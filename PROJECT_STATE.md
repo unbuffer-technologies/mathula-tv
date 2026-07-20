@@ -6,7 +6,19 @@ Last updated: 2026-07-20
 
 The intended production path is Azure STT → Claude Opus 4.8 → Azure TTS → OpenVoice → measured alignment → background reconstruction → mix/subtitles/render/QC → mandatory human review.
 
-The Azure TTS → OpenVoice compatibility gate is **pending**. This handoff does not claim a live Claude Opus 4.8 response, live Azure isiZulu synthesis, live OpenVoice inference, compatibility pass, successful original-dialogue removal, or human-approved production video. The known proof job `19ba6d69f1b84132ba4f20599101834a` is reported by the incoming handoff as a roughly 157-second, four-turn job in legacy `synthesis_queued`; it was not mutated while implementing or testing this architecture. Inspect and validate it with explicit `--live-operation` commands before trusting that reported state.
+The Azure TTS → OpenVoice compatibility gate is **pending**. Live Phase A execution is in progress for proof job `19ba6d69f1b84132ba4f20599101834a` (a 156.885-second clip). The legacy OmniVoice `review_ready` record was explicitly archived in its attempt history and reset into the Azure TTS/OpenVoice path with its approved translation hashes preserved. No OpenVoice inference, compatibility pass, background separation, final render, or human-approved production video has completed.
+
+Completed live proof steps: GCS access validation; source audio derivative recovery and validation; Azure voice discovery (`zu-ZA-ThandoNeural` and `zu-ZA-ThembaNeural`); Azure source calibration WAV generation; 24 deterministic dubbing units and the three-text plan; and targeted Azure Foundry Claude timing repairs. The initial Azure timing pass found nine affected units; a second repair pass completed units `unit_0018`, `unit_0022`, and `unit_0023`. The next action is a normal Azure synthesis rerun, which reuses verified unaffected units and regenerates repaired units.
+
+Use this exact next command from the remote server after starting a new session:
+
+```bash
+cd /home/mokgethwa/mathula-tv
+unset AZURE_SPEECH_KEY AZURE_SPEECH_REGION
+GOOGLE_APPLICATION_CREDENTIALS=/home/mokgethwa/.config/mathula-tv/gcp-worker.json .venv/bin/python -m mathula_tv.cli synthesize 19ba6d69f1b84132ba4f20599101834a --backend azure-tts --live-operation
+```
+
+Never commit or paste `.env`, the service-account JSON key, Azure/Foundry keys, clips, transcripts, generated audio, job manifests, logs, or Colab secrets. The public repository contains code, tests, and this non-secret handover only.
 
 ## Architectural decisions
 
