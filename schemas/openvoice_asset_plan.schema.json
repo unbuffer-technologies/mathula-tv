@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mathula.tv/schemas/openvoice_asset_plan.schema.json",
+  "title": "Mathula TV OpenVoice GPU asset plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "lease_identity",
+    "openvoice_revision",
+    "sources",
+    "speakers",
+    "artifact_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "openvoice-asset-plan-v1"},
+    "job_id": {"$ref": "#/$defs/safeId"},
+    "lease_identity": {"$ref": "#/$defs/safeId"},
+    "openvoice_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "artifact_sha256": {"$ref": "#/$defs/sha256"},
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/source"}
+    },
+    "speakers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/speaker"}
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "azure_voice",
+        "region",
+        "output_format",
+        "calibration_text_version",
+        "calibration_text_sha256",
+        "openvoice_revision",
+        "sample_rate",
+        "channels",
+        "sample_width",
+        "minimum_duration_seconds",
+        "maximum_duration_seconds",
+        "reviewed"
+      ],
+      "properties": {
+        "azure_voice": {"$ref": "#/$defs/safeId"},
+        "region": {"type": "string", "minLength": 1},
+        "output_format": {"type": "string", "minLength": 1},
+        "calibration_text_version": {"type": "string", "minLength": 1},
+        "calibration_text_sha256": {"$ref": "#/$defs/sha256"},
+        "openvoice_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "sample_rate": {"type": "integer", "minimum": 1},
+        "channels": {"const": 1},
+        "sample_width": {"const": 2},
+        "minimum_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "maximum_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "reviewed": {"const": true}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "azure_voice",
+        "calibration_audio_path",
+        "calibration_audio_sha256",
+        "calibration_manifest_path",
+        "calibration_manifest_sha256",
+        "source_embedding_path",
+        "source_embedding_manifest_path",
+        "calibration"
+      ],
+      "properties": {
+        "azure_voice": {"$ref": "#/$defs/safeId"},
+        "calibration_audio_path": {"$ref": "#/$defs/relativePath"},
+        "calibration_audio_sha256": {"$ref": "#/$defs/sha256"},
+        "calibration_manifest_path": {"$ref": "#/$defs/relativePath"},
+        "calibration_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "source_embedding_path": {"$ref": "#/$defs/relativePath"},
+        "source_embedding_manifest_path": {"$ref": "#/$defs/relativePath"},
+        "calibration": {"$ref": "#/$defs/calibration"}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "azure_voice",
+        "source_audio_path",
+        "source_audio_sha256",
+        "output_path",
+        "calibration_text_sha256",
+        "target_language",
+        "conversion_settings",
+        "sample_rate"
+      ],
+      "properties": {
+        "candidate_id": {"$ref": "#/$defs/safeId"},
+        "azure_voice": {"$ref": "#/$defs/safeId"},
+        "source_audio_path": {"$ref": "#/$defs/relativePath"},
+        "source_audio_sha256": {"$ref": "#/$defs/sha256"},
+        "output_path": {"$ref": "#/$defs/relativePath"},
+        "calibration_text_sha256": {"$ref": "#/$defs/sha256"},
+        "target_language": {"type": "string", "minLength": 1},
+        "conversion_settings": {"type": "object"},
+        "sample_rate": {"type": "integer", "minimum": 1}
+      }
+    },
+    "speaker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "speaker_id",
+        "reference_audio_path",
+        "reference_audio_sha256",
+        "reference_manifest_path",
+        "reference_manifest_sha256",
+        "target_embedding_path",
+        "target_embedding_manifest_path",
+        "candidate_manifest_path",
+        "voice_candidates",
+        "sample_rate"
+      ],
+      "properties": {
+        "speaker_id": {"$ref": "#/$defs/safeId"},
+        "reference_audio_path": {"$ref": "#/$defs/relativePath"},
+        "reference_audio_sha256": {"$ref": "#/$defs/sha256"},
+        "reference_manifest_path": {"$ref": "#/$defs/relativePath"},
+        "reference_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "target_embedding_path": {"$ref": "#/$defs/relativePath"},
+        "target_embedding_manifest_path": {"$ref": "#/$defs/relativePath"},
+        "candidate_manifest_path": {
+          "oneOf": [{"$ref": "#/$defs/relativePath"}, {"type": "null"}]
+        },
+        "voice_candidates": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/candidate"}
+        },
+        "sample_rate": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

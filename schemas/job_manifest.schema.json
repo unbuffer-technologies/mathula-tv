@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "job_manifest.schema.json",
+  "type": "object",
+  "required": ["schema_version", "job_id", "created_at", "updated_at", "source_filename", "local_source_path", "source_checksum", "source_duration", "source_language", "target_language", "state", "completed_stages", "attempt_counters", "objects", "providers", "configuration", "quality_warnings", "human_review_flags"],
+  "properties": {
+    "schema_version": {"enum": ["job-manifest-v1", "job-manifest-v2"]},
+    "job_id": {"type": "string", "minLength": 1},
+    "source_duration": {"type": "number", "exclusiveMinimum": 0},
+    "state": {"enum": ["created", "audio_prepared", "uploaded", "analysis_queued", "analysis_running", "analysis_ready", "translation_running", "translating", "translation_ready", "azure_tts_queued", "azure_tts_running", "azure_tts_ready", "voice_conversion_queued", "voice_conversion_running", "voice_conversion_ready", "compatibility_review", "alignment_running", "alignment_ready", "background_processing", "background_ready", "synthesis_queued", "synthesis_claimed", "synthesizing", "synthesis_ready", "rendering", "review_ready", "failed", "failed_retryable", "failed_terminal", "cancelled"]},
+    "objects": {"type": "object", "additionalProperties": {"type": "string"}},
+    "completed_stages": {"type": "array", "uniqueItems": true},
+    "attempt_counters": {"type": "object"},
+    "attempt_history": {"type": "array", "items": {"type": "object"}},
+    "providers": {"type": "object"},
+    "configuration": {"type": "object"},
+    "quality_warnings": {"type": "array"},
+    "human_review_flags": {"type": "array"},
+    "compatibility_gate": {
+      "type": "object",
+      "required": ["state"],
+      "properties": {
+        "state": {"enum": ["pending", "passed", "failed_pronunciation", "failed_intelligibility", "failed_identity", "failed_timing", "failed_audio_quality", "needs_human_review"]}
+      },
+      "additionalProperties": true
+    },
+    "review_readiness": {"enum": ["compatibility_pending", "compatibility_failed", "azure_tts_only_review", "needs_translation_review", "needs_pronunciation_review", "needs_voice_review", "needs_timing_review", "needs_background_review", "needs_audio_review", "review_ready", "failed"]},
+    "consent_review": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": "job-manifest-v2"}}},
+      "then": {"required": ["attempt_history", "compatibility_gate", "review_readiness", "consent_review"]}
+    }
+  ],
+  "additionalProperties": true
+}

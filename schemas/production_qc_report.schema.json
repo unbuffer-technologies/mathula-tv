@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mathula.tv/schemas/production_qc_report.schema.json",
+  "title": "Production dubbing QC report",
+  "type": "object",
+  "required": ["schema_version", "job_id", "readiness", "human_review_mandatory", "publication_approved", "youtube_uploaded"],
+  "properties": {
+    "schema_version": {"const": "production-qc-report-v1"},
+    "job_id": {"type": "string"},
+    "readiness": {"enum": ["compatibility_pending", "compatibility_failed", "azure_tts_only_review", "needs_translation_review", "needs_pronunciation_review", "needs_voice_review", "needs_timing_review", "needs_background_review", "needs_audio_review", "review_ready", "failed"]},
+    "human_review_mandatory": {"const": true},
+    "publication_approved": {"const": false},
+    "youtube_uploaded": {"const": false}
+  }
+}

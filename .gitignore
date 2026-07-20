@@ -1,0 +1,64 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+service-account*.json
+*credentials*.json
+*credential*.json
+*secrets*.json
+*token*.json
+*.pem
+*.key
+*.p12
+
+# Python/build/test output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+
+# Notebook scratch/output
+.ipynb_checkpoints/
+
+# Job artifacts, logs, caches, private context, downloads, and worker scratch
+working/
+worker-data/
+worker_data/
+*.log
+*.jsonl
+
+# Generated media, subtitles, embeddings, and model assets
+*.wav
+*.flac
+*.aac
+*.mp3
+*.mp4
+*.mkv
+*.mov
+*.srt
+*.vtt
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.safetensors
+*.embedding
+*.embeddings
+*embedding*.bin
+*.npy
+*.npz
+
+# GPU/model caches accidentally created in the repository
+checkpoints/
+model-assets/
+model_assets/
+huggingface/

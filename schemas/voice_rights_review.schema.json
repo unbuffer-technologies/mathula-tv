@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mathula.tv/schemas/voice_rights_review.schema.json",
+  "title": "Voice rights review",
+  "type": "object",
+  "required": ["schema_version", "intended_use", "generation_allowed", "publication_approved", "speakers", "human_review_required"],
+  "properties": {
+    "schema_version": {"const": "voice-rights-review-v1"},
+    "intended_use": {"type": "string", "minLength": 1},
+    "generation_allowed": {"type": "boolean"},
+    "publication_approved": {"type": "boolean"},
+    "human_review_required": {"const": true},
+    "speakers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["speaker_id", "reference_source", "intended_use", "consent_or_rights_status", "reviewer", "review_timestamp", "restrictions", "expiry_or_rereview_date", "notes"]
+      }
+    }
+  }
+}

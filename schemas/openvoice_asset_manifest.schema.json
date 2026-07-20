@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mathula.tv/schemas/openvoice_asset_manifest.schema.json",
+  "title": "Mathula TV OpenVoice GPU asset worker manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "job_id",
+    "lease_identity",
+    "backend",
+    "backend_revision",
+    "plan_artifact_sha256",
+    "server_plan_artifact_sha256",
+    "server_plan_file_sha256",
+    "state",
+    "completed_assets",
+    "pending_assets",
+    "checkpoint_hashes",
+    "runtime",
+    "sources",
+    "speakers"
+  ],
+  "properties": {
+    "schema_version": {"const": "openvoice-asset-worker-manifest-v1"},
+    "job_id": {"type": "string", "minLength": 1},
+    "lease_identity": {"type": "string", "minLength": 1},
+    "backend": {"const": "openvoice"},
+    "backend_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "plan_artifact_sha256": {"$ref": "#/$defs/sha256"},
+    "server_plan_artifact_sha256": {"$ref": "#/$defs/sha256"},
+    "server_plan_file_sha256": {"$ref": "#/$defs/sha256"},
+    "state": {"enum": ["pending", "partial", "failed", "completed"]},
+    "completed_assets": {"type": "integer", "minimum": 0},
+    "pending_assets": {"type": "integer", "minimum": 0},
+    "checkpoint_hashes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/sha256"}
+    },
+    "runtime": {"type": ["object", "null"]},
+    "sources": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/record"}
+    },
+    "speakers": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/speakerRecord"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "record": {
+      "type": "object",
+      "required": ["status", "attempts"],
+      "properties": {
+        "status": {"enum": ["pending", "failed", "completed"]},
+        "attempts": {"type": "integer", "minimum": 0},
+        "result": {"type": "object"},
+        "last_error": {"type": "object"}
+      }
+    },
+    "speakerRecord": {
+      "allOf": [
+        {"$ref": "#/$defs/record"},
+        {
+          "type": "object",
+          "required": ["candidates"],
+          "properties": {
+            "candidate_manifest_sha256": {"$ref": "#/$defs/sha256"},
+            "candidates": {
+              "type": "object",
+              "additionalProperties": {"$ref": "#/$defs/record"}
+            }
+          }
+        }
+      ]
+    }
+  }
+}

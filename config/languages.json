@@ -1,0 +1,10 @@
+{
+  "schema_version": "languages-v1",
+  "languages": {
+    "zu-ZA": {"name": "isiZulu", "enabled": true, "prompt_locale": "South African broadcast isiZulu"},
+    "nso-ZA": {"name": "Sepedi", "enabled": false},
+    "xh-ZA": {"name": "isiXhosa", "enabled": false},
+    "af-ZA": {"name": "Afrikaans", "enabled": false}
+  }
+}
+
