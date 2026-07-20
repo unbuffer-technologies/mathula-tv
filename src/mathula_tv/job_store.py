@@ -75,24 +75,48 @@ class JobStore:
                 return
         raise ValueError("Attempt history entry is missing")
 
-    def migrate_synthesis_queued(self, job: JobManifest, *, dry_run: bool = False) -> dict:
+    def migrate_synthesis_queued(
+        self,
+        job: JobManifest,
+        *,
+        dry_run: bool = False,
+        allow_legacy_review_reset: bool = False,
+    ) -> dict:
         """Migrate the one supported legacy state without changing translations."""
         if job.state == "azure_tts_queued":
             return {"changed": False, "state": job.state, "translation_hashes": self._translation_hashes(job)}
-        if job.state != "synthesis_queued":
+        legacy_review_reset = job.state == "review_ready"
+        if legacy_review_reset:
+            if not allow_legacy_review_reset:
+                raise ValueError(
+                    "Legacy review_ready reset requires --allow-legacy-review-reset"
+                )
+            if (
+                job.providers.get("synthesis") != "k2-fsa/OmniVoice"
+                or "omnivoice_synthesis" not in job.completed_stages
+            ):
+                raise ValueError(
+                    "Only a verified legacy OmniVoice review_ready job can be reset"
+                )
+        elif job.state != "synthesis_queued":
             raise ValueError(f"Only legacy synthesis_queued can migrate, not {job.state}")
         hashes = self._translation_hashes(job)
         result = {
             "changed": True,
-            "from_state": "synthesis_queued",
+            "from_state": job.state,
             "state": "azure_tts_queued",
             "translation_hashes": hashes,
             "translations_preserved": True,
             "dry_run": dry_run,
+            "legacy_review_reset": legacy_review_reset,
         }
         if dry_run:
             return result
-        job.transition("azure_tts_queued")
+        if legacy_review_reset:
+            job.state = "azure_tts_queued"
+            job.updated_at = utcnow()
+        else:
+            job.transition("azure_tts_queued")
         job.schema_version = "job-manifest-v2"
         job.compatibility_gate = {"state": "pending", "calibrated_thresholds": False}
         job.review_readiness = "compatibility_pending"
@@ -101,7 +125,7 @@ class JobStore:
                 "stage": "dubbing_state_migration",
                 "attempt": 1,
                 "status": "completed",
-                "from_state": "synthesis_queued",
+                "from_state": result["from_state"],
                 "to_state": "azure_tts_queued",
                 "translation_hashes": hashes,
                 "completed_at": utcnow(),

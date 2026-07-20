@@ -70,9 +70,7 @@ REVIEWED_AZURE_CALIBRATION_TEXT = (
     "Sicela nilalele ngokucophelela amagama abantu, amagama ezindawo, izinombolo, izinsuku, "
     "amaphesenti kanye nemali eshiwo kulo mbiko. Izintatheli zethu zihlola amaqiniso, zigcine "
     "ukuthi ubani oshilo, futhi zehlukanise izinsolo ebufakazini obuqinisekisiwe. Uma udaba "
-    "lusadingidwa, siyakusho lokho ngokucacile ngaphandle kokwandisa noma ukunciphisa isimangalo. "
-    "Leli zwi lokulinganisa lisebenzisa imisho emifushane nemide, imibuzo, ukuphumula, kanye "
-    "nokushintsha kwesigqi ukuze kuhlolwe ukukhuluma kwesiZulu ngendlela ecacile nenemvelo."
+    "lusadingidwa, siyakusho lokho ngokucacile ngaphandle kokwandisa isimangalo."
 )
 REVIEWED_SPEAKER_VOICE_CALIBRATION_SENTENCE = (
     "Sawubona, namuhla ngikhuluma ngokucacile ukuze kuhlolwe izwi, isigqi, "
@@ -284,8 +282,18 @@ class ProductionDubbingPipeline:
             "mutated": False,
         }
 
-    def migrate(self, job: JobManifest, *, dry_run: bool = False) -> dict[str, Any]:
-        return self.jobs.migrate_synthesis_queued(job, dry_run=dry_run)
+    def migrate(
+        self,
+        job: JobManifest,
+        *,
+        dry_run: bool = False,
+        allow_legacy_review_reset: bool = False,
+    ) -> dict[str, Any]:
+        return self.jobs.migrate_synthesis_queued(
+            job,
+            dry_run=dry_run,
+            allow_legacy_review_reset=allow_legacy_review_reset,
+        )
 
     def ensure_source_derivatives(self, job: JobManifest, *, force: bool = False) -> dict[str, Any]:
         paths = self.paths(job.job_id)
@@ -490,8 +498,11 @@ class ProductionDubbingPipeline:
                 repaired = dict(response.data["unit"])
                 if str(repaired.get("unit_id")) != unit_id:
                     raise ValueError("Claude timing repair returned a different unit ID")
-                if repaired.get("faithful_translation") != current.get("faithful_translation"):
-                    raise ValueError("Claude timing repair changed the faithful translation")
+                faithful_changed_by_model = repaired.get("faithful_translation") != current.get("faithful_translation")
+                # The archival faithful translation is server-owned and never changes
+                # during a delivery-only timing repair. Foundry-compatible Claude
+                # endpoints can paraphrase echoed fields despite the instruction.
+                repaired["faithful_translation"] = current.get("faithful_translation")
                 if not repaired.get("numbers_preserved") or not repaired.get("dates_preserved"):
                     raise ValueError("Claude timing repair did not preserve numbers or dates")
                 if not repaired.get("negation_preserved"):
@@ -508,6 +519,7 @@ class ProductionDubbingPipeline:
                     {
                         "attempt": attempt,
                         "signal": signal,
+                        "faithful_translation_preserved_by_server": faithful_changed_by_model,
                         "metadata": response.metadata.to_dict(),
                     }
                 )

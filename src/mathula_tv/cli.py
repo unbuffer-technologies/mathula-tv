@@ -59,11 +59,11 @@ def create_speech_backend(settings):
 
 def create_translation_backend(provider: str | None = None, model: str | None = None):
     selected = (provider or os.getenv("MATHULA_TV_AI_PROVIDER") or "anthropic").strip().lower()
-    if selected == "anthropic":
+    if selected in {"anthropic", "azure-foundry-claude"}:
         environment = dict(os.environ)
-        environment["MATHULA_TV_AI_PROVIDER"] = "anthropic"
+        environment["MATHULA_TV_AI_PROVIDER"] = selected
         if model:
-            environment["MATHULA_TV_CLAUDE_MODEL"] = model
+            environment["MATHULA_TV_FOUNDRY_CLAUDE_DEPLOYMENT" if selected == "azure-foundry-claude" else "MATHULA_TV_CLAUDE_MODEL"] = model
         return create_production_ai_provider(environment)
     if selected in {"azure-openai-legacy", "azure-openai-test"}:
         return AzureOpenAIClient.from_environment()
@@ -113,7 +113,9 @@ def parser() -> argparse.ArgumentParser:
 
     for name in ("process", "transcribe", "diarize", "status", "retry", "validate", "inspect"):
         _add_job_command(commands, name)
-    _add_job_command(commands, "migrate-dubbing-state")
+    migration = _add_job_command(commands, "migrate-dubbing-state")
+    migration.add_argument("--allow-legacy-review-reset", action="store_true")
+    _add_job_command(commands, "prepare-source-derivatives")
     _add_job_command(commands, "build-dubbing-units")
     translate = _add_job_command(commands, "translate")
     translate.add_argument("--provider", default=None)
@@ -241,7 +243,18 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "inspect":
             print(json.dumps(redact(production.inspect(job)), indent=2))
         elif args.command == "migrate-dubbing-state":
-            print(json.dumps(production.migrate(job, dry_run=args.dry_run), indent=2))
+            print(
+                json.dumps(
+                    production.migrate(
+                        job,
+                        dry_run=args.dry_run,
+                        allow_legacy_review_reset=args.allow_legacy_review_reset,
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.command == "prepare-source-derivatives":
+            print(json.dumps(production.ensure_source_derivatives(job, force=args.force), indent=2))
         elif args.command == "build-dubbing-units":
             print(json.dumps(production.build_units(job, force=args.force), ensure_ascii=False, indent=2))
         elif args.command == "prepare-dubbing":
@@ -255,8 +268,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(production.translate(job, provider, force=args.force), ensure_ascii=False, indent=2))
         elif args.command == "repair-translation":
             provider_name = args.provider or settings.ai_provider
-            if provider_name != "anthropic":
-                raise ValueError("Timing repair requires the configured Anthropic production provider")
+            if provider_name not in {"anthropic", "azure-foundry-claude"}:
+                raise ValueError("Timing repair requires the configured Claude production provider")
             provider = create_translation_backend(provider_name, args.model or settings.claude_model)
             print(
                 json.dumps(

@@ -33,6 +33,7 @@ from .errors import (
 
 
 PRODUCTION_AI_PROVIDER = "anthropic"
+AZURE_FOUNDRY_CLAUDE_PROVIDER = "azure-foundry-claude"
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 ANTHROPIC_API_VERSION = "2023-06-01"
 AI_REQUEST_SCHEMA_VERSION = "ai-request-v1"
@@ -228,6 +229,7 @@ def _positive_float(name: str, value: str) -> float:
 @dataclass(frozen=True)
 class AnthropicConfig:
     api_key: str = field(repr=False)
+    provider: str = PRODUCTION_AI_PROVIDER
     model: str = DEFAULT_CLAUDE_MODEL
     timeout_seconds: float = 900.0
     max_retries: int = 3
@@ -239,7 +241,9 @@ class AnthropicConfig:
 
     def __post_init__(self) -> None:
         if not self.api_key:
-            raise ValueError("ANTHROPIC_API_KEY is missing")
+            raise ValueError("Claude API key is missing")
+        if self.provider not in {PRODUCTION_AI_PROVIDER, AZURE_FOUNDRY_CLAUDE_PROVIDER}:
+            raise UnsupportedAIProvider(f"AI provider {self.provider!r} is not registered for production")
         if not self.model.strip():
             raise ValueError("MATHULA_TV_CLAUDE_MODEL is missing")
         if self.timeout_seconds <= 0 or not math.isfinite(self.timeout_seconds):
@@ -252,24 +256,39 @@ class AnthropicConfig:
             raise ValueError("MATHULA_TV_CLAUDE_MAX_OUTPUT_TOKENS must be positive")
         if self.effort not in SUPPORTED_EFFORT:
             raise ValueError("MATHULA_TV_CLAUDE_EFFORT must be low, medium, high, xhigh, or max")
-        if self.base_url.rstrip("/") != "https://api.anthropic.com":
+        if self.provider == PRODUCTION_AI_PROVIDER and self.base_url.rstrip("/") != "https://api.anthropic.com":
             raise ValueError("Anthropic production endpoint must be https://api.anthropic.com")
+        if self.provider == AZURE_FOUNDRY_CLAUDE_PROVIDER and not re.fullmatch(
+            r"https://[a-z0-9-]+\.services\.ai\.azure\.com/anthropic", self.base_url.rstrip("/")
+        ):
+            raise ValueError("MATHULA_TV_FOUNDRY_CLAUDE_ENDPOINT must be an Azure Foundry Anthropic endpoint")
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "AnthropicConfig":
         env = environ if environ is not None else os.environ
         provider = env.get("MATHULA_TV_AI_PROVIDER", PRODUCTION_AI_PROVIDER).strip().lower()
-        if provider != PRODUCTION_AI_PROVIDER:
+        if provider not in {PRODUCTION_AI_PROVIDER, AZURE_FOUNDRY_CLAUDE_PROVIDER}:
             raise UnsupportedAIProvider(
                 f"AI provider {provider or '<empty>'!r} is not registered for production",
                 details={"provider": provider or None},
             )
-        key = env.get("ANTHROPIC_API_KEY", "")
+        key_name = "ANTHROPIC_API_KEY" if provider == PRODUCTION_AI_PROVIDER else "MATHULA_TV_FOUNDRY_CLAUDE_API_KEY"
+        key = env.get(key_name, "")
         if not key:
-            raise ValueError("ANTHROPIC_API_KEY is missing")
+            raise ValueError(f"{key_name} is missing")
+        base_url = "https://api.anthropic.com"
+        model = env.get("MATHULA_TV_CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
+        if provider == AZURE_FOUNDRY_CLAUDE_PROVIDER:
+            base_url = env.get("MATHULA_TV_FOUNDRY_CLAUDE_ENDPOINT", "").rstrip("/")
+            if base_url.endswith("/v1/messages"):
+                base_url = base_url[: -len("/v1/messages")]
+            model = env.get("MATHULA_TV_FOUNDRY_CLAUDE_DEPLOYMENT", "")
+            if not model:
+                raise ValueError("MATHULA_TV_FOUNDRY_CLAUDE_DEPLOYMENT is missing")
         return cls(
             api_key=key,
-            model=env.get("MATHULA_TV_CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL),
+            provider=provider,
+            model=model,
             timeout_seconds=_positive_float(
                 "MATHULA_TV_CLAUDE_TIMEOUT_SECONDS",
                 env.get("MATHULA_TV_CLAUDE_TIMEOUT_SECONDS", "900"),
@@ -287,6 +306,7 @@ class AnthropicConfig:
                 "MATHULA_TV_CLAUDE_MAX_OUTPUT_TOKENS",
                 env.get("MATHULA_TV_CLAUDE_MAX_OUTPUT_TOKENS", "50000"),
             ),
+            base_url=base_url,
         )
 
 
@@ -476,6 +496,19 @@ def _adaptive_thinking_supported(model: str) -> bool:
     return any(model.startswith(prefix) for prefix in ADAPTIVE_THINKING_MODELS)
 
 
+def _parse_structured_json(text: str) -> dict[str, Any]:
+    """Accept raw JSON or a single Markdown JSON fence from compatible endpoints."""
+
+    candidate = text.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?```", candidate, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    value = json.loads(candidate)
+    if not isinstance(value, dict):
+        raise ValueError("structured output must be a JSON object")
+    return value
+
+
 @dataclass
 class AnthropicClaudeProvider:
     config: AnthropicConfig
@@ -486,6 +519,7 @@ class AnthropicClaudeProvider:
 
     def __post_init__(self) -> None:
         self.session = self.session or requests.Session()
+        self.provider = self.config.provider
 
     @property
     def model(self) -> str:
@@ -503,10 +537,18 @@ class AnthropicClaudeProvider:
             "operation": request.operation,
             "input": request.payload,
         }
-        output_config: dict[str, Any] = {
-            "effort": self.config.effort,
-            "format": {"type": "json_schema", "schema": _anthropic_output_schema(request.output_schema)},
-        }
+        if self.provider == AZURE_FOUNDRY_CLAUDE_PROVIDER:
+            user_payload = {
+                **dict(user_payload),
+                "required_output_schema": request.output_schema,
+                "response_instruction": "Return only one JSON object matching required_output_schema. Do not use Markdown or prose.",
+            }
+        output_config: dict[str, Any] = {"effort": self.config.effort}
+        if self.provider == PRODUCTION_AI_PROVIDER:
+            output_config["format"] = {
+                "type": "json_schema",
+                "schema": _anthropic_output_schema(request.output_schema),
+            }
         body: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_output_tokens,
@@ -519,11 +561,12 @@ class AnthropicClaudeProvider:
         return body
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "x-api-key": self.config.api_key,
+        headers = {
             "anthropic-version": self.config.api_version,
             "content-type": "application/json",
         }
+        headers["x-api-key"] = self.config.api_key
+        return headers
 
     def _send(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         last_kind = "request"
@@ -664,9 +707,7 @@ class AnthropicClaudeProvider:
             current_text = ""
             try:
                 current_text, refusal = self._text_and_refusal(response)
-                value = json.loads(current_text)
-                if not isinstance(value, dict):
-                    raise ValueError("structured output must be a JSON object")
+                value = _parse_structured_json(current_text)
                 jsonschema.validate(value, dict(request.output_schema))
                 if request.validator is not None:
                     request.validator(value)
@@ -950,6 +991,7 @@ __all__ = [
     "AIUsage",
     "AnthropicClaudeProvider",
     "AnthropicConfig",
+    "AZURE_FOUNDRY_CLAUDE_PROVIDER",
     "DEFAULT_CLAUDE_MODEL",
     "FULL_CLIP_TRANSLATION_PROMPT_VERSION",
     "FULL_CLIP_TRANSLATION_SCHEMA",

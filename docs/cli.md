@@ -7,6 +7,7 @@ Use `python -m mathula_tv.cli --help` and `python -m mathula_tv.cli COMMAND --he
 ```bash
 python -m mathula_tv.cli inspect JOB_ID
 python -m mathula_tv.cli migrate-dubbing-state JOB_ID --dry-run
+python -m mathula_tv.cli prepare-source-derivatives JOB_ID
 python -m mathula_tv.cli build-dubbing-units JOB_ID
 python -m mathula_tv.cli translate JOB_ID --provider anthropic --model claude-opus-4-8 --live-operation
 python -m mathula_tv.cli repair-translation JOB_ID --provider anthropic --model claude-opus-4-8 --live-operation
@@ -33,6 +34,11 @@ python -m mathula_tv.cli render JOB_ID
 python -m mathula_tv.cli review JOB_ID
 python -m mathula_tv.cli process JOB_ID
 ```
+
+If protected-job inspection proves a legacy OmniVoice job is incorrectly marked
+`review_ready`, an authorised operator may preserve its old artifacts and reset
+only its state with `migrate-dubbing-state JOB_ID --allow-legacy-review-reset
+--live-operation`. The command rejects non-OmniVoice or non-legacy review jobs.
 
 Important controls:
 
@@ -65,6 +71,7 @@ python -m mathula_tv.cli inspect 19ba6d69f1b84132ba4f20599101834a --live-operati
 python -m mathula_tv.cli validate 19ba6d69f1b84132ba4f20599101834a --live-operation
 python -m mathula_tv.cli migrate-dubbing-state 19ba6d69f1b84132ba4f20599101834a --dry-run --live-operation
 python -m mathula_tv.cli migrate-dubbing-state 19ba6d69f1b84132ba4f20599101834a --live-operation
+python -m mathula_tv.cli prepare-source-derivatives 19ba6d69f1b84132ba4f20599101834a --live-operation
 python -m mathula_tv.cli build-dubbing-units 19ba6d69f1b84132ba4f20599101834a --live-operation
 python -m mathula_tv.cli prepare-dubbing 19ba6d69f1b84132ba4f20599101834a --live-operation
 ```

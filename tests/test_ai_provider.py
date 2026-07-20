@@ -5,6 +5,7 @@ import pytest
 import requests
 
 from mathula_tv.ai_provider import (
+    AZURE_FOUNDRY_CLAUDE_PROVIDER,
     DEFAULT_CLAUDE_MODEL,
     FULL_CLIP_TRANSLATION_PROMPT_VERSION,
     AnthropicClaudeProvider,
@@ -105,6 +106,26 @@ def test_missing_configuration_names_variable_without_disclosing_values():
     assert "private-model-name" not in str(caught.value)
 
 
+def test_azure_foundry_claude_uses_messages_endpoint_and_api_key_header():
+    config = AnthropicConfig.from_environment(
+        {
+            "MATHULA_TV_AI_PROVIDER": AZURE_FOUNDRY_CLAUDE_PROVIDER,
+            "MATHULA_TV_FOUNDRY_CLAUDE_ENDPOINT": "https://example.services.ai.azure.com/anthropic/v1/messages",
+            "MATHULA_TV_FOUNDRY_CLAUDE_DEPLOYMENT": "claude-opus-4-8",
+            "MATHULA_TV_FOUNDRY_CLAUDE_API_KEY": "foundry-secret",
+        }
+    )
+    instance = AnthropicClaudeProvider(config, session=Session([Response(body=message())]), sleep=lambda _delay: None)
+    instance.complete_structured(request())
+    url, kwargs = instance.session.calls[0]
+    assert url == "https://example.services.ai.azure.com/anthropic/v1/messages"
+    assert kwargs["headers"]["x-api-key"] == "foundry-secret"
+    assert instance.provider == AZURE_FOUNDRY_CLAUDE_PROVIDER
+    assert kwargs["json"]["output_config"] == {"effort": "high"}
+    payload = json.loads(kwargs["json"]["messages"][0]["content"])
+    assert payload["required_output_schema"] == SIMPLE_SCHEMA
+
+
 def test_request_construction_is_model_specific_and_uses_structured_adaptive_thinking():
     instance, session = provider([Response(body=message())])
     result = instance.complete_structured(request())
@@ -161,6 +182,11 @@ def test_invalid_json_gets_one_bounded_repair():
     assert len(session.calls) == 2
     repair_payload = json.loads(session.calls[1][1]["json"]["messages"][0]["content"])
     assert repair_payload["structured_output_repair"]["attempt"] == 1
+
+
+def test_markdown_fenced_json_is_accepted_from_compatible_endpoint():
+    instance, _session = provider([Response(body=message("```json\n{\"ok\": true}\n```"))])
+    assert instance.complete_structured(request()).data == {"ok": True}
 
 
 def test_invalid_json_stops_at_configured_repair_limit():
