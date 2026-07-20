@@ -188,6 +188,41 @@ def normalize_translation_units(
     return result
 
 
+def normalize_fresh_claude_translation_units(
+    translation: Mapping[str, Any],
+    units: list[dict[str, Any]],
+    *,
+    pronunciation_dictionary: PronunciationDictionary | None = None,
+) -> dict[str, Any]:
+    """Normalize a new Claude response before the strict persisted-artifact gate."""
+    candidate = dict(translation)
+    candidate_units: list[dict[str, Any]] = []
+    events: list[dict[str, str]] = []
+    for item in translation.get("units", []):
+        value = dict(item)
+        spoken = str(value.get("spoken_text", "")).strip()
+        proposed_tts = str(value.get("tts_text", "")).strip()
+        if spoken and proposed_tts and proposed_tts != spoken:
+            events.append(
+                {
+                    "unit_id": str(value.get("unit_id")),
+                    "event": "unreviewed_tts_text_discarded",
+                    "reason": "tts_text differed from spoken_text without reviewed pronunciation substitutions",
+                }
+            )
+        # Claude supplies language only. The server applies the reviewed
+        # dictionary in build_target_text and records its substitutions.
+        value["tts_text"] = spoken
+        value["pronunciation_substitutions"] = []
+        candidate_units.append(value)
+    candidate["units"] = candidate_units
+    normalized = normalize_translation_units(
+        candidate, units, pronunciation_dictionary=pronunciation_dictionary
+    )
+    normalized["normalization_events"] = events
+    return normalized
+
+
 def build_dubbing_plan(
     *,
     job: Mapping[str, Any],

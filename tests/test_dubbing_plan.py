@@ -1,5 +1,6 @@
 from mathula_tv.dubbing_plan import (
     build_dubbing_plan,
+    normalize_fresh_claude_translation_units,
     normalize_translation_units,
     upgrade_legacy_translation_artifact,
 )
@@ -142,3 +143,47 @@ def test_unsafe_target_splits_are_rejected(left, right):
     }
     with pytest.raises(ValueError, match="Unsafe target split"):
         normalize_translation_units(translated, UNITS)
+
+
+def test_fresh_claude_tts_wording_is_discarded_and_recorded():
+    response = {
+        "units": [
+            {"unit_id": "unit_0001", "faithful_translation": "Lena yindaba ephelele.", "spoken_text": "Lena yindaba ephelele.", "tts_text": "Leh-na yindaba ephelele."},
+            {"unit_id": "unit_0002", "faithful_translation": "Iyaqhubeka lapha.", "spoken_text": "Iyaqhubeka lapha.", "tts_text": "Iyaqhubeka lapha."},
+        ]
+    }
+    result = normalize_fresh_claude_translation_units(response, UNITS)
+    assert result["units"][0]["tts_text"] == result["units"][0]["spoken_text"]
+    assert result["normalization_events"] == [{
+        "unit_id": "unit_0001",
+        "event": "unreviewed_tts_text_discarded",
+        "reason": "tts_text differed from spoken_text without reviewed pronunciation substitutions",
+    }]
+
+
+def test_fresh_claude_text_uses_reviewed_dictionary_and_records_identity():
+    dictionary = PronunciationDictionary.from_dict({
+        "schema_version": "pronunciation-dictionary-v1",
+        "dictionary_version": "reviewed-v1",
+        "language": "zu-ZA",
+        "entries": [{"display_text": "Feroz", "spoken_text": "Feroz", "tts_text": "Feh-rohz", "reviewed_by": "editor", "source": "human_review"}],
+    })
+    response = {"units": [
+        {"unit_id": "unit_0001", "faithful_translation": "Feroz ukhona.", "spoken_text": "Feroz ukhona.", "tts_text": "Feroz ukhona."},
+        {"unit_id": "unit_0002", "faithful_translation": "Iyaqhubeka lapha.", "spoken_text": "Iyaqhubeka lapha.", "tts_text": "Iyaqhubeka lapha."},
+    ]}
+    result = normalize_fresh_claude_translation_units(response, UNITS, pronunciation_dictionary=dictionary)
+    unit = result["units"][0]
+    assert unit["tts_text"] == "Feh-rohz ukhona."
+    assert unit["pronunciation_dictionary_version"] == "reviewed-v1"
+    assert unit["pronunciation_dictionary_sha256"] == dictionary.sha256
+    assert unit["pronunciation_substitutions"][0]["entry_id"]
+
+
+def test_persisted_unreviewed_tts_difference_remains_rejected():
+    artifact = {"units": [
+        {"unit_id": "unit_0001", "faithful_translation": "Lena yindaba ephelele.", "spoken_text": "Lena yindaba ephelele.", "tts_text": "Leh-na yindaba ephelele."},
+        {"unit_id": "unit_0002", "faithful_translation": "Iyaqhubeka lapha.", "spoken_text": "Iyaqhubeka lapha.", "tts_text": "Iyaqhubeka lapha."},
+    ]}
+    with pytest.raises(ValueError, match="proposes spoken_text/tts_text differences"):
+        normalize_translation_units(artifact, UNITS)

@@ -32,7 +32,11 @@ from .compatibility import (
 )
 from .config import Settings
 from .consent import build_voice_rights_review, require_generation_rights
-from .dubbing_plan import build_dubbing_plan, normalize_translation_units
+from .dubbing_plan import (
+    build_dubbing_plan,
+    normalize_fresh_claude_translation_units,
+    normalize_translation_units,
+)
 from .dubbing_units import DubbingUnitConfig, build_dubbing_units
 from .errors import CompatibilityGateFailure, TranslationTimingFailure
 from .gcs_store import GCSStore
@@ -414,12 +418,22 @@ class ProductionDubbingPipeline:
         pronunciation = self._pronunciation_dictionary(job)
         glossary_path = self.paths(job.job_id).job_root / "dubbing/terminology_glossary.json"
         glossary = read_json(glossary_path) if glossary_path.is_file() else {}
+        cache_key = self._canonical_hash(
+            {
+                "semantic_units_sha256": units["artifact_sha256"],
+                "prompt_version": "claude-full-clip-zu-v1",
+                "provider": getattr(provider, "provider", "anthropic"),
+                "model": getattr(provider, "model", ""),
+            }
+        )
+        cache_path = self.jobs.job_dir(job.job_id) / "translation/semantic_cache" / f"{cache_key}.json"
+        cached_artifact = read_json(cache_path) if cache_path.is_file() else None
         claude_calls = sum(
             count
             for stage, count in job.attempt_counters.items()
             if stage.startswith("claude_")
         )
-        if claude_calls >= self.settings.max_claude_calls_per_job:
+        if cached_artifact is None and claude_calls >= self.settings.max_claude_calls_per_job:
             raise RuntimeError("MATHULA_TV_MAX_CLAUDE_CALLS_PER_JOB reached before translation")
         payload = build_full_clip_payload(
             transcript=transcript,
@@ -436,33 +450,45 @@ class ProductionDubbingPipeline:
         )
         if job.state == "analysis_ready":
             job.transition("translation_running")
-        attempt = self.jobs.begin_attempt(job, "claude_translation", forced=force)
+        attempt = self.jobs.begin_attempt(job, "claude_translation", forced=force) if cached_artifact is None else None
         try:
-            response = provider.translate_full_clip(payload)
-            artifact = response.to_artifact()
-            normalized = normalize_translation_units(response.data, units["units"])
-            normalized["metadata"] = response.metadata.to_dict()
-            normalized["seo"] = response.data.get("seo", {})
-            atomic_write_json(paths.three_text_translation, normalized)
-            atomic_write_json(
-                self.jobs.job_dir(job.job_id) / "translation/claude_response.json",
-                artifact,
+            if cached_artifact is None:
+                response = provider.translate_full_clip(payload)
+                artifact = response.to_artifact()
+                atomic_write_json(cache_path, artifact)
+                response_metadata = response.metadata.to_dict()
+            else:
+                artifact = cached_artifact
+                response_metadata = dict(artifact.get("metadata") or {})
+            atomic_write_json(self.jobs.job_dir(job.job_id) / "translation/claude_response.json", artifact)
+            normalized = normalize_fresh_claude_translation_units(
+                artifact["result"], units["units"], pronunciation_dictionary=pronunciation
             )
+            normalized["metadata"] = response_metadata
+            normalized["seo"] = artifact["result"].get("seo", {})
+            atomic_write_json(paths.three_text_translation, normalized)
             job.providers.update(
                 translation="anthropic",
-                translation_model=response.metadata.model_returned,
-                translation_prompt_version=response.metadata.prompt_version,
+                translation_model=response_metadata.get("model_returned", getattr(provider, "model", "")),
+                translation_prompt_version=response_metadata.get("prompt_version", "claude-full-clip-zu-v1"),
             )
             job.media["translation_sha256"] = checksum(paths.three_text_translation)
             job.transition("translation_ready")
             job.transition("azure_tts_queued")
             if "translation" not in job.completed_stages:
                 job.completed_stages.append("translation")
-            self.jobs.finish_attempt(job, "claude_translation", attempt, "completed")
+            if attempt is not None:
+                self.jobs.finish_attempt(job, "claude_translation", attempt, "completed")
+            elif "translation_cache_reused" not in job.completed_stages:
+                job.completed_stages.append("translation_cache_reused")
+                self.jobs.save(job)
             return normalized
         except Exception as exc:
             job.last_error = self._safe_error("claude_translation", exc)
-            self.jobs.finish_attempt(job, "claude_translation", attempt, "failed")
+            if attempt is not None:
+                self.jobs.finish_attempt(job, "claude_translation", attempt, "failed")
+            else:
+                self.jobs.save(job)
             raise
 
     def upgrade_validated_translation(self, job: JobManifest, *, force: bool = False) -> dict[str, Any]:
