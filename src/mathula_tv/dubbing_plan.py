@@ -11,7 +11,7 @@ from .atomic_io import atomic_write_json
 from .logging_utils import redact
 from .media import checksum
 from .pronunciation import PronunciationDictionary
-from .target_text import TargetText, build_target_text, record_full_text_change
+from .target_text import TargetText, build_target_text, record_full_text_change, validate_safe_target_splits
 
 
 DUBBING_PLAN_SCHEMA_VERSION = "dubbing-plan-v1"
@@ -89,7 +89,7 @@ def upgrade_legacy_translation_artifact(
         after = _words(" ".join(reconstructed[phrase_id]))
         if before != after:
             raise RuntimeError(f"Legacy translation content changed while splitting {phrase_id}")
-    return {
+    result = {
         "schema_version": "three-text-translation-v1",
         "language": "zu-ZA",
         "source_schema_version": legacy.get("schema_version"),
@@ -98,6 +98,7 @@ def upgrade_legacy_translation_artifact(
         "approved_content_preserved": True,
         "units": translated_units,
     }
+    return result
 
 
 def normalize_translation_units(
@@ -173,7 +174,7 @@ def normalize_translation_units(
                 "tts_proposal_review": proposal_review,
             }
         )
-    return {
+    result = {
         "schema_version": "three-text-translation-v1",
         "language": "zu-ZA",
         "source_schema_version": translation.get("schema_version"),
@@ -183,6 +184,8 @@ def normalize_translation_units(
         "seo": translation.get("seo", {}),
         "metadata": translation.get("metadata", {}),
     }
+    validate_safe_target_splits(result["units"])
+    return result
 
 
 def build_dubbing_plan(

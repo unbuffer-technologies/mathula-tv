@@ -31,6 +31,7 @@ LIVE_COMPATIBILITY_JOB_ID = "19ba6d69f1b84132ba4f20599101834a"
 EXTERNAL_COMMANDS = {
     "transcribe",
     "translate",
+    "rebuild-translation",
     "repair-translation",
     "validate-azure-voices",
     "calibrate-azure-sources",
@@ -120,6 +121,12 @@ def parser() -> argparse.ArgumentParser:
     translate = _add_job_command(commands, "translate")
     translate.add_argument("--provider", default=None)
     translate.add_argument("--model", default=None)
+    rebuild_translation = _add_job_command(commands, "rebuild-translation")
+    rebuild_translation.add_argument("--target-locale", default="zu-ZA")
+    rebuild_translation.add_argument("--semantic-units", action="store_true")
+    rebuild_translation.add_argument("--invalidate-downstream", action="store_true")
+    rebuild_translation.add_argument("--provider", default=None)
+    rebuild_translation.add_argument("--model", default=None)
     repair_translation = _add_job_command(commands, "repair-translation")
     repair_translation.add_argument("--provider", default=None)
     repair_translation.add_argument("--model", default=None)
@@ -266,6 +273,14 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 provider = create_translation_backend(provider_name, args.model or settings.claude_model)
                 print(json.dumps(production.translate(job, provider, force=args.force), ensure_ascii=False, indent=2))
+        elif args.command == "rebuild-translation":
+            if args.target_locale != "zu-ZA":
+                raise ValueError("This production semantic rebuild currently supports zu-ZA only")
+            if not args.semantic_units or not args.invalidate_downstream:
+                raise ValueError("rebuild-translation requires --semantic-units and --invalidate-downstream")
+            provider_name = args.provider or settings.ai_provider
+            provider = create_translation_backend(provider_name, args.model or settings.claude_model)
+            print(json.dumps(production.rebuild_translation(job, provider, force=args.force), ensure_ascii=False, indent=2))
         elif args.command == "repair-translation":
             provider_name = args.provider or settings.ai_provider
             if provider_name not in {"anthropic", "azure-foundry-claude"}:

@@ -27,6 +27,38 @@ TEXT_CHANGE_TYPES = {
     "other",
 }
 TEXT_CHANGE_LAYERS = {"faithful_to_spoken", "spoken_to_tts"}
+_DANGLING_ZU_CONNECTORS = {
+    "futhi", "ukuthi", "kuvele", "bese", "kodwa", "ngoba", "uma",
+    "lapho", "manje", "noma", "kanye", "ngisho",
+}
+
+
+def validate_safe_target_splits(units: Sequence[Mapping[str, Any]]) -> None:
+    """Reject target units that cannot be independently spoken naturally.
+
+    This is deliberately conservative: it catches the migration failure
+    patterns while leaving real sentence fragments from the source to the
+    translator/editor, who can mark them for review rather than distributing
+    words by timestamp.
+    """
+    for index, unit in enumerate(units):
+        unit_id = str(unit.get("unit_id", f"index {index}"))
+        text = str(unit.get("spoken_text") or unit.get("faithful_translation") or "").strip()
+        tokens = text.replace("…", " ").split()
+        if len(tokens) < 2:
+            raise ValueError(f"Unsafe target split in {unit_id}: one-word target unit: {text!r}")
+        first = tokens[0].strip("\"'“”‘’([{.,;:!?}").casefold()
+        last = tokens[-1].strip("\"'“”‘’)]}.,;:!?").casefold()
+        if last in _DANGLING_ZU_CONNECTORS:
+            raise ValueError(f"Unsafe target split in {unit_id}: dangling final connector {last!r}: {text!r}")
+        if first in _DANGLING_ZU_CONNECTORS:
+            raise ValueError(f"Unsafe target split in {unit_id}: dangling initial connector {first!r}: {text!r}")
+        if index:
+            previous = str(units[index - 1].get("spoken_text") or "").strip()
+            # A capital initial or a hyphenated fragment is a strong signal
+            # that an English proper name/brand was cut across units.
+            if previous.endswith(("Big", "W", "Suleiman", "Heart")) or text.startswith(("W ", "Side", "Attack", "Karim")):
+                raise ValueError(f"Unsafe target split between {units[index - 1].get('unit_id')} and {unit_id}: probable protected entity split")
 
 
 @dataclass(frozen=True)
@@ -340,4 +372,5 @@ __all__ = [
     "record_full_text_change",
     "subtitle_text",
     "upgrade_legacy_translation",
+    "validate_safe_target_splits",
 ]

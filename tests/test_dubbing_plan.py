@@ -1,11 +1,10 @@
-from pathlib import Path
-
 from mathula_tv.dubbing_plan import (
     build_dubbing_plan,
     normalize_translation_units,
     upgrade_legacy_translation_artifact,
 )
 from mathula_tv.pronunciation import PronunciationDictionary
+import pytest
 
 
 UNITS = [
@@ -123,3 +122,23 @@ def test_timing_aware_spoken_rewrite_is_recorded_and_unreviewed_tts_proposal_is_
     assert unit["text_changes"][0]["layer"] == "faithful_to_spoken"
     assert unit["tts_text"] == unit["spoken_text"]
     assert unit["tts_proposal_review"]["applied"] is False
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("I-Big", "W West Side."),
+        ("Lokhu ayikwazi ngisho", "nokuthumela i-email."),
+        ("Uyaphuza bese", "kungazelelwe uyawa."),
+        ("Kuvele", "ukuthi uyahamba."),
+    ],
+)
+def test_unsafe_target_splits_are_rejected(left, right):
+    translated = {
+        "units": [
+            {"unit_id": "unit_0001", "faithful_translation": left, "spoken_text": left, "tts_text": left},
+            {"unit_id": "unit_0002", "faithful_translation": right, "spoken_text": right, "tts_text": right},
+        ]
+    }
+    with pytest.raises(ValueError, match="Unsafe target split"):
+        normalize_translation_units(translated, UNITS)

@@ -330,6 +330,69 @@ class ProductionDubbingPipeline:
         self.jobs.save(job)
         return artifact
 
+    def rebuild_translation(
+        self, job: JobManifest, provider: AnthropicClaudeProvider, *, force: bool = False
+    ) -> dict[str, Any]:
+        """Rebuild semantic text while preserving source media and speaker assets.
+
+        Stale downstream media is moved to a timestamped quarantine rather
+        than deleted.  In particular, OpenVoice speaker references and target
+        embeddings stay in place; only unit-dependent output is invalidated.
+        """
+        paths = self.paths(job.job_id)
+        old_plan_hash = checksum(paths.plan) if paths.plan.is_file() else None
+        old_translation_hash = checksum(paths.three_text_translation) if paths.three_text_translation.is_file() else None
+        approved_speakers = read_json(paths.plan).get("speakers", {}) if paths.plan.is_file() else {}
+        stamp = utcnow().replace(":", "-")
+        quarantine = paths.job_root / "dubbing/stale" / stamp
+        moved: list[dict[str, str]] = []
+        targets = [
+            paths.three_text_translation,
+            paths.plan,
+            paths.azure_tts_root / "turns",
+            paths.azure_tts_root / "candidates",
+            paths.azure_manifest,
+            paths.openvoice_root / "turns",
+            paths.openvoice_plan,
+            paths.openvoice_manifest,
+            paths.aligned_root,
+            paths.compatibility_json,
+            paths.compatibility_markdown,
+            paths.dialogue,
+            paths.final_mix,
+            paths.final_video,
+            paths.render_manifest,
+        ]
+        for source in targets:
+            if not source.exists():
+                continue
+            destination = quarantine / source.relative_to(paths.job_root)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(destination))
+            moved.append({"from": str(source), "to": str(destination)})
+        # The semantic builder never uses timestamp-weighted text splitting.
+        self.build_units(job, force=True)
+        job.state = "analysis_ready"
+        job.last_error = None
+        self.jobs.save(job)
+        translation = self.translate(job, provider, force=True)
+        plan = self.prepare_dubbing(job, force=True)
+        if approved_speakers:
+            plan["speakers"] = approved_speakers
+            self._write_plan(paths.plan, plan)
+        record = {
+            "at": utcnow(),
+            "reason": "semantic source grouping replaced unsafe legacy word-boundary migration",
+            "old_translation_sha256": old_translation_hash,
+            "new_translation_sha256": checksum(paths.three_text_translation),
+            "old_plan_sha256": old_plan_hash,
+            "new_plan_sha256": checksum(paths.plan),
+            "quarantined": moved,
+            "preserved_reusable_assets": ["speaker reference reels", "target embeddings", "OpenVoice checkpoints"],
+        }
+        atomic_write_json(paths.job_root / "dubbing/rebuild_translation.json", record)
+        return {"translation": translation, "plan": plan, "invalidation": record}
+
     def translate(
         self,
         job: JobManifest,
@@ -587,6 +650,8 @@ class ProductionDubbingPipeline:
             else self.upgrade_validated_translation(job)
         )
         pronunciation = self._pronunciation_dictionary(job)
+        existing = read_json(paths.plan) if paths.plan.is_file() else {}
+        speakers = existing.get("speakers", {}) if isinstance(existing.get("speakers", {}), Mapping) else {}
         plan = build_dubbing_plan(
             job=job.to_dict(),
             source_media=Path(job.local_source_path),
@@ -596,6 +661,8 @@ class ProductionDubbingPipeline:
             translation_artifact=translation,
             output_path=paths.plan,
             pronunciation_dictionary=pronunciation,
+            speaker_references={key: value.get("reference", {}) for key, value in speakers.items()},
+            voice_selections={key: value.get("selected_azure_voice", {}) for key, value in speakers.items()},
         )
         job.media["dubbing_plan_sha256"] = checksum(paths.plan)
         self.jobs.save(job)

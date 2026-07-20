@@ -12,7 +12,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 DUBBING_UNITS_SCHEMA_VERSION = "dubbing-units-v1"
 DUBBING_UNIT_SCHEMA_VERSION = "1.0"
-_SPLIT_PUNCTUATION = re.compile(r"[.!?;,:][\"'”’)]*$")
+_SPLIT_PUNCTUATION = re.compile(r"[.!?;:][\"'”’)]*$")
 _SEMANTIC_END = re.compile(r"[.!?][\"'”’)]*$")
 _TOKEN = re.compile(r"[^\W_]+(?:['’][^\W_]+)*|[^\w\s]", re.UNICODE)
 
@@ -261,10 +261,11 @@ def _boundary_index(words: Sequence[_Word], start_index: int, limit_ms: int, min
     ]
     if preferred:
         return preferred[-1]
-    sufficiently_long = [
-        index for index in viable if words[index].end_ms - words[start_index].start_ms >= minimum_ms
-    ]
-    return (sufficiently_long or viable)[-1]
+    # A duration window is never authority to cut a thought in half.  A
+    # caller may accept an overlong unit, or an editor/model can later split
+    # it at a grammatical boundary.  The old fallback was the source of
+    # mechanically fragmented translations.
+    return len(words) - 1
 
 
 def _piece_metadata(
