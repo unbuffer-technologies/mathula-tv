@@ -187,3 +187,24 @@ def test_persisted_unreviewed_tts_difference_remains_rejected():
     ]}
     with pytest.raises(ValueError, match="proposes spoken_text/tts_text differences"):
         normalize_translation_units(artifact, UNITS)
+
+
+def test_fresh_translation_moves_dangling_manje_to_next_unit():
+    response = {"units": [
+        {"unit_id": "unit_0001", "faithful_translation": "Lesi yisikhwama se-W. Manje,", "spoken_text": "Lesi yisikhwama se-W. Manje,", "tts_text": "Lesi yisikhwama se-W. Manje,"},
+        {"unit_id": "unit_0002", "faithful_translation": "sinoSuleiman Karim.", "spoken_text": "sinoSuleiman Karim.", "tts_text": "sinoSuleiman Karim."},
+    ]}
+    result = normalize_fresh_claude_translation_units(response, UNITS)
+    assert result["units"][0]["spoken_text"] == "Lesi yisikhwama se-W."
+    assert result["units"][1]["spoken_text"] == "Manje, sinoSuleiman Karim."
+    assert result["normalization_events"][0]["event"] == "dangling_connector_moved"
+
+
+def test_fresh_translation_removes_terminal_redundant_manje():
+    one_unit = [UNITS[0]]
+    response = {"units": [
+        {"unit_id": "unit_0001", "faithful_translation": "Lesi yisikhwama se-W. Manje,", "spoken_text": "Lesi yisikhwama se-W. Manje,", "tts_text": "Lesi yisikhwama se-W. Manje,"},
+    ]}
+    result = normalize_fresh_claude_translation_units(response, one_unit)
+    assert result["units"][0]["spoken_text"] == "Lesi yisikhwama se-W."
+    assert result["normalization_events"][0]["event"] == "redundant_dangling_connector_removed"

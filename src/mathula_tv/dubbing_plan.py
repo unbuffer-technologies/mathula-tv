@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,6 +16,10 @@ from .target_text import TargetText, build_target_text, record_full_text_change,
 
 
 DUBBING_PLAN_SCHEMA_VERSION = "dubbing-plan-v1"
+_FINAL_CONNECTOR = re.compile(
+    r"(?:\s|^)(manje|futhi|ukuthi|kuvele|bese|kodwa|ngoba|uma|lapho|noma|kanye)\s*[,;:]?\s*$",
+    re.IGNORECASE,
+)
 
 
 def upgrade_legacy_translation_artifact(
@@ -215,6 +220,27 @@ def normalize_fresh_claude_translation_units(
         value["tts_text"] = spoken
         value["pronunciation_substitutions"] = []
         candidate_units.append(value)
+    for index, value in enumerate(candidate_units):
+        spoken = str(value.get("spoken_text", "")).strip()
+        match = _FINAL_CONNECTOR.search(spoken)
+        if not match:
+            continue
+        connector = match.group(1)
+        connector_title = connector[:1].upper() + connector[1:]
+        cleaned_spoken = spoken[: match.start()].rstrip()
+        cleaned_faithful = _FINAL_CONNECTOR.sub("", str(value.get("faithful_translation", "")).strip()).rstrip()
+        if not cleaned_spoken or not cleaned_faithful:
+            continue
+        value["spoken_text"] = cleaned_spoken
+        value["faithful_translation"] = cleaned_faithful
+        value["tts_text"] = cleaned_spoken
+        if index + 1 < len(candidate_units):
+            following = candidate_units[index + 1]
+            for field in ("faithful_translation", "spoken_text", "tts_text"):
+                following[field] = f"{connector_title}, {str(following.get(field, '')).lstrip()}"
+            events.append({"event": "dangling_connector_moved", "connector": connector_title, "from_unit_id": str(value.get("unit_id")), "to_unit_id": str(following.get("unit_id")), "reason": "connector introduces the following semantic thought"})
+        else:
+            events.append({"event": "redundant_dangling_connector_removed", "connector": connector_title, "unit_id": str(value.get("unit_id"))})
     candidate["units"] = candidate_units
     normalized = normalize_translation_units(
         candidate, units, pronunciation_dictionary=pronunciation_dictionary

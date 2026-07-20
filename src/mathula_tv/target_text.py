@@ -47,12 +47,11 @@ def validate_safe_target_splits(units: Sequence[Mapping[str, Any]]) -> None:
         tokens = text.replace("…", " ").split()
         if len(tokens) < 2:
             raise ValueError(f"Unsafe target split in {unit_id}: one-word target unit: {text!r}")
-        first = tokens[0].strip("\"'“”‘’([{.,;:!?}").casefold()
         last = tokens[-1].strip("\"'“”‘’)]}.,;:!?").casefold()
         if last in _DANGLING_ZU_CONNECTORS:
             raise ValueError(f"Unsafe target split in {unit_id}: dangling final connector {last!r}: {text!r}")
-        if first in _DANGLING_ZU_CONNECTORS:
-            raise ValueError(f"Unsafe target split in {unit_id}: dangling initial connector {first!r}: {text!r}")
+        # A connector at the start can be a complete, natural transition
+        # from the prior thought; only a dangling *final* connector is unsafe.
         if index:
             previous = str(units[index - 1].get("spoken_text") or "").strip()
             # A capital initial or a hyphenated fragment is a strong signal
