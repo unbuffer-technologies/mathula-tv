@@ -236,11 +236,23 @@ class Orchestrator:
                         raise
             azure = read_json(self.jobs.job_dir(job.job_id) / "analysis/azure_diarization.json")
             turns, source, warnings = select_authoritative(pyannote, azure, diagnostic_warning)
-            transcript = reconcile(azure["words"], turns, source=source, tolerance=self.settings.speaker_tolerance_seconds)
-            transcript["warnings"].extend(warnings)
             job_dir = self.jobs.job_dir(job.job_id)
             transcript_path = job_dir / "analysis/transcript_en.json"
-            atomic_write_json(transcript_path, transcript)
+            
+            # Check if a corrected transcript already exists
+            if transcript_path.is_file() and transcript_path.stat().st_size > 0:
+                # Use existing corrected transcript
+                transcript = read_json(transcript_path)
+                transcript["warnings"] = transcript.get("warnings", [])
+                transcript["warnings"].extend(warnings)
+                transcript["warnings"].append("Using existing corrected transcript")
+                atomic_write_json(transcript_path, transcript)
+            else:
+                # Reconcile from Azure STT words
+                transcript = reconcile(azure["words"], turns, source=source, tolerance=self.settings.speaker_tolerance_seconds)
+                transcript["warnings"].extend(warnings)
+                atomic_write_json(transcript_path, transcript)
+            
             classification = classify(" ".join(segment["source_text"] for segment in transcript["segments"]))
             classification_path = job_dir / "analysis/domain_classification.json"
             atomic_write_json(classification_path, classification)
@@ -248,6 +260,15 @@ class Orchestrator:
             context = {"providers": [provider.enrich(classification, text) for provider in providers_for(classification, self.settings.commission_master_case_path, self.settings.politics_context_path)]}
             context_path = job_dir / "analysis/context.json"
             atomic_write_json(context_path, context)
+            
+            # Update analysis input hashes based on actual file bytes
+            inputs = {}
+            for name, path in (("transcript_en", transcript_path), ("domain_classification", classification_path), ("context", context_path)):
+                if not path.is_file() or not path.stat().st_size:
+                    raise ValueError(f"Required analysis artifact is missing or empty: {path.name}")
+                inputs[name] = checksum(path)
+            job.media["analysis_input_hashes"] = inputs
+            
             if not self.gcs:
                 self.gcs = GCSStore(self.settings.gcs_bucket, self.settings.gcs_prefix)
             if pyannote_path.is_file():

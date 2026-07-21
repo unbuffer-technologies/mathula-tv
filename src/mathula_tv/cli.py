@@ -233,7 +233,6 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps([{"job_id": item.job_id, "state": item.state, "source": item.source_filename} for item in app.jobs.list()], indent=2))
             return 0
         if args.command == "entities":
-            from pathlib import Path
             from .entity_registry import EntityRegistry
             
             registry_path = Path(args.registry)
@@ -477,11 +476,49 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "process":
             print(_process_message(job))
         elif args.command == "diarize":
-            result = run_pyannote(Path(job.objects["local_audio"]), settings.pyannote_model)
-            from .atomic_io import atomic_write_json
-
-            atomic_write_json(app.jobs.job_dir(job.job_id) / "analysis/pyannote_diarization.json", result)
-            print("Optional Pyannote diagnostic ready; Azure speaker labels remain authoritative")
+            job_dir = app.jobs.job_dir(job.job_id)
+            pyannote_path = job_dir / "analysis/pyannote_diarization.json"
+            azure_path = job_dir / "analysis/azure_diarization.json"
+            
+            # Check if existing diarization artifacts are valid
+            if pyannote_path.is_file() and azure_path.is_file():
+                # Both artifacts exist - verify they are valid
+                from .diarization import validate_turns
+                try:
+                    pyannote_data = read_json(pyannote_path)
+                    azure_data = read_json(azure_path)
+                    validate_turns(azure_data.get("turns", []))
+                    validate_turns(pyannote_data.get("turns", []))
+                    print("Reusing existing valid diarization artifacts")
+                    print("Optional Pyannote diagnostic ready; Azure speaker labels remain authoritative")
+                except Exception as exc:
+                    print(f"Existing diarization artifacts invalid: {exc}")
+                    print("Running fresh Pyannote inference")
+                    result = run_pyannote(Path(job.objects["local_audio"]), settings.pyannote_model)
+                    from .atomic_io import atomic_write_json
+                    atomic_write_json(pyannote_path, result)
+                    print("Optional Pyannote diagnostic ready; Azure speaker labels remain authoritative")
+            elif azure_path.is_file():
+                # Only Azure exists - if Azure is authoritative, no need for Pyannote
+                from .diarization import validate_turns
+                try:
+                    azure_data = read_json(azure_path)
+                    validate_turns(azure_data.get("turns", []))
+                    print("Azure diarization valid; Pyannote diagnostic optional")
+                    print("Azure speaker labels remain authoritative")
+                except Exception as exc:
+                    print(f"Azure diarization invalid: {exc}")
+                    print("Running fresh Pyannote inference")
+                    result = run_pyannote(Path(job.objects["local_audio"]), settings.pyannote_model)
+                    from .atomic_io import atomic_write_json
+                    atomic_write_json(pyannote_path, result)
+                    print("Optional Pyannote diagnostic ready; Azure speaker labels remain authoritative")
+            else:
+                # No existing artifacts - run Pyannote
+                result = run_pyannote(Path(job.objects["local_audio"]), settings.pyannote_model)
+                from .atomic_io import atomic_write_json
+                atomic_write_json(pyannote_path, result)
+                print("Optional Pyannote diagnostic ready; Azure speaker labels remain authoritative")
         elif args.command == "retry":
             if job.state != "failed_retryable":
                 raise ValueError("Only failed_retryable jobs can be retried")

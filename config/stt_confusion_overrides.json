@@ -55,12 +55,12 @@
     {
       "rule_id": "matthew_chaskalson",
       "pattern": "\\b(?:advocate\\s+)?Charles Carlson\\b",
-      "replacement": "Advocate Matthew Chaskalson",
+      "replacement": "Advocate Chaskalson",
       "flags": [
         "IGNORECASE"
       ],
       "entity_id": "person_matthew_chaskalson",
-      "reason": "Registry-backed evidence-leader candidate."
+      "reason": "Correct the spoken surname while keeping the full canonical identity in entity metadata."
     },
     {
       "rule_id": "suleiman_carrim_commentary",
