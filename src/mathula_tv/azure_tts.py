@@ -5,9 +5,7 @@ import hashlib
 import io
 import json
 import math
-import os
 import re
-import tempfile
 import time
 import wave
 from dataclasses import asdict, dataclass, field, replace
@@ -17,7 +15,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, TypeVar
 
 import requests
 
-from .atomic_io import read_json
+from .atomic_io import atomic_write_bytes, read_json
 from .errors import PipelineError
 from .logging_utils import redact
 from .tts_ssml import (
@@ -537,11 +535,12 @@ class AzureTTSBackend:
             "result": result.to_dict(),
         }
         # The manifest is promoted last and therefore acts as the completeness marker.
-        _atomic_write_bytes(output_path, audio)
-        _atomic_write_bytes(ssml_path, (document.xml + "\n").encode("utf-8"))
-        _atomic_write_bytes(
+        atomic_write_bytes(output_path, audio, fsync_dir=True)
+        atomic_write_bytes(ssml_path, (document.xml + "\n").encode("utf-8"), fsync_dir=True)
+        atomic_write_bytes(
             manifest_path,
             (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            fsync_dir=True,
         )
         return result
 
@@ -851,31 +850,6 @@ def canonicalize_pcm_wav(
         "trimmed_leading_ms": int(round(trimmed_leading * 1000 / sample_rate)),
         "trimmed_trailing_ms": int(round(trimmed_trailing * 1000 / sample_rate)),
     }
-
-
-def _atomic_write_bytes(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(value)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        try:
-            directory_descriptor = os.open(path.parent, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def _safe_detail(body: bytes) -> str:

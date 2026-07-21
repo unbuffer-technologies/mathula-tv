@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .errors import TimingBoundExceeded
-from .media import checksum
+from .media import checksum, ffmpeg_base_command
+from .pcm import decode_pcm16
 
 
 def render_dialogue_tracks(
@@ -49,7 +50,7 @@ def render_dialogue_tracks(
         _validate_pcm(output, sample_rate, channels=1)
         tracks.append({"speaker_id": speaker, "path": str(output), "sha256": checksum(output), "unit_count": len(items)})
 
-    mix_command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    mix_command = ffmpeg_base_command()
     for track in tracks:
         mix_command.extend(["-i", track["path"]])
     inputs = "".join(f"[{index}:a]" for index in range(len(tracks)))
@@ -85,7 +86,7 @@ def render_dialogue_tracks(
 def _speaker_track_command(
     clips: list[dict[str, Any]], output: Path, total_duration_ms: int, sample_rate: int
 ) -> list[str]:
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    command = ffmpeg_base_command()
     filters = []
     for index, clip in enumerate(sorted(clips, key=lambda item: (int(item["start_ms"]), str(item["unit_id"])))):
         command.extend(["-i", str(clip["path"])])
@@ -250,7 +251,7 @@ def _validate_pcm(path: Path, sample_rate: int, *, channels: int) -> dict[str, A
             raise ValueError("Unexpected PCM bus format")
         raw = handle.readframes(handle.getnframes())
         duration = handle.getnframes() / sample_rate
-    samples = [int.from_bytes(raw[index : index + 2], "little", signed=True) for index in range(0, len(raw), 2)]
+    samples = decode_pcm16(raw)
     clipping = sum(abs(value) >= 32767 for value in samples)
     peak = max((abs(value) for value in samples), default=0)
     return {

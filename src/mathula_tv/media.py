@@ -10,6 +10,11 @@ from typing import Any
 from .errors import InvalidSourceMedia, UnsupportedSourceDuration
 
 
+def ffmpeg_base_command() -> list[str]:
+    """Return a fresh ffmpeg invocation prefix with quiet, overwrite defaults."""
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+
+
 def checksum(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -46,7 +51,7 @@ def prepare_audio(source: Path, output: Path) -> dict[str, Any]:
     source_info = probe(source)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".partial.wav")
-    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(temporary)], check=True)
+    subprocess.run(ffmpeg_base_command() + ["-i", str(source), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(temporary)], check=True)
     temporary.replace(output)
     audio_info = probe(output)
     stream: dict[str, Any] = next(
@@ -81,12 +86,8 @@ def prepare_source_derivatives(
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_name(f".{output.stem}.partial{output.suffix}")
         subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
+            ffmpeg_base_command()
+            + [
                 "-i",
                 str(source),
                 "-map",
@@ -148,7 +149,7 @@ def render_video(source: Path, audio: Path, output: Path) -> None:
     probe(source); probe(audio)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".partial.mp4")
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", str(temporary)]
+    command = ffmpeg_base_command() + ["-i", str(source), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", str(temporary)]
     try:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError:

@@ -4,6 +4,8 @@ import wave
 import re
 from pathlib import Path
 
+from .pcm import encode_pcm16
+
 
 def select_speaker_references(turns: list[dict], *, min_duration: float = 3.0, preferred_max_duration: float = 15.0, absolute_max_duration: float = 25.0, max_references: int = 1) -> dict[str, list[dict]]:
     selected: dict[str, list[dict]] = {}
@@ -76,7 +78,7 @@ def assemble_timeline(clips: list[dict], output: Path, total_duration: float, ra
             if occupied[index]: overlaps.append(clip.get("segment_id"))
             mixed = existing + value
             if abs(mixed) > 32767: clipping += 1
-            frames[index*2:index*2+2] = max(-32768, min(32767, mixed)).to_bytes(2, "little", signed=True)
+            frames[index*2:index*2+2] = encode_pcm16(mixed)
             occupied[index] = True
     output.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(output), "wb") as wav: wav.setparams((1, 2, rate, 0, "NONE", "not compressed")); wav.writeframes(frames)

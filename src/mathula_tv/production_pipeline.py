@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import re
-import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +14,7 @@ from typing import Any, Mapping
 from .ai_provider import AnthropicClaudeProvider, TURN_REPAIR_SCHEMA, build_full_clip_payload
 from .alignment import align_converted_unit
 from .artifacts import DubbingArtifacts
-from .atomic_io import atomic_write_json, read_json
+from .atomic_io import atomic_copy, atomic_write_json, read_json
 from .azure_tts import AzureTTSBackend, AzureTTSRequest, AzureTTSResult
 from .background import (
     ResidualSpeechDetector,
@@ -3281,10 +3280,7 @@ class ProductionDubbingPipeline:
 
     @staticmethod
     def _atomic_copy(source: Path, destination: Path) -> None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.partial")
-        shutil.copyfile(source, temporary)
-        temporary.replace(destination)
+        atomic_copy(source, destination)
 
     @staticmethod
     def _relative_job_path(paths: DubbingArtifacts, value: Path) -> Path:

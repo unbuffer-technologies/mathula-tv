@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .atomic_io import atomic_write_json
 from .errors import InsufficientReferenceQuality, MissingSameSpeakerReference
-from .media import checksum
+from .media import checksum, ffmpeg_base_command
 from .quality import inspect_wav
 
 
@@ -85,7 +85,7 @@ def build_reference_reel(
     runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     selected = selection["selected"]
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    command = ffmpeg_base_command()
     filters = []
     for index, item in enumerate(selected):
         source = Path(item["path"])

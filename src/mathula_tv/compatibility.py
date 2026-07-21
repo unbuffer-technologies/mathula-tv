@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import os
 import re
-import shutil
-import tempfile
 import wave
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -11,7 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .atomic_io import atomic_write_json
+from .atomic_io import atomic_copy, atomic_write_json, atomic_write_text
 from .logging_utils import redact
 from .openvoice import sha256_file
 
@@ -536,7 +533,7 @@ def write_compatibility_report(
 ) -> None:
     safe_report = redact(dict(report))
     atomic_write_json(json_path, safe_report)
-    _atomic_write_text(markdown_path, compatibility_report_markdown(safe_report))
+    atomic_write_text(markdown_path, compatibility_report_markdown(safe_report))
 
 
 def compatibility_report_markdown(report: Mapping[str, Any]) -> str:
@@ -623,7 +620,7 @@ def build_ab_review_package(
                 raise FileNotFoundError(f"Missing {label} audio for unit {item.unit_id}")
             _validate_review_audio(source, label=label, unit_id=item.unit_id)
             destination = review_root / label / f"{item.unit_id}.wav"
-            _atomic_copy(source, destination)
+            atomic_copy(source, destination)
             actual_hash = sha256_file(destination)
             expected_hash = report_units[item.unit_id].get(
                 {
@@ -655,7 +652,7 @@ def build_ab_review_package(
         review_root / "compatibility_report.json",
         review_root / "compatibility_report.md",
     )
-    _atomic_write_text(review_root / "listening_guide.md", _listening_guide(report))
+    atomic_write_text(review_root / "listening_guide.md", _listening_guide(report))
     package_manifest = {
         "schema_version": REVIEW_PACKAGE_SCHEMA,
         "job_id": report["job_id"],
@@ -692,23 +689,6 @@ def _listening_guide(report: Mapping[str, Any]) -> str:
     )
 
 
-def _atomic_copy(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
-    try:
-        with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
-            shutil.copyfileobj(input_file, output)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, destination)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-
-
 def _validate_review_audio(path: Path, *, label: str, unit_id: str) -> None:
     try:
         with wave.open(str(path), "rb") as audio:
@@ -722,23 +702,6 @@ def _validate_review_audio(path: Path, *, label: str, unit_id: str) -> None:
         raise ValueError(f"Invalid {label} WAV for unit {unit_id}") from exc
     if not valid:
         raise ValueError(f"Empty {label} WAV for unit {unit_id}")
-
-
-def _atomic_write_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(value)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def _display(value: Any) -> str:
