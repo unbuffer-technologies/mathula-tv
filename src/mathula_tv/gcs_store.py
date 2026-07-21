@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .logging_utils import redact
+from .models import validate_job_id
 
 
 class LeaseConflict(RuntimeError):
@@ -19,7 +20,7 @@ class LeaseLost(RuntimeError):
 
 
 def object_name(prefix: str, job_id: str, relative: str) -> str:
-    return f"{prefix.strip('/')}/jobs/{job_id}/{relative.strip('/')}"
+    return f"{prefix.strip('/')}/jobs/{validate_job_id(job_id)}/{relative.strip('/')}"
 
 
 def gs_uri(bucket: str, name: str) -> str:
