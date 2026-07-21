@@ -1,0 +1,83 @@
+{
+  "schema_version": "mathula-stt-confusion-hints-v1",
+  "description": "Candidate hints only. These rules never directly replace transcript text. New suggestions require review unless an exact learned user/project vocabulary rule already exists.",
+  "rules": [
+    {
+      "rule_id": "madlanga_supermarket",
+      "pattern": "\\bmalanga supermarket\\b",
+      "replacement": "Madlanga supermarket",
+      "flags": [
+        "IGNORECASE"
+      ],
+      "entity_id": "case_or_inquiry_madlanga_commission",
+      "reason": "Recurring acoustic confusion in Commission commentary."
+    },
+    {
+      "rule_id": "madlanga_commission",
+      "pattern": "\\bmalanga commission\\b",
+      "replacement": "Madlanga Commission",
+      "flags": [
+        "IGNORECASE"
+      ],
+      "entity_id": "case_or_inquiry_madlanga_commission",
+      "reason": "Recurring acoustic confusion in Commission commentary."
+    },
+    {
+      "rule_id": "hoshkhari",
+      "pattern": "\\bhorse curry\\b",
+      "replacement": "hoshkhari",
+      "flags": [
+        "IGNORECASE"
+      ],
+      "entity_id": "phrase_hoshkhari",
+      "reason": "User-confirmed recurring acoustic confusion."
+    },
+    {
+      "rule_id": "thabo_bester",
+      "pattern": "\\bTabo Pesta\\b",
+      "replacement": "Thabo Bester",
+      "flags": [
+        "IGNORECASE"
+      ],
+      "entity_id": "person_thabo_bester",
+      "reason": "Registry-backed named-entity candidate."
+    },
+    {
+      "rule_id": "cat_matlala",
+      "pattern": "\\bVusi Matlala\\b",
+      "replacement": "Vusimuzi \"Cat\" Matlala",
+      "flags": [
+        "IGNORECASE"
+      ],
+      "entity_id": "person_vusimuzi_cat_matlala",
+      "reason": "Registry-backed named-entity candidate."
+    },
+    {
+      "rule_id": "matthew_chaskalson",
+      "pattern": "\\b(?:advocate\\s+)?Charles Carlson\\b",
+      "replacement": "Advocate Matthew Chaskalson",
+      "flags": [
+        "IGNORECASE"
+      ],
+      "entity_id": "person_matthew_chaskalson",
+      "reason": "Registry-backed evidence-leader candidate."
+    },
+    {
+      "rule_id": "suleiman_carrim_commentary",
+      "pattern": "\\bSuleiman heart attack,?\\s+Karim\\b",
+      "replacement": "Suleiman \"heart attack\" Carrim",
+      "flags": [
+        "IGNORECASE"
+      ],
+      "entity_id": "person_suleiman_carrim",
+      "reason": "Corrects the surname candidate while preserving the speaker's sarcastic inserted phrase."
+    }
+  ],
+  "review_patterns": [
+    {
+      "review_id": "madlanga_ward_word_world",
+      "pattern": "\\bmalanga ward\\b",
+      "reason": "Likely refers to Madlanga, but the second word may be ward, word, or world. Ask the uploader."
+    }
+  ]
+}

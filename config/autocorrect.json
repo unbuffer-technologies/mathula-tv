@@ -1,0 +1,34 @@
+{
+  "schema_version": "mathula-autocorrect-config-v2",
+  "database": {
+    "engine": "postgresql",
+    "url_environment_order": [
+      "MATHULA_TV_DATABASE_URL",
+      "DATABASE_URL"
+    ],
+    "schema_environment": "MATHULA_TV_DATABASE_SCHEMA",
+    "default_schema": "mathula_autocorrect",
+    "connection_pool_min_size": 1,
+    "connection_pool_max_size": 5
+  },
+  "max_questions_per_upload": 5,
+  "fuzzy_candidate_threshold": 0.68,
+  "low_confidence_threshold": 0.72,
+  "learned_rule_auto_apply_confirmations": 2,
+  "new_ai_suggestions_auto_apply": false,
+  "public_dictionary": {
+    "enabled": true,
+    "free_text_new_terms_allowed": true,
+    "auto_promotion": false,
+    "minimum_independent_users": 5,
+    "minimum_distinct_jobs": 5,
+    "moderator_approval_required": true,
+    "approved_terms_are_candidates_not_auto_rules": true
+  },
+  "privacy": {
+    "user_and_project_learning_private_by_default": true,
+    "public_contribution_requires_explicit_consent": true,
+    "public_contribution_requires_hash_salt": true,
+    "raw_user_ids_are_not_stored_in_public_evidence": true
+  }
+}
