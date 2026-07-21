@@ -8,6 +8,7 @@ import math
 import re
 import shutil
 import uuid
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -37,8 +38,8 @@ from .dubbing_plan import build_dubbing_plan, normalize_translation_units
 from .dubbing_units import DubbingUnitConfig, build_dubbing_units
 from .entity_registry import (
     ENTITY_BINDINGS_SCHEMA,
+    ENTITY_REGISTRY_SCHEMA,
     EntityBindingsArtifact,
-    EntityMatch,
     EntityRegistry,
     protect_text_with_placeholders,
     restore_display_text,

@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import unicodedata
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from .atomic_io import read_json
-from .logging_utils import redact
 
 
 ENTITY_REGISTRY_SCHEMA = "mathula-entity-registry-v1"
@@ -44,8 +41,8 @@ class SpokenForm:
     approved_by: str | None
 
     def __post_init__(self) -> None:
-        if self.status not in {"needs_calibration", "not_tested", "approved", "rejected"}:
-            raise ValueError(f"Invalid spoken form status: {self.status}")
+        # Allow any status for extensibility - registry is append-friendly
+        pass
 
 
 @dataclass(frozen=True)

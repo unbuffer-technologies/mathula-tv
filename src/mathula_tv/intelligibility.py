@@ -3,25 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import unicodedata
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .atomic_io import atomic_write_json, read_json
-from .azure_stt import (
-    AzureSpeechError,
-    SpeechBackend,
-    derive_endpoint,
-    request_definition,
-    safe_endpoint,
-    validate_endpoint,
-)
+from .atomic_io import atomic_write_json
+from .azure_stt import SpeechBackend
 from .config import Settings
-from .logging_utils import redact
 
 
 INTELLIGIBILITY_AUDIT_SCHEMA = "mathula-stt-intelligibility-audit-v1"
@@ -325,19 +316,19 @@ class IntelligibilityAuditor:
         """Generate Markdown report."""
         hinted_wer_str = f"{report.aggregate_hinted_wer:.4f}" if report.aggregate_hinted_wer is not None else "N/A"
         lines = [
-            f"# Intelligibility Audit Report",
-            f"",
+            "# Intelligibility Audit Report",
+            "",
             f"**Job ID:** {report.job_id}",
             f"**Stage:** {report.stage}",
             f"**Locale:** {report.locale}",
             f"**Generated:** {report.generated_at}",
-            f"",
-            f"## Summary",
-            f"",
+            "",
+            "## Summary",
+            "",
             f"**State:** {report.state}",
             f"**Aggregate Blind WER:** {report.aggregate_blind_wer:.4f}",
             f"**Aggregate Hinted WER:** {hinted_wer_str}",
-            f"",
+            "",
         ]
         
         if report.pass_fail_reasons:
@@ -348,25 +339,25 @@ class IntelligibilityAuditor:
             lines.append("")
         
         lines.extend([
-            f"### Protected Entities",
-            f"",
+            "### Protected Entities",
+            "",
             f"- Expected: {report.protected_entities_summary['total_expected']}",
             f"- Recognized: {report.protected_entities_summary['total_recognized']}",
             f"- Recognition Rate: {report.protected_entities_summary['recognition_rate']:.2%}",
-            f"",
-            f"## Per-Unit Observations",
-            f"",
+            "",
+            "## Per-Unit Observations",
+            "",
         ])
         
         for unit_id, obs in report.per_unit_observations.items():
             lines.extend([
                 f"### {unit_id}",
-                f"",
+                "",
                 f"- WER: {obs['word_error_rate']:.4f}",
                 f"- Expected: {obs['protected_entities_expected']}",
                 f"- Recognized: {obs['protected_entities_recognized']}",
                 f"- Missing: {obs['protected_entities_missing']}",
-                f"",
+                "",
             ])
         
         return "\n".join(lines)
