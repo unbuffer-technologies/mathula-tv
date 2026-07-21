@@ -62,7 +62,7 @@ def safe_endpoint(endpoint: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
-def request_definition(locale: str, max_speakers: int) -> dict[str, Any]:
+def _request_definition_without_phrases(locale: str, max_speakers: int) -> dict[str, Any]:
     if not locale or len(locale) > 20:
         raise ValueError("AZURE_SPEECH_LOCALE is invalid")
     if not 1 <= max_speakers <= 35:
@@ -70,6 +70,34 @@ def request_definition(locale: str, max_speakers: int) -> dict[str, Any]:
     # Fast Transcription returns word timestamps by default. Its current request
     # schema has no wordLevelTimestampsEnabled property (that is a batch option).
     return {"locales": [locale], "diarization": {"enabled": True, "maxSpeakers": max_speakers}}
+
+def request_definition(
+    locale: str = "en-ZA",
+    *args: Any,
+    phrases: list[str] | tuple[str, ...] | None = None,
+    biasing_weight: float | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Build the Fast transcription definition with optional entity phrases."""
+
+    definition = _request_definition_without_phrases(locale, *args, **kwargs)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in phrases or ():
+        phrase = " ".join(str(value).split()).strip()
+        key = phrase.casefold()
+        if phrase and key not in seen:
+            seen.add(key)
+            cleaned.append(phrase)
+    if cleaned:
+        phrase_list: dict[str, Any] = {"phrases": cleaned}
+        if biasing_weight is not None:
+            if not 0.0 <= float(biasing_weight) <= 2.0:
+                raise ValueError("Azure phrase-list biasing weight must be between 0.0 and 2.0")
+            phrase_list["biasingWeight"] = float(biasing_weight)
+        definition["phraseList"] = phrase_list
+    return definition
+
 
 
 def _error_message(response: requests.Response) -> str:
@@ -114,6 +142,9 @@ class AzureFastTranscriptionBackend:
     provider: str = "azure-speech-fast-transcription"
     request_duration_seconds: float | None = None
 
+    phrase_list: tuple[str, ...] = ()
+    phrase_biasing_weight: float | None = None
+
     def __post_init__(self) -> None:
         self.endpoint = validate_endpoint(self.endpoint)
         if not self.subscription_key:
@@ -149,7 +180,7 @@ class AzureFastTranscriptionBackend:
         if duration >= FAST_MAX_DURATION_SECONDS:
             raise AzureSpeechError("Audio exceeds the reviewed 240-minute production limit; chunked speaker stitching is not implemented")
 
-        definition = request_definition(locale, self.max_speakers)
+        definition = request_definition(locale, self.max_speakers, phrases=self.phrase_list, biasing_weight=self.phrase_biasing_weight)
         started = time.perf_counter()
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
@@ -249,6 +280,11 @@ class AzureSTTRouter:
         if duration > PRODUCTION_MAX_DURATION_SECONDS:
             raise AzureSpeechError("Audio exceeds the reviewed 240-minute production limit")
         backend = self.fast if audio.stat().st_size < FAST_MAX_BYTES and duration < FAST_MAX_DURATION_SECONDS else self.batch
+        if backend is self.batch and getattr(self.fast, "phrase_list", ()):
+            raise AzureSpeechError(
+                "Entity phrase lists require Azure Fast transcription; "
+                "the source is outside the Fast API size or duration limit"
+            )
         if backend is None:
             raise AzureSpeechError("Audio requires Azure Batch transcription, but no reviewed batch boundary is configured")
         raw = backend.transcribe(audio, locale)

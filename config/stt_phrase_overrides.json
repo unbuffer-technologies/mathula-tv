@@ -1,0 +1,16 @@
+{
+  "schema_version": "mathula-stt-phrase-overrides-v1",
+  "description": "High-priority source-STT phrases that are clip language or recurring terms rather than canonical registry aliases.",
+  "phrases": [
+    "Madlanga",
+    "Madlanga Commission",
+    "Madlanga supermarket",
+    "Madlanga ward",
+    "hoshkhari",
+    "Thabo Bester",
+    "Vusimuzi Cat Matlala",
+    "Cat Matlala",
+    "Woolworths",
+    "Woolies"
+  ]
+}

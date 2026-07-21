@@ -18,6 +18,7 @@ from .context_providers import providers_for
 from .transcript_merge import reconcile
 from .translation import AzureAIError, JsonClient, TRANSLATION_PROMPT_VERSION, translate as translate_segments, validate_translation
 from .seo import generate_seo, validate_seo
+from .stt_phrases import configure_source_stt_backend
 
 
 class Orchestrator:
@@ -71,6 +72,10 @@ class Orchestrator:
     def transcribe(self, job: JobManifest, backend: SpeechBackend, *, force: bool = False) -> JobManifest:
         stage = "azure_transcription"
         job_dir = self.jobs.job_dir(job.job_id)
+        phrase_bundle = configure_source_stt_backend(backend)
+        phrase_path = job_dir / "analysis/azure_stt_phrase_list.json"
+        if phrase_bundle is not None:
+            atomic_write_json(phrase_path, phrase_bundle.to_dict())
         raw_path = job_dir / "analysis/azure_stt.json"
         normalized_path = job_dir / "analysis/azure_diarization.json"
         if stage in job.completed_stages and not force:
@@ -99,6 +104,15 @@ class Orchestrator:
             # File upload preserves the successful Azure response byte-for-byte.
             job.objects["azure_stt"] = self.gcs.upload(job.job_id, "analysis/azure_stt.json", raw_path)
             job.objects["azure_diarization"] = self.gcs.upload(job.job_id, "analysis/azure_diarization.json", normalized_path)
+            if phrase_bundle is not None:
+                job.objects["azure_stt_phrase_list"] = self.gcs.upload(
+                    job.job_id,
+                    "analysis/azure_stt_phrase_list.json",
+                    phrase_path,
+                )
+                job.providers["azure_stt_phrase_registry_sha256"] = phrase_bundle.registry_sha256
+                job.providers["azure_stt_phrase_count"] = len(phrase_bundle.phrases)
+                job.providers["azure_stt_phrase_biasing_weight"] = phrase_bundle.biasing_weight
             job.providers["azure_stt"] = backend.provider
             job.providers["azure_stt_api_version"] = backend.api_version
             job.media["azure_transcription_duration"] = normalized["duration"]
