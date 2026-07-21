@@ -147,3 +147,15 @@ class DubbingArtifacts:
 
     def intelligibility_markdown(self, stage: str) -> Path:
         return self.qc_intelligibility_root / stage / "report.md"
+
+    @property
+    def preview_root(self) -> Path:
+        return self.job_root / "audio/previews"
+
+    @property
+    def preview_background(self) -> Path:
+        return self.preview_root / "background_review.wav"
+
+    @property
+    def preview_final_mix(self) -> Path:
+        return self.preview_root / "final_mix_review.wav"

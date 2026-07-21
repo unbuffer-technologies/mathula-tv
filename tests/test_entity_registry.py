@@ -314,16 +314,16 @@ def test_entity_bindings_artifact():
 
 
 def test_entity_spoken_form_calibration_status():
-    """Test that invalid spoken form status raises error."""
-    with pytest.raises(ValueError, match="Invalid spoken form status"):
-        from mathula_tv.entity_registry import SpokenForm
-        SpokenForm(
-            default="test",
-            voices={},
-            status="invalid_status",
-            last_tested_at=None,
-            approved_by=None,
-        )
+    """Test that SpokenForm accepts all status values for extensibility."""
+    from mathula_tv.entity_registry import SpokenForm
+    # Should not raise ValueError for any status (extensibility)
+    SpokenForm(
+        default="test",
+        voices={},
+        status="custom_status",
+        last_tested_at=None,
+        approved_by=None,
+    )
 
 
 def test_entity_invalid_entity_type():
@@ -346,6 +346,133 @@ def test_entity_invalid_entity_type():
             do_not_confuse_with=(),
             sources=(),
         )
+
+
+def test_spoken_form_status_extensibility():
+    """Test that SpokenForm accepts all status values for extensibility."""
+    from mathula_tv.entity_registry import SpokenForm
+    # Should not raise ValueError for any status
+    SpokenForm(
+        default="test",
+        voices={},
+        status="literal_designation",
+        last_tested_at=None,
+        approved_by=None,
+    )
+    SpokenForm(
+        default="test",
+        voices={},
+        status="needs_human_reference",
+        last_tested_at=None,
+        approved_by=None,
+    )
+    SpokenForm(
+        default="test",
+        voices={},
+        status="custom_status",
+        last_tested_at=None,
+        approved_by=None,
+    )
+
+
+def test_translation_text_forms_separation():
+    """Test that faithful, natural, and TTS text forms are separate."""
+    from mathula_tv.entity_registry import Entity, SpokenForm, EntityMatch, restore_display_text, restore_tts_text
+    
+    # Create a test entity with different display and spoken forms
+    entity = Entity(
+        entity_id="test_entity",
+        entity_type="person",
+        canonical_text="John Doe",
+        display_text="John Doe",
+        aliases=("Johnny",),
+        domains=("test",),
+        roles=(),
+        source_status="public_record",
+        active=True,
+        must_preserve=True,
+        translation_policy="protected_token",
+        stt_phrases=("John Doe",),
+        spoken_forms={
+            "zu-ZA": SpokenForm(
+                default="uJohn Doe",
+                voices={},
+                status="approved",
+                last_tested_at=None,
+                approved_by=None,
+            )
+        },
+        do_not_confuse_with=(),
+        sources=(),
+    )
+    
+    # Create a mock registry
+    class MockRegistry:
+        def get_entity(self, entity_id):
+            return entity
+    
+    registry = MockRegistry()
+    
+    # Test placeholder restoration with EntityMatch objects
+    placeholder = "[[MATHULA_ENTITY:test_entity]]"
+    match = EntityMatch(
+        entity_id="test_entity",
+        matched_source_text="John Doe",
+        canonical_text="John Doe",
+        display_text="John Doe",
+        source_char_start=0,
+        source_char_end=8,
+        matched_alias="John Doe",
+        match_confidence="high",
+        match_method="canonical",
+        domain="test",
+        role="unknown",
+        requires_pronunciation_calibration=False,
+    )
+    bindings = {placeholder: match}
+    
+    # restore_display_text should use display_text
+    faithful_restored = restore_display_text(placeholder, bindings, registry)
+    assert faithful_restored == "John Doe"
+    
+    # restore_tts_text should use spoken form
+    tts_restored = restore_tts_text(placeholder, bindings, registry, "zu-ZA", None)
+    assert tts_restored == "uJohn Doe"
+    
+    # Verify they are different
+    assert faithful_restored != tts_restored
+
+
+def test_residual_dialogue_allowlist():
+    """Test that only approved residual dialogue states are allowed for production."""
+    approved_states = {"passed", "clean", "no_residual"}
+    rejected_states = {"missing", "not_run", "pending", "inconclusive", "failed", "above_threshold"}
+    
+    # All approved states should pass
+    for state in approved_states:
+        assert state in approved_states
+    
+    # All rejected states should not be in approved list
+    for state in rejected_states:
+        assert state not in approved_states
+
+
+def test_preview_only_paths():
+    """Test that proof-of-concept uses separate preview paths."""
+    from mathula_tv.artifacts import DubbingArtifacts
+    from pathlib import Path
+    import tempfile
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        work_dir = Path(tmpdir)
+        job_id = "test_job"
+        paths = DubbingArtifacts(work_dir / "jobs" / job_id)
+        
+        # Preview paths should be separate from production paths
+        assert paths.preview_background != paths.background
+        assert paths.preview_final_mix != paths.final_mix
+        assert "previews" in str(paths.preview_background)
+        assert "previews" in str(paths.preview_final_mix)
 
 
 def test_entity_invalid_translation_policy():

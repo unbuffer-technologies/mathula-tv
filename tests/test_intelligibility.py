@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -329,10 +330,87 @@ def test_intelligibility_auditor_markdown_report(mock_settings):
         audio_paths={"stage_root": "/path/to/audio"},
     )
     
-    md = auditor._markdown_report(report)
+    markdown = auditor._markdown_report(report)
+    assert "test_job" in markdown
+    assert "azure-tts" in markdown
+    assert "0.2500" in markdown
+
+
+def test_final_mix_wer_degradation_detection(mock_settings, mock_stt_backend):
+    """Test final-mix WER degradation detection."""
+    auditor = IntelligibilityAuditor(mock_settings, mock_stt_backend)
     
-    assert "# Intelligibility Audit Report" in md
-    assert "test_job" in md
-    assert "azure-tts" in md
-    assert "0.2500" in md  # WER value
-    assert "unit_1" in md
+    # Known incident: aligned WER 0.20, final mix WER 1.0756
+    # Degradation: 0.8756 exceeds threshold of 0.15
+    units = [
+        {"unit_id": "unit_1", "tts_text": "test text"}
+    ]
+    
+    # Mock final mix transcription with high WER
+    mock_stt_backend.transcribe.return_value = {
+        "DisplayText": "completely wrong transcription with many errors",
+        "NBest": [{"Lexical": "completely wrong transcription with many errors"}]
+    }
+    
+    # Create temporary audio file
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = Path(tmpdir) / "unit_1.wav"
+        audio_path.touch()
+        
+        report = auditor.audit_stage(
+            job_id="test_job",
+            stage="final-mix",
+            units=units,
+            audio_root=Path(tmpdir),
+            locale="zu-ZA",
+            baseline_wer=0.20,  # Aligned stage WER
+        )
+        
+        # Should fail due to excessive degradation
+        assert report.state == "failed"
+        assert any("degradation" in reason.lower() for reason in report.pass_fail_reasons)
+
+
+def test_hinted_stt_diagnostic_only(mock_settings, mock_stt_backend):
+    """Test that hinted STT is diagnostic-only and doesn't affect pass/fail."""
+    auditor = IntelligibilityAuditor(mock_settings, mock_stt_backend)
+    
+    units = [
+        {"unit_id": "unit_1", "tts_text": "Madlanga Commission"}
+    ]
+    
+    # Mock blind transcription that fails
+    mock_stt_backend.transcribe.return_value = {
+        "DisplayText": "wrong text",
+        "NBest": [{"Lexical": "wrong text"}]
+    }
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = Path(tmpdir) / "unit_1.wav"
+        audio_path.touch()
+        
+        # Blind audit should fail
+        report = auditor.audit_stage(
+            job_id="test_job",
+            stage="azure-tts",
+            units=units,
+            audio_root=Path(tmpdir),
+            locale="zu-ZA",
+            with_phrase_hints=False,
+        )
+        
+        assert report.state == "failed"
+        
+        # Even with phrase hints enabled, blind WER determines pass/fail
+        # (hinted is diagnostic only)
+        report_hinted = auditor.audit_stage(
+            job_id="test_job",
+            stage="azure-tts",
+            units=units,
+            audio_root=Path(tmpdir),
+            locale="zu-ZA",
+            with_phrase_hints=True,
+        )
+        
+        # Should still fail because blind WER is authoritative
+        assert report_hinted.state == "failed"

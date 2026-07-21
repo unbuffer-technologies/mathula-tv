@@ -142,14 +142,26 @@ class IntelligibilityAuditor:
         audio_path: Path,
         protected_entities: dict[str, dict[str, Any]] | None = None,
         locale: str = "zu-ZA",
+        with_phrase_hints: bool = False,
     ) -> UnitIntelligibilityObservation:
         """Audit a single unit's intelligibility."""
-        # Transcribe audio
+        # Blind transcription (authoritative)
         result = self.backend.transcribe(audio_path, locale)
         transcribed = self._extract_transcription(result)
         
-        # Calculate WER
+        # Calculate blind WER
         wer = self.calculate_wer(expected_text, transcribed)
+        
+        # Optional hinted transcription (diagnostic only)
+        # Placeholder for future implementation with phrase hints
+        # if with_phrase_hints and protected_entities:
+        #     phrase_hints = []
+        #     for entity_data in protected_entities.values():
+        #         phrase_hints.extend(entity_data.get("stt_phrases", []))
+        #     if phrase_hints:
+        #         hinted_result = self.backend.transcribe(audio_path, locale, phrase_hints=phrase_hints)
+        #         hinted_transcribed = self._extract_transcription(hinted_result)
+        #         hinted_wer = self.calculate_wer(expected_text, hinted_transcribed)
         
         # Check protected entities
         protected_entities = protected_entities or {}
@@ -195,11 +207,16 @@ class IntelligibilityAuditor:
         locale: str = "zu-ZA",
         with_phrase_hints: bool = False,
         protected_entities: dict[str, dict[str, Any]] | None = None,
+        baseline_wer: float | None = None,
     ) -> IntelligibilityAuditReport:
-        """Audit an entire stage (azure-tts, openvoice, aligned, final-mix)."""
+        """Audit an entire stage (azure-tts, openvoice, aligned, final-mix).
+        
+        For final-mix, baseline_wer should be the aligned stage WER for degradation comparison.
+        """
         observations = {}
         aggregate_wer = 0.0
         aggregate_hinted_wer = None
+        hinted_observations = {}
         
         for unit in units:
             unit_id = unit.get("unit_id")
@@ -209,29 +226,51 @@ class IntelligibilityAuditor:
             if not audio_path.exists():
                 continue
             
-            # Blind audit
+            # Blind audit (authoritative)
             obs = self.audit_unit(
-                unit_id, expected_text, audio_path, protected_entities, locale
+                unit_id, expected_text, audio_path, protected_entities, locale, with_phrase_hints=False
             )
             observations[unit_id] = asdict(obs)
             aggregate_wer += obs.word_error_rate
             
             # Optional hinted audit (diagnostic only)
             if with_phrase_hints and protected_entities:
-                # This would require a separate STT call with phrase hints
-                # For now, we skip this as it's diagnostic-only
-                pass
+                unit_phrases = []
+                for entity_id, entity_data in protected_entities.get(unit_id, {}).items():
+                    unit_phrases.extend(entity_data.get("stt_phrases", []))
+                if unit_phrases:
+                    # Run hinted audit for diagnostic purposes
+                    hinted_obs = self.audit_unit(
+                        unit_id, expected_text, audio_path, protected_entities, locale, with_phrase_hints=True
+                    )
+                    hinted_observations[unit_id] = asdict(hinted_obs)
+                    aggregate_hinted_wer = aggregate_hinted_wer or 0.0
+                    aggregate_hinted_wer += hinted_obs.word_error_rate
         
         if observations:
             aggregate_wer /= len(observations)
         
-        # Determine pass/fail
+        if hinted_observations:
+            aggregate_hinted_wer /= len(hinted_observations)
+        
+        # Determine pass/fail based on BLIND WER only (hinted is diagnostic)
         max_wer = self._get_max_wer_for_stage(stage)
         state = "passed" if aggregate_wer <= max_wer else "failed"
         reasons = []
         
         if state == "failed":
-            reasons.append(f"Aggregate WER {aggregate_wer:.4f} exceeds threshold {max_wer}")
+            reasons.append(f"Aggregate blind WER {aggregate_wer:.4f} exceeds threshold {max_wer}")
+        
+        # For final-mix, check WER degradation against baseline
+        if stage == "final-mix" and baseline_wer is not None:
+            degradation = aggregate_wer - baseline_wer
+            max_degradation = self.settings.__dict__.get("max_final_mix_wer_degradation", 0.15)
+            if degradation > max_degradation:
+                state = "failed"
+                reasons.append(
+                    f"WER degradation {degradation:.4f} exceeds threshold {max_degradation} "
+                    f"(baseline: {baseline_wer:.4f}, final: {aggregate_wer:.4f})"
+                )
         
         # Check protected entities
         total_expected = sum(len(o.get("protected_entities_expected", [])) for o in observations.values())

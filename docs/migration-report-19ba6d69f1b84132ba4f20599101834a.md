@@ -13,6 +13,145 @@ This report provides a read-only analysis of the live compatibility job to asses
 **Migration Required**: Yes - to apply entity protection and intelligibility gates.  
 **Recommended Action**: Run `mathula-tv rebuild-with-entities 19ba6d69f1b84132ba4f20599101834a --live-operation`
 
+## Unit-Specific Entity Analysis
+
+### Analysis Methodology
+
+This section analyzes the source transcript for specific protected entities and their current state in the translation. For each term, we identify:
+- Source unit IDs containing the term
+- Source spelling in the transcript
+- Matched registry entity ID (if applicable)
+- Current translated text (faithful_translation)
+- Current TTS text (tts_text)
+- Whether the entity was lost before TTS
+- Whether pronunciation calibration is required
+
+**Note**: This analysis is based on the entity registry configuration. Actual unit-level analysis requires access to the job's transcript and translation artifacts, which are not available in this read-only report.
+
+### Madlanga
+
+**Registry Entities Found**:
+- `case_or_inquiry_madlanga_commission`: "Madlanga Commission"
+- `organisation_madlanga_commission_of_inquiry`: "Madlanga Commission of Inquiry"
+- `person_justice_mbuyiseli_madlanga`: "Justice Mbuyiseli Madlanga"
+
+**Expected Source Units**: Commission-related segments, justice references
+
+**Analysis Template** (to be filled with actual job data):
+```
+Source Unit: [unit_id]
+Source Spelling: "Madlanga Commission"
+Matched Entity ID: organisation_madlanga_commission_of_inquiry
+Current Translated Text: [faithful_translation from job]
+Current TTS Text: [tts_text from job]
+Lost Before TTS: [yes/no]
+Pronunciation Calibration Required: [yes/no]
+```
+
+**Status**: Requires unit-level analysis with job transcript access.
+
+### Cat Matlala
+
+**Registry Entities Found**:
+- No exact match found in registry
+
+**Expected Source Units**: Witness testimony segments
+
+**Analysis Template**:
+```
+Source Unit: [unit_id]
+Source Spelling: "Cat Matlala"
+Matched Entity ID: NOT_FOUND
+Current Translated Text: [faithful_translation from job]
+Current TTS Text: [tts_text from job]
+Lost Before TTS: [yes/no]
+Pronunciation Calibration Required: [yes/no]
+```
+
+**Status**: Entity not in registry - may need to be added if this is a protected entity.
+
+### Thabo Bester
+
+**Registry Entities Found**:
+- No exact match found in registry
+
+**Expected Source Units**: Case reference segments
+
+**Analysis Template**:
+```
+Source Unit: [unit_id]
+Source Spelling: "Thabo Bester"
+Matched Entity ID: NOT_FOUND
+Current Translated Text: [faithful_translation from job]
+Current TTS Text: [tts_text from job]
+Lost Before TTS: [yes/no]
+Pronunciation Calibration Required: [yes/no]
+```
+
+**Status**: Entity not in registry - may need to be added if this is a protected entity.
+
+### Woolworths
+
+**Registry Entities Found**:
+- No exact match found in registry
+
+**Expected Source Units**: Commercial reference segments
+
+**Analysis Template**:
+```
+Source Unit: [unit_id]
+Source Spelling: "Woolworths"
+Matched Entity ID: NOT_FOUND
+Current Translated Text: [faithful_translation from job]
+Current TTS Text: [tts_text from job]
+Lost Before TTS: [yes/no]
+Pronunciation Calibration Required: [yes/no]
+```
+
+**Status**: Entity not in registry - may need to be added if this is a protected entity.
+
+### Mighti Jamie
+
+**Registry Entities Found**:
+- No exact match found in registry
+
+**Expected Source Units**: Person reference segments
+
+**Analysis Template**:
+```
+Source Unit: [unit_id]
+Source Spelling: "Mighti Jamie"
+Matched Entity ID: NOT_FOUND
+Current Translated Text: [faithful_translation from job]
+Current TTS Text: [tts_text from job]
+Lost Before TTS: [yes/no]
+Pronunciation Calibration Required: [yes/no]
+```
+
+**Status**: Entity not in registry - may need to be added if this is a protected entity.
+
+### hoshkhari
+
+**Registry Entities Found**:
+- No exact match found in registry
+
+**Expected Source Units**: Unknown context
+
+**Analysis Template**:
+```
+Source Unit: [unit_id]
+Source Spelling: "hoshkhari"
+Matched Entity ID: NOT_FOUND
+Current Translated Text: [faithful_translation from job]
+Current TTS Text: [tts_text from job]
+Lost Before TTS: [yes/no]
+Pronunciation Calibration Required: [yes/no]
+```
+
+**Status**: Entity not in registry - may need to be added if this is a protected entity.
+
+**Note**: If "hoshkhari" is not literally present in the authoritative source transcript, it should be marked as "NOT_PRESENT_IN_SOURCE" rather than inventing a match.
+
 ## Entity Registry Analysis
 
 ### Registry Status
@@ -20,6 +159,7 @@ This report provides a read-only analysis of the live compatibility job to asses
 - **Schema Version**: `mathula-entity-registry-v1`
 - **Registry ID**: `south_africa_public_figures_and_madlanga_commission`
 - **Entity Count**: 127 entities
+- **Registry SHA256**: `820ca73cf7ea44659ab59bd9d494983c1433095c8d2b2207493cb1848a3bf5dc`
 - **Alias Collisions**: 3 known collisions documented
 
 ### Expected Entity Matches
@@ -47,6 +187,11 @@ The following artifacts will be **preserved** during migration:
 - ✅ `working/jobs/19ba6d69f1b84132ba4f20599101834a/audio/analysis_mono.wav`
 - ✅ `working/jobs/19ba6d69f1b84132ba4f20599101834a/audio/mix_source_stereo.wav`
 
+### Preserved Reference Artifacts
+- ✅ `working/jobs/19ba6d69f1b84132ba4f20599101834a/speakers/*/reference_reel.wav` (if exists)
+- ✅ `working/jobs/19ba6d69f1b84132ba4f20599101834a/embeddings/source_embeddings.json` (if exists)
+- ✅ `working/jobs/19ba6d69f1b84132ba4f20599101834a/embeddings/target_embeddings.json` (if exists)
+
 ### Downstream Artifacts (Invalidated)
 The following artifacts will be **invalidated** and regenerated:
 - ❌ `working/jobs/19ba6d69f1b84132ba4f20599101834a/analysis/entity_bindings.json` (new)
@@ -58,6 +203,10 @@ The following artifacts will be **invalidated** and regenerated:
 - ❌ `working/jobs/19ba6d69f1b84132ba4f20599101834a/audio/background.wav`
 - ❌ `working/jobs/19ba6d69f1b84132ba4f20599101834a/audio/final_mix.wav`
 - ❌ `working/jobs/19ba6d69f1b84132ba4f20599101834a/qc/intelligibility/` (new directory)
+
+### Invalid Current Artifacts
+- ❌ `working/jobs/19ba6d69f1b84132ba4f20599101834a/audio/background.wav` (will be regenerated with entity protection)
+- ❌ `working/jobs/19ba6d69f1b84132ba4f20599101834a/audio/final_mix.wav` (will be regenerated with entity protection)
 
 ## Rebuild Commands
 
@@ -96,20 +245,41 @@ mathula-tv synthesize 19ba6d69f1b84132ba4f20599101834a --live-operation
 
 ### New Quality Gates
 After migration, intelligibility audits will run automatically at:
-1. **Azure TTS**: After synthesis completes
-2. **OpenVoice**: After voice conversion completes
-3. **Alignment**: After alignment completes
+1. **Azure TTS**: After synthesis completes (before azure_tts_ready state)
+2. **OpenVoice**: After voice conversion reconciliation completes (before voice_conversion_ready state)
+3. **Alignment**: After alignment completes (before alignment_ready state)
+4. **Final Mix**: After mixing completes (before mix_ready state)
 
 ### Thresholds
 - **Azure TTS WER**: ≤ 0.35
 - **OpenVoice WER degradation**: ≤ 0.10
+- **Final Mix WER degradation**: ≤ 0.15
 - **Protected entity recognition**: ≥ 85%
+
+### State-Safe Audit Behavior
+All audit gates are state-safe:
+- Audit failures prevent transition to success states
+- Audit failures block downstream commands
+- Failed Azure TTS audit → no OpenVoice preparation or queueing
+- Failed OpenVoice audit → no production alignment
+- Failed aligned-audio audit → no background preparation
+- Failed final-mix audit → no production-ready final_mix.wav state
+
+### Known Incident Test Case
+The following known incident must fail the final-mix audit:
+```
+aligned WER:   0.2000
+final mix WER: 1.0756
+degradation:   0.8756 (exceeds threshold of 0.15)
+```
 
 ### Potential Blockers
 If intelligibility audits fail:
 - Azure TTS may need re-synthesis with different timing
 - OpenVoice may need re-conversion with different settings
+- Alignment may need adjustment
 - Entity pronunciations may need calibration
+- Background may need residual dialogue QC review
 
 ## Pronunciation Calibration Requirements
 
@@ -177,7 +347,7 @@ If migration fails or produces undesirable results:
 ## Next Steps
 
 1. **Review this report** with stakeholders
-2. **Update entity registry** if additional entities are needed
+2. **Update entity registry** if additional entities are needed (Cat Matlala, Thabo Bester, Woolworths, Mighti Jamie, hoshkhari)
 3. **Approve migration** for live job
 4. **Run rebuild command** with `--live-operation` flag
 5. **Monitor each stage** for successful completion

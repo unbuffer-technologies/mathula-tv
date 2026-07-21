@@ -903,12 +903,14 @@ class ProductionDubbingPipeline:
                 "azure_tts",
                 {str(item["turn_id"]): item for item in results},
             )
-            job.providers["speech_generation"] = "azure_tts"
-            job.media["azure_tts_manifest_sha256"] = checksum(paths.azure_manifest)
             
-            # Run Azure TTS intelligibility audit
+            # Run Azure TTS intelligibility audit BEFORE state transition
+            # This ensures audit failures block the success state
             if hasattr(self, '_stt_backend') and self._stt_backend:
                 self._audit_intelligibility(job, "azure-tts", plan["units"], paths.azure_tts_root)
+            
+            job.providers["speech_generation"] = "azure_tts"
+            job.media["azure_tts_manifest_sha256"] = checksum(paths.azure_manifest)
             
             if "azure_tts" not in job.completed_stages:
                 job.completed_stages.append("azure_tts")
@@ -2502,6 +2504,12 @@ class ProductionDubbingPipeline:
             staged.clear()
             atomic_write_json(paths.openvoice_manifest, remote)
             self._update_plan_stage(job, "openvoice", results)
+            
+            # Run OpenVoice intelligibility audit BEFORE state transition
+            # This ensures audit failures block the success state
+            if hasattr(self, '_stt_backend') and self._stt_backend:
+                self._audit_intelligibility(job, "openvoice", plan["units"], paths.openvoice_root / "turns")
+            
             if job.state == "voice_conversion_queued":
                 job.transition("voice_conversion_running")
             job.transition("voice_conversion_ready")
@@ -2516,10 +2524,6 @@ class ProductionDubbingPipeline:
                 "unit_count": len(plan.units),
                 "completed_at": utcnow(),
             }
-            
-            # Run OpenVoice intelligibility audit
-            if hasattr(self, '_stt_backend') and self._stt_backend:
-                self._audit_intelligibility(job, "openvoice", plan["units"], paths.openvoice_root / "turns")
             
             if "openvoice_conversion" not in job.completed_stages:
                 job.completed_stages.append("openvoice_conversion")
@@ -2658,7 +2662,8 @@ class ProductionDubbingPipeline:
                 {str(item["unit_id"]): item for item in results},
             )
             
-            # Run aligned intelligibility audit
+            # Run aligned intelligibility audit BEFORE state transition
+            # This ensures audit failures block the success state
             if hasattr(self, '_stt_backend') and self._stt_backend:
                 plan = self.prepare_dubbing(job)
                 self._audit_intelligibility(job, "aligned", plan["units"], paths.aligned_root / "turns")
@@ -2712,9 +2717,14 @@ class ProductionDubbingPipeline:
         job.transition("background_processing")
         self.jobs.save(job)
         transcript = read_json(self.jobs.job_dir(job.job_id) / "analysis/transcript_en.json")
+        
+        # Use separate preview paths for proof-of-concept
+        output_path = paths.preview_background if proof_of_concept else paths.background
+        manifest_path = paths.preview_root / "background_manifest.json" if proof_of_concept else paths.background_manifest
+        
         manifest = prepare_background(
             paths.mix_source_audio,
-            paths.background,
+            output_path,
             source_dialogue=transcript["segments"],
             clean_stem=clean_stem,
             cached_separation=self.jobs.job_dir(job.job_id) / "audio/separated_background.wav",
@@ -2724,7 +2734,7 @@ class ProductionDubbingPipeline:
         )
         if residual_detector is not None:
             residual = residual_dialogue_qc(
-                paths.background,
+                output_path,
                 " ".join(str(item.get("source_text", "")) for item in transcript["segments"]),
                 residual_detector,
             )
@@ -2734,32 +2744,44 @@ class ProductionDubbingPipeline:
                 "passed": False,
                 "reason": "Configure an injectable speech detector/retranscriber",
             }
-        write_background_manifest(paths.background_manifest, manifest, residual)
+        write_background_manifest(manifest_path, manifest, residual)
         dubbing_plan = read_json(paths.plan)
         
         # Check residual dialogue QC for production safety
-        if residual.get("status") == "failed" and not proof_of_concept:
+        # Allow only explicitly approved production states
+        approved_residual_states = {"passed", "clean", "no_residual"}
+        residual_status = residual.get("status", "not_run")
+        
+        if not proof_of_concept and residual_status not in approved_residual_states:
             raise ValueError(
-                f"Residual dialogue QC failed: {residual.get('reason', 'Unknown reason')}. "
-                "Background contains residual dialogue that would interfere with dubbing. "
+                f"Residual dialogue QC status '{residual_status}' is not approved for production. "
+                f"Approved states: {', '.join(approved_residual_states)}. "
+                f"Reason: {residual.get('reason', 'Unknown reason')}. "
                 "Use proof_of_concept=True for preview-only ducking, or provide a clean stem."
             )
         
         dubbing_plan["background"] = {
             "status": "ready",
             "mode": manifest["mode"],
-            "manifest_path": str(paths.background_manifest),
-            "manifest_sha256": checksum(paths.background_manifest),
+            "manifest_path": str(manifest_path),
+            "manifest_sha256": checksum(manifest_path),
             "residual_dialogue_status": residual["status"],
             "proof_of_concept_ducking": proof_of_concept,
+            "readiness": "review_preview_only" if proof_of_concept else "production_ready",
+            "production_authorized": not proof_of_concept,
         }
         self._write_plan(paths.plan, dubbing_plan)
-        job.review_readiness = "needs_background_review"
-        job.transition("background_ready")
+        
+        if proof_of_concept:
+            job.review_readiness = "preview_review_only"
+            # Do not transition to background_ready for previews
+        else:
+            job.review_readiness = "needs_background_review"
+            job.transition("background_ready")
         self.jobs.save(job)
         return {**manifest, "residual_dialogue_qc": residual}
 
-    def mix(self, job: JobManifest) -> dict[str, Any]:
+    def mix(self, job: JobManifest, *, proof_of_concept: bool = False) -> dict[str, Any]:
         if job.state != "background_ready":
             raise ValueError("Mixing requires background_ready")
         paths = self.paths(job.job_id)
@@ -2771,7 +2793,13 @@ class ProductionDubbingPipeline:
         ):
             raise CompatibilityGateFailure(
                 "Compatibility-passed OpenVoice alignment is required before mixing"
-            )
+        )
+        
+        # For proof-of-concept, use preview background
+        background_path = paths.preview_background if proof_of_concept else paths.background
+        final_mix_path = paths.preview_final_mix if proof_of_concept else paths.final_mix
+        manifest_path = paths.preview_root / "mix_manifest.json" if proof_of_concept else (self.jobs.job_dir(job.job_id) / "audio/mix_manifest.json")
+        
         plan = self.prepare_dubbing(job)
         aligned_by_id = {item["unit_id"]: item for item in alignment["units"]}
         clips = [
@@ -2792,15 +2820,42 @@ class ProductionDubbingPipeline:
             total_duration_ms=total_ms,
         )
         final_mix = mix_final_buses(
-            paths.background,
+            background_path,
             paths.dialogue,
-            paths.final_mix,
+            final_mix_path,
             target_lufs=self.settings.target_lufs,
             target_lra=self.settings.target_lra,
             true_peak_dbtp=self.settings.true_peak_dbtp,
         )
-        manifest = {"schema_version": "mix-manifest-v1", "dialogue": dialogue, "final_mix": final_mix}
-        atomic_write_json(self.jobs.job_dir(job.job_id) / "audio/mix_manifest.json", manifest)
+        manifest = {
+            "schema_version": "mix-manifest-v1",
+            "dialogue": dialogue,
+            "final_mix": final_mix,
+            "readiness": "review_preview_only" if proof_of_concept else "production_ready",
+            "production_authorized": not proof_of_concept,
+        }
+        atomic_write_json(manifest_path, manifest)
+        
+        # Run final-mix intelligibility audit BEFORE state transition
+        if hasattr(self, '_stt_backend') and self._stt_backend:
+            # Get baseline WER from aligned stage for degradation comparison
+            baseline_wer = None
+            aligned_report_path = paths.qc_intelligibility_root / "aligned" / "report.json"
+            if aligned_report_path.exists():
+                aligned_report = read_json(aligned_report_path)
+                baseline_wer = aligned_report.get("aggregate_blind_wer")
+            
+            # Audit final mix
+            self._audit_intelligibility(
+                job, "final-mix", plan["units"], final_mix_path.parent, baseline_wer=baseline_wer
+            )
+        
+        if proof_of_concept:
+            job.review_readiness = "preview_review_only"
+            # Do not transition to mix_ready for previews
+        else:
+            job.transition("mix_ready")
+        self.jobs.save(job)
         return manifest
 
     def subtitles(self, job: JobManifest) -> dict[str, Any]:
