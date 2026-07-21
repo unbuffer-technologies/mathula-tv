@@ -162,10 +162,8 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("list-jobs")
     
     # Entity registry commands
-    bind_entities = _add_job_command(commands, "bind-entities")
-    bind_entities.add_argument("--force", action="store_true")
-    rebuild_entities = _add_job_command(commands, "rebuild-with-entities")
-    rebuild_entities.add_argument("--force", action="store_true")
+    _add_job_command(commands, "bind-entities")
+    _add_job_command(commands, "rebuild-with-entities")
     
     # Intelligibility audit commands
     audit_intelligibility = _add_job_command(commands, "audit-intelligibility")

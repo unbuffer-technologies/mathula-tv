@@ -323,6 +323,7 @@ class IntelligibilityAuditor:
 
     def _markdown_report(self, report: IntelligibilityAuditReport) -> str:
         """Generate Markdown report."""
+        hinted_wer_str = f"{report.aggregate_hinted_wer:.4f}" if report.aggregate_hinted_wer is not None else "N/A"
         lines = [
             f"# Intelligibility Audit Report",
             f"",
@@ -335,7 +336,7 @@ class IntelligibilityAuditor:
             f"",
             f"**State:** {report.state}",
             f"**Aggregate Blind WER:** {report.aggregate_blind_wer:.4f}",
-            f"**Aggregate Hinted WER:** {report.aggregate_hinted_wer:.4f if report.aggregate_hinted_wer else 'N/A'}",
+            f"**Aggregate Hinted WER:** {hinted_wer_str}",
             f"",
         ]
         
