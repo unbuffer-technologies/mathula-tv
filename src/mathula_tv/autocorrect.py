@@ -2577,10 +2577,9 @@ def render_effective_transcript(
         str(effective[view.collection_key][item.index][item.text_field]).strip()
         for item in view.items
     ]
-    if "complete_text" in effective:
-        effective["complete_text"] = " ".join(
-            text for text in texts if text
-        )
+    effective["complete_text"] = " ".join(
+        text for text in texts if text
+    )
     effective["autocorrect"] = {
         "schema_version": AUTOCORRECT_SCHEMA,
         "source_snapshot": str(paths.snapshot),
