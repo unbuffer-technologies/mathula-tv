@@ -65,6 +65,10 @@ class Settings:
     max_job_runtime_seconds: int = 14400
     max_artifact_download_bytes: int = 2 * 1024 * 1024 * 1024
     pyannote_enabled: bool = False
+    max_clean_unit_wer: float = 0.35
+    max_openvoice_wer_degradation: float = 0.10
+    max_final_mix_wer_degradation: float = 0.15
+    min_protected_entity_similarity: float = 0.85
 
     def safe_snapshot(self) -> dict:
         return {k: str(v) if isinstance(v, Path) else v for k, v in asdict(self).items()}
@@ -132,6 +136,10 @@ def load_settings(project_root: Path | None = None) -> Settings:
         max_job_runtime_seconds=int(os.getenv("MATHULA_TV_MAX_JOB_RUNTIME_SECONDS", "14400")),
         max_artifact_download_bytes=int(os.getenv("MATHULA_TV_MAX_ARTIFACT_DOWNLOAD_BYTES", str(2 * 1024 * 1024 * 1024))),
         pyannote_enabled=os.getenv("MATHULA_TV_ENABLE_PYANNOTE_DIAGNOSTIC", "0") == "1",
+        max_clean_unit_wer=float(os.getenv("MATHULA_TV_MAX_CLEAN_UNIT_WER", "0.35")),
+        max_openvoice_wer_degradation=float(os.getenv("MATHULA_TV_MAX_OPENVOICE_WER_DEGRADATION", "0.10")),
+        max_final_mix_wer_degradation=float(os.getenv("MATHULA_TV_MAX_FINAL_MIX_WER_DEGRADATION", "0.15")),
+        min_protected_entity_similarity=float(os.getenv("MATHULA_TV_MIN_PROTECTED_ENTITY_SIMILARITY", "0.85")),
     )
 
 

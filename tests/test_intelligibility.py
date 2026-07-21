@@ -1,0 +1,321 @@
+"""Tests for intelligibility audit module."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from mathula_tv.config import Settings
+from mathula_tv.intelligibility import (
+    IntelligibilityAuditReport,
+    IntelligibilityAuditor,
+    UnitIntelligibilityObservation,
+)
+
+
+@pytest.fixture
+def mock_settings():
+    """Mock settings for testing."""
+    return Settings(
+        max_clean_unit_wer=0.35,
+        max_openvoice_wer_degradation=0.10,
+        max_final_mix_wer_degradation=0.15,
+        min_protected_entity_similarity=0.85,
+    )
+
+
+@pytest.fixture
+def mock_stt_backend():
+    """Mock STT backend for testing."""
+    backend = MagicMock()
+    backend.transcribe.return_value = {
+        "DisplayText": "Test transcription",
+        "combinedResults": [{"lexical": "test transcription"}],
+    }
+    return backend
+
+
+def test_intelligibility_auditor_normalize_text():
+    """Test text normalization for WER calculation."""
+    settings = Settings()
+    backend = MagicMock()
+    auditor = IntelligibilityAuditor(settings, backend)
+    
+    # Test basic normalization
+    assert auditor.normalize_text("Hello World") == "hello world"
+    assert auditor.normalize_text("  Hello  World  ") == "hello world"
+    
+    # Test punctuation removal
+    assert auditor.normalize_text("Hello, World!") == "hello world"
+    
+    # Test Unicode normalization
+    assert auditor.normalize_text("Hello\u2019World") == "hello'world"
+
+
+def test_intelligibility_auditor_calculate_wer():
+    """Test WER calculation."""
+    settings = Settings()
+    backend = MagicMock()
+    auditor = IntelligibilityAuditor(settings, backend)
+    
+    # Perfect match
+    wer = auditor.calculate_wer("hello world", "hello world")
+    assert wer == 0.0
+    
+    # One substitution
+    wer = auditor.calculate_wer("hello world", "hello there")
+    assert wer == 0.5
+    
+    # One insertion
+    wer = auditor.calculate_wer("hello world", "hello big world")
+    assert wer == 0.5
+    
+    # One deletion
+    wer = auditor.calculate_wer("hello world", "hello")
+    assert wer == 0.5
+    
+    # Empty reference
+    wer = auditor.calculate_wer("", "hello")
+    assert wer == 1.0
+    
+    # Empty hypothesis with non-empty reference
+    wer = auditor.calculate_wer("hello", "")
+    assert wer == 1.0
+
+
+def test_intelligibility_auditor_check_protected_entity():
+    """Test protected entity recognition checking."""
+    settings = Settings()
+    backend = MagicMock()
+    auditor = IntelligibilityAuditor(settings, backend)
+    
+    # Exact match
+    recognized, phrase = auditor.check_protected_entity("John Doe", "John Doe testified")
+    assert recognized is True
+    assert phrase == "John Doe"
+    
+    # Alias match
+    recognized, phrase = auditor.check_protected_entity(
+        "John Doe", "J. Doe testified", aliases=["J. Doe"]
+    )
+    assert recognized is True
+    assert phrase == "J. Doe"
+    
+    # STT phrase match
+    recognized, phrase = auditor.check_protected_entity(
+        "John Doe", "Mr. Doe testified", stt_phrases=["Mr. Doe"]
+    )
+    assert recognized is True
+    assert phrase == "Mr. Doe"
+    
+    # No match
+    recognized, phrase = auditor.check_protected_entity("John Doe", "Someone testified")
+    assert recognized is False
+    assert phrase == ""
+
+
+def test_intelligibility_auditor_audit_unit(mock_settings, mock_stt_backend, tmp_path):
+    """Test auditing a single unit."""
+    auditor = IntelligibilityAuditor(mock_settings, mock_stt_backend)
+    
+    # Create a dummy audio file
+    audio_file = tmp_path / "test.wav"
+    audio_file.write_bytes(b"dummy audio data")
+    
+    protected_entities = {
+        "person_john_doe": {
+            "canonical_text": "John Doe",
+            "aliases": ["J. Doe"],
+            "stt_phrases": ["John Doe", "J. Doe"],
+        }
+    }
+    
+    observation = auditor.audit_unit(
+        unit_id="unit_1",
+        expected_text="John Doe testified",
+        audio_path=audio_file,
+        protected_entities=protected_entities,
+        locale="zu-ZA",
+    )
+    
+    assert observation.unit_id == "unit_1"
+    assert observation.expected_text == "John Doe testified"
+    assert observation.transcribed_text == "Test transcription"
+    assert observation.word_error_rate >= 0.0
+
+
+def test_intelligibility_auditor_audit_stage(mock_settings, mock_stt_backend, tmp_path):
+    """Test auditing an entire stage."""
+    auditor = IntelligibilityAuditor(mock_settings, mock_stt_backend)
+    
+    # Create dummy audio files
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    (audio_root / "unit_1.wav").write_bytes(b"dummy audio 1")
+    (audio_root / "unit_2.wav").write_bytes(b"dummy audio 2")
+    
+    units = [
+        {"unit_id": "unit_1", "tts_text": "John Doe testified"},
+        {"unit_id": "unit_2", "tts_text": "Test Corporation reported"},
+    ]
+    
+    protected_entities = {
+        "unit_1": {
+            "person_john_doe": {
+                "canonical_text": "John Doe",
+                "aliases": ["J. Doe"],
+                "stt_phrases": ["John Doe"],
+            }
+        },
+        "unit_2": {
+            "organisation_test_corp": {
+                "canonical_text": "Test Corporation",
+                "aliases": ["Test Corp"],
+                "stt_phrases": ["Test Corporation"],
+            }
+        },
+    }
+    
+    report = auditor.audit_stage(
+        job_id="test_job",
+        stage="azure-tts",
+        units=units,
+        audio_root=audio_root,
+        locale="zu-ZA",
+        protected_entities=protected_entities,
+    )
+    
+    assert report.job_id == "test_job"
+    assert report.stage == "azure-tts"
+    assert report.locale == "zu-ZA"
+    assert len(report.per_unit_observations) == 2
+    assert report.state in {"passed", "failed"}
+
+
+def test_intelligibility_auditor_write_report(mock_settings, mock_stt_backend, tmp_path):
+    """Test writing intelligibility reports."""
+    auditor = IntelligibilityAuditor(mock_settings, mock_stt_backend)
+    
+    report = IntelligibilityAuditReport(
+        schema_version="mathula-stt-intelligibility-audit-v1",
+        job_id="test_job",
+        stage="azure-tts",
+        locale="zu-ZA",
+        generated_at="2026-07-21T00:00:00+02:00",
+        aggregate_blind_wer=0.25,
+        aggregate_hinted_wer=None,
+        per_unit_observations={},
+        protected_entities_summary={
+            "total_expected": 1,
+            "total_recognized": 1,
+            "recognition_rate": 1.0,
+        },
+        pass_fail_reasons=[],
+        state="passed",
+        audio_paths={"stage_root": "/path/to/audio"},
+    )
+    
+    json_path, md_path = auditor.write_report(report, tmp_path)
+    
+    assert json_path.exists()
+    assert md_path.exists()
+    assert json_path.suffix == ".json"
+    assert md_path.suffix == ".md"
+
+
+def test_intelligibility_auditor_get_max_wer_for_stage(mock_settings):
+    """Test getting max WER for different stages."""
+    auditor = IntelligibilityAuditor(mock_settings, MagicMock())
+    
+    assert auditor._get_max_wer_for_stage("azure-tts") == 0.35
+    assert auditor._get_max_wer_for_stage("openvoice") == 0.10
+    assert auditor._get_max_wer_for_stage("aligned") == 0.10
+    assert auditor._get_max_wer_for_stage("final-mix") == 0.15
+    assert auditor._get_max_wer_for_stage("unknown") == 0.35  # Default
+
+
+def test_unit_intelligibility_observation():
+    """Test UnitIntelligibilityObservation dataclass."""
+    observation = UnitIntelligibilityObservation(
+        unit_id="unit_1",
+        expected_text="John Doe testified",
+        transcribed_text="John Doe testified",
+        word_error_rate=0.0,
+        protected_entities_expected=["person_john_doe"],
+        protected_entities_recognized=["person_john_doe"],
+        protected_entities_missing=[],
+        best_recognized_phrases={"person_john_doe": "John Doe"},
+        duration_seconds=5.0,
+        audio_sha256="abc123",
+    )
+    
+    assert observation.unit_id == "unit_1"
+    assert observation.word_error_rate == 0.0
+    assert len(observation.protected_entities_missing) == 0
+
+
+def test_intelligibility_audit_report():
+    """Test IntelligibilityAuditReport dataclass."""
+    report = IntelligibilityAuditReport(
+        schema_version="mathula-stt-intelligibility-audit-v1",
+        job_id="test_job",
+        stage="azure-tts",
+        locale="zu-ZA",
+        generated_at="2026-07-21T00:00:00+02:00",
+        aggregate_blind_wer=0.25,
+        aggregate_hinted_wer=0.20,
+        per_unit_observations={},
+        protected_entities_summary={
+            "total_expected": 1,
+            "total_recognized": 1,
+            "recognition_rate": 1.0,
+        },
+        pass_fail_reasons=[],
+        state="passed",
+        audio_paths={"stage_root": "/path/to/audio"},
+    )
+    
+    assert report.job_id == "test_job"
+    assert report.aggregate_blind_wer == 0.25
+    assert report.state == "passed"
+
+
+def test_intelligibility_auditor_markdown_report(mock_settings, mock_stt_backend):
+    """Test Markdown report generation."""
+    auditor = IntelligibilityAuditor(mock_settings, mock_stt_backend)
+    
+    report = IntelligibilityAuditReport(
+        schema_version="mathula-stt-intelligibility-audit-v1",
+        job_id="test_job",
+        stage="azure-tts",
+        locale="zu-ZA",
+        generated_at="2026-07-21T00:00:00+02:00",
+        aggregate_blind_wer=0.25,
+        aggregate_hinted_wer=None,
+        per_unit_observations={
+            "unit_1": {
+                "unit_id": "unit_1",
+                "word_error_rate": 0.1,
+                "protected_entities_expected": ["person_john_doe"],
+                "protected_entities_recognized": ["person_john_doe"],
+                "protected_entities_missing": [],
+            }
+        },
+        protected_entities_summary={
+            "total_expected": 1,
+            "total_recognized": 1,
+            "recognition_rate": 1.0,
+        },
+        pass_fail_reasons=[],
+        state="passed",
+        audio_paths={"stage_root": "/path/to/audio"},
+    )
+    
+    md = auditor._markdown_report(report)
+    
+    assert "# Intelligibility Audit Report" in md
+    assert "test_job" in md
+    assert "azure-tts" in md
+    assert "0.2500" in md  # WER value
+    assert "unit_1" in md

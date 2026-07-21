@@ -133,3 +133,17 @@ class DubbingArtifacts:
     @property
     def qc_markdown(self) -> Path:
         return self.review_root / "qc_report.md"
+
+    @property
+    def entity_bindings(self) -> Path:
+        return self.job_root / "analysis/entity_bindings.json"
+
+    @property
+    def qc_intelligibility_root(self) -> Path:
+        return self.job_root / "qc/intelligibility"
+
+    def intelligibility_report(self, stage: str) -> Path:
+        return self.qc_intelligibility_root / stage / "report.json"
+
+    def intelligibility_markdown(self, stage: str) -> Path:
+        return self.qc_intelligibility_root / stage / "report.md"

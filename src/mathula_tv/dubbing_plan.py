@@ -127,6 +127,24 @@ def normalize_translation_units(
         supplied_tts = str(item.get("tts_text", "")).strip()
         if not faithful or not spoken or not supplied_tts:
             raise ValueError(f"Translated unit {unit_id} is missing one of the three text forms")
+        
+        # Validate protected entity integrity
+        expected_entities = item.get("protected_entities_expected", 0)
+        restored_entities = item.get("protected_entities_restored", 0)
+        missing_entities = item.get("protected_entities_missing", [])
+        unexpected_entities = item.get("protected_entities_unexpected", [])
+        
+        if expected_entities != restored_entities:
+            raise ValueError(
+                f"Unit {unit_id} entity integrity failed: expected {expected_entities}, "
+                f"restored {restored_entities}, missing {missing_entities}, "
+                f"unexpected {unexpected_entities}"
+            )
+        if missing_entities:
+            raise ValueError(f"Unit {unit_id} has missing protected entities: {missing_entities}")
+        if unexpected_entities:
+            raise ValueError(f"Unit {unit_id} has unexpected protected entities: {unexpected_entities}")
+        
         protected_terms = tuple(str(value) for value in item.get("protected_entities_found", ()))
         changes = list(item.get("text_changes", ()))
         if faithful != spoken and not changes:
@@ -219,6 +237,9 @@ def build_dubbing_plan(
                 "tts_text": target["tts_text"],
                 "text_changes": target.get("text_changes", []),
                 "pronunciation_substitutions": target.get("pronunciation_substitutions", []),
+                "protected_entities_expected": target.get("protected_entities_expected", 0),
+                "protected_entities_restored": target.get("protected_entities_restored", 0),
+                "pronunciation_calibration_required": target.get("pronunciation_calibration_required", False),
                 "azure_tts": {"status": "pending", "attempts": 0},
                 "openvoice": {"status": "pending", "attempts": 0},
                 "alignment": {"status": "pending"},
@@ -254,6 +275,8 @@ def build_dubbing_plan(
             if pronunciation_dictionary
             else None
         ),
+        "entity_registry": job.get("media", {}).get("entity_registry_sha256"),
+        "entity_bindings": job.get("media", {}).get("entity_bindings_sha256"),
         "speakers": {
             speaker_id: {
                 "reference": dict((speaker_references or {}).get(speaker_id, {})),

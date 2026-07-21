@@ -20,6 +20,8 @@ from .compatibility import (
 )
 from .config import load_settings
 from .diarization import run_pyannote
+from .entity_registry import EntityRegistry
+from .intelligibility import IntelligibilityAuditor
 from .logging_utils import configure_logging, redact
 from .orchestrator import Orchestrator
 from .production_pipeline import ProductionDubbingPipeline
@@ -158,6 +160,17 @@ def parser() -> argparse.ArgumentParser:
     render.add_argument("--burn-subtitles", action="store_true")
     _add_job_command(commands, "review")
     commands.add_parser("list-jobs")
+    
+    # Entity registry commands
+    bind_entities = _add_job_command(commands, "bind-entities")
+    bind_entities.add_argument("--force", action="store_true")
+    rebuild_entities = _add_job_command(commands, "rebuild-with-entities")
+    rebuild_entities.add_argument("--force", action="store_true")
+    
+    # Intelligibility audit commands
+    audit_intelligibility = _add_job_command(commands, "audit-intelligibility")
+    audit_intelligibility.add_argument("--stage", required=True)
+    
     publish_worker = commands.add_parser("publish-colab-package")
     publish_worker.add_argument("--live-operation", action="store_true")
     return root
@@ -373,6 +386,40 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(production.render(job, burn_subtitles=args.burn_subtitles), indent=2))
         elif args.command == "review":
             print(json.dumps(production.review(job), ensure_ascii=False, indent=2))
+        elif args.command == "bind-entities":
+            print(json.dumps(production.bind_entities(job, force=args.force), ensure_ascii=False, indent=2))
+        elif args.command == "rebuild-with-entities":
+            print(json.dumps(production.rebuild_with_entities(job, force=args.force), indent=2))
+        elif args.command == "audit-intelligibility":
+            stt_backend = create_speech_backend(settings)
+            production_with_stt = ProductionDubbingPipeline(settings, _gcs(settings), stt_backend)
+            plan = production_with_stt.prepare_dubbing(job)
+            stage = args.stage
+            audio_root = None
+            if stage == "azure-tts":
+                audio_root = production_with_stt.paths(job.job_id).azure_tts_root / "turns"
+            elif stage == "openvoice":
+                audio_root = production_with_stt.paths(job.job_id).openvoice_root / "turns"
+            elif stage == "aligned":
+                audio_root = production_with_stt.paths(job.job_id).aligned_root / "turns"
+            elif stage == "final-mix":
+                audio_root = production_with_stt.paths(job.job_id).job_root / "audio"
+            else:
+                raise ValueError(f"Unknown stage: {stage}")
+            if not audio_root or not audio_root.exists():
+                raise ValueError(f"Audio root for stage {stage} does not exist")
+            auditor = IntelligibilityAuditor(settings, stt_backend)
+            report = auditor.audit_stage(
+                job_id=job.job_id,
+                stage=stage,
+                units=plan["units"],
+                audio_root=audio_root,
+                locale=job.target_language,
+            )
+            json_path, md_path = auditor.write_report(
+                report, production_with_stt.paths(job.job_id).qc_intelligibility_root / stage
+            )
+            print(json.dumps({"report_path": str(json_path), "markdown_path": str(md_path), "state": report.state}, indent=2))
         elif args.command == "process":
             print(_process_message(job))
         elif args.command == "diarize":
