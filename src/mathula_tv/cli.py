@@ -519,6 +519,10 @@ def main(argv: list[str] | None = None) -> int:
                 from .atomic_io import atomic_write_json
                 atomic_write_json(pyannote_path, result)
                 print("Optional Pyannote diagnostic ready; Azure speaker labels remain authoritative")
+            
+            # Call orchestrator to continue analysis with existing/reused diarization
+            result = app.process(job)
+            print(result)
         elif args.command == "retry":
             if job.state != "failed_retryable":
                 raise ValueError("Only failed_retryable jobs can be retried")

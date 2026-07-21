@@ -44,7 +44,7 @@ def test_existing_corrected_transcript_is_reused(tmp_path):
     atomic_write_json(job_dir/"analysis/transcript_en.json",corrected_transcript)
     
     atomic_write_json(job_dir/"analysis/azure_diarization.json",normalize(RAW))
-    message=app.process(job)
+    app.process(job)
     result=app.jobs.load(job.job_id)
     
     # Verify transcript was reused (original content preserved)
@@ -65,7 +65,7 @@ def test_analysis_hashes_updated_from_actual_file_bytes(tmp_path):
     job_dir=app.jobs.job_dir(job.job_id)
     
     atomic_write_json(job_dir/"analysis/azure_diarization.json",normalize(RAW))
-    message=app.process(job)
+    app.process(job)
     result=app.jobs.load(job.job_id)
     
     # Verify hashes are computed from actual bytes
@@ -93,14 +93,12 @@ def test_domain_classification_and_context_rebuilt_from_corrected_transcript(tmp
     atomic_write_json(job_dir/"analysis/transcript_en.json",corrected_transcript)
     
     atomic_write_json(job_dir/"analysis/azure_diarization.json",normalize(RAW))
-    message=app.process(job)
-    result=app.jobs.load(job.job_id)
+    app.process(job)
     
     # Verify domain classification and context were rebuilt
     assert (job_dir/"analysis/domain_classification.json").is_file()
     assert (job_dir/"analysis/context.json").is_file()
     classification=json.loads(Path(job_dir/"analysis/domain_classification.json").read_text())
-    context=json.loads(Path(job_dir/"analysis/context.json").read_text())
     
     # Verify classification contains content from corrected transcript
     # Domain classifier lowercases text, so check evidence field
@@ -122,7 +120,7 @@ def test_azure_transcription_not_rerun_when_completed(tmp_path):
     original_stt_bytes=Path(job_dir/"analysis/azure_stt.json").read_bytes()
     
     atomic_write_json(job_dir/"analysis/azure_diarization.json",normalize(RAW))
-    message=app.process(job)
+    app.process(job)
     result=app.jobs.load(job.job_id)
     
     # Verify Azure STT was not rerun (bytes unchanged)
@@ -139,7 +137,7 @@ def test_valid_state_transition_analysis_running_to_analysis_ready(tmp_path):
     job.state="analysis_running"; job.completed_stages=["azure_transcription"]; app.jobs.save(job)
     
     atomic_write_json(app.jobs.job_dir(job.job_id)/"analysis/azure_diarization.json",normalize(RAW))
-    message=app.process(job)
+    app.process(job)
     result=app.jobs.load(job.job_id)
     
     # Verify valid state transition
