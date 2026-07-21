@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from .atomic_io import atomic_write_json
 from .errors import BackgroundStemUnavailable, ResidualEnglishDetected
 from .media import checksum
+from .pcm import encode_pcm16
 
 
 PUBLICATION_MODES = {"clean_background_stem", "separated_background", "reconstructed_ambience"}
@@ -180,8 +181,7 @@ def duck_dialogue_regions(
         for channel in range(2):
             offset = (frame * 2 + channel) * 2
             value = int.from_bytes(raw[offset : offset + 2], "little", signed=True)
-            scaled = max(-32768, min(32767, round(value * frame_gain)))
-            raw[offset : offset + 2] = scaled.to_bytes(2, "little", signed=True)
+            raw[offset : offset + 2] = encode_pcm16(round(value * frame_gain))
     output.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(output), "wb") as dst:
         dst.setparams((2, 2, params.framerate, 0, "NONE", "not compressed"))

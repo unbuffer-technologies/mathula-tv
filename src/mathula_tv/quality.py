@@ -5,13 +5,14 @@ import wave
 from pathlib import Path
 
 from .logging_utils import redact
+from .pcm import decode_pcm16
 
 
 def inspect_wav(path: Path) -> dict:
     with wave.open(str(path), "rb") as wav:
         channels,sample_rate,width=wav.getnchannels(),wav.getframerate(),wav.getsampwidth(); frames = wav.readframes(wav.getnframes()); duration = wav.getnframes() / sample_rate
     if channels!=1 or width!=2: return {"duration":duration,"channels":channels,"sample_rate":sample_rate,"valid":False}
-    values = [int.from_bytes(frames[i:i+2], "little", signed=True) for i in range(0, len(frames), 2)]
+    values = decode_pcm16(frames)
     peak = max((abs(v) for v in values), default=0)
     non_silent = sum(abs(v) > 64 for v in values) / max(len(values), 1)
     clipped = sum(abs(v) >= 32760 for v in values) / max(len(values), 1)

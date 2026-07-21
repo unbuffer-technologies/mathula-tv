@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from .atomic_io import atomic_write_json
+from .atomic_io import atomic_write_json, atomic_write_text
 from .logging_utils import redact
 from .media import checksum
 
@@ -148,7 +148,7 @@ def write_qc_report(
     report["readiness"] = review_readiness(report)
     atomic_write_json(json_path, report)
     markdown = _markdown_report(report)
-    _atomic_write_text(markdown_path, markdown)
+    atomic_write_text(markdown_path, markdown)
     return report
 
 
@@ -173,13 +173,6 @@ def _markdown_report(report: dict[str, Any]) -> str:
     if flags:
         lines.extend(["## Human review requirements", ""] + [f"- {item}" for item in flags] + [""])
     return "\n".join(lines)
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.partial")
-    temporary.write_text(text, encoding="utf-8")
-    temporary.replace(path)
 
 
 def _tokens(text: str) -> list[str]:

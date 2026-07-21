@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .atomic_io import atomic_write_json
+from .atomic_io import atomic_write_json, atomic_write_text
 from .media import checksum
 
 
@@ -61,7 +61,7 @@ def write_subtitles(
         spoken_json,
         {"schema_version": "spoken-subtitles-v1", "language": "zu-ZA", "entries": entries},
     )
-    _atomic_write_text(
+    atomic_write_text(
         srt,
         "\n\n".join(
             f"{index}\n{_timestamp(item['start_ms'], ',')} --> {_timestamp(item['end_ms'], ',')}\n{item['spoken_text']}"
@@ -69,7 +69,7 @@ def write_subtitles(
         )
         + "\n",
     )
-    _atomic_write_text(
+    atomic_write_text(
         vtt,
         "WEBVTT\n\n"
         + "\n\n".join(
@@ -88,11 +88,3 @@ def write_subtitles(
             "vtt": {"path": str(vtt), "sha256": checksum(vtt)},
         },
     }
-
-
-def _atomic_write_text(path: Path, value: str) -> None:
-    temporary = path.with_name(f".{path.name}.partial")
-    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(value)
-        handle.flush()
-    temporary.replace(path)
