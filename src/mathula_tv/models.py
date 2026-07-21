@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+_JOB_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def validate_job_id(job_id: str) -> str:
+    """Return ``job_id`` if it is a safe path/object segment, else raise.
+
+    Job identifiers are used to build both local filesystem paths and remote
+    object names. Restricting them to an alphanumeric/dash/underscore token
+    prevents traversal (``..``, ``/``) from any identifier that originates
+    outside this process, such as a job id read from a shared status object.
+    """
+
+    if not isinstance(job_id, str) or not _JOB_ID_PATTERN.fullmatch(job_id):
+        raise ValueError("Invalid job ID")
+    return job_id
 
 
 # ``synthesis_*`` and ``translating`` are retained only so existing manifests

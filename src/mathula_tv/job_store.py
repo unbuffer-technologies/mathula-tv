@@ -6,7 +6,7 @@ from pathlib import Path
 from .atomic_io import atomic_write_json, read_json
 from .media import checksum
 from .models import JobManifest
-from .models import utcnow
+from .models import utcnow, validate_job_id
 
 
 class JobStore:
@@ -15,9 +15,7 @@ class JobStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def job_dir(self, job_id: str) -> Path:
-        if not job_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in job_id):
-            raise ValueError("Invalid job ID")
-        return self.root / job_id
+        return self.root / validate_job_id(job_id)
 
     def path(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "manifest.json"
