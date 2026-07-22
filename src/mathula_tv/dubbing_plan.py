@@ -216,6 +216,7 @@ def build_dubbing_plan(
     speaker_references: Mapping[str, Any] | None = None,
     source_calibrations: Mapping[str, Any] | None = None,
     voice_selections: Mapping[str, Any] | None = None,
+    azure_only: bool = False,
 ) -> dict[str, Any]:
     units = [dict(value) for value in unit_artifact.get("units", [])]
     if not units:
@@ -241,7 +242,7 @@ def build_dubbing_plan(
                 "protected_entities_restored": target.get("protected_entities_restored", 0),
                 "pronunciation_calibration_required": target.get("pronunciation_calibration_required", False),
                 "azure_tts": {"status": "pending", "attempts": 0},
-                "openvoice": {"status": "pending", "attempts": 0},
+                "openvoice": {"status": "skipped" if azure_only else "pending", "attempts": 0},
                 "alignment": {"status": "pending"},
                 "review_flags": list(target.get("human_review_flags", [])),
             }
@@ -249,6 +250,15 @@ def build_dubbing_plan(
     plan = {
         "schema_version": DUBBING_PLAN_SCHEMA_VERSION,
         "job_id": job["job_id"],
+        "configuration": {
+            "dubbing_mode": "azure_only" if azure_only else "standard",
+            "gpu_required": False if azure_only else True,
+            "providers": {
+                "speech_generation": "azure_tts",
+                "voice_conversion": "none" if azure_only else "openvoice",
+                "alignment_source": "azure_tts" if azure_only else "openvoice",
+            },
+        },
         "source_media": {"path": str(source_media), "sha256": checksum(source_media)},
         "analysis_audio": {"path": str(analysis_audio), "sha256": checksum(analysis_audio)},
         "mix_source_audio": {"path": str(mix_source_audio), "sha256": checksum(mix_source_audio)},

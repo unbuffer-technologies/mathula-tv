@@ -157,6 +157,13 @@ def parser() -> argparse.ArgumentParser:
     render = _add_job_command(commands, "render")
     render.add_argument("--burn-subtitles", action="store_true")
     _add_job_command(commands, "review")
+    
+    # Azure-only dubbing command
+    dub_azure = _add_job_command(commands, "dub-azure")
+    dub_azure.add_argument("--skip-to", choices=["speaker_profiles", "acoustic_analysis", "voice_resolution", "dubbing_plan", "azure_tts", "azure_qc", "alignment", "background", "mix", "render"])
+    dub_azure.add_argument("--fallback-allowed", action="store_true")
+    dub_azure.add_argument("--min-confidence", type=float, default=0.5)
+    
     commands.add_parser("list-jobs")
     
     # Entity registry commands
@@ -471,6 +478,21 @@ def main(argv: list[str] | None = None) -> int:
             
             result = production_with_stt._audit_intelligibility(
                 job, stage, plan["units"], audio_root, baseline_wer=baseline_wer, with_phrase_hints=args.with_phrase_hints
+            )
+            print(json.dumps(result, indent=2))
+        elif args.command == "dub-azure":
+            from .azure_orchestrator import create_azure_orchestrator
+            azure_tts_backend = create_tts_backend(settings)
+            orchestrator = create_azure_orchestrator(
+                production,
+                fallback_allowed=args.fallback_allowed,
+                min_confidence=args.min_confidence,
+            )
+            result = orchestrator.run_full_pipeline(
+                job,
+                azure_tts_backend,
+                force=args.force,
+                skip_to=args.skip_to,
             )
             print(json.dumps(result, indent=2))
         elif args.command == "process":

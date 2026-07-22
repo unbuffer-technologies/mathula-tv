@@ -139,6 +139,22 @@ class DubbingArtifacts:
         return self.job_root / "analysis/entity_bindings.json"
 
     @property
+    def speaker_profiles(self) -> Path:
+        return self.job_root / "analysis/speaker_profiles.json"
+
+    @property
+    def acoustic_analysis(self) -> Path:
+        return self.job_root / "analysis/acoustic_analysis.json"
+
+    @property
+    def azure_voice_assignments(self) -> Path:
+        return self.job_root / "analysis/azure_voice_assignments.json"
+
+    @property
+    def azure_qc_report(self) -> Path:
+        return self.job_root / "dubbing/azure_tts/qc_report.json"
+
+    @property
     def qc_intelligibility_root(self) -> Path:
         return self.job_root / "qc/intelligibility"
 

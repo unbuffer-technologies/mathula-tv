@@ -772,7 +772,7 @@ class ProductionDubbingPipeline:
         self.jobs.save(job)
         return normalized["timing_repair_summary"]
 
-    def prepare_dubbing(self, job: JobManifest, *, force: bool = False) -> dict[str, Any]:
+    def prepare_dubbing(self, job: JobManifest, *, force: bool = False, azure_only: bool = False) -> dict[str, Any]:
         paths = self.paths(job.job_id)
         if paths.plan.is_file() and not force:
             return read_json(paths.plan)
@@ -793,6 +793,7 @@ class ProductionDubbingPipeline:
             translation_artifact=translation,
             output_path=paths.plan,
             pronunciation_dictionary=pronunciation,
+            azure_only=azure_only,
         )
         job.media["dubbing_plan_sha256"] = checksum(paths.plan)
         self.jobs.save(job)
@@ -804,6 +805,7 @@ class ProductionDubbingPipeline:
         backend: AzureTTSBackend,
         *,
         force: bool = False,
+        voice_assignments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if job.state == "azure_tts_ready" and force:
             self._forced_stage_reset(job, "azure_tts", "azure_tts_queued")
@@ -835,9 +837,20 @@ class ProductionDubbingPipeline:
         )
         results = []
         repair_signals = []
+        
+        # Load voice assignments if provided (for azure_only mode)
+        voice_by_speaker = {}
+        if voice_assignments:
+            for assignment in voice_assignments.get("assignments", []):
+                voice_by_speaker[assignment["speaker_id"]] = assignment["selected_voice"]
+        
         try:
             for unit in plan["units"]:
-                voice = self._selected_voice(plan, unit["speaker_id"], backend.default_voice)
+                # Use voice assignments if available, otherwise fall back to plan
+                if voice_by_speaker:
+                    voice = voice_by_speaker.get(unit["speaker_id"], backend.default_voice)
+                else:
+                    voice = self._selected_voice(plan, unit["speaker_id"], backend.default_voice)
                 request = AzureTTSRequest(
                     turn_id=unit["unit_id"],
                     speaker_id=unit["speaker_id"],
@@ -2611,12 +2624,22 @@ class ProductionDubbingPipeline:
         skip_openvoice: bool = False,
         require_compatibility_pass: bool = True,
         force: bool = False,
+        azure_only: bool = False,
     ) -> dict[str, Any]:
         gate = job.compatibility_gate.get("state", "pending")
-        if require_compatibility_pass and not skip_openvoice and gate != "passed":
-            raise CompatibilityGateFailure(f"OpenVoice compatibility gate is {gate}")
-        production_authorized = not skip_openvoice and gate == "passed"
-        allowed = {"azure_tts_ready"} if skip_openvoice else {"compatibility_review"}
+        
+        # For azure_only mode, skip compatibility gate requirements
+        if azure_only:
+            skip_openvoice = True
+            require_compatibility_pass = False
+            production_authorized = True
+            allowed = {"azure_tts_ready"}
+        else:
+            if require_compatibility_pass and not skip_openvoice and gate != "passed":
+                raise CompatibilityGateFailure(f"OpenVoice compatibility gate is {gate}")
+            production_authorized = not skip_openvoice and gate == "passed"
+            allowed = {"azure_tts_ready"} if skip_openvoice else {"compatibility_review"}
+        
         if job.state not in allowed and not (
             production_authorized and force and job.state == "alignment_ready"
         ):
@@ -2644,7 +2667,9 @@ class ProductionDubbingPipeline:
             "schema_version": "alignment-manifest-v1",
             "source_backend": "azure_tts" if skip_openvoice else "openvoice",
             "readiness": (
-                "compatibility_passed"
+                "azure_tts_production_ready"
+                if azure_only
+                else "compatibility_passed"
                 if production_authorized
                 else "azure_tts_only_review"
                 if skip_openvoice
@@ -2652,6 +2677,7 @@ class ProductionDubbingPipeline:
             ),
             "production_authorized": production_authorized,
             "compatibility_gate_state": gate,
+            "azure_only_mode": azure_only,
             "units": results,
         }
         atomic_write_json(paths.alignment_manifest, manifest)
@@ -2696,6 +2722,7 @@ class ProductionDubbingPipeline:
         separation_provider: SeparationProvider | None = None,
         residual_detector: ResidualSpeechDetector | None = None,
         proof_of_concept: bool = False,
+        azure_only: bool = False,
     ) -> dict[str, Any]:
         paths = self.paths(job.job_id)
         if not paths.alignment_manifest.is_file():
@@ -2703,15 +2730,28 @@ class ProductionDubbingPipeline:
                 "Production background requires a verified alignment manifest"
             )
         alignment = read_json(paths.alignment_manifest)
-        if (
-            job.compatibility_gate.get("state") != "passed"
-            or alignment.get("readiness") != "compatibility_passed"
-            or alignment.get("production_authorized") is not True
-            or alignment.get("source_backend") != "openvoice"
-        ):
-            raise CompatibilityGateFailure(
-                "Evidence-only alignment cannot authorize background production"
-            )
+        
+        # For azure_only mode, accept azure_tts_production_ready alignment
+        if azure_only:
+            if (
+                alignment.get("readiness") != "azure_tts_production_ready"
+                or alignment.get("azure_only_mode") is not True
+                or alignment.get("source_backend") != "azure_tts"
+            ):
+                raise CompatibilityGateFailure(
+                    "Azure-only background requires azure_tts_production_ready alignment"
+                )
+        else:
+            if (
+                job.compatibility_gate.get("state") != "passed"
+                or alignment.get("readiness") != "compatibility_passed"
+                or alignment.get("production_authorized") is not True
+                or alignment.get("source_backend") != "openvoice"
+            ):
+                raise CompatibilityGateFailure(
+                    "Evidence-only alignment cannot authorize background production"
+                )
+        
         if job.state != "alignment_ready":
             raise ValueError("Background preparation requires alignment_ready")
         job.transition("background_processing")
@@ -2781,19 +2821,30 @@ class ProductionDubbingPipeline:
         self.jobs.save(job)
         return {**manifest, "residual_dialogue_qc": residual}
 
-    def mix(self, job: JobManifest, *, proof_of_concept: bool = False) -> dict[str, Any]:
+    def mix(self, job: JobManifest, *, proof_of_concept: bool = False, azure_only: bool = False) -> dict[str, Any]:
         if job.state != "background_ready":
             raise ValueError("Mixing requires background_ready")
         paths = self.paths(job.job_id)
         alignment = read_json(paths.alignment_manifest)
-        if (
-            job.compatibility_gate.get("state") != "passed"
-            or alignment.get("production_authorized") is not True
-            or alignment.get("readiness") != "compatibility_passed"
-        ):
-            raise CompatibilityGateFailure(
-                "Compatibility-passed OpenVoice alignment is required before mixing"
-        )
+        # For azure_only mode, accept azure_tts_production_ready alignment
+        if azure_only:
+            if (
+                alignment.get("readiness") != "azure_tts_production_ready"
+                or alignment.get("azure_only_mode") is not True
+                or alignment.get("source_backend") != "azure_tts"
+            ):
+                raise CompatibilityGateFailure(
+                    "Azure-only mix requires azure_tts_production_ready alignment"
+                )
+        else:
+            if (
+                job.compatibility_gate.get("state") != "passed"
+                or alignment.get("production_authorized") is not True
+                or alignment.get("readiness") != "compatibility_passed"
+            ):
+                raise CompatibilityGateFailure(
+                    "Compatibility-passed OpenVoice alignment is required before mixing"
+                )
         
         # For proof-of-concept, use preview background
         background_path = paths.preview_background if proof_of_concept else paths.background
@@ -2864,21 +2915,32 @@ class ProductionDubbingPipeline:
         alignment = read_json(paths.alignment_manifest)
         return write_subtitles(plan["units"], alignment["units"], paths.subtitle_root)
 
-    def render(self, job: JobManifest, *, burn_subtitles: bool = False) -> dict[str, Any]:
+    def render(self, job: JobManifest, *, burn_subtitles: bool = False, azure_only: bool = False) -> dict[str, Any]:
         if job.state != "background_ready":
             raise ValueError("Rendering requires background_ready after a verified mix")
         paths = self.paths(job.job_id)
         alignment = read_json(paths.alignment_manifest)
-        if (
-            job.compatibility_gate.get("state") != "passed"
-            or alignment.get("production_authorized") is not True
-            or alignment.get("readiness") != "compatibility_passed"
-        ):
-            raise CompatibilityGateFailure(
-                "Compatibility-passed OpenVoice alignment is required before rendering"
-            )
+        # For azure_only mode, accept azure_tts_production_ready alignment
+        if azure_only:
+            if (
+                alignment.get("readiness") != "azure_tts_production_ready"
+                or alignment.get("azure_only_mode") is not True
+                or alignment.get("source_backend") != "azure_tts"
+            ):
+                raise CompatibilityGateFailure(
+                    "Azure-only render requires azure_tts_production_ready alignment"
+                )
+        else:
+            if (
+                job.compatibility_gate.get("state") != "passed"
+                or alignment.get("production_authorized") is not True
+                or alignment.get("readiness") != "compatibility_passed"
+            ):
+                raise CompatibilityGateFailure(
+                    "Compatibility-passed OpenVoice alignment is required before rendering"
+                )
         if not paths.final_mix.is_file():
-            self.mix(job)
+            self.mix(job, azure_only=azure_only)
         subtitle_manifest = self.subtitles(job)
         job.transition("rendering")
         self.jobs.save(job)
