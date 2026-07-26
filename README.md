@@ -32,9 +32,10 @@ classifier, then a blocking unresolved-speaker error.
 single TikTok publication file. The AI may select only an existing rendered
 speech block as the opening boundary. The server removes material before that
 block, retains the complete video afterward, applies the constant frame rate,
-adds a three-second isiZulu hook at the top and a persistent bold caption card
-at the footer, and verifies that the approved translation checksum did not
-change. Hashtags remain in the posting caption but are excluded from the card.
+and places the localized SEO `cover_hook` in a persistent bold, rounded footer
+panel. The title is limited to two lines and replaces the source lower-third;
+there is no top overlay. The approved translation checksum is verified
+unchanged, while the long caption and hashtags remain in the posting package.
 
 To rerun only the hook selection and edit:
 

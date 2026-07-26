@@ -88,7 +88,7 @@ def test_hook_edit_preserves_translation_and_keeps_remainder(
     source_info = {
         "duration": 120.0,
         "streams": [
-            {"codec_type": "video"},
+            {"codec_type": "video", "width": 1920, "height": 1080},
             {"codec_type": "audio"},
         ],
     }
@@ -116,6 +116,16 @@ def test_hook_edit_preserves_translation_and_keeps_remainder(
     )
     monkeypatch.setattr(tiktok_editor, "_FONT_PATH", tmp_path / "font.ttf")
     tiktok_editor._FONT_PATH.write_bytes(b"font")
+    def fake_title_panel(*, output_path, title, width, height):
+        output_path.write_bytes(b"panel")
+        return {
+            "rendered_text": title,
+            "line_count": 1,
+            "font_size": 48,
+            "panel_bounds": [88, 852, 1832, 1068],
+        }
+
+    monkeypatch.setattr(tiktok_editor, "_render_title_panel", fake_title_panel)
     commands = []
 
     def fake_runner(command, check=True, **kwargs):
@@ -135,24 +145,23 @@ def test_hook_edit_preserves_translation_and_keeps_remainder(
             "hook_text": "I-EFF ayihlehli!",
         },
         translation_path=translation,
-        caption_text="Umbhalo obhalwe ngokugqamile #ZuluTikTok #IsiZulu",
+        title_text="Isihloko esigqamile #ZuluTikTok #IsiZulu",
         runner=fake_runner,
     )
 
     assert translation.read_bytes() == before
     assert result["all_content_after_boundary_preserved"] is True
     assert result["translation"]["immutable"] is True
-    assert result["caption_card"]["source_text_without_hashtags"] == (
-        "Umbhalo obhalwe ngokugqamile"
-    )
-    assert result["caption_card"]["position"] == "footer"
-    assert result["caption_card"]["font_weight"] == "bold"
+    assert result["title_panel"]["text"] == "Isihloko esigqamile"
+    assert result["title_panel"]["position"] == "footer"
+    assert result["title_panel"]["font_weight"] == "bold"
+    assert result["top_hook_overlay"] is False
     command = commands[0]
     assert command[command.index("-ss") + 1] == "19.840000"
     assert command.index("-ss") < command.index("-i")
-    video_filter = command[command.index("-vf") + 1]
+    video_filter = command[command.index("-filter_complex") + 1]
     assert "setpts=PTS-STARTPTS" in video_filter
-    assert "drawtext=" in video_filter
+    assert "overlay=0:0" in video_filter
     assert command[command.index("-af") + 1] == "asetpts=PTS-STARTPTS"
     assert result["render_version"] == tiktok_editor.TIKTOK_EDIT_RENDER_VERSION
     assert output.read_bytes() == b"edited"
@@ -172,13 +181,15 @@ def test_edit_reuses_same_output_across_relative_and_absolute_paths(
     master = root / "direct_dub" / "final_dubbed.mp4"
     output = root / "output" / f"final_dubbed_{job_id}.mp4"
     translation = root / "translation" / "transcript_zu.json"
+    seo = root / "translation" / "tiktok_zu.json"
     report = root / "direct_dub" / "report.json"
     manifest = root / "output" / f"tiktok_edit_manifest_{job_id}.json"
-    for path in (master, output, translation, report, manifest):
+    for path in (master, output, translation, seo, report, manifest):
         path.parent.mkdir(parents=True, exist_ok=True)
     master.write_bytes(b"master")
     output.write_bytes(b"publication")
     translation.write_text('{"target_language": "zu-ZA"}', encoding="utf-8")
+    seo.write_text('{"cover_hook": "Isihloko se-SEO"}', encoding="utf-8")
     report.write_text(
         json.dumps(
             {
@@ -197,6 +208,7 @@ def test_edit_reuses_same_output_across_relative_and_absolute_paths(
                 "translation": {
                     "sha256_after": tiktok_editor.checksum(translation)
                 },
+                "title_panel": {"text": "Isihloko se-SEO"},
                 "output": {
                     "path": os.path.relpath(output, Path.cwd()),
                     "sha256": tiktok_editor.checksum(output),

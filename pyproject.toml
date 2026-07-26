@@ -7,7 +7,7 @@ name = "mathula-tv"
 version = "0.1.3"
 description = "Resumable South African news dubbing proof of concept"
 requires-python = ">=3.11"
-dependencies = ["jsonschema>=4.21", "python-dotenv>=1.0", "requests>=2.31", "yt-dlp"]
+dependencies = ["jsonschema>=4.21", "Pillow>=10", "python-dotenv>=1.0", "requests>=2.31", "yt-dlp"]
 
 [project.optional-dependencies]
 database = ["psycopg[binary,pool]>=3.2,<4"]
