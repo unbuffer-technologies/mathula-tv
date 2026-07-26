@@ -17,13 +17,55 @@ class FakeProvider:
 
     def complete_structured(self, request):
         self.requests.append(request)
+        score_sets = [
+            {
+                "visual_impact": 9,
+                "curiosity": 9,
+                "specificity": 9,
+                "stakes": 7,
+                "immediacy": 8,
+                "audience_relevance": 9,
+            },
+            {
+                "visual_impact": 5,
+                "curiosity": 6,
+                "specificity": 7,
+                "stakes": 6,
+                "immediacy": 6,
+                "audience_relevance": 7,
+            },
+            {
+                "visual_impact": 4,
+                "curiosity": 5,
+                "specificity": 6,
+                "stakes": 5,
+                "immediacy": 5,
+                "audience_relevance": 6,
+            },
+        ]
         return SimpleNamespace(
             data={
-                "selected_block_id": self.selected_block_id,
-                "hook_text": "I-EFF ayihlehli!",
-                "rationale": "This is the earliest self-contained central claim.",
-                "confidence": 0.91,
-                "human_review_flags": [],
+                "candidates": [
+                    {
+                        "candidate_id": f"candidate_{index + 1}",
+                        "selected_block_id": (
+                            self.selected_block_id if index == 0 else "block_0001"
+                        ),
+                        "hook_text": (
+                            "I-EFF ayihlehli!"
+                            if index == 0
+                            else f"Umcimbi we-EFF uqala manje {index}"
+                        ),
+                        "rationale": "Grounded, specific and self-contained.",
+                        "confidence": 0.91 - (index * 0.1),
+                        "grounded": True,
+                        "preserves_attribution": True,
+                        "no_sensationalism": True,
+                        "scores": score_sets[index],
+                        "human_review_flags": [],
+                    }
+                    for index in range(3)
+                ],
             },
             metadata=SimpleNamespace(to_dict=lambda: {"provider": "fake"}),
         )
@@ -61,6 +103,8 @@ def test_ai_selects_only_server_supplied_block_boundaries() -> None:
     assert result["selected_block_id"] == "block_0002"
     assert result["cut_start_seconds"] == 19.84
     assert result["approved_speech_immutable"] is True
+    assert result["engagement_ranking"]["winner_score"] > 8
+    assert len(result["engagement_ranking"]["ranked_candidates"]) == 3
 
 
 def test_ai_cannot_select_a_non_candidate_boundary() -> None:
@@ -263,6 +307,10 @@ def test_edit_reuses_same_output_across_relative_and_absolute_paths(
             {
                 "job_id": job_id,
                 "render_version": tiktok_editor.TIKTOK_EDIT_RENDER_VERSION,
+                "selection_prompt_version": (
+                    tiktok_editor.TIKTOK_HOOK_PROMPT_VERSION
+                ),
+                "hook_text": "Isihloko se-SEO",
                 "master_video": {"sha256": tiktok_editor.checksum(master)},
                 "translation": {
                     "sha256_after": tiktok_editor.checksum(translation)

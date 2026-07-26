@@ -36,6 +36,10 @@ and places the localized SEO `cover_hook` in a persistent bold, rounded footer
 panel. The title is limited to two lines and replaces the source lower-third;
 there is no top overlay. The approved translation checksum is verified
 unchanged, while the long caption and hashtags remain in the posting package.
+Hook selection first rejects ungrounded or sensational candidates, then asks
+the AI for three distinct grounded options. The server ranks them for visual
+impact, curiosity, specificity, stakes, immediacy, and audience relevance, and
+synchronizes the winner into the TikTok SEO and cover artifacts.
 
 To rerun only the hook selection and edit:
 
