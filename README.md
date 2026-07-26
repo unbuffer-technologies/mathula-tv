@@ -28,11 +28,13 @@ classifier, then a blocking unresolved-speaker error.
 
 ## AI TikTok hook edit
 
-`dub-azure` automatically creates `output/tiktok_edited_<job_id>.mp4` after
-the full dubbed master. The AI may select only an existing rendered speech
-block as the opening boundary. The server removes material before that block,
-retains the complete video afterward, adds a three-second isiZulu hook overlay,
-and verifies that the approved translation checksum did not change.
+`dub-azure` automatically finishes `output/final_dubbed_<job_id>.mp4` as the
+single TikTok publication file. The AI may select only an existing rendered
+speech block as the opening boundary. The server removes material before that
+block, retains the complete video afterward, applies the constant frame rate,
+adds a three-second isiZulu hook at the top and a persistent bold caption card
+at the footer, and verifies that the approved translation checksum did not
+change. Hashtags remain in the posting caption but are excluded from the card.
 
 To rerun only the hook selection and edit:
 

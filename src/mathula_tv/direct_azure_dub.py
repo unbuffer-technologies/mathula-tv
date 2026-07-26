@@ -36,7 +36,7 @@ from .output_naming import (
     load_seo_output_context,
     publish_title_named_outputs,
 )
-from .rendering import render_review_mp4, render_tiktok_compatible_mp4
+from .rendering import render_review_mp4
 from .tts_ssml import SSMLBounds
 from .voice_prosody import voice_and_base_prosody
 from .speaker_mapping import build_speaker_id_mapping, canonicalize_voice_family_evidence
@@ -167,10 +167,6 @@ class DirectDubArtifacts:
     @property
     def final_video(self) -> Path:
         return self.root / "final_dubbed.mp4"
-
-    @property
-    def tiktok_render_manifest(self) -> Path:
-        return self.root / "tiktok_render_manifest.json"
 
     @property
     def render_manifest(self) -> Path:
@@ -525,18 +521,6 @@ class DirectAzureDubRenderer:
         named_seo_files = {
             key: str(path) for key, path in sorted(named_outputs.seo_files.items())
         }
-        tiktok_upload_video = (
-            self.jobs.job_dir(job.job_id)
-            / "output"
-            / f"tiktok_upload_{job.job_id}.mp4"
-        )
-        tiktok_render_manifest = render_tiktok_compatible_mp4(
-            named_outputs.final_video,
-            tiktok_upload_video,
-            artifacts.tiktok_render_manifest,
-            runner=self.runner,
-        )
-
         report = {
             "schema_version": DIRECT_DUB_SCHEMA_VERSION,
             "job_id": job.job_id,
@@ -581,7 +565,6 @@ class DirectAzureDubRenderer:
             "background": background_manifest,
             "mix": mix_manifest,
             "render": render_manifest,
-            "tiktok_render": tiktok_render_manifest,
             "outputs": {
                 "dialogue": str(artifacts.dialogue),
                 "background": (
@@ -590,7 +573,6 @@ class DirectAzureDubRenderer:
                 "final_mix": str(artifacts.final_mix),
                 "canonical_final_video": str(artifacts.final_video),
                 "final_video": str(named_outputs.final_video),
-                "tiktok_upload_video": str(tiktok_upload_video),
                 "seo_files": named_seo_files,
                 "seo_title": named_outputs.title,
                 "filename_stem": named_outputs.filename_stem,
@@ -606,8 +588,8 @@ class DirectAzureDubRenderer:
         job.media["direct_dub_canonical_video"] = str(artifacts.final_video)
         job.media["direct_dub_video"] = str(named_outputs.final_video)
         job.media["direct_dub_video_sha256"] = checksum(named_outputs.final_video)
-        job.media["tiktok_upload_video"] = str(tiktok_upload_video)
-        job.media["tiktok_upload_video_sha256"] = checksum(tiktok_upload_video)
+        job.media.pop("tiktok_upload_video", None)
+        job.media.pop("tiktok_upload_video_sha256", None)
         job.media["direct_dub_seo_files"] = named_seo_files
         job.media["direct_dub_seo_file_sha256"] = {
             key: checksum(path)
@@ -1123,12 +1105,6 @@ class DirectAzureDubRenderer:
             return None
         final_video = Path(str(outputs.get("final_video") or ""))
         if not final_video.is_file() or final_video.stat().st_size <= 0:
-            return None
-        tiktok_upload_video = Path(str(outputs.get("tiktok_upload_video") or ""))
-        if (
-            not tiktok_upload_video.is_file()
-            or tiktok_upload_video.stat().st_size <= 0
-        ):
             return None
         seo_files = outputs.get("seo_files")
         if not isinstance(seo_files, Mapping) or not seo_files:

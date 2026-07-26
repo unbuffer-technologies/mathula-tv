@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -133,12 +135,18 @@ def test_hook_edit_preserves_translation_and_keeps_remainder(
             "hook_text": "I-EFF ayihlehli!",
         },
         translation_path=translation,
+        caption_text="Umbhalo obhalwe ngokugqamile #ZuluTikTok #IsiZulu",
         runner=fake_runner,
     )
 
     assert translation.read_bytes() == before
     assert result["all_content_after_boundary_preserved"] is True
     assert result["translation"]["immutable"] is True
+    assert result["caption_card"]["source_text_without_hashtags"] == (
+        "Umbhalo obhalwe ngokugqamile"
+    )
+    assert result["caption_card"]["position"] == "footer"
+    assert result["caption_card"]["font_weight"] == "bold"
     command = commands[0]
     assert command[command.index("-ss") + 1] == "19.840000"
     assert command.index("-ss") < command.index("-i")
@@ -148,3 +156,62 @@ def test_hook_edit_preserves_translation_and_keeps_remainder(
     assert command[command.index("-af") + 1] == "asetpts=PTS-STARTPTS"
     assert result["render_version"] == tiktok_editor.TIKTOK_EDIT_RENDER_VERSION
     assert output.read_bytes() == b"edited"
+
+
+def test_caption_card_removes_all_hashtags() -> None:
+    assert tiktok_editor.caption_without_hashtags(
+        "Izindaba #ZuluTikTok zanamuhla #Mzansi"
+    ) == "Izindaba zanamuhla"
+
+
+def test_edit_reuses_same_output_across_relative_and_absolute_paths(
+    tmp_path,
+) -> None:
+    job_id = "job1"
+    root = tmp_path / "jobs" / job_id
+    master = root / "direct_dub" / "final_dubbed.mp4"
+    output = root / "output" / f"final_dubbed_{job_id}.mp4"
+    translation = root / "translation" / "transcript_zu.json"
+    report = root / "direct_dub" / "report.json"
+    manifest = root / "output" / f"tiktok_edit_manifest_{job_id}.json"
+    for path in (master, output, translation, report, manifest):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    master.write_bytes(b"master")
+    output.write_bytes(b"publication")
+    translation.write_text('{"target_language": "zu-ZA"}', encoding="utf-8")
+    report.write_text(
+        json.dumps(
+            {
+                "blocks": [{"block_id": "block_0001"}],
+                "outputs": {"canonical_final_video": str(master)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest.write_text(
+        json.dumps(
+            {
+                "job_id": job_id,
+                "render_version": tiktok_editor.TIKTOK_EDIT_RENDER_VERSION,
+                "master_video": {"sha256": tiktok_editor.checksum(master)},
+                "translation": {
+                    "sha256_after": tiktok_editor.checksum(translation)
+                },
+                "output": {
+                    "path": os.path.relpath(output, Path.cwd()),
+                    "sha256": tiktok_editor.checksum(output),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    job = SimpleNamespace(job_id=job_id, target_language="zu-ZA", media={})
+
+    result = tiktok_editor.edit_tiktok_job(
+        work_dir=tmp_path,
+        job=job,
+        provider=SimpleNamespace(),
+    )
+
+    assert result["idempotent_reuse"] is True
+    assert job.media["tiktok_publication_video"] == str(output)

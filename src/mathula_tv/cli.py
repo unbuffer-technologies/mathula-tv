@@ -583,6 +583,7 @@ def main(argv: list[str] | None = None) -> int:
                     force=False,
                 ),
             }
+            app.jobs.save(job)
             print(json.dumps(result, indent=2))
         elif args.command == "enroll-speaker":
             from .known_speakers import enrol_known_speaker
@@ -622,6 +623,7 @@ def main(argv: list[str] | None = None) -> int:
                 provider=create_production_ai_provider(),
                 force=args.force,
             )
+            app.jobs.save(job)
             print(json.dumps(result, ensure_ascii=False, indent=2))
         elif args.command == "process":
             result = app.process(job)
