@@ -21,6 +21,7 @@ DEFAULT_MATCH_MARGIN = 0.10
 MINIMUM_ENROLMENT_SAMPLES = 2
 MINIMUM_RANGE_SECONDS = 3.0
 _PERSON_ID_RE = re.compile(r"[a-z0-9][a-z0-9_]{1,79}")
+_speechbrain_classifier_cache: dict[str, Any] = {}
 
 
 class KnownSpeakerError(RuntimeError):
@@ -69,6 +70,10 @@ class SpeechBrainECAPAEncoder:
     def _load(self) -> Any:
         if self._classifier is not None:
             return self._classifier
+        cache_key = str(self.cache_root.resolve())
+        if cache_key in _speechbrain_classifier_cache:
+            self._classifier = _speechbrain_classifier_cache[cache_key]
+            return self._classifier
         try:
             from huggingface_hub import snapshot_download
             from speechbrain.inference.speaker import EncoderClassifier
@@ -84,6 +89,7 @@ class SpeechBrainECAPAEncoder:
                 savedir=str(self.cache_root),
                 run_opts={"device": "cpu"},
             )
+            _speechbrain_classifier_cache[cache_key] = self._classifier
             return self._classifier
         except Exception as exc:
             raise KnownSpeakerError(

@@ -59,6 +59,23 @@ class DirectDubError(RuntimeError):
     """Raised when the direct renderer cannot safely produce a complete dub."""
 
 
+class TimingOverflowError(DirectDubError):
+    """Raised when synthesized speech cannot fit its current timeline window."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        measured_duration_ms: int,
+        target_duration_ms: int,
+        stretch_ratio: float,
+    ) -> None:
+        super().__init__(message)
+        self.measured_duration_ms = measured_duration_ms
+        self.target_duration_ms = target_duration_ms
+        self.stretch_ratio = stretch_ratio
+
+
 @dataclass(frozen=True)
 class ApprovedSegment:
     segment_id: str
@@ -170,6 +187,7 @@ class DirectDubOptions:
     max_azure_rate_percent: int = 25
     max_time_stretch_ratio: float = 1.35
     collision_max_time_stretch_ratio: float = 1.60
+    max_cross_speaker_boundary_shift_ms: int = 500
     male_voice: str = "zu-ZA-ThembaNeural"
     female_voice: str = "zu-ZA-ThandoNeural"
     min_voice_family_confidence: float = 0.70
@@ -193,6 +211,10 @@ class DirectDubOptions:
         if not self.max_time_stretch_ratio <= self.collision_max_time_stretch_ratio <= 2.0:
             raise ValueError(
                 "collision time-stretch ratio must be between the normal limit and 2.0"
+            )
+        if not 0 <= self.max_cross_speaker_boundary_shift_ms <= 1000:
+            raise ValueError(
+                "cross-speaker boundary shift must be between 0 and 1000ms"
             )
         if not 0.0 <= self.min_voice_family_confidence <= 1.0:
             raise ValueError("minimum voice-family confidence must be between 0 and 1")
@@ -307,9 +329,11 @@ class DirectAzureDubRenderer:
             if reused is not None:
                 return reused
 
+        render_blocks = list(blocks)
         block_results: list[dict[str, Any]] = []
         clips: list[dict[str, Any]] = []
-        for block_index, block in enumerate(blocks):
+        for block_index in range(len(render_blocks)):
+            block = render_blocks[block_index]
             assignment = assignments.get(block.speaker_id)
             if assignment is None:
                 raise DirectDubError(
@@ -335,29 +359,76 @@ class DirectAzureDubRenderer:
                     max_time_stretch_ratio=options.max_time_stretch_ratio,
                     force=force,
                 )
-            except DirectDubError as exc:
-                if "still needs" not in str(exc):
-                    raise
+            except TimingOverflowError as exc:
                 expanded, timing_adjustment = borrow_safe_silence_window(
-                    blocks,
+                    render_blocks,
                     block_index,
                 )
-                if expanded.duration_ms <= block.duration_ms:
-                    raise
-                fitted = self._synthesize_block(
-                    expanded,
-                    artifacts,
-                    voice=voice,
-                    base_rate_percent=base_rate,
-                    pitch_percent=pitch,
-                    volume_percent=volume,
-                    max_azure_rate_percent=options.max_azure_rate_percent,
-                    max_time_stretch_ratio=options.collision_max_time_stretch_ratio,
-                    # Reuse the already synthesized Azure candidates. Only the
-                    # pitch-preserving fit is redone for the expanded window.
-                    force=False,
-                )
-                fitted["timing_adjustment"] = timing_adjustment
+                fitted: dict[str, Any] | None = None
+                latest_overflow = exc
+                if expanded.duration_ms > block.duration_ms:
+                    try:
+                        fitted = self._synthesize_block(
+                            expanded,
+                            artifacts,
+                            voice=voice,
+                            base_rate_percent=base_rate,
+                            pitch_percent=pitch,
+                            volume_percent=volume,
+                            max_azure_rate_percent=options.max_azure_rate_percent,
+                            max_time_stretch_ratio=options.collision_max_time_stretch_ratio,
+                            # Reuse the already synthesized Azure candidates. Only the
+                            # pitch-preserving fit is redone for the expanded window.
+                            force=False,
+                        )
+                    except TimingOverflowError as expanded_exc:
+                        latest_overflow = expanded_exc
+                    else:
+                        block = expanded
+                        render_blocks[block_index] = expanded
+                        fitted["timing_adjustment"] = timing_adjustment
+
+                if fitted is None:
+                    required_window_ms = math.ceil(
+                        latest_overflow.measured_duration_ms
+                        / options.collision_max_time_stretch_ratio
+                    )
+                    expanded, shifted_next, timing_adjustment = (
+                        rebalance_cross_speaker_handoff(
+                            render_blocks,
+                            block_index,
+                            required_window_ms=required_window_ms,
+                            max_shift_ms=options.max_cross_speaker_boundary_shift_ms,
+                        )
+                    )
+                    if shifted_next is None:
+                        raise DirectDubError(
+                            genuine_speaker_collision_message(
+                                render_blocks,
+                                block_index,
+                                latest_overflow,
+                                required_window_ms=required_window_ms,
+                            )
+                        ) from latest_overflow
+                    render_blocks[block_index] = expanded
+                    render_blocks[block_index + 1] = shifted_next
+                    block = expanded
+                    fitted = self._synthesize_block(
+                        expanded,
+                        artifacts,
+                        voice=voice,
+                        base_rate_percent=base_rate,
+                        pitch_percent=pitch,
+                        volume_percent=volume,
+                        max_azure_rate_percent=options.max_azure_rate_percent,
+                        max_time_stretch_ratio=options.collision_max_time_stretch_ratio,
+                        force=False,
+                    )
+                    fitted["timing_adjustment"] = timing_adjustment
+            except DirectDubError:
+                # Non-timing failures must remain visible and must not trigger
+                # timeline mutation.
+                raise
             block_results.append(fitted)
             clips.append(
                 {
@@ -941,10 +1012,13 @@ class DirectAzureDubRenderer:
         if selected.duration_ms > block.duration_ms:
             stretch_ratio = selected.duration_ms / block.duration_ms
             if stretch_ratio > max_time_stretch_ratio:
-                raise DirectDubError(
+                raise TimingOverflowError(
                     f"{block.block_id} still needs {stretch_ratio:.3f}x time compression after "
                     f"Azure {selected.rate_percent:+d}%. Increase the same-speaker grouping window "
-                    "or revise the approved segment boundary; the renderer will not rewrite text."
+                    "or revise the approved segment boundary; the renderer will not rewrite text.",
+                    measured_duration_ms=selected.duration_ms,
+                    target_duration_ms=block.duration_ms,
+                    stretch_ratio=stretch_ratio,
                 )
             _time_stretch_to_window(
                 Path(selected.output_path),
@@ -1087,6 +1161,87 @@ def borrow_safe_silence_window(
         "text_immutable": True,
         "cross_speaker_overlap": False,
     }
+
+
+def rebalance_cross_speaker_handoff(
+    blocks: Sequence[SpeechBlock],
+    block_index: int,
+    *,
+    required_window_ms: int,
+    max_shift_ms: int = 500,
+) -> tuple[SpeechBlock, SpeechBlock | None, dict[str, Any]]:
+    """Move one handoff boundary while preserving speaker order and all text.
+
+    This is a last-resort repair after same-speaker grouping and safe silence
+    borrowing. It never overlaps speakers: the next block starts exactly where
+    the expanded block ends. The approved segment artifacts remain untouched.
+    """
+    if block_index < 0 or block_index >= len(blocks):
+        raise IndexError(f"Invalid block index: {block_index}")
+    block = blocks[block_index]
+    required_shift_ms = max(0, required_window_ms - block.duration_ms)
+    next_block = blocks[block_index + 1] if block_index + 1 < len(blocks) else None
+    repair = {
+        "method": "bounded_cross_speaker_handoff_rebalance",
+        "original_block_id": block.block_id,
+        "original_start_ms": block.start_ms,
+        "original_end_ms": block.end_ms,
+        "required_window_ms": required_window_ms,
+        "boundary_shift_ms": required_shift_ms,
+        "maximum_boundary_shift_ms": max_shift_ms,
+        "text_immutable": True,
+        "speaker_order_preserved": True,
+        "cross_speaker_overlap": False,
+    }
+    if (
+        required_shift_ms <= 0
+        or required_shift_ms > max_shift_ms
+        or next_block is None
+        or next_block.speaker_id == block.speaker_id
+        or next_block.start_ms != block.end_ms
+        or next_block.duration_ms - required_shift_ms < 1000
+    ):
+        repair["applied"] = False
+        return block, None, repair
+
+    boundary_ms = block.end_ms + required_shift_ms
+    expanded = replace(
+        block,
+        block_id=f"{block.block_id}_handoff",
+        end_ms=boundary_ms,
+    )
+    shifted_next = replace(next_block, start_ms=boundary_ms)
+    repair.update(
+        {
+            "applied": True,
+            "adaptive_block_id": expanded.block_id,
+            "adjusted_end_ms": boundary_ms,
+            "next_block_id": next_block.block_id,
+            "next_original_start_ms": next_block.start_ms,
+            "next_adjusted_start_ms": shifted_next.start_ms,
+        }
+    )
+    return expanded, shifted_next, repair
+
+
+def genuine_speaker_collision_message(
+    blocks: Sequence[SpeechBlock],
+    block_index: int,
+    overflow: TimingOverflowError,
+    *,
+    required_window_ms: int,
+) -> str:
+    block = blocks[block_index]
+    previous = blocks[block_index - 1] if block_index > 0 else None
+    following = blocks[block_index + 1] if block_index + 1 < len(blocks) else None
+    return (
+        f"Genuine cross-speaker timeline collision for {block.block_id} "
+        f"({block.speaker_id}, {block.start_ms}-{block.end_ms}ms): Azure audio is "
+        f"{overflow.measured_duration_ms}ms and needs at least {required_window_ms}ms "
+        f"at the bounded stretch limit. Previous="
+        f"{previous.speaker_id if previous else 'none'}; next="
+        f"{following.speaker_id if following else 'none'}. Approved text was not changed."
+    )
 
 
 

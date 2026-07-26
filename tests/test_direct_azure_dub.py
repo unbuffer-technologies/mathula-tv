@@ -6,6 +6,7 @@ from mathula_tv.direct_azure_dub import (
     borrow_safe_silence_window,
     coalesce_same_speaker_segments,
     estimate_required_azure_rate,
+    rebalance_cross_speaker_handoff,
 )
 
 
@@ -124,3 +125,61 @@ def test_borrows_only_silence_bounded_by_surrounding_speakers() -> None:
     assert adjustment["borrowed_after_ms"] == 240
     assert adjustment["text_immutable"] is True
     assert adjustment["cross_speaker_overlap"] is False
+
+
+def test_rebalances_a_small_cross_speaker_handoff_without_overlap() -> None:
+    blocks = [
+        SpeechBlock(
+            "block_0014",
+            "SPEAKER_03",
+            652360,
+            653000,
+            ("seg-20",),
+            "Thank you very much.",
+            "Ngiyabonga kakhulu.",
+            "Ngiyabonga kakhulu.",
+        ),
+        SpeechBlock(
+            "block_0015",
+            "SPEAKER_02",
+            653000,
+            691640,
+            ("seg-21",),
+            "Next report",
+            "Umbiko olandelayo",
+            "Umbiko olandelayo",
+        ),
+    ]
+
+    expanded, shifted, adjustment = rebalance_cross_speaker_handoff(
+        blocks,
+        0,
+        required_window_ms=936,
+        max_shift_ms=500,
+    )
+
+    assert shifted is not None
+    assert expanded.end_ms == shifted.start_ms == 653296
+    assert expanded.tts_text == blocks[0].tts_text
+    assert shifted.tts_text == blocks[1].tts_text
+    assert adjustment["boundary_shift_ms"] == 296
+    assert adjustment["cross_speaker_overlap"] is False
+    assert adjustment["text_immutable"] is True
+
+
+def test_rejects_cross_speaker_handoff_shift_above_bound() -> None:
+    blocks = [
+        SpeechBlock("block_1", "A", 0, 640, ("s1",), "a", "a", "a"),
+        SpeechBlock("block_2", "B", 640, 5000, ("s2",), "b", "b", "b"),
+    ]
+
+    unchanged, shifted, adjustment = rebalance_cross_speaker_handoff(
+        blocks,
+        0,
+        required_window_ms=1200,
+        max_shift_ms=500,
+    )
+
+    assert unchanged == blocks[0]
+    assert shifted is None
+    assert adjustment["applied"] is False
