@@ -45,12 +45,14 @@ class FakeProvider:
         ]
         return SimpleNamespace(
             data={
+                "opening_boundary_block_id": self.selected_block_id,
+                "opening_boundary_rationale": (
+                    "Earliest safe self-contained opening."
+                ),
                 "candidates": [
                     {
                         "candidate_id": f"candidate_{index + 1}",
-                        "selected_block_id": (
-                            self.selected_block_id if index == 0 else "block_0001"
-                        ),
+                        "selected_block_id": self.selected_block_id,
                         "hook_text": (
                             "I-EFF ayihlehli!"
                             if index == 0
@@ -117,6 +119,30 @@ def test_ai_cannot_select_a_non_candidate_boundary() -> None:
             seo={},
             source_duration_seconds=120.0,
         )
+
+
+def test_viral_title_from_later_block_does_not_move_opening_cut() -> None:
+    class LaterTitleProvider(FakeProvider):
+        def complete_structured(self, request):
+            response = super().complete_structured(request)
+            response.data["candidates"][0]["selected_block_id"] = "block_0002"
+            response.data["candidates"][0]["hook_text"] = (
+                "I-EFF iveza imininingwane emangazayo"
+            )
+            return response
+
+    result = tiktok_editor.select_tiktok_hook(
+        provider=LaterTitleProvider("block_0001"),
+        job_id="job1",
+        target_language="zu-ZA",
+        blocks=_blocks(),
+        seo={},
+        source_duration_seconds=120.0,
+    )
+
+    assert result["selected_block_id"] == "block_0001"
+    assert result["cut_start_seconds"] == 2.0
+    assert result["engagement_ranking"]["winner_source_block_id"] == "block_0002"
 
 
 def test_hook_edit_preserves_translation_and_keeps_remainder(
