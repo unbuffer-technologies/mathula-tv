@@ -26,6 +26,20 @@ excluded from Git. Direct Azure dubbing resolves voices in this order:
 `--voice-map`, verified SpeechBrain signature, anonymous voice-family
 classifier, then a blocking unresolved-speaker error.
 
+## AI TikTok hook edit
+
+`dub-azure` automatically creates `output/tiktok_edited_<job_id>.mp4` after
+the full dubbed master. The AI may select only an existing rendered speech
+block as the opening boundary. The server removes material before that block,
+retains the complete video afterward, adds a three-second isiZulu hook overlay,
+and verifies that the approved translation checksum did not change.
+
+To rerun only the hook selection and edit:
+
+```bash
+python -m mathula_tv.cli edit-tiktok "$JOB_ID" --live-operation --force
+```
+
 Mathula TV is a resumable, human-reviewed pipeline for dubbing English South African news video into isiZulu. The production design uses Azure Speech-to-Text for transcription and authoritative job-local diarization, Claude Opus 4.8 for contextual translation and editorial metadata, Azure Text-to-Speech for isiZulu pronunciation, and OpenVoice for post-TTS speaker-identity conversion on a Colab or Kaggle GPU worker.
 
 Codex is the engineering agent that implements this repository; it is not a runtime content provider. Claude Opus 4.8 is the configured production runtime AI provider.

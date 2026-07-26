@@ -46,6 +46,7 @@ EXTERNAL_COMMANDS = {
     "queue-voice-conversion",
     "reconcile-voice-conversion",
     "dub-azure",
+    "edit-tiktok",
 }
 
 
@@ -221,6 +222,8 @@ def parser() -> argparse.ArgumentParser:
     )
     enroll_speaker.add_argument("--person-id")
     enroll_speaker.add_argument("--voice")
+
+    _add_job_command(commands, "edit-tiktok")
     
     commands.add_parser("list-jobs")
     
@@ -567,6 +570,19 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 force=args.force,
             )
+            from .tiktok_editor import edit_tiktok_job
+
+            result = {
+                **result,
+                "tiktok_edit": edit_tiktok_job(
+                    work_dir=settings.work_dir,
+                    job=job,
+                    provider=create_production_ai_provider(),
+                    # Reuse by master/translation checksum. A forced dub does not
+                    # justify paying for the same AI hook or re-encoding it again.
+                    force=False,
+                ),
+            }
             print(json.dumps(result, indent=2))
         elif args.command == "enroll-speaker":
             from .known_speakers import enrol_known_speaker
@@ -597,6 +613,16 @@ def main(argv: list[str] | None = None) -> int:
                     indent=2,
                 )
             )
+        elif args.command == "edit-tiktok":
+            from .tiktok_editor import edit_tiktok_job
+
+            result = edit_tiktok_job(
+                work_dir=settings.work_dir,
+                job=job,
+                provider=create_production_ai_provider(),
+                force=args.force,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         elif args.command == "process":
             result = app.process(job)
             if result is not None:
