@@ -173,6 +173,36 @@ def test_caption_card_removes_all_hashtags() -> None:
     ) == "Izindaba zanamuhla"
 
 
+def test_selected_hook_becomes_authoritative_seo_cover_hook(tmp_path) -> None:
+    seo_path = tmp_path / "translation" / "tiktok_zu.json"
+    output_root = tmp_path / "output"
+    output_json = output_root / "tiktok_seo_zu_job1.json"
+    output_cover = output_root / "tiktok_cover_zu_job1.txt"
+    seo_path.parent.mkdir(parents=True)
+    output_root.mkdir()
+    output_json.write_text('{"cover_hook": "Generic"}', encoding="utf-8")
+    output_cover.write_text("Generic\n", encoding="utf-8")
+
+    updated = tiktok_editor._synchronize_seo_cover_hook(
+        seo={"cover_hook": "Generic", "title": "Generic"},
+        seo_path=seo_path,
+        hook_text="I-EFF yamukelwa yi-helicopter ebiyihlola",
+        selection={
+            "selected_block_id": "block_0001",
+            "confidence": 0.9,
+            "rationale": "Strongest grounded visual detail.",
+            "human_review_flags": ["Preserve attribution."],
+        },
+        output_root=output_root,
+        job_id="job1",
+    )
+
+    assert updated["cover_hook"] == "I-EFF yamukelwa yi-helicopter ebiyihlola"
+    assert tiktok_editor.read_json(seo_path)["cover_hook"] == updated["cover_hook"]
+    assert tiktok_editor.read_json(output_json)["cover_hook"] == updated["cover_hook"]
+    assert output_cover.read_text(encoding="utf-8").strip() == updated["cover_hook"]
+
+
 def test_edit_reuses_same_output_across_relative_and_absolute_paths(
     tmp_path,
 ) -> None:
