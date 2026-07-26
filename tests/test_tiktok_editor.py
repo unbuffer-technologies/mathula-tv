@@ -122,6 +122,10 @@ def test_hook_edit_preserves_translation_and_keeps_remainder(
             "rendered_text": title,
             "line_count": 1,
             "font_size": 48,
+            "minimum_font_size": 35,
+            "maximum_font_size": 84,
+            "fit_action": "unchanged",
+            "truncated": False,
             "panel_bounds": [88, 852, 1832, 1068],
         }
 
@@ -201,6 +205,31 @@ def test_selected_hook_becomes_authoritative_seo_cover_hook(tmp_path) -> None:
     assert tiktok_editor.read_json(seo_path)["cover_hook"] == updated["cover_hook"]
     assert tiktok_editor.read_json(output_json)["cover_hook"] == updated["cover_hook"]
     assert output_cover.read_text(encoding="utf-8").strip() == updated["cover_hook"]
+
+
+def test_title_panel_expands_and_shrinks_font_to_fill_two_lines(tmp_path) -> None:
+    short = tiktok_editor._render_title_panel(
+        output_path=tmp_path / "short.png",
+        title="I-EFF eLimpopo",
+        width=1920,
+        height=1080,
+    )
+    long = tiktok_editor._render_title_panel(
+        output_path=tmp_path / "long.png",
+        title=(
+            "I-EFF ingena enqabeni ye-ANC eLimpopo, yamukelwa "
+            "yi-helicopter ebiyihlola"
+        ),
+        width=1920,
+        height=1080,
+    )
+
+    assert short["fit_action"] == "expanded"
+    assert long["fit_action"] == "expanded"
+    assert short["font_size"] > long["font_size"]
+    assert long["line_count"] == 2
+    assert short["truncated"] is False
+    assert long["truncated"] is False
 
 
 def test_edit_reuses_same_output_across_relative_and_absolute_paths(
