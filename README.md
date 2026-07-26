@@ -1,5 +1,31 @@
 # Mathula TV
 
+## Known-speaker enrolment
+
+Install the pinned SpeechBrain ECAPA speaker-recognition model once:
+
+```bash
+source .venv/bin/activate
+python -m pip install -e '.[speaker-recognition]'
+python scripts/install_speechbrain_ecapa.py
+```
+
+Manually enrol a verified public speaker from at least two clean, single-speaker
+timeline ranges:
+
+```bash
+python -m mathula_tv.cli enroll-speaker "$JOB_ID" \
+  --name "Samkelo Maseko" \
+  --gender male \
+  --range "00:11:38-00:12:08" \
+  --range "00:12:20-00:12:50"
+```
+
+Profiles and sample audio are kept under `working/known_speakers/`, which is
+excluded from Git. Direct Azure dubbing resolves voices in this order:
+`--voice-map`, verified SpeechBrain signature, anonymous voice-family
+classifier, then a blocking unresolved-speaker error.
+
 Mathula TV is a resumable, human-reviewed pipeline for dubbing English South African news video into isiZulu. The production design uses Azure Speech-to-Text for transcription and authoritative job-local diarization, Claude Opus 4.8 for contextual translation and editorial metadata, Azure Text-to-Speech for isiZulu pronunciation, and OpenVoice for post-TTS speaker-identity conversion on a Colab or Kaggle GPU worker.
 
 Codex is the engineering agent that implements this repository; it is not a runtime content provider. Claude Opus 4.8 is the configured production runtime AI provider.

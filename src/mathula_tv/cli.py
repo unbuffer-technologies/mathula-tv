@@ -22,6 +22,11 @@ from .config import load_settings
 from .diarization import run_pyannote
 from .logging_utils import configure_logging, redact
 from .orchestrator import Orchestrator
+from .youtube_ingestion import (
+    download_youtube_video,
+    is_youtube_url,
+    record_youtube_submission,
+)
 from .production_pipeline import ProductionDubbingPipeline
 from .translation import AzureOpenAIClient
 from .tts_ssml import SSMLBounds
@@ -40,6 +45,7 @@ EXTERNAL_COMMANDS = {
     "reconcile-openvoice-assets",
     "queue-voice-conversion",
     "reconcile-voice-conversion",
+    "dub-azure",
 }
 
 
@@ -93,6 +99,46 @@ def create_tts_backend(settings) -> AzureTTSBackend:
     )
 
 
+def create_translation_client(settings):
+    key = os.getenv("AZURE_SPEECH_KEY", "")
+    if not key:
+        raise ValueError("AZURE_SPEECH_KEY is missing")
+    if not settings.azure_ai_endpoint:
+        raise ValueError("AZURE_AI_ENDPOINT is missing")
+    if not settings.azure_ai_deployment:
+        raise ValueError("AZURE_AI_DEPLOYMENT is missing")
+
+    class SimpleJsonClient:
+        def __init__(self, endpoint, deployment, api_version, key):
+            self.deployment = deployment
+            self.api_version = api_version
+            self.request_durations = []
+            self.endpoint = endpoint
+            self.key = key
+
+        def __call__(self, payload):
+            import time
+            import requests
+            start = time.time()
+            headers = {
+                "Content-Type": "application/json",
+                "api-key": self.key,
+            }
+            url = f"{self.endpoint}/openai/deployments/{self.deployment}/chat/completions?api-version={self.api_version}"
+            response = requests.post(url, headers=headers, json=payload, timeout=600)
+            response.raise_for_status()
+            duration = time.time() - start
+            self.request_durations.append(duration)
+            return response.json()
+
+    return SimpleJsonClient(
+        endpoint=settings.azure_ai_endpoint,
+        deployment=settings.azure_ai_deployment,
+        api_version=settings.azure_ai_api_version,
+        key=key,
+    )
+
+
 def _add_job_command(commands, name: str) -> argparse.ArgumentParser:
     command = commands.add_parser(name)
     command.add_argument("job_id")
@@ -107,7 +153,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--verbose", action="store_true")
     commands = root.add_subparsers(dest="command", required=True)
     submit = commands.add_parser("submit")
-    submit.add_argument("video", type=Path)
+    submit.add_argument("video", help="Local MP4/WebM path or a YouTube video URL")
     submit.add_argument("--target-language", default="zu-ZA")
     submit.add_argument("--force", action="store_true")
 
@@ -158,11 +204,23 @@ def parser() -> argparse.ArgumentParser:
     render.add_argument("--burn-subtitles", action="store_true")
     _add_job_command(commands, "review")
     
-    # Azure-only dubbing command
+    # Direct Azure dubbing from the already-approved translation artifact.
     dub_azure = _add_job_command(commands, "dub-azure")
-    dub_azure.add_argument("--skip-to", choices=["speaker_profiles", "acoustic_analysis", "voice_resolution", "dubbing_plan", "azure_tts", "azure_qc", "alignment", "background", "mix", "render"])
-    dub_azure.add_argument("--fallback-allowed", action="store_true")
-    dub_azure.add_argument("--min-confidence", type=float, default=0.5)
+    dub_azure.add_argument("--min-confidence", type=float, default=0.70)
+    dub_azure.add_argument("--voice-map", type=Path)
+
+    enroll_speaker = _add_job_command(commands, "enroll-speaker")
+    enroll_speaker.add_argument("--name", required=True)
+    enroll_speaker.add_argument("--gender", required=True, choices=("male", "female"))
+    enroll_speaker.add_argument(
+        "--range",
+        dest="ranges",
+        action="append",
+        required=True,
+        help="Clean single-speaker timeline range, e.g. 00:11:38-00:12:08; repeat it",
+    )
+    enroll_speaker.add_argument("--person-id")
+    enroll_speaker.add_argument("--voice")
     
     commands.add_parser("list-jobs")
     
@@ -233,7 +291,16 @@ def main(argv: list[str] | None = None) -> int:
     app = Orchestrator(settings)
     try:
         if args.command == "submit":
-            job = app.submit(args.video, args.target_language, args.force)
+            if is_youtube_url(args.video):
+                maximum_minutes = float(getattr(settings, "max_source_duration_minutes", 240))
+                with download_youtube_video(
+                    args.video,
+                    max_duration_seconds=maximum_minutes * 60.0,
+                ) as download:
+                    job = app.submit(download.path, args.target_language, args.force)
+                    record_youtube_submission(app, job, download)
+            else:
+                job = app.submit(Path(args.video), args.target_language, args.force)
             print(job.job_id)
             return 0
         if args.command == "list-jobs":
@@ -481,22 +548,64 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(result, indent=2))
         elif args.command == "dub-azure":
-            from .azure_orchestrator import create_azure_orchestrator
-            azure_tts_backend = create_tts_backend(settings)
-            orchestrator = create_azure_orchestrator(
-                production,
-                fallback_allowed=args.fallback_allowed,
-                min_confidence=args.min_confidence,
+            from .direct_azure_dub import (
+                DirectAzureDubRenderer,
+                DirectDubOptions,
             )
-            result = orchestrator.run_full_pipeline(
+
+            azure_tts_backend = create_tts_backend(settings)
+            renderer = DirectAzureDubRenderer(settings, azure_tts_backend)
+            result = renderer.render(
                 job,
-                azure_tts_backend,
+                voice_map_path=args.voice_map,
+                options=DirectDubOptions(
+                    max_azure_rate_percent=min(
+                        25,
+                        azure_tts_backend.ssml_bounds.rate_max_percent,
+                    ),
+                    min_voice_family_confidence=args.min_confidence,
+                ),
                 force=args.force,
-                skip_to=args.skip_to,
             )
             print(json.dumps(result, indent=2))
+        elif args.command == "enroll-speaker":
+            from .known_speakers import enrol_known_speaker
+            from .media import prepare_source_derivatives
+
+            job_root = app.jobs.job_dir(job.job_id)
+            analysis_audio = job_root / "audio" / "analysis_mono.wav"
+            if not analysis_audio.is_file():
+                prepare_source_derivatives(
+                    Path(job.local_source_path),
+                    analysis_audio,
+                    job_root / "audio" / "mix_source_stereo.wav",
+                    max_duration_seconds=settings.max_source_duration_minutes * 60,
+                )
+            print(
+                json.dumps(
+                    enrol_known_speaker(
+                        work_dir=settings.work_dir,
+                        job_id=job.job_id,
+                        analysis_audio_path=analysis_audio,
+                        name=args.name,
+                        gender=args.gender,
+                        ranges=args.ranges,
+                        azure_voice=args.voice,
+                        person_id=args.person_id,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
         elif args.command == "process":
-            print(_process_message(job))
+            result = app.process(job)
+            if result is not None:
+                if isinstance(result, (dict, list)):
+                    print(json.dumps(result, indent=2))
+                else:
+                    print(result)
+            else:
+                print(_process_message(job))
         elif args.command == "diarize":
             job_dir = app.jobs.job_dir(job.job_id)
             pyannote_path = job_dir / "analysis/pyannote_diarization.json"
@@ -546,12 +655,30 @@ def main(argv: list[str] | None = None) -> int:
             result = app.process(job)
             print(result)
         elif args.command == "retry":
-            if job.state != "failed_retryable":
-                raise ValueError("Only failed_retryable jobs can be retried")
+            error = job.last_error or {}
+            recoverable_azure_auth_failure = (
+                job.state == "failed_terminal"
+                and error.get("stage") == "azure_transcription"
+                and error.get("error_type") == "AzureSpeechError"
+                and "401" in error.get("message", "")
+            )
+
+            if job.state != "failed_retryable" and not recoverable_azure_auth_failure:
+                raise ValueError(
+                    "Only failed_retryable jobs or Azure Speech 401 failures can be retried"
+                )
+
             job.last_error = None
-            job.transition("uploaded")
+
+            if job.state == "failed_retryable":
+                job.transition("uploaded")
+            else:
+                # A corrected Azure credential makes this configuration failure
+                # explicitly recoverable without repeating upload or submission.
+                job.state = "uploaded"
+
             app.jobs.save(job)
-            print(app.process(job))
+            print(_process_message(job))
         elif args.command == "validate":
             print(json.dumps(production.validate_job(job), indent=2))
         elif args.command == "transcribe":
