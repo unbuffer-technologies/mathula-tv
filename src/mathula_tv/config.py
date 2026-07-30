@@ -31,11 +31,28 @@ class Settings:
     pyannote_model: str
     speaker_tolerance_seconds: float = 0.35
     lease_seconds: int = 900
-    ai_provider: str = "anthropic"
+    ai_provider: str = "azure-foundry-claude"
     claude_model: str = "claude-opus-4-8"
     claude_timeout_seconds: float = 900
     claude_max_retries: int = 3
     claude_effort: str = "high"
+    translation_claude_effort: str = "low"
+    translation_claude_thinking: str = "disabled"
+    translation_max_output_tokens: int = 100_000
+    seo_claude_effort: str = "medium"
+    seo_claude_thinking: str = "adaptive"
+    seo_max_output_tokens: int = 12_000
+    hook_claude_effort: str = "low"
+    hook_claude_thinking: str = "disabled"
+    hook_max_output_tokens: int = 12_000
+    editorial_claude_effort: str = "high"
+    editorial_claude_thinking: str = "adaptive"
+    editorial_max_output_tokens: int = 12_000
+    translation_batch_size: int = 6
+    translation_context_units: int = 2
+    translation_request_timeout_seconds: float = 300
+    translation_batch_max_retries: int = 2
+    translation_max_provider_calls_per_session: int = 64
     azure_tts_voices: tuple[str, ...] = ("zu-ZA-ThandoNeural", "zu-ZA-ThembaNeural")
     azure_tts_default_voice: str = "zu-ZA-ThandoNeural"
     azure_tts_sample_rate: int = 24000
@@ -102,11 +119,68 @@ def load_settings(project_root: Path | None = None) -> Settings:
         pyannote_model=os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1"),
         speaker_tolerance_seconds=float(os.getenv("MATHULA_TV_SPEAKER_TOLERANCE_SECONDS", "0.35")),
         lease_seconds=int(os.getenv("MATHULA_TV_LEASE_SECONDS", "900")),
-        ai_provider=os.getenv("MATHULA_TV_AI_PROVIDER", "anthropic").strip().lower(),
+        ai_provider=os.getenv("MATHULA_TV_AI_PROVIDER", "azure-foundry-claude").strip().lower(),
         claude_model=os.getenv("MATHULA_TV_CLAUDE_MODEL", "claude-opus-4-8"),
         claude_timeout_seconds=float(os.getenv("MATHULA_TV_CLAUDE_TIMEOUT_SECONDS", "900")),
         claude_max_retries=int(os.getenv("MATHULA_TV_CLAUDE_MAX_RETRIES", "3")),
-        claude_effort=os.getenv("MATHULA_TV_CLAUDE_EFFORT", "high"),
+        claude_effort=os.getenv("MATHULA_TV_CLAUDE_EFFORT", "high").strip().lower(),
+        translation_claude_effort=os.getenv(
+            "MATHULA_TV_TRANSLATION_CLAUDE_EFFORT", "low"
+        ).strip().lower(),
+        translation_claude_thinking=os.getenv(
+            "MATHULA_TV_TRANSLATION_CLAUDE_THINKING", "disabled"
+        ).strip().lower(),
+        translation_max_output_tokens=int(
+            os.getenv("MATHULA_TV_TRANSLATION_MAX_OUTPUT_TOKENS", "100000")
+        ),
+        seo_claude_effort=os.getenv(
+            "MATHULA_TV_SEO_CLAUDE_EFFORT", "medium"
+        ).strip().lower(),
+        seo_claude_thinking=os.getenv(
+            "MATHULA_TV_SEO_CLAUDE_THINKING", "adaptive"
+        ).strip().lower(),
+        seo_max_output_tokens=int(
+            os.getenv(
+                "MATHULA_TV_SEO_MAX_OUTPUT_TOKENS",
+                os.getenv("MATHULA_TV_SEO_CLAUDE_MAX_OUTPUT_TOKENS", "12000"),
+            )
+        ),
+        hook_claude_effort=os.getenv(
+            "MATHULA_TV_HOOK_CLAUDE_EFFORT", "low"
+        ).strip().lower(),
+        hook_claude_thinking=os.getenv(
+            "MATHULA_TV_HOOK_CLAUDE_THINKING", "disabled"
+        ).strip().lower(),
+        hook_max_output_tokens=int(
+            os.getenv(
+                "MATHULA_TV_HOOK_MAX_OUTPUT_TOKENS",
+                os.getenv("MATHULA_TV_HOOK_CLAUDE_MAX_OUTPUT_TOKENS", "12000"),
+            )
+        ),
+        editorial_claude_effort=os.getenv(
+            "MATHULA_TV_EDITORIAL_CLAUDE_EFFORT",
+            os.getenv("MATHULA_TV_SEO_CLAUDE_EFFORT", "high"),
+        ).strip().lower(),
+        editorial_claude_thinking=os.getenv(
+            "MATHULA_TV_EDITORIAL_CLAUDE_THINKING",
+            os.getenv("MATHULA_TV_SEO_CLAUDE_THINKING", "adaptive"),
+        ).strip().lower(),
+        editorial_max_output_tokens=int(
+            os.getenv(
+                "MATHULA_TV_EDITORIAL_MAX_OUTPUT_TOKENS",
+                os.getenv(
+                    "MATHULA_TV_EDITORIAL_CLAUDE_MAX_OUTPUT_TOKENS",
+                    "12000",
+                ),
+            )
+        ),
+        translation_batch_size=int(os.getenv("MATHULA_TV_TRANSLATION_BATCH_SIZE", "6")),
+        translation_context_units=int(os.getenv("MATHULA_TV_TRANSLATION_CONTEXT_UNITS", "2")),
+        translation_request_timeout_seconds=float(os.getenv("MATHULA_TV_TRANSLATION_REQUEST_TIMEOUT_SECONDS", "300")),
+        translation_batch_max_retries=int(os.getenv("MATHULA_TV_TRANSLATION_BATCH_MAX_RETRIES", "2")),
+        translation_max_provider_calls_per_session=int(
+            os.getenv("MATHULA_TV_TRANSLATION_MAX_PROVIDER_CALLS_PER_SESSION", "64")
+        ),
         azure_tts_voices=voices,
         azure_tts_default_voice=os.getenv("MATHULA_TV_AZURE_TTS_DEFAULT_VOICE", "zu-ZA-ThandoNeural"),
         azure_tts_sample_rate=int(os.getenv("MATHULA_TV_AZURE_TTS_SAMPLE_RATE", "24000")),

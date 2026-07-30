@@ -8,6 +8,8 @@ from mathula_tv.ai_provider import (
     AZURE_FOUNDRY_CLAUDE_PROVIDER,
     DEFAULT_CLAUDE_MODEL,
     FULL_CLIP_TRANSLATION_PROMPT_VERSION,
+    SEMANTIC_LANGUAGE_ANALYSIS_SCHEMA,
+    build_semantic_language_payload,
     AnthropicClaudeProvider,
     AnthropicConfig,
     StructuredAIRequest,
@@ -121,9 +123,12 @@ def test_azure_foundry_claude_uses_messages_endpoint_and_api_key_header():
     assert url == "https://example.services.ai.azure.com/anthropic/v1/messages"
     assert kwargs["headers"]["x-api-key"] == "foundry-secret"
     assert instance.provider == AZURE_FOUNDRY_CLAUDE_PROVIDER
-    assert kwargs["json"]["output_config"] == {"effort": "high"}
+    assert kwargs["json"]["output_config"] == {
+        "effort": "high",
+        "format": {"type": "json_schema", "schema": SIMPLE_SCHEMA},
+    }
     payload = json.loads(kwargs["json"]["messages"][0]["content"])
-    assert payload["required_output_schema"] == SIMPLE_SCHEMA
+    assert "required_output_schema" not in payload
 
 
 def test_request_construction_is_model_specific_and_uses_structured_adaptive_thinking():
@@ -267,3 +272,210 @@ def test_full_clip_payload_and_request_are_single_call_and_preserve_unit_order()
     assert posted["input"]["transcript"] == payload["transcript"]
     assert posted["input"]["dubbing_units"] == payload["dubbing_units"]
     assert "untrusted" in session.calls[0][1]["json"]["system"].lower()
+
+
+def test_english_code_switch_phrase_is_protected_verbatim():
+    payload = build_full_clip_payload(
+        transcript={"segments": [{"source_text": "The Big W West Side."}]},
+        dubbing_units={
+            "units": [
+                {
+                    "unit_id": "unit_0001",
+                    "source_text": "The Big W West Side.",
+                }
+            ]
+        },
+        pronunciation_dictionary={
+            "entries": [],
+            "job_overrides": [
+                {
+                    "kind": "english_code_switch",
+                    "display_text": "Big W",
+                    "spoken_text": "Big W",
+                    "tts_text": "Big double-you",
+                },
+                {
+                    "kind": "english_code_switch",
+                    "display_text": "West Side",
+                    "spoken_text": "West Side",
+                    "tts_text": "West Side",
+                },
+            ],
+        },
+    )
+    assert payload["protected"]["verbatim_phrases"] == ["Big W", "West Side"]
+
+    schema = {
+        "type": "object",
+        "required": ["units"],
+        "properties": {
+            "units": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "unit_id",
+                        "faithful_translation",
+                        "spoken_text",
+                        "protected_entities_found",
+                        "protected_entities_preserved",
+                    ],
+                    "properties": {
+                        "unit_id": {"type": "string"},
+                        "faithful_translation": {"type": "string"},
+                        "spoken_text": {"type": "string"},
+                        "protected_entities_found": {"type": "array"},
+                        "protected_entities_preserved": {"type": "array"},
+                    },
+                },
+            }
+        },
+    }
+    bad_output = {
+        "units": [
+            {
+                "unit_id": "unit_0001",
+                "faithful_translation": "Uhlangothi olusentshonalanga.",
+                "spoken_text": "Uhlangothi olusentshonalanga.",
+                "protected_entities_found": [],
+                "protected_entities_preserved": [],
+            }
+        ]
+    }
+    instance, _session = provider([Response(body=message(json.dumps(bad_output)))])
+    with pytest.raises(ClaudeInvalidStructuredOutput):
+        instance.translate_full_clip(payload, output_schema=schema)
+
+
+def test_semantic_analysis_locks_cross_unit_wordplay_and_translation_obeys_owner():
+    semantic_payload = build_semantic_language_payload(
+        transcript={"segments": [{"source_text": "The Big W West Side."}]},
+        dubbing_units={
+            "units": [
+                {"unit_id": "unit_0007", "source_text": "The Big"},
+                {"unit_id": "unit_0008", "source_text": "W West Side."},
+            ]
+        },
+    )
+    semantic_output = {
+        "schema_version": "semantic-language-analysis-v1",
+        "spans": [
+            {
+                "span_id": "span_0001",
+                "source_text": "Big W",
+                "source_unit_ids": ["unit_0007", "unit_0008"],
+                "output_unit_id": "unit_0007",
+                "category": "wordplay",
+                "policy": "spell_out",
+                "display_text": "Big W",
+                "tts_text": "Big double-you",
+                "rationale": "W links Big W, West Side and Woolworths",
+                "confidence": 0.96,
+                "human_review_required": False,
+            },
+            {
+                "span_id": "span_0002",
+                "source_text": "West Side",
+                "source_unit_ids": ["unit_0008"],
+                "output_unit_id": "unit_0008",
+                "category": "wordplay",
+                "policy": "preserve_verbatim",
+                "display_text": "West Side",
+                "tts_text": "West Side",
+                "rationale": "English wordplay anchor",
+                "confidence": 0.94,
+                "human_review_required": False,
+            },
+        ],
+    }
+    semantic_provider, _ = provider([Response(body=message(json.dumps(semantic_output)))])
+    analyzed = semantic_provider.analyze_semantic_language(semantic_payload)
+    assert analyzed.data["spans"][0]["source_unit_ids"] == ["unit_0007", "unit_0008"]
+
+    translation_payload = build_full_clip_payload(
+        transcript=semantic_payload["transcript"],
+        dubbing_units=semantic_payload["dubbing_units"],
+        semantic_annotations=semantic_output,
+    )
+    translated = {
+        "units": [
+            {
+                "unit_id": "unit_0007",
+                "faithful_translation": "Uhehwe yi-Big W.",
+                "spoken_text": "Uhehwe yi-Big W.",
+                "tts_text": "Uhehwe yi-Big double-you.",
+                "protected_entities_found": [],
+                "protected_entities_preserved": [],
+                "human_review_flags": [],
+                "semantic_span_ids_applied": ["span_0001"],
+            },
+            {
+                "unit_id": "unit_0008",
+                "faithful_translation": "West Side.",
+                "spoken_text": "West Side.",
+                "tts_text": "West Side.",
+                "protected_entities_found": [],
+                "protected_entities_preserved": [],
+                "human_review_flags": [],
+                "semantic_span_ids_applied": ["span_0002"],
+            },
+        ]
+    }
+    schema = {
+        "type": "object",
+        "required": ["units"],
+        "properties": {
+            "units": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "unit_id", "faithful_translation", "spoken_text", "tts_text",
+                        "protected_entities_found", "protected_entities_preserved",
+                        "human_review_flags", "semantic_span_ids_applied"
+                    ],
+                    "properties": {
+                        "unit_id": {"type": "string"},
+                        "faithful_translation": {"type": "string"},
+                        "spoken_text": {"type": "string"},
+                        "tts_text": {"type": "string"},
+                        "protected_entities_found": {"type": "array"},
+                        "protected_entities_preserved": {"type": "array"},
+                        "human_review_flags": {"type": "array"},
+                        "semantic_span_ids_applied": {"type": "array"},
+                    },
+                },
+            }
+        },
+    }
+    translation_provider, _ = provider([Response(body=message(json.dumps(translated)))])
+    result = translation_provider.translate_full_clip(translation_payload, output_schema=schema)
+    assert result.data["units"][0]["tts_text"].endswith("Big double-you.")
+
+
+def test_semantic_analysis_rejects_invented_span():
+    payload = build_semantic_language_payload(
+        transcript={"segments": [{"source_text": "Ordinary sentence."}]},
+        dubbing_units={"units": [{"unit_id": "unit_0001", "source_text": "Ordinary sentence."}]},
+    )
+    invented = {
+        "schema_version": "semantic-language-analysis-v1",
+        "spans": [
+            {
+                "span_id": "span_0001",
+                "source_text": "Big W",
+                "source_unit_ids": ["unit_0001"],
+                "output_unit_id": "unit_0001",
+                "category": "wordplay",
+                "policy": "preserve_verbatim",
+                "display_text": "Big W",
+                "tts_text": "Big W",
+                "rationale": "invented",
+                "confidence": 0.9,
+                "human_review_required": False,
+            }
+        ],
+    }
+    instance, _ = provider([Response(body=message(json.dumps(invented)))])
+    with pytest.raises(ClaudeInvalidStructuredOutput):
+        instance.analyze_semantic_language(payload, output_schema=SEMANTIC_LANGUAGE_ANALYSIS_SCHEMA)

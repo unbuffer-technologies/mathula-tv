@@ -4,8 +4,9 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from .ai_provider import create_production_ai_provider
 from .atomic_io import read_json
@@ -21,6 +22,7 @@ from .compatibility import (
 from .config import load_settings
 from .diarization import run_pyannote
 from .logging_utils import configure_logging, redact
+from .models import PRODUCTION_STATES, utcnow
 from .orchestrator import Orchestrator
 from .youtube_ingestion import (
     download_youtube_video,
@@ -30,11 +32,13 @@ from .youtube_ingestion import (
 from .production_pipeline import ProductionDubbingPipeline
 from .translation import AzureOpenAIClient
 from .tts_ssml import SSMLBounds
+from .viral_moments_cli import add_viral_moments_command, run_viral_moments_command
 
 
 LIVE_COMPATIBILITY_JOB_ID = "19ba6d69f1b84132ba4f20599101834a"
 EXTERNAL_COMMANDS = {
     "transcribe",
+    "resume-autocorrect-research",
     "translate",
     "repair-translation",
     "validate-azure-voices",
@@ -47,6 +51,20 @@ EXTERNAL_COMMANDS = {
     "reconcile-voice-conversion",
     "dub-azure",
     "edit-tiktok",
+}
+_POST_AUTOCORRECT_STAGES = {
+    "classification",
+    "context",
+    "entity_binding",
+    "translation",
+    "azure_tts",
+    "voice_conversion",
+    "compatibility",
+    "alignment",
+    "background",
+    "mix",
+    "render",
+    "review",
 }
 
 
@@ -65,12 +83,21 @@ def create_speech_backend(settings):
 
 
 def create_translation_backend(provider: str | None = None, model: str | None = None):
-    selected = (provider or os.getenv("MATHULA_TV_AI_PROVIDER") or "anthropic").strip().lower()
-    if selected in {"anthropic", "azure-foundry-claude"}:
+    selected = (
+        provider
+        or os.getenv("MATHULA_TV_AI_PROVIDER")
+        or "azure-foundry-claude"
+    ).strip().lower()
+    if selected == "anthropic":
+        raise ValueError(
+            "Mathula TV Claude calls must use Azure AI Foundry; "
+            "set --provider azure-foundry-claude"
+        )
+    if selected == "azure-foundry-claude":
         environment = dict(os.environ)
         environment["MATHULA_TV_AI_PROVIDER"] = selected
         if model:
-            environment["MATHULA_TV_FOUNDRY_CLAUDE_DEPLOYMENT" if selected == "azure-foundry-claude" else "MATHULA_TV_CLAUDE_MODEL"] = model
+            environment["MATHULA_TV_FOUNDRY_CLAUDE_DEPLOYMENT"] = model
         return create_production_ai_provider(environment)
     if selected in {"azure-openai-legacy", "azure-openai-test"}:
         return AzureOpenAIClient.from_environment()
@@ -149,6 +176,445 @@ def _add_job_command(commands, name: str) -> argparse.ArgumentParser:
     return command
 
 
+def _format_progress_time(seconds: Any) -> str:
+    try:
+        total = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError):
+        return "--:--"
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _print_direct_dub_progress(event: dict[str, Any]) -> None:
+    """Write human progress to stderr while preserving JSON-only stdout."""
+
+    elapsed = _format_progress_time(event.get("elapsed_seconds"))
+    stage = str(event.get("stage") or "working").replace("_", "-")
+    message = str(event.get("message") or "Working")
+    current = event.get("current")
+    total = event.get("total")
+    progress = ""
+    if isinstance(current, int) and isinstance(total, int) and total > 0:
+        percent = event.get("percent")
+        percent_text = (
+            f" {float(percent):.0f}%"
+            if isinstance(percent, (int, float))
+            else ""
+        )
+        progress = f" {current}/{total}{percent_text}"
+    eta = event.get("eta_seconds")
+    eta_text = (
+        f" | ETA {_format_progress_time(eta)}"
+        if isinstance(eta, (int, float)) and eta > 0
+        else ""
+    )
+    status = str(event.get("status") or "running")
+    status_text = " WARNING" if status == "warning" else ""
+    print(
+        f"[dub-azure {elapsed}] {stage}{progress}{status_text}: {message}{eta_text}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+class _PhaseDurationTracker:
+    """Measure independently observed phases against one wall-clock total."""
+
+    _TERMINAL_STATUSES = {
+        "completed",
+        "failed",
+        "review_required",
+        "reused",
+    }
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._started_at = clock()
+        self._active: dict[str, float] = {}
+        self._durations: dict[str, float] = {}
+        self._order: list[str] = []
+
+    def observe(self, event: Mapping[str, Any]) -> None:
+        stage = str(event.get("stage") or "").strip()
+        if not stage:
+            return
+        status = str(event.get("status") or "running").strip().lower()
+        now = self._clock()
+        if stage not in self._order:
+            self._order.append(stage)
+
+        if status == "started":
+            previous_start = self._active.get(stage)
+            if previous_start is not None:
+                self._durations[stage] = self._durations.get(stage, 0.0) + max(
+                    0.0,
+                    now - previous_start,
+                )
+            self._active[stage] = now
+        elif stage not in self._active and stage not in self._durations:
+            # Some reusable stages report only one completed event. Preserve
+            # them in the summary even though no measurable interval exists.
+            self._active[stage] = now
+
+        if status in self._TERMINAL_STATUSES:
+            stage_started_at = self._active.pop(stage, None)
+            if stage_started_at is not None:
+                self._durations[stage] = self._durations.get(stage, 0.0) + max(
+                    0.0,
+                    now - stage_started_at,
+                )
+
+    def finish(self) -> dict[str, Any]:
+        finished_at = self._clock()
+        for stage, stage_started_at in list(self._active.items()):
+            self._durations[stage] = self._durations.get(stage, 0.0) + max(
+                0.0,
+                finished_at - stage_started_at,
+            )
+        self._active.clear()
+        total_seconds = max(0.0, finished_at - self._started_at)
+        phases = [
+            {
+                "stage": stage,
+                "duration_seconds": self._durations.get(stage, 0.0),
+                "share_percent": (
+                    (self._durations.get(stage, 0.0) / total_seconds) * 100.0
+                    if total_seconds > 0
+                    else 0.0
+                ),
+            }
+            for stage in self._order
+        ]
+        return {
+            "total_seconds": total_seconds,
+            "phases": phases,
+        }
+
+
+def _print_direct_dub_phase_summary(summary: Mapping[str, Any]) -> None:
+    """Print a final timing report without contaminating JSON stdout."""
+
+    phases = summary.get("phases")
+    if not isinstance(phases, list):
+        phases = []
+    print("[dub-azure summary] Phase durations", file=sys.stderr)
+    for phase in phases:
+        if not isinstance(phase, Mapping):
+            continue
+        stage = str(phase.get("stage") or "working").replace("_", "-")
+        if stage == "publication-render":
+            stage = "publication-render (aggregate)"
+        duration = _format_progress_time(phase.get("duration_seconds"))
+        share = phase.get("share_percent")
+        share_text = (
+            f"{float(share):5.1f}%"
+            if isinstance(share, (int, float))
+            else "    --"
+        )
+        print(
+            f"  {stage:<34} {duration:>8}  {share_text}",
+            file=sys.stderr,
+        )
+    print(
+        f"  {'TOTAL WALL TIME':<34} "
+        f"{_format_progress_time(summary.get('total_seconds')):>8}  100.0%",
+        file=sys.stderr,
+    )
+    print(
+        "  Note: aggregate and nested phases overlap; TOTAL WALL TIME is not "
+        "the sum of phase rows.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _publication_ai_progress_payload(
+    event: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Convert content-free provider telemetry into operator progress."""
+
+    kind = str(event.get("event") or "")
+    status = "running"
+    if kind == "request_metrics":
+        request_bytes = int(event.get("request_body_bytes") or 0)
+        payload_bytes = int(event.get("payload_bytes") or 0)
+        schema_bytes = int(event.get("output_schema_bytes") or 0)
+        estimated_tokens = int(event.get("estimated_input_tokens") or 0)
+        message = (
+            f"Editorial AI request: {request_bytes / 1024:.1f} KiB JSON "
+            f"(~{estimated_tokens:,} input tokens estimated); "
+            f"payload={payload_bytes / 1024:.1f} KiB, "
+            f"schema={schema_bytes / 1024:.1f} KiB, "
+            f"max_output_tokens={event.get('max_output_tokens')}"
+        )
+    elif kind == "response_usage":
+        response_bytes = int(event.get("response_body_bytes") or 0)
+        message = (
+            "Editorial AI usage: "
+            f"input={int(event.get('input_tokens') or 0):,}, "
+            f"output={int(event.get('output_tokens') or 0):,}, "
+            f"thinking={int(event.get('thinking_tokens') or 0):,}, "
+            f"cache-read={int(event.get('cache_read_input_tokens') or 0):,}, "
+            f"cache-write={int(event.get('cache_creation_input_tokens') or 0):,}; "
+            f"response={response_bytes / 1024:.1f} KiB"
+        )
+        status = "completed"
+    elif kind == "request_attempt":
+        message = (
+            "Editorial AI request attempt "
+            f"{event.get('attempt')}/{event.get('max_retries')}"
+        )
+    elif kind == "http_response":
+        status_code = int(event.get("status_code") or 0)
+        message = f"Editorial AI returned HTTP {status_code}"
+        if not 200 <= status_code < 300:
+            status = "warning"
+    elif kind == "stream_opened":
+        message = "Editorial AI SSE stream opened"
+    elif kind == "stream_progress":
+        message = (
+            "Editorial AI response: "
+            f"{int(event.get('text_characters') or 0):,} characters, "
+            f"{int(event.get('output_tokens') or 0):,} output tokens"
+        )
+    elif kind == "stream_completed":
+        message = (
+            "Editorial AI SSE response completed: "
+            f"{int(event.get('text_characters') or 0):,} characters"
+        )
+        status = "completed"
+    elif kind == "retry_backoff":
+        message = (
+            "Editorial AI retrying after "
+            f"{event.get('delay_seconds')}s ({event.get('reason')})"
+        )
+        status = "warning"
+    else:
+        # Do not print every low-level SSE delta.
+        return None
+    return {
+        "stage": "publication_ai",
+        "status": status,
+        "message": message,
+        "provider_event": kind,
+        **{key: value for key, value in event.items() if key != "event"},
+    }
+
+
+def _print_translation_result(
+    *,
+    job_id: str,
+    result: dict[str, Any],
+    json_output: bool,
+) -> None:
+    """Print a concise operator result unless machine-readable JSON is requested."""
+
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    print(f"Translation complete for job {job_id}.")
+
+
+def _print_job_status(job: Any, *, json_output: bool) -> None:
+    """Print only the current state unless the complete manifest is requested."""
+
+    if json_output:
+        print(json.dumps(redact(job.to_dict()), ensure_ascii=False, indent=2))
+        return
+    print(str(job.state))
+
+
+
+def _format_media_duration(seconds: Any) -> str:
+    """Format media duration as H:MM:SS or MM:SS for operator output."""
+
+    try:
+        total = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError):
+        return "unknown"
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _friendly_codec(value: Any) -> str:
+    codec = str(value or "").strip().lower()
+    labels = {
+        "h264": "H.264",
+        "avc": "H.264",
+        "h265": "H.265",
+        "hevc": "H.265",
+        "aac": "AAC",
+        "mp3": "MP3",
+        "opus": "Opus",
+    }
+    return labels.get(codec, codec.upper()) if codec else "unknown"
+
+
+def _friendly_frame_rate(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "unknown fps"
+    if "/" in raw:
+        numerator, denominator = raw.split("/", 1)
+        try:
+            rate = float(numerator) / float(denominator)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return f"{raw} fps"
+        if rate.is_integer():
+            return f"{int(rate)} fps"
+        return f"{rate:.3f}".rstrip("0").rstrip(".") + " fps"
+    return f"{raw} fps"
+
+
+def _friendly_sample_rate(value: Any) -> str:
+    try:
+        rate = int(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if rate >= 1000 and rate % 1000 == 0:
+        return f"{rate // 1000} kHz"
+    if rate >= 1000:
+        return f"{rate / 1000:.1f} kHz"
+    return f"{rate} Hz"
+
+
+def _print_dub_azure_result(
+    *,
+    job_id: str,
+    result: dict[str, Any],
+    json_output: bool,
+) -> None:
+    """Print the useful publication result instead of dumping the full report."""
+
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    nested_publication = result.get("tiktok_edit")
+    publication = (
+        nested_publication
+        if isinstance(nested_publication, dict)
+        and any(
+            key in nested_publication
+            for key in ("output", "title_panel", "translation", "idempotent_reuse")
+        )
+        else result
+    )
+    output = (
+        publication.get("output")
+        if isinstance(publication.get("output"), dict)
+        else {}
+    )
+    title_panel = (
+        publication.get("title_panel")
+        if isinstance(publication.get("title_panel"), dict)
+        else {}
+    )
+    translation = (
+        publication.get("translation")
+        if isinstance(publication.get("translation"), dict)
+        else {}
+    )
+
+    if not output:
+        outputs = result.get("outputs") if isinstance(result.get("outputs"), dict) else {}
+        fallback_path = (
+            outputs.get("canonical_final_video")
+            or outputs.get("final_video")
+            or outputs.get("canonical_dubbed_master")
+            or outputs.get("dubbed_master")
+        )
+        if fallback_path:
+            output = {"path": fallback_path}
+
+    video_path = str(output.get("path") or "not reported")
+    duration = _format_media_duration(output.get("duration_seconds"))
+    if duration == "unknown":
+        duration = "not reported"
+    video_codec = _friendly_codec(output.get("video_codec"))
+    profile = str(output.get("video_profile") or "").strip()
+    frame_rate = _friendly_frame_rate(output.get("frame_rate"))
+    audio_codec = _friendly_codec(output.get("audio_codec"))
+    sample_rate = _friendly_sample_rate(output.get("audio_sample_rate"))
+    title = str(title_panel.get("text") or "none").strip()
+    if translation.get("immutable") is True:
+        translation_state = "unchanged"
+    elif translation.get("immutable") is False:
+        translation_state = "changed"
+    else:
+        translation_state = "not reported"
+    reuse_state = "reused" if publication.get("idempotent_reuse") else "created"
+
+    video_description = video_codec
+    if profile:
+        video_description += f" {profile}"
+
+    print("Dubbing complete.")
+    print(f"Job: {job_id}")
+    print(f"Video: {video_path}")
+    print(f"Duration: {duration}")
+    media_parts: list[str] = []
+    if video_codec != "unknown":
+        media_parts.append(video_description)
+    if frame_rate != "unknown fps":
+        media_parts.append(frame_rate)
+    if audio_codec != "unknown":
+        audio_description = audio_codec
+        if sample_rate != "unknown":
+            audio_description += f" {sample_rate}"
+        media_parts.append(audio_description)
+    print(f"Media: {' · '.join(media_parts) if media_parts else 'not reported'}")
+    print(f"Title panel: {title}")
+    if publication.get("hook_edit_enabled") is False:
+        print("Hook edit: disabled (hook card retained)")
+    print(f"Translation: {translation_state}")
+    print(f"Publication render: {reuse_state}")
+
+
+def _translation_progress_callback():
+    """Return a stderr progress callback with a stable per-command clock."""
+
+    started = time.monotonic()
+
+    def report(event: dict[str, Any]) -> None:
+        payload = dict(event)
+        payload.setdefault("elapsed_seconds", time.monotonic() - started)
+        elapsed = _format_progress_time(payload.get("elapsed_seconds"))
+        stage = str(payload.get("stage") or "working").replace("_", "-")
+        message = str(payload.get("message") or "Working")
+        current = payload.get("current")
+        total = payload.get("total")
+        progress_text = ""
+        if isinstance(current, int) and isinstance(total, int) and total > 0:
+            percent = payload.get("percent")
+            percent_text = (
+                f" {float(percent):.0f}%"
+                if isinstance(percent, (int, float))
+                else ""
+            )
+            progress_text = f" {current}/{total}{percent_text}"
+        eta = payload.get("eta_seconds")
+        eta_text = (
+            f" | ETA {_format_progress_time(eta)}"
+            if isinstance(eta, (int, float)) and eta > 0
+            else ""
+        )
+        warning = " WARNING" if payload.get("status") == "warning" else ""
+        print(
+            f"[translate {elapsed}] {stage}{progress_text}{warning}: {message}{eta_text}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    return report
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="mathula-tv")
     root.add_argument("--verbose", action="store_true")
@@ -158,8 +624,17 @@ def parser() -> argparse.ArgumentParser:
     submit.add_argument("--target-language", default="zu-ZA")
     submit.add_argument("--force", action="store_true")
 
-    for name in ("process", "transcribe", "diarize", "status", "retry", "validate", "inspect"):
+    for name in ("process", "transcribe", "diarize", "retry", "validate", "inspect"):
         _add_job_command(commands, name)
+    _add_job_command(commands, "resume-autocorrect-research")
+    status = _add_job_command(commands, "status")
+    status.add_argument(
+        "--json",
+        "--json-output",
+        dest="json_output",
+        action="store_true",
+        help="Print the complete redacted job manifest instead of only the current state",
+    )
     migration = _add_job_command(commands, "migrate-dubbing-state")
     migration.add_argument("--allow-legacy-review-reset", action="store_true")
     _add_job_command(commands, "prepare-source-derivatives")
@@ -167,6 +642,27 @@ def parser() -> argparse.ArgumentParser:
     translate = _add_job_command(commands, "translate")
     translate.add_argument("--provider", default=None)
     translate.add_argument("--model", default=None)
+    translate.add_argument("--batch-size", type=int, default=None)
+    translate.add_argument("--context-units", type=int, default=None)
+    translate.add_argument("--request-timeout-seconds", type=float, default=None)
+    translate.add_argument("--batch-max-retries", type=int, default=None)
+    translate.add_argument("--max-provider-calls", type=int, default=None)
+    translate.add_argument("--restart-batches", action="store_true")
+    translate.add_argument("--no-progress", action="store_true")
+    translate.add_argument(
+        "--json-output",
+        action="store_true",
+        help="Print the complete translation JSON to stdout instead of a concise completion message",
+    )
+    recover_translation = _add_job_command(commands, "recover-translation-response")
+    recover_translation.add_argument(
+        "--run-dir",
+        type=Path,
+        help=(
+            "Specific failed translation/cloud_runs/<timestamp> directory. "
+            "Defaults to the latest failed run for the job."
+        ),
+    )
     repair_translation = _add_job_command(commands, "repair-translation")
     repair_translation.add_argument("--provider", default=None)
     repair_translation.add_argument("--model", default=None)
@@ -205,10 +701,86 @@ def parser() -> argparse.ArgumentParser:
     render.add_argument("--burn-subtitles", action="store_true")
     _add_job_command(commands, "review")
     
+    export_translation = _add_job_command(commands, "export-translation-package")
+    export_translation.add_argument("--target-locale", choices=("zu-ZA", "nso-ZA"))
+    export_translation.add_argument("--output-dir", type=Path)
+
+    import_translation = _add_job_command(commands, "import-translation")
+    import_translation.add_argument("translated_json", type=Path)
+    import_translation.add_argument("--request", type=Path)
+    import_translation.add_argument("--reviewed-by", required=True)
+
     # Direct Azure dubbing from the already-approved translation artifact.
     dub_azure = _add_job_command(commands, "dub-azure")
     dub_azure.add_argument("--min-confidence", type=float, default=0.70)
     dub_azure.add_argument("--voice-map", type=Path)
+    dub_azure.add_argument("--timeline-panel-host", default="127.0.0.1")
+    dub_azure.add_argument("--timeline-panel-port", type=int, default=8765)
+    dub_azure.add_argument(
+        "--refresh-voice-analysis",
+        action="store_true",
+        help=(
+            "Rebuild speaker reels and rerun SpeechBrain/voice-family analysis. "
+            "Ordinary --force retries reuse the persisted job-local voice resolution."
+        ),
+    )
+    dub_azure.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Show stage, block, Azure candidate, timeline balance, and render progress "
+            "on stderr. Use --no-progress for quiet automation logs."
+        ),
+    )
+    dub_azure.add_argument(
+        "--hook-edit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Cut the publication video to the AI-selected opening anchor. "
+            "Use --no-hook-edit to preserve the full dubbed video while still "
+            "generating and rendering the hook text on the footer card."
+        ),
+    )
+    dub_azure.add_argument(
+        "--json",
+        "--json-output",
+        dest="json_output",
+        action="store_true",
+        help="Print the complete dubbing and publication report as JSON",
+    )
+
+
+    collision_panel = commands.add_parser("timeline-collision-panel")
+    collision_panel.add_argument("legacy_job_id", nargs="?")
+    collision_panel.add_argument("--job-id")
+    collision_panel.add_argument("--force", action="store_true")
+    collision_panel.add_argument("--dry-run", action="store_true")
+    collision_panel.add_argument("--live-operation", action="store_true")
+    collision_panel.add_argument("--serve", action="store_true")
+    collision_panel.add_argument("--host", default="127.0.0.1")
+    collision_panel.add_argument("--port", type=int, default=8765)
+    collision_panel.add_argument("--resolve", metavar="COLLISION_ID")
+    collision_panel.add_argument(
+        "--strategy",
+        choices=("allow_overlap", "manual_text", "select_variants"),
+    )
+    collision_panel.add_argument("--reviewed-by")
+    collision_panel.add_argument("--overlap-before-ms", type=int, default=0)
+    collision_panel.add_argument("--overlap-after-ms", type=int, default=0)
+    collision_panel.add_argument("--text")
+    collision_panel.add_argument("--text-file", type=Path)
+    collision_panel.add_argument(
+        "--previous-variant", choices=("natural", "concise", "compact")
+    )
+    collision_panel.add_argument(
+        "--current-variant", choices=("natural", "concise", "compact")
+    )
+    collision_panel.add_argument(
+        "--following-variant", choices=("natural", "concise", "compact")
+    )
+    collision_panel.add_argument("--clear", metavar="COLLISION_ID")
 
     enroll_speaker = _add_job_command(commands, "enroll-speaker")
     enroll_speaker.add_argument("--name", required=True)
@@ -251,6 +823,7 @@ def parser() -> argparse.ArgumentParser:
     
     publish_worker = commands.add_parser("publish-colab-package")
     publish_worker.add_argument("--live-operation", action="store_true")
+    add_viral_moments_command(commands)
     return root
 
 
@@ -276,7 +849,15 @@ def _require_operation_authorization(args, settings) -> None:
 def _dry_run(args, job) -> dict[str, Any] | None:
     if not getattr(args, "dry_run", False):
         return None
-    if args.command in {"inspect", "status", "validate", "migrate-dubbing-state"}:
+    if args.command in {
+        "inspect",
+        "status",
+        "validate",
+        "migrate-dubbing-state",
+        "export-translation-package",
+        "import-translation",
+        "recover-translation-response",
+    }:
         return None
     return {
         "dry_run": True,
@@ -287,11 +868,41 @@ def _dry_run(args, job) -> dict[str, Any] | None:
     }
 
 
+def _reset_for_autocorrect_research(job: Any) -> str:
+    """Return a job to analysis without repeating upload or transcription."""
+
+    previous_state = str(job.state)
+    job.state = "analysis_running"
+    job.completed_stages = [
+        stage
+        for stage in job.completed_stages
+        if stage not in _POST_AUTOCORRECT_STAGES
+    ]
+    job.review_readiness = "autocorrection_research_rerun"
+    job.last_error = None
+    job.attempt_history.append(
+        {
+            "stage": "autocorrect_name_research_rerun",
+            "status": "started",
+            "from_state": previous_state,
+            "to_state": "analysis_running",
+            "started_at": utcnow(),
+        }
+    )
+    return previous_state
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     settings = load_settings()
+    if args.command == "viral-clips":
+        print(json.dumps(run_viral_moments_command(args, settings), ensure_ascii=False, indent=2))
+        return 0
+
     configure_logging(settings.work_dir / "logs/mathula-tv.jsonl", args.verbose)
     app = Orchestrator(settings)
+    phase_timing: _PhaseDurationTracker | None = None
+    phase_timing_reported = False
     try:
         if args.command == "submit":
             if is_youtube_url(args.video):
@@ -366,6 +977,68 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({key: value for key, value in result.items() if key != "sha256"}, indent=2))
             return 0
 
+        if args.command == "timeline-collision-panel":
+            from .timeline_collision_panel import (
+                clear_timeline_collision_resolution,
+                save_timeline_collision_resolution,
+                serve_universal_timeline_collision_panel,
+                timeline_collision_job_paths,
+                universal_timeline_collision_summary,
+            )
+
+            target_job_id = args.job_id or args.legacy_job_id
+            if args.clear or args.resolve:
+                if not target_job_id:
+                    raise ValueError(
+                        "--job-id is required only for terminal resolution or clear actions"
+                    )
+                paths = timeline_collision_job_paths(app.jobs.root, target_job_id)
+                if not paths["review"].is_file():
+                    raise ValueError(
+                        f"No timeline collision review exists for job {target_job_id}"
+                    )
+                if args.clear:
+                    clear_timeline_collision_resolution(
+                        resolutions_path=paths["resolutions"],
+                        review_path=paths["review"],
+                        panel_path=paths["panel"],
+                        collision_id=args.clear,
+                    )
+                if args.resolve:
+                    if not args.strategy:
+                        raise ValueError("--strategy is required with --resolve")
+                    text_value = args.text
+                    if args.text_file:
+                        text_value = args.text_file.read_text(encoding="utf-8")
+                    save_timeline_collision_resolution(
+                        resolutions_path=paths["resolutions"],
+                        review_path=paths["review"],
+                        panel_path=paths["panel"],
+                        job_id=target_job_id,
+                        collision_id=args.resolve,
+                        strategy=args.strategy,
+                        reviewed_by=args.reviewed_by or "",
+                        overlap_before_ms=args.overlap_before_ms,
+                        overlap_after_ms=args.overlap_after_ms,
+                        manual_text=text_value,
+                        previous_variant_id=args.previous_variant,
+                        current_variant_id=args.current_variant,
+                        following_variant_id=args.following_variant,
+                    )
+            if args.serve:
+                serve_universal_timeline_collision_panel(
+                    jobs_root=app.jobs.root,
+                    host=args.host,
+                    port=args.port,
+                )
+            else:
+                print(universal_timeline_collision_summary(app.jobs.root))
+                print(
+                    "Serve the universal panel with: "
+                    "python -m mathula_tv.cli timeline-collision-panel --serve"
+                )
+            return 0
+
         job = app.jobs.load(args.job_id)
         _require_operation_authorization(args, settings)
         dry = _dry_run(args, job)
@@ -376,12 +1049,21 @@ def main(argv: list[str] | None = None) -> int:
         # Preserve the explicitly selectable Azure OpenAI legacy/test adapter.
         # Normal Settings always has ai_provider=anthropic and uses production below.
         if args.command == "translate" and not hasattr(settings, "ai_provider"):
-            print(json.dumps(app.translate_and_package(job, create_translation_backend(), force=args.force), ensure_ascii=False))
+            result = app.translate_and_package(
+                job,
+                create_translation_backend(),
+                force=args.force,
+            )
+            _print_translation_result(
+                job_id=job.job_id,
+                result=result,
+                json_output=args.json_output,
+            )
             return 0
         production = ProductionDubbingPipeline(settings)
 
         if args.command == "status":
-            print(json.dumps(redact(job.to_dict()), indent=2))
+            _print_job_status(job, json_output=args.json_output)
         elif args.command == "inspect":
             print(json.dumps(redact(production.inspect(job)), indent=2))
         elif args.command == "migrate-dubbing-state":
@@ -404,14 +1086,56 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "translate":
             provider_name = args.provider or settings.ai_provider
             if provider_name in {"azure-openai-legacy", "azure-openai-test"}:
-                print(json.dumps(app.translate_and_package(job, create_translation_backend(provider_name, args.model), force=args.force), ensure_ascii=False))
+                result = app.translate_and_package(
+                    job,
+                    create_translation_backend(provider_name, args.model),
+                    force=args.force,
+                )
             else:
-                provider = create_translation_backend(provider_name, args.model or settings.claude_model)
-                print(json.dumps(production.translate(job, provider, force=args.force), ensure_ascii=False, indent=2))
+                provider = create_translation_backend(
+                    provider_name,
+                    args.model or settings.claude_model,
+                )
+                result = production.translate(
+                    job,
+                    provider,
+                    force=args.force,
+                    batch_size=args.batch_size,
+                    context_units=args.context_units,
+                    request_timeout_seconds=args.request_timeout_seconds,
+                    batch_max_retries=args.batch_max_retries,
+                    max_provider_calls=args.max_provider_calls,
+                    restart_batches=args.restart_batches,
+                    progress=(
+                        None if args.no_progress else _translation_progress_callback()
+                    ),
+                )
+            _print_translation_result(
+                job_id=job.job_id,
+                result=result,
+                json_output=args.json_output,
+            )
+        elif args.command == "recover-translation-response":
+            if not args.dry_run and not args.live_operation:
+                raise ValueError(
+                    "recover-translation-response installs a preserved cloud response "
+                    "and requires --live-operation (or use --dry-run to validate only)"
+                )
+            print(
+                json.dumps(
+                    production.recover_translation_response(
+                        job,
+                        run_dir=(args.run_dir.resolve() if args.run_dir else None),
+                        dry_run=args.dry_run,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
         elif args.command == "repair-translation":
             provider_name = args.provider or settings.ai_provider
-            if provider_name not in {"anthropic", "azure-foundry-claude"}:
-                raise ValueError("Timing repair requires the configured Claude production provider")
+            if provider_name != "azure-foundry-claude":
+                raise ValueError("Timing repair requires Azure AI Foundry Claude")
             provider = create_translation_backend(provider_name, args.model or settings.claude_model)
             print(
                 json.dumps(
@@ -550,6 +1274,133 @@ def main(argv: list[str] | None = None) -> int:
                 job, stage, plan["units"], audio_root, baseline_wer=baseline_wer, with_phrase_hints=args.with_phrase_hints
             )
             print(json.dumps(result, indent=2))
+        elif args.command == "export-translation-package":
+            from .multivariant_translation import export_translation_package
+
+            target_locale = args.target_locale or job.target_language
+            output_dir = args.output_dir or (
+                app.jobs.job_dir(job.job_id)
+                / "translation"
+                / "prompt_package"
+            )
+            result = export_translation_package(
+                job_root=app.jobs.job_dir(job.job_id),
+                job_id=job.job_id,
+                target_locale=target_locale,
+                output_dir=output_dir,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.command == "import-translation":
+            from .multivariant_translation import (
+                install_manual_translation,
+                load_request_for_response,
+            )
+
+            if not args.dry_run and not args.live_operation:
+                raise ValueError(
+                    "import-translation changes the authoritative job translation and "
+                    "requires --live-operation (or use --dry-run to validate only)"
+                )
+            response_path = args.translated_json.resolve()
+            request_path = load_request_for_response(
+                response_path,
+                explicit_request_path=(args.request.resolve() if args.request else None),
+            )
+            result = install_manual_translation(
+                job_root=app.jobs.job_dir(job.job_id),
+                job_id=job.job_id,
+                target_locale=job.target_language,
+                response_path=response_path,
+                reviewed_by=args.reviewed_by,
+                request_path=request_path,
+                dry_run=args.dry_run,
+            )
+            if not args.dry_run:
+                job.providers["translation"] = "external_manual_override"
+                job.providers["translation_model"] = "manual_multivariant_import"
+                job.providers["translation_prompt_version"] = (
+                    result.get("validation", {}).get("prompt_version")
+                    or "mathula-multivariant-translation-prompt-v2-batched"
+                )
+                job.media["manual_translation_override"] = result[
+                    "translation_target"
+                ]
+                job.media["manual_translation_override_history"] = result[
+                    "history_directory"
+                ]
+                job.media["translation_multivariant_sha256"] = result[
+                    "installed_translation_sha256"
+                ]
+                job.media["translation_sha256"] = result[
+                    "installed_dubbing_sha256"
+                ]
+                previous_state = job.state
+                if job.state in {"analysis_ready", "translation_running"}:
+                    if job.state == "analysis_ready":
+                        job.transition("translation_running")
+                    job.transition("translation_ready")
+                    job.transition("azure_tts_queued")
+                elif job.state == "translation_ready":
+                    job.transition("azure_tts_queued")
+                elif job.state in set(PRODUCTION_STATES) - {
+                    "created",
+                    "audio_prepared",
+                    "uploaded",
+                    "analysis_queued",
+                    "analysis_running",
+                }:
+                    # A reviewed override invalidates every generated artifact
+                    # downstream of translation. The files remain available for
+                    # audit/cache comparison, but the manifest may no longer
+                    # claim that the old dub is review-ready.
+                    job.state = "azure_tts_queued"
+                    job.updated_at = utcnow()
+                else:
+                    raise ValueError(
+                        f"Cannot install a production translation override while job "
+                        f"is in state {job.state}"
+                    )
+                downstream_stages = {
+                    "azure_tts",
+                    "voice_conversion",
+                    "compatibility",
+                    "alignment",
+                    "background",
+                    "mix",
+                    "render",
+                    "review",
+                }
+                job.completed_stages = [
+                    stage
+                    for stage in job.completed_stages
+                    if stage not in downstream_stages
+                ]
+                if "translation" not in job.completed_stages:
+                    job.completed_stages.append("translation")
+                job.compatibility_gate = {"state": "pending", "calibrated_thresholds": False}
+                job.review_readiness = "compatibility_pending"
+                job.last_error = None
+                job.attempt_history.append(
+                    {
+                        "stage": "manual_multivariant_translation_override",
+                        "status": "completed",
+                        "from_state": previous_state,
+                        "to_state": "azure_tts_queued",
+                        "reviewed_by": args.reviewed_by,
+                        "translation_sha256": result["installed_translation_sha256"],
+                        "completed_at": utcnow(),
+                    }
+                )
+                job.human_review_flags = list(
+                    dict.fromkeys(
+                        [
+                            *job.human_review_flags,
+                            "manual_multivariant_translation_requires_human_review",
+                        ]
+                    )
+                )
+                app.jobs.save(job)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         elif args.command == "dub-azure":
             from .direct_azure_dub import (
                 DirectAzureDubRenderer,
@@ -557,34 +1408,136 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             azure_tts_backend = create_tts_backend(settings)
-            renderer = DirectAzureDubRenderer(settings, azure_tts_backend)
+            renderer = DirectAzureDubRenderer(
+                settings,
+                azure_tts_backend,
+            )
+            progress_elapsed = {"seconds": 0.0}
+            phase_timing = _PhaseDurationTracker()
+
+            def progress_callback(event: dict[str, Any]) -> None:
+                if not args.progress:
+                    return
+                payload = dict(event)
+                phase_timing.observe(payload)
+                elapsed = payload.get("elapsed_seconds")
+                if isinstance(elapsed, (int, float)):
+                    progress_elapsed["seconds"] = float(elapsed)
+                else:
+                    payload["elapsed_seconds"] = progress_elapsed["seconds"]
+                _print_direct_dub_progress(payload)
+
             result = renderer.render(
                 job,
                 voice_map_path=args.voice_map,
                 options=DirectDubOptions(
                     max_azure_rate_percent=min(
-                        25,
+                        10,
                         azure_tts_backend.ssml_bounds.rate_max_percent,
                     ),
                     min_voice_family_confidence=args.min_confidence,
                 ),
                 force=args.force,
+                refresh_voice_analysis=args.refresh_voice_analysis,
+                progress_callback=(progress_callback if args.progress else None),
             )
             from .tiktok_editor import edit_tiktok_job
 
-            result = {
-                **result,
-                "tiktok_edit": edit_tiktok_job(
-                    work_dir=settings.work_dir,
-                    job=job,
-                    provider=create_production_ai_provider(),
-                    # Reuse by master/translation checksum. A forced dub does not
-                    # justify paying for the same AI hook or re-encoding it again.
-                    force=False,
+            publication_message = (
+                "Rendering or reusing the hook-panel publication video"
+                if args.hook_edit
+                else (
+                    "Rendering or reusing the full-length publication video "
+                    "with the hook card and no opening cut"
+                )
+            )
+            if args.progress:
+                progress_callback(
+                    {
+                        "stage": "publication_render",
+                        "status": "started",
+                        "message": publication_message,
+                    }
+                )
+            publication_elapsed_base = progress_elapsed["seconds"]
+            publication_started_at = time.monotonic()
+
+            def publication_progress(
+                event: dict[str, Any],
+            ) -> None:
+                payload = dict(event)
+                stage_elapsed = payload.get("stage_elapsed_seconds")
+                wall_elapsed = max(
+                    0.0,
+                    time.monotonic() - publication_started_at,
+                )
+                reported_elapsed = (
+                    max(wall_elapsed, float(stage_elapsed))
+                    if isinstance(stage_elapsed, (int, float))
+                    else wall_elapsed
+                )
+                payload["elapsed_seconds"] = (
+                    publication_elapsed_base + reported_elapsed
+                )
+                progress_callback(payload)
+
+            publication_provider = create_production_ai_provider()
+            with_request_options = getattr(
+                publication_provider,
+                "with_request_options",
+                None,
+            )
+            if args.progress and callable(with_request_options):
+                def publication_provider_event(
+                    event: dict[str, Any],
+                ) -> None:
+                    payload = _publication_ai_progress_payload(event)
+                    if payload is not None:
+                        publication_progress(payload)
+
+                publication_provider = with_request_options(
+                    event_callback=publication_provider_event,
+                )
+            tiktok_edit = edit_tiktok_job(
+                work_dir=settings.work_dir,
+                job=job,
+                provider=publication_provider,
+                # Reuse by master/translation checksum. A forced dub does not
+                # justify paying for the same AI hook or re-encoding it again.
+                force=False,
+                apply_opening_cut=args.hook_edit,
+                progress_callback=(
+                    publication_progress if args.progress else None
                 ),
-            }
+            )
+            if args.progress:
+                progress_callback(
+                    {
+                        "stage": "publication_render",
+                        "status": "completed",
+                        "message": (
+                            "Hook-panel publication video is ready"
+                            if args.hook_edit
+                            else "Full-length publication video with hook card is ready"
+                        ),
+                    }
+                )
             app.jobs.save(job)
-            print(json.dumps(result, indent=2))
+            # The hook-panel publication pass updates report.json. Reload it so
+            # the CLI's final_video always points to the panel-bearing output,
+            # never the clean dubbed master.
+            final_report = read_json(
+                settings.work_dir / "jobs" / job.job_id / "direct_dub" / "report.json"
+            )
+            result = {**final_report, "tiktok_edit": tiktok_edit}
+            if args.progress:
+                _print_direct_dub_phase_summary(phase_timing.finish())
+                phase_timing_reported = True
+            _print_dub_azure_result(
+                job_id=job.job_id,
+                result=result,
+                json_output=args.json_output,
+            )
         elif args.command == "enroll-speaker":
             from .known_speakers import enrol_known_speaker
             from .media import prepare_source_derivatives
@@ -625,6 +1578,43 @@ def main(argv: list[str] | None = None) -> int:
             )
             app.jobs.save(job)
             print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.command == "resume-autocorrect-research":
+            job_root = app.jobs.job_dir(job.job_id)
+            azure_diarization = (
+                job_root / "analysis" / "azure_diarization.json"
+            )
+            research_artifact = (
+                job_root / "analysis" / "autocorrection_name_research.json"
+            )
+            if not azure_diarization.is_file():
+                raise ValueError(
+                    "Cannot resume autocorrect research without "
+                    f"{azure_diarization}"
+                )
+            if not research_artifact.is_file():
+                raise ValueError(
+                    "No previous autocorrect research artifact exists for this job"
+                )
+            artifact = read_json(research_artifact)
+            if artifact.get("status") in {
+                "completed",
+                "no_name_candidates",
+                "no_research_candidates",
+            }:
+                raise ValueError(
+                    "Autocorrect research is already complete; this command "
+                    "resumes only failed or incomplete research"
+                )
+            previous_state = _reset_for_autocorrect_research(job)
+            app.jobs.save(job)
+            result = app.process(job)
+            print(
+                result
+                or (
+                    "Autocorrect research resumed from "
+                    f"{previous_state}; analysis rebuilt"
+                )
+            )
         elif args.command == "process":
             result = app.process(job)
             if result is not None:
@@ -725,6 +1715,39 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"Unsupported command: {args.command}")
         return 0
     except Exception as exc:
+        if exc.__class__.__name__ == "TimelineCollisionReviewRequired" and hasattr(
+            exc, "review"
+        ):
+            from .timeline_collision_panel import (
+                wait_for_timeline_collision_resolutions,
+            )
+
+            cycle_count = int(
+                getattr(main, "_timeline_collision_review_cycles", 0)
+            )
+            if cycle_count >= 20:
+                raise RuntimeError(
+                    "More than 20 timeline collision review cycles were requested"
+                ) from exc
+            setattr(main, "_timeline_collision_review_cycles", cycle_count + 1)
+            try:
+                wait_for_timeline_collision_resolutions(
+                    review=exc.review,
+                    jobs_root=app.jobs.root,
+                    host=getattr(args, "timeline_panel_host", "127.0.0.1"),
+                    port=int(getattr(args, "timeline_panel_port", 8765)),
+                )
+                # Re-enter the same command after the matching decision is saved.
+                # The direct renderer reuses its Azure and finalized-block caches.
+                return main()
+            finally:
+                setattr(main, "_timeline_collision_review_cycles", cycle_count)
+        if (
+            phase_timing is not None
+            and getattr(args, "progress", False)
+            and not phase_timing_reported
+        ):
+            _print_direct_dub_phase_summary(phase_timing.finish())
         print(f"error: {redact(str(exc))}", file=sys.stderr)
         return 1
 
