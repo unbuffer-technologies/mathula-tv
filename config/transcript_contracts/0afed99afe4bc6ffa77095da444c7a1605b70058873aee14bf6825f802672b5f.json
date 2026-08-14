@@ -1,0 +1,85 @@
+{
+  "schema_version": "transcript-contract-v1",
+  "name": "Mighty Jamie Woolworths / Madlanga proof clip",
+  "raw_transcript_sha256": "0afed99afe4bc6ffa77095da444c7a1605b70058873aee14bf6825f802672b5f",
+  "enforce_corrections": false,
+  "correction_authority": "analysis/transcript_en.json autocorrect.overlays (rendered from PostgreSQL)",
+  "protected_spans": [
+    {
+      "span_id": "the_dissection_title",
+      "start_ms": 19680,
+      "end_ms": 20480,
+      "source_expected": "The Dissection",
+      "display_expected": "The Dissection",
+      "tts_expected": "The Dissection"
+    },
+    {
+      "span_id": "big_w_first",
+      "start_ms": 45040,
+      "end_ms": 46320,
+      "source_expected": "Big W",
+      "display_expected": "Big W",
+      "tts_expected": "Big double-you"
+    },
+    {
+      "span_id": "big_w_west_side",
+      "start_ms": 46560,
+      "end_ms": 48800,
+      "source_expected": "The Big W West Side",
+      "display_expected": "The Big W West Side",
+      "tts_expected": "The Big double-you West Side"
+    },
+    {
+      "span_id": "woolworths_side",
+      "start_ms": 48960,
+      "end_ms": 50240,
+      "source_expected": "Woolworths side",
+      "display_expected": "Woolworths side",
+      "tts_expected": "Woolworths side"
+    },
+    {
+      "span_id": "w_bag",
+      "start_ms": 62160,
+      "end_ms": 63160,
+      "source_expected": "W bag",
+      "display_expected": "W bag",
+      "tts_expected": "double-you bag"
+    },
+    {
+      "span_id": "suleiman_carrim_name_first",
+      "start_ms": 66480,
+      "end_ms": 69200,
+      "source_expected": "Suleiman heart attack Carrim",
+      "display_expected": "Suleiman heart attack Carrim",
+      "tts_expected": "Suleiman heart attack Carrim"
+    },
+    {
+      "span_id": "woolies_slogan",
+      "start_ms": 141680,
+      "end_ms": 144280,
+      "source_expected": "Woolies It's in the water",
+      "display_expected": "Woolies It's in the water",
+      "tts_expected": "Woolies It's in the water"
+    },
+    {
+      "span_id": "suleiman_carrim_name_final",
+      "start_ms": 154160,
+      "end_ms": 155680,
+      "source_expected": "Suleiman heart attack Carrim",
+      "display_expected": "Suleiman heart attack Carrim",
+      "tts_expected": "Suleiman heart attack Carrim"
+    }
+  ],
+  "advisories": [
+    {
+      "source": "pool of the Big W",
+      "suggestion": "pull of the Big W",
+      "message": "Confirm whether Azure misheard 'pull of the Big W' as 'pool of the Big W'."
+    },
+    {
+      "source": "the wool is water",
+      "suggestion": "Woolies water",
+      "message": "Confirm the exact Woolies/Woolworths wordplay before publication."
+    }
+  ]
+}

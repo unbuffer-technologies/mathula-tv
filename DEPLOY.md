@@ -1,55 +1,53 @@
-# Deploy Mathula TV v13.17.2
+# Deploy Mathula TV v13.18.26
 
 Patch:
 
-`mathula-tv-claude-resilience-v13.17.2-20260730T143224Z.tar.gz`
+`mathula-tv-mastering-no-change-guard-v13.18.26-20260811T192638Z.tar.gz`
 
-This archive is cumulative and can be installed over the existing Mathula TV
-checkout even if one of the earlier v13.16.x/v13.17.x patches was only partially
-installed.
+This is a cumulative patch containing every Mathula TV upgrade through
+v13.18.26. It fixes the identical-audio mastering loop seen on job
+`6f410d500d9e4e7ca07653550e3c883e`.
 
-## 1. Put the archive on the server
+## 1. Copy the patch to the server
 
-Copy the downloaded archive to:
+Place the downloaded archive at:
 
-`/tmp/mathula-tv-claude-resilience-v13.17.2-20260730T143224Z.tar.gz`
-
-For example, from the computer containing the download:
-
-```bash
-scp mathula-tv-claude-resilience-v13.17.2-20260730T143224Z.tar.gz \
-  mokgethwa@YOUR_SERVER:/tmp/
+```text
+/tmp/mathula-tv-mastering-no-change-guard-v13.18.26-20260811T192638Z.tar.gz
 ```
 
-## 2. Stop the active command
-
-If `translate`, `dub-azure`, or publication rendering is running in the current
-terminal, stop it with `Ctrl+C`. Completed translation checkpoints are retained.
-
-## 3. Activate the project and verify the archive
+Then verify it without extracting:
 
 ```bash
 cd /home/mokgethwa/mathula-tv
 source .venv/bin/activate
 
-PATCH="/tmp/mathula-tv-claude-resilience-v13.17.2-20260730T143224Z.tar.gz"
+PATCH="/tmp/mathula-tv-mastering-no-change-guard-v13.18.26-20260811T192638Z.tar.gz"
 
 test -f "$PATCH" || {
-  echo "Patch not found: $PATCH"
+  echo "ERROR: Patch not found: $PATCH"
   exit 1
 }
 
 sha256sum "$PATCH"
-tar -tzf "$PATCH"
+tar -tzf "$PATCH" | less
+tar -xOf "$PATCH" DEPLOY.md | less
 ```
 
-Compare the printed SHA-256 value with the checksum supplied with the download.
+## 2. Stop an active old process
 
-## 4. Back up every file replaced by the patch
+If `translate`, `dub-azure`, or `optimize-dub` is currently running, stop only
+that command with `Ctrl+C`. Do not delete the job directory, translation,
+speaker mappings, provider checkpoints, TTS cache, rendered media, or mastering
+reports.
+
+## 3. Back up every replaced file
 
 ```bash
+cd /home/mokgethwa/mathula-tv
+
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-BACKUP_DIR="/tmp/mathula-tv-before-v13.17.2-${STAMP}"
+BACKUP_DIR="/tmp/mathula-tv-before-v13.18.26-${STAMP}"
 mkdir -p "$BACKUP_DIR"
 
 while IFS= read -r FILE
@@ -58,17 +56,16 @@ do
     mkdir -p "$BACKUP_DIR/$(dirname "$FILE")"
     cp -a -- "$FILE" "$BACKUP_DIR/$FILE"
   fi
-done < <(tar -tzf "$PATCH" | grep -E '^(src/|tests/|DEPLOY.md$|PATCH_NOTES.md$)')
+done < <(
+  tar -tzf "$PATCH" |
+    sed 's#^\./##' |
+    grep -E '^(src/|scripts/|tests/|pyproject.toml$|requirements.txt$|DEPLOY.md$|PATCH_NOTES.md$)'
+)
 
 echo "Rollback backup: $BACKUP_DIR"
 ```
 
-Keep the printed `BACKUP_DIR` path until the resumed job has completed.
-
-## 5. Install
-
-The `--no-overwrite-dir` and `--touch` options avoid the directory permission
-and `utime` errors seen with earlier archives.
+## 4. Install safely
 
 ```bash
 tar -xzf "$PATCH" \
@@ -79,133 +76,120 @@ tar -xzf "$PATCH" \
   -C /home/mokgethwa/mathula-tv
 ```
 
-## 6. Compile and verify the installed markers
+These flags prevent the directory `utime` and permission errors encountered
+with earlier archives.
+
+## 5. Compile and verify the installed markers
 
 ```bash
 cd /home/mokgethwa/mathula-tv
 source .venv/bin/activate
 
-python -m compileall -q src/mathula_tv
+python -m compileall -q src/mathula_tv scripts
 
 rg -n \
-  "foundry_structured_outputs|stream_json_salvaged|split_chunk_recovery_count" \
-  src/mathula_tv/ai_provider.py \
-  src/mathula_tv/one_call_translation.py
-
-rg -n "TOTAL WALL TIME" src/mathula_tv/cli.py
+  "v13.18.26|mathula-production-dub-score-v3|mastering_variant_id|repair_render_produced_identical_audio" \
+  src/mathula_tv/direct_azure_dub.py \
+  src/mathula_tv/dub_mastering.py
 ```
 
-All three commands must exit successfully.
+All four markers must be present.
 
-## 7. Run the focused deployment tests
+## 6. Run the focused regression suite
 
 ```bash
 pytest -q \
-  tests/test_claude_resilience_v13172.py \
-  tests/test_ai_provider.py \
-  tests/test_foundry_max_tokens_recovery.py \
-  tests/test_multivariant_ai_provider.py \
-  tests/test_targeted_validation_repair_v13170.py \
-  tests/test_targeted_identity_repair_v13160.py \
-  tests/test_editorial_ai_profiles.py \
-  tests/test_multivariant_exact_manual_prompt.py
+  tests/test_dub_mastering_no_change_v131826.py \
+  tests/test_dub_mastering_calibration_v131825.py \
+  tests/test_dub_mastering_loop_v131824.py \
+  tests/test_direct_azure_dub.py \
+  tests/test_direct_azure_voice_cache.py \
+  tests/test_dub_azure_cli_output.py \
+  tests/test_zulu_native_honorifics_v131823.py \
+  tests/test_zulu_native_dates_v131822.py \
+  tests/test_target_text_pronunciation.py \
+  tests/test_contextual_turn_repair_v131821.py \
+  tests/test_zulu_coloured_code_switch_v131820.py \
+  tests/test_reporter_attribution_word_alignment_v131819.py \
+  tests/test_five_block_final_conductor_v131818.py
 ```
 
-Expected: 45 tests pass.
+Expected result: `102 passed`.
 
-Do not add the entire `test_translation_response_recovery.py` file to this
-deployment gate. It contains two legacy identity tests already failing in the
-v13.17.1 baseline. The focused recovery assertions used by this patch pass.
+## 7. Run mastering on the affected job
 
-## 8. Structured-output mode
+```bash
+JOB_ID="6f410d500d9e4e7ca07653550e3c883e"
 
-No environment change is required. The recommended default is:
+python -m mathula_tv.cli optimize-dub "$JOB_ID" \
+  --max-rounds 2 \
+  --live-operation
+```
+
+Do not add `--force`. On the first non-audit v13.18.26 run, the v2 automatic
+override payload is archived under:
 
 ```text
-MATHULA_TV_FOUNDRY_CLAUDE_STRUCTURED_OUTPUTS=auto
+working/jobs/JOB_ID/direct_dub/mastering/policy_migrations/
 ```
 
-Modes:
+The code then rebuilds the unmodified approved-variant baseline under policy
+v3. Existing Azure STT and TTS cache entries remain reusable.
 
-- `auto`: attempt native Structured Outputs, then remember a deployment-level
-  fallback if Azure rejects the feature;
-- `enabled`: require native Structured Outputs and fail if unavailable;
-- `disabled`: always use schema-in-prompt plus local validation.
+The repair log should now show a changed audio checksum before a second STT
+round. If any future repair still produces identical audio, the command stops
+immediately with:
 
-Use `auto` unless the specific Foundry deployment has already been verified and
-you deliberately want fail-closed `enabled` behavior.
+```text
+repair_render_produced_identical_audio
+```
 
-## 9. Resume the existing job
+It will not spend another Azure STT request on that unchanged mix.
 
-Use the same job ID. Do not start a new job:
+## 8. Inspect the result
 
 ```bash
-export JOB_ID="8b670180f8e44ccf8e6a04fc9219b313"
+jq '{
+  state,
+  stopped_reason,
+  best_round,
+  best_production_score,
+  best_round_restored,
+  prior_policy_overrides_rebased,
+  rounds
+}' "working/jobs/$JOB_ID/direct_dub/mastering/report.json"
 
-python -m mathula_tv.cli translate "$JOB_ID" --live-operation
+jq '.' \
+  "working/jobs/$JOB_ID/direct_dub/mastering_overrides.json"
 ```
 
-The command reuses completed chunk checkpoints. If the saved failed chunk is a
-truncation/context-size failure, it proceeds to serial split recovery without
-paying for the same parent request again.
+Check that a repair round includes:
 
-If autocorrect research, rather than translation, is still the incomplete
-phase, run:
+```text
+repair_audio_changed: true
+```
+
+If it is `false`, the loop must have stopped after that round and restored the
+best override set.
+
+## 9. Create or reuse the publication output once
+
+After mastering finishes:
 
 ```bash
-python -m mathula_tv.cli resume-autocorrect-research \
-  "$JOB_ID" \
-  --live-operation
-
-python -m mathula_tv.cli translate "$JOB_ID" --live-operation
+python -m mathula_tv.cli dub-azure "$JOB_ID" --live-operation
 ```
 
-## 10. Inspect consumption, progress, and timing
-
-During execution, the terminal now reports request size/token estimates, actual
-usage, retries/fallbacks, chunk progress, split recovery, and FFmpeg progress.
-At command completion it prints every tracked phase plus `TOTAL WALL TIME`.
-
-Inspect the cumulative machine-readable AI report:
-
-```bash
-python -m json.tool \
-  "working/jobs/$JOB_ID/analysis/ai_consumption_report.json" \
-  | less
-```
-
-Find the most important recovery and timing events in a captured log:
-
-```bash
-rg -n \
-  "consumption|capability fallback|salvaged|split recovery|ffmpeg|TOTAL WALL TIME" \
-  /path/to/your/run.log
-```
+The mastering loop works on the clean dub and does not run the publication
+editor in each feedback round. The final command reuses mastered assets and
+performs the publication stage once.
 
 ## Rollback
 
-Replace the example with the exact backup path printed during installation:
-
 ```bash
-cd /home/mokgethwa/mathula-tv
-source .venv/bin/activate
-
-BACKUP_DIR="/tmp/mathula-tv-before-v13.17.2-YYYYMMDDTHHMMSSZ"
-test -d "$BACKUP_DIR" || {
-  echo "Backup not found: $BACKUP_DIR"
-  exit 1
-}
-
-while IFS= read -r -d '' FILE
-do
-  RELATIVE="${FILE#"$BACKUP_DIR/"}"
-  mkdir -p "$(dirname "$RELATIVE")"
-  cp -a -- "$FILE" "$RELATIVE"
-done < <(find "$BACKUP_DIR" -type f -print0)
-
-python -m compileall -q src/mathula_tv
+cp -a "$BACKUP_DIR"/. /home/mokgethwa/mathula-tv/
+python -m compileall -q /home/mokgethwa/mathula-tv/src/mathula_tv
 ```
 
-This restores every pre-existing file that the archive replaced. The new
-regression test `tests/test_claude_resilience_v13172.py` can remain in place; it
-does not affect runtime behavior.
+Rollback restores code and tests only. It does not delete job media, cached
+provider responses, mastering audits, or policy-migration evidence.

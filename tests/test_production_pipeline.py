@@ -12,6 +12,7 @@ from mathula_tv.atomic_io import atomic_write_json, read_json
 from mathula_tv.azure_tts import AzureTTSResult
 from mathula_tv.compatibility import CompatibilityThresholds, UnitCompatibilityObservation
 from mathula_tv.config import Settings
+from mathula_tv.dubbing_units import DubbingUnitConfig, build_dubbing_units
 from mathula_tv.errors import CompatibilityGateFailure
 from mathula_tv.media import checksum
 from mathula_tv.openvoice_worker import OpenVoiceAssetPlan
@@ -699,3 +700,93 @@ def test_openvoice_asset_plan_queue_and_reconciliation_are_server_bound(tmp_path
     app.gcs = second_gcs
     reused_queue = app.queue_openvoice_assets(job, force=True)
     assert reused_queue["source_cache_seed_count"] == 1
+
+
+def test_autocorrected_effective_transcript_rebuilds_cached_long_units(tmp_path):
+    app, job = setup_legacy(tmp_path)
+    transcript_path = app.jobs.job_dir(job.job_id) / "analysis/transcript_en.json"
+    raw_tokens = [
+        "First", ",", "we", "had", "a", "malanga", "ward", ".",
+        "Now", ",", "we", "have", "a", "malanga", "supermarket", ",", "Woolworths", ".",
+    ]
+    duration = 10.0
+    words = []
+    for index, token in enumerate(raw_tokens):
+        start = duration * index / len(raw_tokens)
+        end = duration * (index + 1) / len(raw_tokens)
+        words.append(
+            {
+                "word_id": f"word_{index + 1:06d}",
+                "phrase_id": "seg-00001",
+                "text": token,
+                "start": start,
+                "end": end,
+                "speaker": "AZURE_1",
+            }
+        )
+    raw = {
+        "schema_version": "transcript-v1",
+        "duration": duration,
+        "segments": [
+            {
+                "segment_id": "seg-00001",
+                "speaker": "AZURE_1",
+                "start": 0,
+                "end": duration,
+                "source_text": "First, we had a malanga ward. Now, we have a malanga supermarket, Woolworths.",
+            }
+        ],
+        "words": words,
+    }
+    # Simulate a stale unit artifact produced by the old pre-autocorrection
+    # pipeline. The upgraded pipeline must never reuse it.
+    stale = build_dubbing_units(raw, DubbingUnitConfig())
+    atomic_write_json(app.paths(job.job_id).dubbing_units, stale)
+
+    corrected = dict(raw)
+    corrected["segments"] = [dict(raw["segments"][0])]
+    corrected["segments"][0]["source_text"] = (
+        "First, we had a Madlanga ward. Now, we have a Madlanga supermarket, Woolworths."
+    )
+    corrected["autocorrect"] = {
+        "schema_version": "mathula-autocorrect-state-v1",
+        "overlays": [
+            {
+                "item_id": "seg-00001",
+                "azure_text": "malanga ward",
+                "corrected_text": "Madlanga ward",
+                "start_ms": 2778,
+                "end_ms": 3889,
+            },
+            {
+                "item_id": "seg-00001",
+                "azure_text": "malanga supermarket",
+                "corrected_text": "Madlanga supermarket",
+                "start_ms": 6667,
+                "end_ms": 8333,
+            },
+        ],
+    }
+    atomic_write_json(transcript_path, corrected)
+    raw_path = app.jobs.job_dir(job.job_id) / "analysis/transcript_en_raw.json"
+    state_path = app.jobs.job_dir(job.job_id) / "analysis/autocorrection_state.json"
+    atomic_write_json(raw_path, raw)
+    atomic_write_json(
+        state_path,
+        {
+            "stage_schema_version": "autocorrection-first-stage-v1",
+            "review_count": 0,
+            "active_count": 2,
+            "ready_for_language_ai": True,
+            "raw_transcript_sha256": checksum(raw_path),
+            "authoritative_transcript_sha256": checksum(transcript_path),
+        },
+    )
+
+    rebuilt = app.build_units(job)
+    rebuilt_text = " ".join(unit["source_text"] for unit in rebuilt["units"])
+    assert stale["source_sha256"] != rebuilt["source_sha256"]
+    assert "Madlanga ward" in rebuilt_text
+    assert "Madlanga supermarket" in rebuilt_text
+    assert "malanga ward" not in rebuilt_text.casefold().replace("madlanga", "")
+    assert any(unit["source_word_ids"] for unit in rebuilt["units"])

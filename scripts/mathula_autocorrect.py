@@ -31,7 +31,7 @@ from mathula_tv.autocorrect import (
     reset_source,
     undo_all_auto_applied,
 )
-from mathula_tv.autocorrect_ai import rank_with_anthropic
+from mathula_tv.autocorrect_ai import rank_with_gpt
 
 
 def emit(value: Any) -> None:
@@ -113,7 +113,7 @@ def command_prepare(args: argparse.Namespace) -> int:
         )
         atomic_write_json(paths.ai_request, request)
         if request["spans"]:
-            advice, metadata = rank_with_anthropic(
+            advice, metadata = rank_with_gpt(
                 request,
                 model=args.ai_model,
             )

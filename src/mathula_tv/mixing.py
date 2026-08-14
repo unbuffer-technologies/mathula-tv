@@ -22,6 +22,14 @@ def render_dialogue_tracks(
     sample_rate: int = 24000,
     runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
+    """Build smooth, overlap-preserving per-speaker tracks and a dialogue bus.
+
+    The old renderer used 20 ms linear fades on every block.  Back-to-back
+    sentence fragments therefore dipped twice at every boundary and could sound
+    clipped or choppy.  The quality renderer uses short adaptive equal-power
+    fades only for de-clicking, stable sample-clock regeneration, and gentle
+    bus compression after timeline placement.
+    """
     if total_duration_ms <= 0 or not clips:
         raise ValueError("Dialogue rendering requires clips and a positive duration")
     speakers: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -40,23 +48,40 @@ def render_dialogue_tracks(
                 },
             )
         speakers[str(clip["speaker_id"])].append(clip)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     tracks: list[dict[str, Any]] = []
     for speaker, items in sorted(speakers.items()):
         output = output_dir / f"{_safe_id(speaker)}.wav"
         command = _speaker_track_command(items, output, total_duration_ms, sample_rate)
         runner(command, check=True)
-        _validate_pcm(output, sample_rate, channels=1)
-        tracks.append({"speaker_id": speaker, "path": str(output), "sha256": checksum(output), "unit_count": len(items)})
+        quality = _validate_pcm(output, sample_rate, channels=1)
+        tracks.append(
+            {
+                "speaker_id": speaker,
+                "path": str(output),
+                "sha256": checksum(output),
+                "unit_count": len(items),
+                "quality": quality,
+            }
+        )
 
     mix_command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     for track in tracks:
         mix_command.extend(["-i", track["path"]])
     inputs = "".join(f"[{index}:a]" for index in range(len(tracks)))
+    total_samples = round(total_duration_ms * sample_rate / 1000)
+    mix_filter = (
+        f"{inputs}amix=inputs={len(tracks)}:normalize=0:dropout_transition=0.08,"
+        f"aresample={sample_rate}:async=1:first_pts=0,"
+        "acompressor=threshold=0.16:ratio=1.35:attack=6:release=140:makeup=1.0:knee=2.0,"
+        "alimiter=limit=0.92:attack=5:release=80,"
+        f"apad=whole_len={total_samples},atrim=end_sample={total_samples},asetpts=N/SR/TB[a]"
+    )
     mix_command.extend(
         [
             "-filter_complex",
-            f"{inputs}amix=inputs={len(tracks)}:normalize=0:dropout_transition=0,alimiter=limit=0.95[a]",
+            mix_filter,
             "-map",
             "[a]",
             "-ar",
@@ -73,33 +98,53 @@ def render_dialogue_tracks(
     quality = _validate_pcm(dialogue_output, sample_rate, channels=1)
     overlaps = overlap_decisions(clips)
     return {
-        "schema_version": "dialogue-bus-v1",
+        "schema_version": "dialogue-bus-v2-smooth-boundaries",
         "speaker_tracks": tracks,
         "dialogue_bus": {"path": str(dialogue_output), "sha256": checksum(dialogue_output), **quality},
         "overlaps": overlaps,
         "overlap_count": len(overlaps),
-        "gain_management": "per-speaker amix plus peak limiter",
+        "gain_management": "adaptive equal-power de-click fades, gentle compression, peak limiter",
+        "boundary_smoothing": {
+            "fade_curve": "qsin",
+            "minimum_fade_ms": 3,
+            "maximum_fade_ms": 10,
+            "sample_clock_regenerated": True,
+        },
     }
+
 
 
 def _speaker_track_command(
     clips: list[dict[str, Any]], output: Path, total_duration_ms: int, sample_rate: int
 ) -> list[str]:
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-    filters = []
-    for index, clip in enumerate(sorted(clips, key=lambda item: (int(item["start_ms"]), str(item["unit_id"])))):
+    ordered = sorted(
+        clips,
+        key=lambda item: (int(item["start_ms"]), str(item["unit_id"])),
+    )
+    filters: list[str] = []
+    for index, clip in enumerate(ordered):
         command.extend(["-i", str(clip["path"])])
-        duration = float(clip.get("duration_ms", 0)) / 1000
-        fade_out_start = max(0.0, duration - 0.02)
+        duration = max(0.001, float(clip.get("duration_ms", 0)) / 1000.0)
+        # Enough to eliminate waveform discontinuities, but short enough not to
+        # swallow consonants or create a double dip at sentence boundaries.
+        fade = min(0.010, max(0.003, duration * 0.025))
+        fade_out_start = max(0.0, duration - fade)
         filters.append(
-            f"[{index}:a]aresample={sample_rate},asetpts=PTS-STARTPTS,"
-            f"adelay={int(clip['start_ms'])}:all=1,afade=t=in:st=0:d=0.02,"
-            f"afade=t=out:st={fade_out_start:.3f}:d=0.02[c{index}]"
+            f"[{index}:a]aresample={sample_rate}:async=1:first_pts=0,"
+            "asetpts=N/SR/TB,"
+            f"afade=t=in:st=0:d={fade:.4f}:curve=qsin,"
+            f"afade=t=out:st={fade_out_start:.4f}:d={fade:.4f}:curve=qsin,"
+            f"adelay={int(clip['start_ms'])}:all=1[c{index}]"
         )
-    inputs = "".join(f"[c{index}]" for index in range(len(clips)))
+    inputs = "".join(f"[c{index}]" for index in range(len(ordered)))
+    total_samples = round(total_duration_ms * sample_rate / 1000)
     filters.append(
-        f"{inputs}amix=inputs={len(clips)}:normalize=0:dropout_transition=0,"
-        f"alimiter=limit=0.95,apad,atrim=duration={total_duration_ms / 1000:.3f}[a]"
+        f"{inputs}amix=inputs={len(ordered)}:duration=longest:normalize=0:dropout_transition=0.08,"
+        "highpass=f=60,"
+        "acompressor=threshold=0.14:ratio=1.55:attack=7:release=120:makeup=1.03:knee=2.0,"
+        "alimiter=limit=0.92:attack=5:release=70,"
+        f"apad=whole_len={total_samples},atrim=end_sample={total_samples},asetpts=N/SR/TB[a]"
     )
     command.extend(
         [
@@ -117,6 +162,7 @@ def _speaker_track_command(
         ]
     )
     return command
+
 
 
 def overlap_decisions(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -150,19 +196,25 @@ def mix_final_buses(
     dialogue: Path,
     output: Path,
     *,
-    target_lufs: float = -14,
-    target_lra: float = 11,
-    true_peak_dbtp: float = -1.5,
-    background_gain_db: float = -3,
+    target_lufs: float = -16.0,
+    target_lra: float = 9.0,
+    true_peak_dbtp: float = -1.0,
+    background_gain_db: float = -5.0,
     runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
+    """Create a stable broadcast-style final mix without abrupt ambience pumping."""
     output.parent.mkdir(parents=True, exist_ok=True)
     filter_graph = (
-        f"[0:a]aresample=48000,volume={background_gain_db}dB[bg];"
-        "[1:a]aresample=48000,pan=stereo|c0=c0|c1=c0,asplit=2[side][dialogue];"
-        "[bg][side]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=300[ducked];"
-        f"[ducked][dialogue]amix=inputs=2:normalize=0:weights='1 1',"
-        f"loudnorm=I={target_lufs}:LRA={target_lra}:TP={true_peak_dbtp},alimiter=limit=0.95[mix]"
+        "[0:a]aresample=48000:async=1:first_pts=0,"
+        f"volume={background_gain_db}dB[bg];"
+        "[1:a]aresample=48000:async=1:first_pts=0,"
+        "pan=stereo|c0=c0|c1=c0,asplit=2[side][dialogue];"
+        "[bg][side]sidechaincompress="
+        "threshold=0.025:ratio=7:attack=8:release=450:makeup=1[ducked];"
+        "[ducked][dialogue]amix=inputs=2:normalize=0:weights='1 1':dropout_transition=0.25,"
+        "acompressor=threshold=0.18:ratio=1.35:attack=12:release=220:makeup=1.0:knee=2.0,"
+        f"loudnorm=I={target_lufs}:LRA={target_lra}:TP={true_peak_dbtp},"
+        "alimiter=limit=0.89:attack=5:release=100,asetpts=N/SR/TB[mix]"
     )
     command = [
         "ffmpeg",
@@ -190,7 +242,7 @@ def mix_final_buses(
     quality = _validate_pcm(output, 48000, channels=2)
     loudness = measure_loudness(output, runner=runner)
     return {
-        "schema_version": "final-mix-v1",
+        "schema_version": "final-mix-v2-smooth-broadcast",
         "dialogue_sha256": checksum(dialogue),
         "background_sha256": checksum(background),
         "output_path": str(output),
@@ -198,10 +250,17 @@ def mix_final_buses(
         "target_lufs": target_lufs,
         "target_lra": target_lra,
         "target_true_peak_dbtp": true_peak_dbtp,
-        "dialogue_to_background": {"background_gain_db": background_gain_db, "sidechain_ducking": True},
+        "dialogue_to_background": {
+            "background_gain_db": background_gain_db,
+            "sidechain_ducking": True,
+            "attack_ms": 8,
+            "release_ms": 450,
+        },
+        "sample_clock_regenerated": True,
         "loudness": loudness,
         **quality,
     }
+
 
 
 def measure_loudness(path: Path, *, runner: Callable[..., Any] = subprocess.run) -> dict[str, Any]:

@@ -963,6 +963,20 @@ def _regex_flags(names: Sequence[str]) -> int:
     return result
 
 
+def curated_hint_auto_applies(rule: Mapping[str, Any]) -> bool:
+    """Return whether an explicit configured confusion rule is authoritative.
+
+    Rules in ``config/autocorrect_hints.json`` are curated application
+    configuration, not AI suggestions. They therefore auto-apply by default.
+    Set ``auto_apply`` to false (or ``review_required`` to true) for a rule
+    that must remain in the human-review queue.
+    """
+
+    if bool(rule.get("review_required", False)):
+        return False
+    return bool(rule.get("auto_apply", True))
+
+
 def registry_candidates(path: Path | None) -> list[dict[str, Any]]:
     if path is None or not path.is_file():
         return []
@@ -1417,15 +1431,20 @@ def detect_candidates(
                     candidates,
                     auto_confirmation_threshold=auto_confirmation_threshold,
                 )
-                selected = learned or candidates[0]
-                status = "auto_applied" if learned else "suggested"
+                authoritative = curated_hint_auto_applies(rule)
+                selected = hint_candidate if authoritative else (learned or candidates[0])
+                source_type = (
+                    "curated_hint"
+                    if authoritative
+                    else ("learned_exact" if learned else "confusion_hint")
+                )
                 if _suppressed(
                     store,
                     heard_text=match.group(0),
                     replacement_text=selected["replacement_text"],
                     owners=owners,
                 ):
-                    status = "suppressed"
+                    source_type = "suppressed"
                 detected.append(
                     (
                         item,
@@ -1433,20 +1452,16 @@ def detect_candidates(
                         match.end(),
                         match.group(0),
                         selected["replacement_text"],
-                        (
-                            "suppressed"
-                            if status == "suppressed"
-                            else (
-                                "learned_exact"
-                                if learned
-                                else "confusion_hint"
-                            )
-                        ),
+                        source_type,
                         selected.get("entity_id"),
                         float(selected.get("score", 0.99)),
                         str(
                             rule.get("reason")
-                            or "Known acoustic confusion candidate"
+                            or (
+                                "Curated exact acoustic correction"
+                                if authoritative
+                                else "Known acoustic confusion candidate"
+                            )
                         ),
                         candidates,
                     )
@@ -1632,6 +1647,7 @@ def detect_candidates(
 
     # Deduplicate overlapping spans; specific hints beat low-confidence words.
     priority = {
+        "curated_hint": 110,
         "learned_exact": 100,
         "suppressed": 100,
         "confusion_hint": 90,
@@ -1688,7 +1704,7 @@ def detect_candidates(
                 char_start,
                 char_end,
             )
-            if source_type == "learned_exact":
+            if source_type in {"curated_hint", "learned_exact"}:
                 status = "auto_applied"
             elif source_type == "suppressed":
                 status = "suppressed"

@@ -49,11 +49,11 @@ To rerun only the hook selection and edit:
 python -m mathula_tv.cli edit-tiktok "$JOB_ID" --live-operation --force
 ```
 
-Mathula TV is a resumable, human-reviewed pipeline for dubbing English South African news video into isiZulu. The production design uses Azure Speech-to-Text for transcription and authoritative job-local diarization, Claude Opus 4.8 for contextual translation and editorial metadata, Azure Text-to-Speech for isiZulu pronunciation, and OpenVoice for post-TTS speaker-identity conversion on a Colab or Kaggle GPU worker.
+Mathula TV is a resumable, human-reviewed pipeline for dubbing English South African news video into isiZulu. The production design uses Azure Speech-to-Text for transcription and authoritative job-local diarization, Azure OpenAI GPT for contextual translation and editorial metadata, Azure Text-to-Speech for isiZulu pronunciation, and OpenVoice for post-TTS speaker-identity conversion on a Colab or Kaggle GPU worker.
 
-Codex is the engineering agent that implements this repository; it is not a runtime content provider. Claude Opus 4.8 is the configured production runtime AI provider.
+Codex is the engineering agent that implements this repository; it is not a runtime content provider. Azure OpenAI GPT through the Responses API is the sole production runtime AI provider.
 
-> **Current status:** the Azure TTS → OpenVoice compatibility gate is **pending**. The repository contains offline-testable production boundaries and orchestration components, but this checkout makes no claim that a live Claude request, live Azure TTS request, live OpenVoice conversion, compatibility pass, publication-quality background, or approved production video has completed. Human voice-rights, editorial, factual, fluent-isiZulu, timing, and audio review are mandatory.
+> **Current status:** the Azure TTS → OpenVoice compatibility gate is **pending**. The repository contains offline-testable production boundaries and orchestration components, but this checkout makes no claim that a live GPT request, live Azure TTS request, live OpenVoice conversion, compatibility pass, publication-quality background, or approved production video has completed. Human voice-rights, editorial, factual, fluent-isiZulu, timing, and audio review are mandatory.
 
 Mathula TV never uploads to YouTube.
 
@@ -64,7 +64,7 @@ source video
   ├─ audio/analysis_mono.wav ──> Azure STT (en-ZA + authoritative diarization)
   └─ audio/mix_source_stereo.wav ───────────────────────────────────────┐
                                       ↓                                 │
-dubbing units ─> Claude Opus 4.8 ─> pronunciation plan ─> Azure TTS     │
+dubbing units ─> Azure OpenAI GPT ─> pronunciation plan ─> Azure TTS   │
                                       ↓                                 │
                     OpenVoice GPU conversion (job-local speaker reels)  │
                                       ↓                                 │
@@ -80,7 +80,7 @@ The rollout is deliberately two-phase:
 1. **Phase A — compatibility proof:** run the existing four-turn job through Azure TTS and OpenVoice, compare raw Azure, converted, aligned, and original-reference audio, calibrate thresholds, and complete human reviews.
 2. **Phase B — production automation:** permit the full alignment, background, mixing, subtitle, render, and QC flow only around the validated path.
 
-F5-TTS is not part of this repository or its fallback chain. Legacy OmniVoice files may remain temporarily as migration evidence, but OmniVoice is deprecated, unregistered, unselectable, and not production; it is pending deletion after the compatibility path passes or an explicit cleanup. There is no silent fallback from Claude to Azure OpenAI, from OpenVoice to OmniVoice, or from converted speech to raw Azure TTS.
+F5-TTS is not part of this repository or its fallback chain. Legacy OmniVoice files may remain temporarily as migration evidence, but OmniVoice is deprecated, unregistered, unselectable, and not production; it is pending deletion after the compatibility path passes or an explicit cleanup. There is no fallback from GPT to another model provider, from OpenVoice to OmniVoice, or from converted speech to raw Azure TTS.
 
 ## Install
 
@@ -108,7 +108,7 @@ python -m mathula_tv.cli process JOB_ID
 
 `process` is a resumable guidance command: it inspects the current state and prints the next action, stopping truthfully when an external GPU worker or human review is required. It does not bypass OpenVoice or a failed/pending compatibility gate. `--skip-openvoice` may be used only for an explicitly labelled `azure_tts_only_review` internal artifact and never implies voice cloning.
 
-The known four-turn proof job is `19ba6d69f1b84132ba4f20599101834a`. Do not run it casually: every command that reads or mutates that live job must use `--live-operation`, valid credentials, and the exact safe sequence in [docs/cli.md](docs/cli.md). The sequence preserves its approved isiZulu content and does not call Claude unless explicitly authorised.
+The known four-turn proof job is `19ba6d69f1b84132ba4f20599101834a`. Do not run it casually: every command that reads or mutates that live job must use `--live-operation`, valid credentials, and the exact safe sequence in [docs/cli.md](docs/cli.md). The sequence preserves its approved isiZulu content and starts no GPT request unless explicitly authorised.
 
 ## Documentation
 
@@ -116,7 +116,7 @@ The known four-turn proof job is `19ba6d69f1b84132ba4f20599101834a`. Do not run 
 - [Architecture and artifact layout](docs/architecture.md)
 - [State machine and legacy migration](docs/state-machine.md)
 - [CLI and exact four-turn runbook](docs/cli.md)
-- [Claude provider](docs/claude-provider.md)
+- [Azure GPT provider](docs/gpt-provider.md)
 - [Azure STT](docs/azure-stt.md) and [Azure TTS](docs/azure-tts.md)
 - [Pronunciation and three text forms](docs/pronunciation.md)
 - [OpenVoice worker](docs/openvoice.md), [Colab](docs/colab.md), and [Kaggle](docs/kaggle.md)

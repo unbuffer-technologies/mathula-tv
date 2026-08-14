@@ -97,6 +97,14 @@ def test_postgres_new_term_public_workflow(tmp_path, live_store, monkeypatch):
         auto_confirmation_threshold=2,
     )
     correction = list_corrections(live_store, job_id=job_id)[0]
+    assert correction["status"] == "auto_applied"
+    state = render_effective_transcript(
+        live_store,
+        paths=paths,
+        job_id=job_id,
+    )
+    assert state["review_count"] == 0
+    assert "hoshkhari" in load_json(paths.effective)["complete_text"]
 
     monkeypatch.setenv("MATHULA_TV_FEEDBACK_HASH_SALT", "test-secret")
     updated = change_correction(

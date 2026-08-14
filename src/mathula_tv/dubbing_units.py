@@ -62,16 +62,37 @@ def _dedupe(values: Iterable[Any]) -> list[Any]:
 
 
 def _join_tokens(tokens: Sequence[str]) -> str:
+    """Join tokenizer output without corrupting quotes or hyphenated words."""
+
     text = ""
     closing = set(".,!?;:%)]}”’")
     opening = set("([{“‘")
+    ascii_quote_open = {"\"": True, "'": True}
+    attach_next = False
     for token in (str(value).strip() for value in tokens):
         if not token:
             continue
-        if not text or token[0] in closing or text[-1] in opening:
+        if token == "-":
+            text = text.rstrip() + "-"
+            attach_next = True
+            continue
+        if token in ascii_quote_open:
+            if ascii_quote_open[token]:
+                if text and not text.endswith((" ", "-", "(", "[", "{")):
+                    text += " "
+                text += token
+                ascii_quote_open[token] = False
+                attach_next = True
+            else:
+                text = text.rstrip() + token
+                ascii_quote_open[token] = True
+                attach_next = False
+            continue
+        if not text or attach_next or token[0] in closing or text[-1] in opening:
             text += token
         else:
             text += " " + token
+        attach_next = False
     return text.strip()
 
 
@@ -249,6 +270,93 @@ def _derived_words(phrase: Mapping[str, Any]) -> list[_Word]:
     ]
 
 
+def _text_signature(text: str) -> tuple[str, ...]:
+    """Return a punctuation-insensitive token identity for source comparison."""
+
+    return tuple(
+        token.casefold()
+        for token in _TOKEN.findall(text)
+        if any(character.isalnum() for character in token)
+    )
+
+
+def _algorithm_words_for_phrase(
+    transcript: Mapping[str, Any],
+    phrase: Mapping[str, Any],
+    phrase_id: Any,
+    real_words: Sequence[_Word],
+) -> list[_Word]:
+    """Return timed words reflecting the effective autocorrected phrase text.
+
+    Raw Azure word timing remains immutable provenance.  Autocorrection edits
+    the effective segment/phrase text and records timed overlays.  For long
+    phrases the unit builder must segment using those corrected words rather
+    than silently falling back to the original Azure spellings.
+    """
+
+    if not real_words:
+        return _derived_words(phrase)
+
+    corrected_text = _phrase_text(phrase)
+    raw_text = _join_tokens([word.text for word in real_words])
+    if _text_signature(raw_text) == _text_signature(corrected_text):
+        return list(real_words)
+
+    autocorrect = transcript.get("autocorrect")
+    overlays = autocorrect.get("overlays", []) if isinstance(autocorrect, Mapping) else []
+    relevant = [
+        overlay
+        for overlay in overlays
+        if isinstance(overlay, Mapping)
+        and str(overlay.get("item_id")) == str(phrase_id)
+        and str(overlay.get("corrected_text", "")).strip()
+    ]
+
+    if not relevant:
+        # The effective phrase is authoritative even when an older artifact did
+        # not retain overlay metadata.  Interpolate corrected tokens across the
+        # phrase rather than reintroducing stale Azure text.
+        return _derived_words(phrase)
+
+    algorithm = list(real_words)
+    for overlay_index, overlay in enumerate(
+        sorted(relevant, key=lambda value: (int(value.get("start_ms", 0)), int(value.get("end_ms", 0))))
+    ):
+        start_ms = int(overlay.get("start_ms", _milliseconds(phrase, "start")))
+        end_ms = int(overlay.get("end_ms", start_ms + 1))
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1
+        replacement_tokens = _TOKEN.findall(str(overlay.get("corrected_text", "")).strip())
+        if not replacement_tokens:
+            continue
+
+        algorithm = [
+            word
+            for word in algorithm
+            if word.end_ms <= start_ms or word.start_ms >= end_ms
+        ]
+        span = end_ms - start_ms
+        for token_index, token in enumerate(replacement_tokens):
+            algorithm.append(
+                _Word(
+                    None,
+                    token,
+                    start_ms + round(span * token_index / len(replacement_tokens)),
+                    start_ms + round(span * (token_index + 1) / len(replacement_tokens)),
+                    -(overlay_index * 1000 + token_index + 1),
+                )
+            )
+        algorithm.sort(key=lambda word: (word.start_ms, word.end_ms, word.source_index))
+
+    patched_text = _join_tokens([word.text for word in algorithm])
+    if _text_signature(patched_text) != _text_signature(corrected_text):
+        # Safety over false precision: if overlay/token reconciliation cannot
+        # reproduce the effective phrase, segment the corrected phrase text
+        # deterministically instead of leaking the raw STT wording.
+        return _derived_words(phrase)
+    return algorithm
+
+
 def _boundary_index(words: Sequence[_Word], start_index: int, limit_ms: int, minimum_ms: int) -> int:
     viable = [index for index in range(start_index, len(words)) if words[index].end_ms <= limit_ms]
     if not viable:
@@ -297,6 +405,8 @@ def _split_phrase(
     words: list[_Word],
     config: DubbingUnitConfig,
     external_override: Mapping[str, Any] | None,
+    *,
+    algorithm_words: Sequence[_Word] | None = None,
 ) -> list[_Piece]:
     phrase_start, phrase_end = _milliseconds(phrase, "start"), _milliseconds(phrase, "end")
     if phrase_end <= phrase_start:
@@ -306,8 +416,8 @@ def _split_phrase(
         phrase, phrase_id, external_override
     )
     real_words = words
-    algorithm_words = real_words or _derived_words(phrase)
-    if phrase_end - phrase_start <= config.maximum_duration_ms or not algorithm_words:
+    timed_algorithm_words = list(algorithm_words) if algorithm_words is not None else (real_words or _derived_words(phrase))
+    if phrase_end - phrase_start <= config.maximum_duration_ms or not timed_algorithm_words:
         return [
             _Piece(
                 speaker,
@@ -327,20 +437,26 @@ def _split_phrase(
 
     chunks: list[tuple[int, int]] = []
     cursor = 0
-    while cursor < len(algorithm_words):
-        limit_ms = algorithm_words[cursor].start_ms + config.maximum_duration_ms
-        boundary = _boundary_index(algorithm_words, cursor, limit_ms, config.minimum_duration_ms)
+    while cursor < len(timed_algorithm_words):
+        limit_ms = timed_algorithm_words[cursor].start_ms + config.maximum_duration_ms
+        boundary = _boundary_index(timed_algorithm_words, cursor, limit_ms, config.minimum_duration_ms)
         chunks.append((cursor, boundary + 1))
         cursor = boundary + 1
 
     pieces: list[_Piece] = []
     for chunk_index, (begin, finish) in enumerate(chunks):
-        chunk_words = algorithm_words[begin:finish]
-        start_ms = phrase_start if chunk_index == 0 else (algorithm_words[begin - 1].end_ms + chunk_words[0].start_ms) // 2
+        chunk_words = timed_algorithm_words[begin:finish]
+        start_ms = phrase_start if chunk_index == 0 else (timed_algorithm_words[begin - 1].end_ms + chunk_words[0].start_ms) // 2
         end_ms = phrase_end if chunk_index == len(chunks) - 1 else (
-            chunk_words[-1].end_ms + algorithm_words[finish].start_ms
+            chunk_words[-1].end_ms + timed_algorithm_words[finish].start_ms
         ) // 2
-        real_chunk_ids = [word.word_id for word in chunk_words if word.word_id is not None]
+        real_chunk_ids = [
+            word.word_id
+            for word in real_words
+            if word.word_id is not None
+            and word.end_ms > start_ms
+            and word.start_ms < end_ms
+        ]
         pieces.append(
             _Piece(
                 speaker,
@@ -515,13 +631,20 @@ class DubbingUnitBuilder:
         pieces: list[_Piece] = []
         for index, phrase in enumerate(phrases):
             phrase_id = _phrase_id(phrase, index)
+            phrase_words = words[index]
             pieces.extend(
                 _split_phrase(
                     phrase,
                     phrase_id,
-                    words[index],
+                    phrase_words,
                     self.config,
                     phrase_overrides.get(phrase_id),
+                    algorithm_words=_algorithm_words_for_phrase(
+                        transcript,
+                        phrase,
+                        phrase_id,
+                        phrase_words,
+                    ),
                 )
             )
         merged = _merge_pieces(pieces, self.config)

@@ -31,7 +31,10 @@ class Settings:
     pyannote_model: str
     speaker_tolerance_seconds: float = 0.35
     lease_seconds: int = 900
-    ai_provider: str = "azure-foundry-claude"
+    ai_provider: str = "azure-openai-gpt"
+    # Deprecated names are retained only so older callers can construct
+    # Settings and read historical job snapshots. Runtime code uses the GPT
+    # fields below and never reads Claude credentials or endpoints.
     claude_model: str = "claude-opus-4-8"
     claude_timeout_seconds: float = 900
     claude_max_retries: int = 3
@@ -86,9 +89,37 @@ class Settings:
     max_openvoice_wer_degradation: float = 0.10
     max_final_mix_wer_degradation: float = 0.15
     min_protected_entity_similarity: float = 0.85
+    gpt_model: str = "gpt-5.6-sol-1"
+    gpt_timeout_seconds: float = 900
+    gpt_max_retries: int = 3
+    gpt_effort: str = "high"
+    translation_gpt_effort: str = "low"
+    seo_gpt_effort: str = "medium"
+    hook_gpt_effort: str = "low"
+    editorial_gpt_effort: str = "high"
+    max_ai_calls_per_job: int = 20
 
     def safe_snapshot(self) -> dict:
-        return {k: str(v) if isinstance(v, Path) else v for k, v in asdict(self).items()}
+        legacy_keys = {
+            "claude_model",
+            "claude_timeout_seconds",
+            "claude_max_retries",
+            "claude_effort",
+            "translation_claude_effort",
+            "translation_claude_thinking",
+            "seo_claude_effort",
+            "seo_claude_thinking",
+            "hook_claude_effort",
+            "hook_claude_thinking",
+            "editorial_claude_effort",
+            "editorial_claude_thinking",
+            "max_claude_calls_per_job",
+        }
+        return {
+            key: str(value) if isinstance(value, Path) else value
+            for key, value in asdict(self).items()
+            if key not in legacy_keys
+        }
 
 
 def load_settings(project_root: Path | None = None) -> Settings:
@@ -119,59 +150,40 @@ def load_settings(project_root: Path | None = None) -> Settings:
         pyannote_model=os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1"),
         speaker_tolerance_seconds=float(os.getenv("MATHULA_TV_SPEAKER_TOLERANCE_SECONDS", "0.35")),
         lease_seconds=int(os.getenv("MATHULA_TV_LEASE_SECONDS", "900")),
-        ai_provider=os.getenv("MATHULA_TV_AI_PROVIDER", "azure-foundry-claude").strip().lower(),
-        claude_model=os.getenv("MATHULA_TV_CLAUDE_MODEL", "claude-opus-4-8"),
-        claude_timeout_seconds=float(os.getenv("MATHULA_TV_CLAUDE_TIMEOUT_SECONDS", "900")),
-        claude_max_retries=int(os.getenv("MATHULA_TV_CLAUDE_MAX_RETRIES", "3")),
-        claude_effort=os.getenv("MATHULA_TV_CLAUDE_EFFORT", "high").strip().lower(),
-        translation_claude_effort=os.getenv(
-            "MATHULA_TV_TRANSLATION_CLAUDE_EFFORT", "low"
-        ).strip().lower(),
-        translation_claude_thinking=os.getenv(
-            "MATHULA_TV_TRANSLATION_CLAUDE_THINKING", "disabled"
-        ).strip().lower(),
+        # GPT is the sole runtime provider. A stale historical selector in an
+        # existing .env is intentionally ignored by the provider factory too.
+        ai_provider="azure-openai-gpt",
+        claude_model="claude-opus-4-8",
+        claude_timeout_seconds=900,
+        claude_max_retries=3,
+        claude_effort="high",
+        translation_claude_effort="low",
+        translation_claude_thinking="disabled",
         translation_max_output_tokens=int(
             os.getenv("MATHULA_TV_TRANSLATION_MAX_OUTPUT_TOKENS", "100000")
         ),
-        seo_claude_effort=os.getenv(
-            "MATHULA_TV_SEO_CLAUDE_EFFORT", "medium"
-        ).strip().lower(),
-        seo_claude_thinking=os.getenv(
-            "MATHULA_TV_SEO_CLAUDE_THINKING", "adaptive"
-        ).strip().lower(),
+        seo_claude_effort="medium",
+        seo_claude_thinking="adaptive",
         seo_max_output_tokens=int(
             os.getenv(
                 "MATHULA_TV_SEO_MAX_OUTPUT_TOKENS",
-                os.getenv("MATHULA_TV_SEO_CLAUDE_MAX_OUTPUT_TOKENS", "12000"),
+                "12000",
             )
         ),
-        hook_claude_effort=os.getenv(
-            "MATHULA_TV_HOOK_CLAUDE_EFFORT", "low"
-        ).strip().lower(),
-        hook_claude_thinking=os.getenv(
-            "MATHULA_TV_HOOK_CLAUDE_THINKING", "disabled"
-        ).strip().lower(),
+        hook_claude_effort="low",
+        hook_claude_thinking="disabled",
         hook_max_output_tokens=int(
             os.getenv(
                 "MATHULA_TV_HOOK_MAX_OUTPUT_TOKENS",
-                os.getenv("MATHULA_TV_HOOK_CLAUDE_MAX_OUTPUT_TOKENS", "12000"),
+                "12000",
             )
         ),
-        editorial_claude_effort=os.getenv(
-            "MATHULA_TV_EDITORIAL_CLAUDE_EFFORT",
-            os.getenv("MATHULA_TV_SEO_CLAUDE_EFFORT", "high"),
-        ).strip().lower(),
-        editorial_claude_thinking=os.getenv(
-            "MATHULA_TV_EDITORIAL_CLAUDE_THINKING",
-            os.getenv("MATHULA_TV_SEO_CLAUDE_THINKING", "adaptive"),
-        ).strip().lower(),
+        editorial_claude_effort="high",
+        editorial_claude_thinking="adaptive",
         editorial_max_output_tokens=int(
             os.getenv(
                 "MATHULA_TV_EDITORIAL_MAX_OUTPUT_TOKENS",
-                os.getenv(
-                    "MATHULA_TV_EDITORIAL_CLAUDE_MAX_OUTPUT_TOKENS",
-                    "12000",
-                ),
+                "12000",
             )
         ),
         translation_batch_size=int(os.getenv("MATHULA_TV_TRANSLATION_BATCH_SIZE", "6")),
@@ -202,7 +214,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
         true_peak_dbtp=float(os.getenv("MATHULA_TV_TRUE_PEAK_DBTP", "-1.5")),
         target_lra=float(os.getenv("MATHULA_TV_TARGET_LRA", "11")),
         max_source_duration_minutes=int(os.getenv("MATHULA_TV_MAX_SOURCE_DURATION_MINUTES", "240")),
-        max_claude_calls_per_job=int(os.getenv("MATHULA_TV_MAX_CLAUDE_CALLS_PER_JOB", "20")),
+        max_claude_calls_per_job=int(os.getenv("MATHULA_TV_MAX_AI_CALLS_PER_JOB", "20")),
         max_translation_repairs_per_unit=int(os.getenv("MATHULA_TV_MAX_TRANSLATION_REPAIRS_PER_UNIT", "2")),
         max_azure_tts_attempts_per_unit=int(os.getenv("MATHULA_TV_MAX_AZURE_TTS_ATTEMPTS_PER_UNIT", "3")),
         max_openvoice_attempts_per_unit=int(os.getenv("MATHULA_TV_MAX_OPENVOICE_ATTEMPTS_PER_UNIT", "2")),
@@ -214,6 +226,33 @@ def load_settings(project_root: Path | None = None) -> Settings:
         max_openvoice_wer_degradation=float(os.getenv("MATHULA_TV_MAX_OPENVOICE_WER_DEGRADATION", "0.10")),
         max_final_mix_wer_degradation=float(os.getenv("MATHULA_TV_MAX_FINAL_MIX_WER_DEGRADATION", "0.15")),
         min_protected_entity_similarity=float(os.getenv("MATHULA_TV_MIN_PROTECTED_ENTITY_SIMILARITY", "0.85")),
+        gpt_model=(
+            os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
+            or os.getenv("AZURE_AI_DEPLOYMENT")
+            or "gpt-5.6-sol-1"
+        ),
+        gpt_timeout_seconds=float(
+            os.getenv("MATHULA_TV_GPT_TIMEOUT_SECONDS", "900")
+        ),
+        gpt_max_retries=int(
+            os.getenv("MATHULA_TV_GPT_MAX_RETRIES", "3")
+        ),
+        gpt_effort=os.getenv("MATHULA_TV_GPT_EFFORT", "high").strip().lower(),
+        translation_gpt_effort=os.getenv(
+            "MATHULA_TV_TRANSLATION_GPT_EFFORT", "low"
+        ).strip().lower(),
+        seo_gpt_effort=os.getenv(
+            "MATHULA_TV_SEO_GPT_EFFORT", "medium"
+        ).strip().lower(),
+        hook_gpt_effort=os.getenv(
+            "MATHULA_TV_HOOK_GPT_EFFORT", "low"
+        ).strip().lower(),
+        editorial_gpt_effort=os.getenv(
+            "MATHULA_TV_EDITORIAL_GPT_EFFORT", "high"
+        ).strip().lower(),
+        max_ai_calls_per_job=int(
+            os.getenv("MATHULA_TV_MAX_AI_CALLS_PER_JOB", "20")
+        ),
     )
 
 

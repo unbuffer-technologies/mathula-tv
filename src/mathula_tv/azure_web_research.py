@@ -1,10 +1,8 @@
 """Azure OpenAI Responses API web-search client for transcript name research.
 
-This module is intentionally independent of Mathula TV's Claude Messages client.
-Azure-hosted Claude deployments may reject Anthropic server-tool definitions even
-when ordinary Messages calls work. Name research therefore uses the Azure OpenAI
-Responses API and its native ``web_search`` tool, while translation and editorial
-work remain on Claude.
+Name research uses the same Azure OpenAI Responses API family as every other
+runtime AI operation, with its native ``web_search`` tool. The separate client
+keeps research-specific citation extraction and diagnostic persistence isolated.
 """
 
 from __future__ import annotations

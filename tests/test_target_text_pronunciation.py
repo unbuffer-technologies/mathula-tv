@@ -3,10 +3,13 @@ import pytest
 from mathula_tv.pronunciation import (
     PronunciationDictionary,
     PronunciationEntry,
+    build_initialism_ssml_parts,
     expand_initials_for_tts,
     normalise_dates_for_tts,
     normalise_numbers_for_tts,
+    with_default_organisation_initialisms,
 )
+from mathula_tv.tts_ssml import CharacterPart, TextPart
 from mathula_tv.target_text import (
     TargetText,
     build_target_text,
@@ -67,6 +70,145 @@ def test_global_entries_cover_names_numbers_dates_and_initials():
     assert normalise_numbers_for_tts(text, dictionary).tts_text.count("amaphesenti") == 1
     assert normalise_dates_for_tts(text, dictionary).tts_text.count("Ntulikazi") == 1
     assert expand_initials_for_tts(text, dictionary).tts_text.count("Ess Ay") == 1
+
+
+def test_reviewed_organisation_initialisms_are_spelled_for_zulu_tts_only():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    target = build_target_text(
+        "I-ANC iphikisana ne-EFF.",
+        dictionary=dictionary,
+        protected_terms=("ANC", "EFF"),
+    )
+    assert target.faithful_translation == target.spoken_text == "I-ANC iphikisana ne-EFF."
+    assert target.tts_text == "I-ANC iphikisana ne-Ee Eff Eff."
+    assert [item.before for item in target.pronunciation_substitutions] == ["ANC", "EFF"]
+    assert all(item.kind == "initials" for item in target.pronunciation_substitutions)
+
+
+def test_npa_uses_reviewed_zulu_letter_names_with_attached_prefixes():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    target = build_target_text(
+        "I-NPA ikhuluma ngecala le-NPA ne-NPA.",
+        dictionary=dictionary,
+        protected_terms=("NPA",),
+    )
+
+    assert target.spoken_text == "I-NPA ikhuluma ngecala le-NPA ne-NPA."
+    assert target.tts_text == (
+        "I-En Pee Ey ikhuluma ngecala le-En Pee Ey ne-En Pee Ey."
+    )
+    assert [item.before for item in target.pronunciation_substitutions] == [
+        "NPA",
+        "NPA",
+        "NPA",
+    ]
+    assert all(item.tts_text == "En Pee Ey" for item in target.pronunciation_substitutions)
+
+
+def test_zulu_word_acronyms_are_pronounced_as_words_not_letter_names():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    target = build_target_text(
+        "I-IDAC ibambisene ne-IPID kanye ne-SAPS.",
+        dictionary=dictionary,
+        protected_terms=("IDAC", "IPID", "SAPS"),
+    )
+
+    assert target.spoken_text == "I-IDAC ibambisene ne-IPID kanye ne-SAPS."
+    assert target.tts_text == "I-Ay-dak ibambisene ne-Ay-pid kanye ne-Saps."
+    assert [item.before for item in target.pronunciation_substitutions] == [
+        "IDAC",
+        "IPID",
+        "SAPS",
+    ]
+    assert all(item.kind == "acronym" for item in target.pronunciation_substitutions)
+
+
+def test_other_reviewed_sa_party_initialisms_are_spelled_letter_by_letter():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    result = dictionary.apply("MK, MKP, DA, IFP ne-UDM")
+    assert result.tts_text == (
+        "Em Kay, Em Kay Pee, Dee Ey, Eye Eff Pee ne-You Dee Em"
+    )
+
+
+@pytest.mark.parametrize(
+    "language",
+    ("nso-ZA", "st-ZA", "tn-ZA", "ve-ZA", "xh-ZA", "ts-ZA", "ss-ZA", "nr-ZA"),
+)
+def test_organisation_initialisms_support_all_sa_language_accounts(language):
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language=language, job_id="job-123")
+    )
+    assert dictionary.apply("ANC EFF MKP").tts_text == (
+        "Ay En See EFF Em Kay Pee"
+    )
+
+
+def test_zulu_initialism_profile_uses_human_selected_aliases_and_character_mode():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    text = dictionary.apply("I-ANC, EFF, MK ne-DA").tts_text
+    assert text == "I-ANC, Ee Eff Eff, Em Kay ne-Dee Ey"
+    assert build_initialism_ssml_parts(text, language="zu-ZA") == (
+        TextPart("I-"),
+        CharacterPart("ANC"),
+        TextPart(", Ee Eff Eff, Em Kay ne-Dee Ey"),
+    )
+    assert build_initialism_ssml_parts(text, language="xh-ZA") == ()
+
+
+def test_zulu_code_switch_place_names_keep_display_text_and_use_reviewed_tts_aliases():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    result = dictionary.apply(
+        "Namhlanje iTshwane ifana neLondon; bantu baseBuffalo City."
+    )
+
+    assert result.spoken_text == (
+        "Namhlanje iTshwane ifana neLondon; bantu baseBuffalo City."
+    )
+    assert result.tts_text == (
+        "Namhlanje i Tšhwane ifana ne Landen; bantu base Baffalo Siti."
+    )
+    assert {item.kind for item in result.substitutions} == {"place_name"}
+
+
+def test_organisation_defaults_do_not_leak_into_unsupported_locales():
+    dictionary = PronunciationDictionary("v1", language="en-US", job_id="job-123")
+    assert with_default_organisation_initialisms(dictionary) is dictionary
+
+
+def test_job_pronunciation_override_wins_over_default_initialism():
+    dictionary = PronunciationDictionary(
+        "v1",
+        language="zu-ZA",
+        job_id="job-123",
+        job_overrides=(entry("ANC", "custom ANC", "initials", source="job_override"),),
+    )
+    augmented = with_default_organisation_initialisms(dictionary)
+    assert augmented.apply("ANC ne-EFF").tts_text == "custom ANC ne-Ee Eff Eff"
+
+
+def test_updated_application_default_replaces_stale_saved_default():
+    dictionary = PronunciationDictionary(
+        "v1",
+        language="zu-ZA",
+        entries=(
+            entry("EFF", "EFF", "initials", source="application_default"),
+        ),
+    )
+    augmented = with_default_organisation_initialisms(dictionary)
+    assert augmented.apply("EFF").tts_text == "Ee Eff Eff"
 
 
 def test_job_override_wins_without_mutating_global_dictionary():

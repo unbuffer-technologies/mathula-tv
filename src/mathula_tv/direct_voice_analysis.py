@@ -15,10 +15,17 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .atomic_io import atomic_write_json
-from .voice_family_classifier import VoiceFamilyClassificationResult, classify_voice_family
 
 
-DIRECT_VOICE_ANALYSIS_SCHEMA_VERSION = "mathula-direct-voice-analysis-v1"
+DIRECT_VOICE_ANALYSIS_SCHEMA_VERSION = "mathula-direct-voice-analysis-v2-short-family-reels"
+
+# Known-speaker identity matching remains conservative, but binary voice-family
+# classification can safely use shorter clean evidence.  The ECAPA family model
+# has no fixed one-second input requirement; the previous 1.0s guard was local.
+MINIMUM_KNOWN_SPEAKER_REEL_SECONDS = 1.0
+MINIMUM_VOICE_FAMILY_REEL_SECONDS = 0.75
+MINIMUM_KNOWN_SPEAKER_TURN_SECONDS = 0.20
+MINIMUM_VOICE_FAMILY_TURN_SECONDS = 0.10
 
 
 class DirectVoiceAnalysisError(RuntimeError):
@@ -32,6 +39,7 @@ def ensure_canonical_speaker_reels(
     speaker_mapping: Mapping[str, Any],
     required_speaker_ids: Sequence[str],
     speakers_root: Path,
+    canonical_speaker_turns: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     max_audio_seconds_per_speaker: float = 60.0,
     force: bool = False,
 ) -> dict[str, dict[str, Any]]:
@@ -64,26 +72,57 @@ def ensure_canonical_speaker_reels(
             )
         speaker_wav = speakers_root / f"{canonical_id}.wav"
         extraction: dict[str, Any] | None = None
-        if force or not speaker_wav.is_file() or speaker_wav.stat().st_size == 0:
-            selected_turns = [
-                turn
-                for turn in turns
-                if str(turn.get("speaker") or "").strip() in set(raw_ids)
-            ]
-            extraction = _write_speaker_reel(
-                source_path=analysis_audio_path,
-                output_path=speaker_wav,
-                turns=selected_turns,
-                max_audio_seconds=max_audio_seconds_per_speaker,
+        try:
+            contextual_turns = list(
+                (canonical_speaker_turns or {}).get(canonical_id, ())
             )
-        results[canonical_id] = {
-            "speaker_id": canonical_id,
-            "raw_speaker_ids": raw_ids,
-            "speaker_audio_path": str(speaker_wav),
-            "speaker_audio_sha256": _sha256(speaker_wav),
-            "extraction": extraction,
-            "reused": extraction is None,
-        }
+            reusable = (
+                not force
+                and not contextual_turns
+                and speaker_wav.is_file()
+                and speaker_wav.stat().st_size > 0
+                and _wav_duration_seconds(speaker_wav)
+                >= MINIMUM_KNOWN_SPEAKER_REEL_SECONDS
+            )
+            if not reusable:
+                selected_turns = contextual_turns or [
+                    turn for turn in turns
+                    if str(turn.get("speaker") or "").strip() in set(raw_ids)
+                ]
+                extraction = _write_speaker_reel(
+                    source_path=analysis_audio_path,
+                    output_path=speaker_wav,
+                    turns=selected_turns,
+                    max_audio_seconds=max_audio_seconds_per_speaker,
+                    minimum_audio_seconds=MINIMUM_KNOWN_SPEAKER_REEL_SECONDS,
+                    minimum_turn_seconds=MINIMUM_KNOWN_SPEAKER_TURN_SECONDS,
+                )
+            results[canonical_id] = {
+                "speaker_id": canonical_id,
+                "raw_speaker_ids": raw_ids,
+                "speaker_audio_path": str(speaker_wav),
+                "speaker_audio_sha256": _sha256(speaker_wav),
+                "extraction": extraction,
+                "turn_source": (
+                    "contextual_transcript_segments"
+                    if contextual_turns
+                    else "raw_diarization"
+                ),
+                "reused": extraction is None,
+                "status": "ready",
+            }
+        except Exception as exc:
+            speaker_wav.unlink(missing_ok=True)
+            results[canonical_id] = {
+                "speaker_id": canonical_id,
+                "raw_speaker_ids": raw_ids,
+                "speaker_audio_path": None,
+                "speaker_audio_sha256": None,
+                "extraction": None,
+                "reused": False,
+                "status": "unavailable",
+                "error": str(exc),
+            }
     return results
 
 
@@ -96,10 +135,11 @@ def ensure_canonical_voice_family_analysis(
     required_speaker_ids: Sequence[str],
     output_path: Path,
     speakers_root: Path,
+    canonical_speaker_turns: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     confidence_threshold: float = 0.70,
     max_audio_seconds_per_speaker: float = 60.0,
     force: bool = False,
-    classifier: Callable[..., VoiceFamilyClassificationResult] = classify_voice_family,
+    classifier: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Create or refresh canonical ECAPA voice-family evidence.
 
@@ -128,6 +168,15 @@ def ensure_canonical_voice_family_analysis(
     ]
     if not unresolved:
         return existing
+    if classifier is None:
+        try:
+            from .voice_family_classifier import classify_voice_family
+        except ImportError as exc:
+            raise DirectVoiceAnalysisError(
+                "Voice-family analysis requires its optional PyTorch classifier "
+                "dependencies"
+            ) from exc
+        classifier = classify_voice_family
 
     raw_to_canonical = {
         str(raw): str(canonical)
@@ -154,9 +203,11 @@ def ensure_canonical_voice_family_analysis(
                 raw for raw, canonical in raw_to_canonical.items()
                 if canonical == canonical_id
             )
-        selected_turns = [
-            turn
-            for turn in turns
+        contextual_turns = list(
+            (canonical_speaker_turns or {}).get(canonical_id, ())
+        )
+        selected_turns = contextual_turns or [
+            turn for turn in turns
             if str(turn.get("speaker") or "").strip() in set(raw_ids)
         ]
         speaker_wav = speakers_root / f"{canonical_id}.wav"
@@ -167,6 +218,8 @@ def ensure_canonical_voice_family_analysis(
                 output_path=speaker_wav,
                 turns=selected_turns,
                 max_audio_seconds=max_audio_seconds_per_speaker,
+                minimum_audio_seconds=MINIMUM_VOICE_FAMILY_REEL_SECONDS,
+                minimum_turn_seconds=MINIMUM_VOICE_FAMILY_TURN_SECONDS,
             )
             classification = classifier(
                 speaker_audio_path=speaker_wav,
@@ -182,6 +235,11 @@ def ensure_canonical_voice_family_analysis(
                     "speaker_audio_path": str(speaker_wav),
                     "speaker_audio_sha256": _sha256(speaker_wav),
                     "extraction": extraction,
+                    "turn_source": (
+                        "contextual_transcript_segments"
+                        if contextual_turns
+                        else "raw_diarization"
+                    ),
                     "evidence": {
                         "method": classification.method,
                         "model": classification.model,
@@ -232,8 +290,14 @@ def _write_speaker_reel(
     output_path: Path,
     turns: Sequence[Mapping[str, Any]],
     max_audio_seconds: float,
+    minimum_audio_seconds: float = MINIMUM_KNOWN_SPEAKER_REEL_SECONDS,
+    minimum_turn_seconds: float = MINIMUM_KNOWN_SPEAKER_TURN_SECONDS,
 ) -> dict[str, Any]:
     """Concatenate mapped diarization turns into one canonical PCM WAV reel."""
+    if minimum_audio_seconds <= 0:
+        raise ValueError("minimum_audio_seconds must be positive")
+    if minimum_turn_seconds <= 0:
+        raise ValueError("minimum_turn_seconds must be positive")
     with wave.open(str(source_path), "rb") as source:
         channels = source.getnchannels()
         sample_width = source.getsampwidth()
@@ -256,7 +320,7 @@ def _write_speaker_reel(
             start_seconds, end_seconds = bounds
             start_frame = max(0, min(frame_count, round(start_seconds * sample_rate)))
             end_frame = max(start_frame, min(frame_count, round(end_seconds * sample_rate)))
-            if end_frame - start_frame < round(0.20 * sample_rate):
+            if end_frame - start_frame < round(minimum_turn_seconds * sample_rate):
                 continue
             bounded.append((start_frame, end_frame))
 
@@ -296,9 +360,11 @@ def _write_speaker_reel(
         temporary.replace(output_path)
 
     duration_seconds = total / sample_rate
-    if duration_seconds < 1.0:
+    if duration_seconds < minimum_audio_seconds:
+        output_path.unlink(missing_ok=True)
         raise DirectVoiceAnalysisError(
-            f"Canonical speaker reel is too short: {duration_seconds:.3f}s"
+            "Canonical speaker reel is too short: "
+            f"{duration_seconds:.3f}s; minimum is {minimum_audio_seconds:.3f}s"
         )
     return {
         "turn_count_available": len(bounded),
@@ -308,7 +374,20 @@ def _write_speaker_reel(
         "channels": 1,
         "sample_width": sample_width,
         "maximum_duration_seconds": max_audio_seconds,
+        "minimum_duration_seconds": minimum_audio_seconds,
+        "minimum_turn_seconds": minimum_turn_seconds,
     }
+
+
+def _wav_duration_seconds(path: Path) -> float:
+    try:
+        with wave.open(str(path), "rb") as wav:
+            sample_rate = wav.getframerate()
+            if sample_rate <= 0:
+                return 0.0
+            return wav.getnframes() / sample_rate
+    except (OSError, wave.Error):
+        return 0.0
 
 
 def _turn_bounds_seconds(item: Mapping[str, Any]) -> tuple[float, float] | None:

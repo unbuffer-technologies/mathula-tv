@@ -19,7 +19,7 @@ source media (preserved unchanged)
 
 Azure transcript
   └─ deterministic semantic dubbing units
-       └─ Claude Opus 4.8 full-clip translation
+       └─ Azure OpenAI GPT semantic-chunk translation
             ├─ faithful_translation
             ├─ spoken_text
             └─ reviewed Azure-friendly tts_text
@@ -38,7 +38,7 @@ Azure TTS determines isiZulu pronunciation and base delivery. OpenVoice receives
 
 | Normal server | Colab/Kaggle GPU worker | Authorised humans |
 | --- | --- | --- |
-| Validate media; create both derivatives; Azure STT; units; Claude; pronunciation; Azure TTS; timing search; reference reels; asset/conversion plans and queues; reconciliation; compatibility/QC; alignment; background; mixing; subtitles; rendering | In `assets` mode, claim the asset lease, extract source/target embeddings and convert voice-calibration candidates; in `conversion` mode, claim the conversion lease and convert pending units; always verify pins/hashes, reuse one model load, promote manifests, and clean private scratch | Voice consent/rights; factual/editorial review; fluent isiZulu and pronunciation; identity and audio quality; timing/background; final publication decision |
+| Validate media; create both derivatives; Azure STT; units; GPT; pronunciation; Azure TTS; timing search; reference reels; asset/conversion plans and queues; reconciliation; compatibility/QC; alignment; background; mixing; subtitles; rendering | In `assets` mode, claim the asset lease, extract source/target embeddings and convert voice-calibration candidates; in `conversion` mode, claim the conversion lease and convert pending units; always verify pins/hashes, reuse one model load, promote manifests, and clean private scratch | Voice consent/rights; factual/editorial review; fluent isiZulu and pronunciation; identity and audio quality; timing/background; final publication decision |
 
 The server must remain importable without CUDA, Torch, or OpenVoice. The worker reuses the existing generation-precondition lease protocol; it does not create a second source of job truth.
 
@@ -130,7 +130,7 @@ The corresponding GCS root is `mathula-tv/jobs/{job_id}` (subject to the configu
 
 ## Backend and migration policy
 
-F5-TTS is absent and cannot be selected. OmniVoice is deprecated, unregistered, unselectable, not production, and not a fallback; remaining migration files are pending deletion after a measured compatibility pass or explicit cleanup. Azure OpenAI may remain only as an explicitly selected legacy/test adapter and never receives traffic after an Anthropic error. No converter failure may be hidden by publishing raw Azure audio as cloned speech.
+F5-TTS is absent and cannot be selected. OmniVoice is deprecated, unregistered, unselectable, not production, and not a fallback; remaining migration files are pending deletion after a measured compatibility pass or explicit cleanup. Azure OpenAI GPT is the sole runtime AI route and never falls back to another model provider. No converter failure may be hidden by publishing raw Azure audio as cloned speech.
 
 ## Secret and privacy boundary
 

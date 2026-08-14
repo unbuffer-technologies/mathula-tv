@@ -147,3 +147,52 @@ def test_write_speaker_profiles():
         data = json.loads(output_path.read_text())
         assert data["job_id"] == "test-job"
         assert "artifact_sha256" in data
+
+
+
+def test_build_speaker_profiles_records_source_delivery_measurements(tmp_path):
+    transcript = {
+        "segments": [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_ms": 0,
+                "end_ms": 2000,
+                "source_text": "one two three four",
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_ms": 3000,
+                "end_ms": 5000,
+                "source_text": "five six",
+            },
+        ]
+    }
+    diarization = {"turns": [{"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0}]}
+    transcript_path = tmp_path / "transcript.json"
+    diarization_path = tmp_path / "diarization.json"
+    transcript_path.write_text(json.dumps(transcript), encoding="utf-8")
+    diarization_path.write_text(json.dumps(diarization), encoding="utf-8")
+
+    artifact = build_speaker_profiles(
+        "job",
+        transcript_path,
+        diarization_path,
+        acoustic_analysis_results={
+            "SPEAKER_00": {
+                "voice_family": "masculine",
+                "confidence": 0.9,
+                "median_f0_hz": 128.0,
+                "f0_percentile_25": 110.0,
+                "f0_percentile_75": 145.0,
+                "voiced_frame_ratio": 0.75,
+                "usable_duration_ms": 4000,
+                "sample_count": 100,
+                "evidence": {},
+            }
+        },
+    )
+    delivery = artifact.speakers[0]["source_delivery"]
+    assert delivery["source_word_count"] == 6
+    assert delivery["source_speech_seconds"] == 4.0
+    assert delivery["source_speech_rate_wps"] == 1.5
+    assert delivery["median_f0_hz"] == 128.0

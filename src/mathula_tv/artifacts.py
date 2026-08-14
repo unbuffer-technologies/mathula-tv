@@ -9,6 +9,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class DubbingArtifacts:
     job_root: Path
+    target_locale: str = "zu-ZA"
 
     @property
     def analysis_audio(self) -> Path:
@@ -23,8 +24,19 @@ class DubbingArtifacts:
         return self.job_root / "dubbing/dubbing_units.json"
 
     @property
+    def language_suffix(self) -> str:
+        return {"zu-ZA": "zu", "nso-ZA": "nso"}.get(
+            self.target_locale,
+            self.target_locale.split("-", 1)[0].lower(),
+        )
+
+    @property
     def three_text_translation(self) -> Path:
-        return self.job_root / "dubbing/translation_zu.json"
+        return self.job_root / f"dubbing/translation_{self.language_suffix}.json"
+
+    @property
+    def raw_multivariant_translation(self) -> Path:
+        return self.job_root / f"translation/transcript_{self.language_suffix}.json"
 
     @property
     def pronunciation_dictionary(self) -> Path:
@@ -113,6 +125,14 @@ class DubbingArtifacts:
     @property
     def render_manifest(self) -> Path:
         return self.render_root / "render_manifest.json"
+
+    @property
+    def output_root(self) -> Path:
+        return self.job_root / "output"
+
+    @property
+    def review_video(self) -> Path:
+        return self.output_root / "review_zu.mp4"
 
     @property
     def review_root(self) -> Path:

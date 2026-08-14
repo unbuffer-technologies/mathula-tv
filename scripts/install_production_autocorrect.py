@@ -25,7 +25,7 @@ EXPERIMENTAL = [
     "scripts/apply_stt_corrections.py",
     "tests/test_stt_corrections.py",
     "src/mathula_tv/transcript_correction.py",
-    "scripts/correct_transcript_with_claude.py",
+    "scripts/mathula_autocorrect.py",
     "tests/test_transcript_correction.py",
     "src/mathula_tv/adaptive_vocabulary.py",
     "src/mathula_tv/correction_review.py",

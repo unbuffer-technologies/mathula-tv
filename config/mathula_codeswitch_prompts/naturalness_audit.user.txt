@@ -1,0 +1,70 @@
+Audit every target segment exhaustively for natural spoken isiZulu and natural code-switching.
+
+Mandatory checks for each segment:
+- isiZulu grammar and morphology;
+- noun classes, concords and agreement;
+- locatives and prepositions;
+- idiomatic spoken naturalness;
+- literal English calques;
+- code-switch boundaries and attachment of isiZulu morphology to English;
+- translation/code-switch balance;
+- rhetorical register, humour, repetition and rhythm;
+- redundant double markers such as phinda + futhi;
+- consistency of preserved English treatment across neighbouring segments;
+- TTS pronounceability without semantic drift.
+
+Actively look for known Mathula TV failures, including:
+- ibisika used for slang cutting/living it up;
+- uqala ukhulume instead of an infinitive complement;
+- Angisakhumbuli nokukhumbula;
+- abe gula;
+- phinda + futhi redundancy;
+- malformed or awkward hybrids around imbibe/imbibing;
+- bare English abstract nouns stranded without isiZulu scaffolding;
+- a complete pompous English vocabulary cascade flattened into ordinary language;
+- spelling such as abammeli instead of abameli.
+
+For each real issue, cite the closest possible source and candidate excerpts and specify a repair goal, not a full rewrite. Python will canonicalize a slightly inexact quote to an exact local substring when unambiguous, so do not suppress a real issue merely because punctuation or spacing is difficult to reproduce. Use issue IDs beginning with "nat-". Do not flag valid regional variation or harmless preference.
+
+Return:
+{
+  "schema_version":"mathula-naturalness-audit-v1",
+  "audit_type":"isizulu_naturalness_codeswitch",
+  "summary":{"critical":0,"high":0,"medium":0,"low":0},
+  "segments":[
+    {
+      "segment_id":"exact ID",
+      "verdict":"approved|issues_found|human_review_required",
+      "coverage":{
+        "grammar_morphology":true,
+        "concord_agreement":true,
+        "locatives":true,
+        "spoken_naturalness":true,
+        "literal_calques":true,
+        "code_switch_boundaries":true,
+        "code_switch_balance":true,
+        "register_rhythm":true,
+        "preservation_consistency":true,
+        "tts_pronounceability":true
+      },
+      "issues":[
+        {
+          "issue_id":"nat-seg-ID-001",
+          "severity":"critical|high|medium|low",
+          "category":"specific category",
+          "source_excerpt":"closest source excerpt",
+          "candidate_excerpt":"closest target excerpt",
+          "naturalness_diagnosis":"what sounds wrong",
+          "explanation":"precise problem",
+          "repair_goal":"natural form/function to achieve"
+        }
+      ]
+    }
+  ],
+  "global_findings":[]
+}
+
+Every coverage field must be true after checking. Python recomputes summary totals from the issue arrays.
+
+PAYLOAD:
+{{PAYLOAD_JSON}}

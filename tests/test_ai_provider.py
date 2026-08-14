@@ -90,15 +90,23 @@ def provider(values, **config_updates):
     return AnthropicClaudeProvider(config, session=session, sleep=lambda _delay: None), session
 
 
-def test_environment_defaults_to_anthropic_opus_and_never_falls_back():
-    instance = create_production_ai_provider({"ANTHROPIC_API_KEY": "secret"}, session=Session([]))
-    assert instance.provider == "anthropic"
-    assert instance.model == "claude-opus-4-8"
-    with pytest.raises(UnsupportedAIProvider):
+def test_environment_defaults_to_gpt_and_never_falls_back_to_anthropic():
+    with pytest.raises(ValueError, match="AZURE_AI_KEY"):
         create_production_ai_provider(
-            {"MATHULA_TV_AI_PROVIDER": "azure-openai", "ANTHROPIC_API_KEY": "secret"},
-            session=Session([]),
+            {"ANTHROPIC_API_KEY": "must-not-be-used"}, session=Session([])
         )
+    instance = create_production_ai_provider(
+        {
+            "AZURE_AI_ENDPOINT": "https://unit-test.services.ai.azure.com",
+            "AZURE_AI_KEY": "secret",
+            "AZURE_AI_DEPLOYMENT": "gpt-5.6-sol-1",
+            "MATHULA_TV_AI_PROVIDER": "azure-foundry-claude",
+            "ANTHROPIC_API_KEY": "must-not-be-used",
+        },
+        session=Session([]),
+    )
+    assert instance.provider == "azure-openai-gpt"
+    assert instance.model == "gpt-5.6-sol-1"
 
 
 def test_missing_configuration_names_variable_without_disclosing_values():

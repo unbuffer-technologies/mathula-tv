@@ -47,11 +47,20 @@ UnsupportedSourceDuration = _error("UnsupportedSourceDuration", "unsupported_sou
 AzureSTTAuthenticationFailure = _error("AzureSTTAuthenticationFailure", "azure_stt_authentication", "analysis", False, "Check Azure Speech credentials and region")
 AzureSTTRateLimit = _error("AzureSTTRateLimit", "azure_stt_rate_limit", "analysis", True, "Retry after the provider delay")
 AzureSTTMalformedResponse = _error("AzureSTTMalformedResponse", "azure_stt_malformed_response", "analysis", True, "Retry and retain the raw provider response")
-ClaudeAuthenticationFailure = _error("ClaudeAuthenticationFailure", "claude_authentication", "translation", False, "Check ANTHROPIC_API_KEY")
-ClaudeRateLimit = _error("ClaudeRateLimit", "claude_rate_limit", "translation", True, "Retry after the provider delay")
-ClaudeTimeout = _error("ClaudeTimeout", "claude_timeout", "translation", True, "Retry within the configured job limit")
-ClaudeInvalidStructuredOutput = _error("ClaudeInvalidStructuredOutput", "claude_invalid_output", "translation", False, "Review the stored validation summary")
-ClaudeRefusal = _error("ClaudeRefusal", "claude_refusal", "translation", False, "Send the unit for human translation review")
+AIAuthenticationFailure = _error("AIAuthenticationFailure", "ai_authentication", "ai", False, "Check AZURE_AI_KEY")
+AIRateLimit = _error("AIRateLimit", "ai_rate_limit", "ai", True, "Retry after the provider delay")
+AITimeout = _error("AITimeout", "ai_timeout", "ai", True, "Retry within the configured job limit")
+AIInvalidStructuredOutput = _error("AIInvalidStructuredOutput", "ai_invalid_output", "ai", False, "Review the stored validation summary")
+AIRefusal = _error("AIRefusal", "ai_refusal", "ai", False, "Send the unit for human review")
+
+# Historical exception names remain importable so old job recovery tools and
+# third-party integrations do not break. New GPT runtime code raises the
+# provider-neutral classes above.
+ClaudeAuthenticationFailure = _error("ClaudeAuthenticationFailure", "claude_authentication", "translation", False, "Use the archived Claude release configuration")
+ClaudeRateLimit = _error("ClaudeRateLimit", "claude_rate_limit", "translation", True, "Retry with the archived Claude release")
+ClaudeTimeout = _error("ClaudeTimeout", "claude_timeout", "translation", True, "Retry with the archived Claude release")
+ClaudeInvalidStructuredOutput = _error("ClaudeInvalidStructuredOutput", "claude_invalid_output", "translation", False, "Review the stored legacy validation summary")
+ClaudeRefusal = _error("ClaudeRefusal", "claude_refusal", "translation", False, "Send the legacy unit for human review")
 TranslationEntityMismatch = _error("TranslationEntityMismatch", "translation_entity_mismatch", "translation", False, "Repair protected entities or request human review")
 TranslationTimingFailure = _error("TranslationTimingFailure", "translation_timing_failure", "translation", False, "Repair only the affected dubbing unit")
 AzureTTSVoiceUnavailable = _error("AzureTTSVoiceUnavailable", "azure_tts_voice_unavailable", "azure_tts", False, "Run voice discovery and choose an available zu-ZA voice")

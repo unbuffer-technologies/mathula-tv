@@ -1,4 +1,4 @@
-"""Resumable semantic-context translation through Azure AI Foundry Claude.
+"""Resumable semantic-context translation through Azure OpenAI GPT.
 
 The public function name is retained for compatibility with the existing
 production pipeline.  Internally, translation is no longer one giant response:
@@ -21,7 +21,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .ai_consumption import consumption_record, update_ai_consumption_report
-from .ai_provider import expand_compact_multivariant_result
+from .ai_provider import (
+    expand_compact_multivariant_result,
+    parse_compact_multivariant_text,
+)
 from .atomic_io import atomic_write_json, read_json
 from .autocorrect_stage import require_authoritative_transcript
 from .media import checksum
@@ -45,7 +48,8 @@ from .semantic_translation_chunks import (
 )
 
 ProgressCallback = Callable[[dict[str, Any]], None]
-_STAGE = "claude_multivariant_translation_semantic_chunk"
+_STAGE = "gpt_multivariant_translation_semantic_chunk"
+_LEGACY_STAGE = "claude_multivariant_translation_semantic_chunk"
 _TARGETED_IDENTITY_REPAIR_SCHEMA_VERSION = (
     "mathula.translation.targeted-identity-repair.v1"
 )
@@ -87,7 +91,7 @@ def _provider_metadata(response: Any) -> dict[str, Any]:
         if isinstance(value, Mapping):
             return dict(value)
     return {
-        "provider": "azure-foundry-claude",
+        "provider": "azure-openai-gpt",
         "model_returned": str(getattr(metadata, "model_returned", "") or ""),
         "prompt_version": str(getattr(metadata, "prompt_version", "") or PROMPT_VERSION),
     }
@@ -275,7 +279,7 @@ def _aggregate_metadata(items: list[Mapping[str, Any]], **extra: Any) -> dict[st
     first = dict(items[0]) if items else {}
     return {
         **first,
-        "provider": str(first.get("provider") or "azure-foundry-claude"),
+        "provider": str(first.get("provider") or "azure-openai-gpt"),
         "prompt_version": PROMPT_VERSION,
         "translation_mode": "semantic_context_chunks",
         "chunk_count": len(items),
@@ -317,27 +321,6 @@ def _load_checkpoint(
 
 
 
-def _parse_complete_json_object(text: str) -> dict[str, Any] | None:
-    """Parse one completed provider JSON object from a saved SSE text stream."""
-
-    value = str(text or "").strip()
-    if not value:
-        return None
-    candidates = [value]
-    first = value.find("{")
-    last = value.rfind("}")
-    if first >= 0 and last > first:
-        candidates.append(value[first : last + 1])
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(parsed, Mapping):
-            return dict(parsed)
-    return None
-
-
 def _recover_failed_candidate(
     *,
     chunk_dir: Path,
@@ -368,16 +351,28 @@ def _recover_failed_candidate(
         ):
             candidate = details.get("candidate_output")
 
-        recovery_source = failure_path
+        recovery_source: str | Path = failure_path
+        if candidate is None and isinstance(details, Mapping):
+            raw_output = str(details.get("raw_output") or "")
+            if raw_output.strip():
+                try:
+                    candidate = parse_compact_multivariant_text(raw_output)
+                    recovery_source = f"{failure_path}#error.details.raw_output"
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    candidate = None
         if candidate is None:
             partial_path = chunk_dir / "translation_response.partial.txt"
             if partial_path.is_file():
-                parsed = _parse_complete_json_object(
-                    partial_path.read_text(encoding="utf-8", errors="replace")
-                )
-                if parsed is not None:
-                    candidate = expand_compact_multivariant_result(parsed)
+                try:
+                    candidate = parse_compact_multivariant_text(
+                        partial_path.read_text(
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                    )
                     recovery_source = partial_path
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    candidate = None
 
         if not isinstance(candidate, Mapping):
             return None
@@ -385,16 +380,19 @@ def _recover_failed_candidate(
         # A provider-schema failure stores the parsed compact wire candidate
         # before normalisation. Canonicalise/expand it here so harmless nested
         # annotations can be recovered locally without another paid request.
-        candidate = expand_compact_multivariant_result(candidate)
+        candidate = expand_compact_multivariant_result(
+            candidate,
+            request=request,
+        )
         normalized = normalize_multivariant_response(candidate, request=request)
         validation = validate_multivariant_response(normalized, request=request)
         metadata = {
             "provider": str(
                 details.get("provider")
                 if isinstance(details, Mapping)
-                else "azure-foundry-claude"
+                else "azure-openai-gpt"
             )
-            or "azure-foundry-claude",
+            or "azure-openai-gpt",
             "model_returned": str(
                 details.get("model_returned") if isinstance(details, Mapping) else ""
             ),
@@ -470,13 +468,24 @@ def _load_saved_validation_failure(
                     )
                     break
         if candidate is None:
+            raw_output = str(saved_details.get("raw_output") or "")
+            if raw_output.strip():
+                try:
+                    candidate = parse_compact_multivariant_text(raw_output)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    candidate = None
+        if candidate is None:
             partial_path = chunk_dir / "translation_response.partial.txt"
             if partial_path.is_file():
-                parsed = _parse_complete_json_object(
-                    partial_path.read_text(encoding="utf-8", errors="replace")
-                )
-                if parsed is not None:
-                    candidate = expand_compact_multivariant_result(parsed)
+                try:
+                    candidate = parse_compact_multivariant_text(
+                        partial_path.read_text(
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    candidate = None
         if not isinstance(candidate, Mapping):
             return None
 
@@ -673,13 +682,23 @@ def _targeted_identity_repair_request(
     request = copy.deepcopy(dict(batch_request))
     request["units"] = [source_unit]
     translation_batch = dict(request.get("translation_batch") or {})
+    # Identity-only repair does not need the complete-story context spine or
+    # neighbouring source units. The failed unit and reviewed accepted forms
+    # are the entire mutation contract. Removing those repeated contexts keeps
+    # the fallback request small if deterministic local recovery is impossible.
+    translation_batch.pop("cacheable_context", None)
+    translation_batch.pop("context_spine_sha256", None)
     translation_batch.update(
         {
             "unit_count": 1,
             "requested_unit_ids": [unit_id],
-            "prior_translated_context": list(
-                translation_batch.get("prior_translated_context") or []
-            ),
+            "context_radius_units": 0,
+            "context_units": [],
+            "prior_translated_context": [],
+            "prior_global_terminology": [],
+            "estimated_source_tokens": estimate_unit_tokens(source_unit),
+            "max_output_tokens": 6000,
+            "repair_context_policy": "single_unit_identity_contract_only",
             "instructions": [
                 *list(translation_batch.get("instructions") or []),
                 (
@@ -798,6 +817,72 @@ def _sum_usage(*items: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
+def _apply_all_local_identity_repairs(
+    *,
+    candidate: Mapping[str, Any],
+    batch_request: Mapping[str, Any],
+    first_issue: Mapping[str, str],
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, str]],
+]:
+    """Repair successive identity-only failures in one paid chunk candidate."""
+
+    current_candidate: Mapping[str, Any] = candidate
+    current_issue = dict(first_issue)
+    issues: list[dict[str, str]] = []
+    repairs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    maximum = max(1, len(batch_request.get("units") or []) * 3)
+
+    for _ in range(maximum):
+        key = (
+            current_issue["unit_id"],
+            current_issue["variant_id"],
+            current_issue["validation_error"],
+        )
+        if key in seen:
+            raise MultivariantTranslationError(
+                "Deterministic identity recovery repeated the same validator failure"
+            )
+        seen.add(key)
+        issues.append(current_issue)
+        try:
+            normalized, validation, unit_repairs = (
+                restore_missing_hard_identities_in_unit(
+                    current_candidate,
+                    request=batch_request,
+                    unit_id=current_issue["unit_id"],
+                )
+            )
+            repairs.extend(unit_repairs)
+            return normalized, validation, repairs, issues
+        except MultivariantTranslationError as exc:
+            details = _exception_details(exc)
+            next_candidate = details.get("candidate_output")
+            next_issue = _missing_identity_issue(exc)
+            completed_repairs = details.get("local_identity_repairs")
+            if (
+                next_issue is None
+                or not isinstance(next_candidate, Mapping)
+                or not isinstance(completed_repairs, list)
+            ):
+                raise
+            repairs.extend(
+                dict(item)
+                for item in completed_repairs
+                if isinstance(item, Mapping)
+            )
+            current_candidate = next_candidate
+            current_issue = next_issue
+
+    raise MultivariantTranslationError(
+        f"Deterministic identity recovery exceeded its bounded limit of {maximum}"
+    )
+
+
 def _attempt_targeted_identity_repair(
     *,
     provider: Any,
@@ -848,20 +933,23 @@ def _attempt_targeted_identity_repair(
             "wire_requests": original_request_metrics
         }
     try:
-        normalized, validation, local_repairs = (
-            restore_missing_hard_identities_in_unit(
-                candidate,
-                request=batch_request,
-                unit_id=issue["unit_id"],
+        normalized, validation, local_repairs, repaired_issues = (
+            _apply_all_local_identity_repairs(
+                candidate=candidate,
+                batch_request=batch_request,
+                first_issue=issue,
             )
+        )
+        repaired_unit_ids = list(
+            dict.fromkeys(item["unit_id"] for item in repaired_issues)
         )
         metadata = {
             **original_metadata,
             "provider": str(
-                original_metadata.get("provider") or "azure-foundry-claude"
+                original_metadata.get("provider") or "azure-openai-gpt"
             ),
-            "targeted_identity_repair_count": 1,
-            "local_identity_alias_repair_count": 1,
+            "targeted_identity_repair_count": len(repaired_unit_ids),
+            "local_identity_alias_repair_count": len(repaired_unit_ids),
             "targeted_identity_repair": {
                 "schema_version": _TARGETED_IDENTITY_REPAIR_SCHEMA_VERSION,
                 "unit_id": issue["unit_id"],
@@ -870,6 +958,8 @@ def _attempt_targeted_identity_repair(
                 "initial_validation_error": issue["validation_error"],
                 "provider_http_requests_started": 0,
                 "repair_mode": "deterministic_reviewed_alias_insertion",
+                "repaired_unit_ids": repaired_unit_ids,
+                "repaired_issue_count": len(repaired_issues),
             },
         }
         atomic_write_json(repair_dir / "merged_response.json", normalized)
@@ -880,6 +970,7 @@ def _attempt_targeted_identity_repair(
             {
                 "schema_version": _TARGETED_IDENTITY_REPAIR_SCHEMA_VERSION,
                 "repairs": local_repairs,
+                "issues": repaired_issues,
             },
         )
         atomic_write_json(
@@ -888,6 +979,7 @@ def _attempt_targeted_identity_repair(
                 "schema_version": _TARGETED_IDENTITY_REPAIR_SCHEMA_VERSION,
                 "completed_at": _utcnow(),
                 "unit_id": issue["unit_id"],
+                "repaired_unit_ids": repaired_unit_ids,
                 "variant_id": issue["variant_id"],
                 "request_sha256": repair_request["request_sha256"],
                 "response_sha256": validation.get("response_sha256"),
@@ -899,7 +991,8 @@ def _attempt_targeted_identity_repair(
             "identity-repair",
             (
                 f"Chunk {chunk_index}/{chunk_count}: restored the reviewed "
-                f"identity alias locally in {issue['unit_id']} and revalidated "
+                f"identity aliases locally in {', '.join(repaired_unit_ids)} "
+                "and revalidated "
                 "the complete chunk"
             ),
             status="completed",
@@ -960,7 +1053,7 @@ def _attempt_targeted_identity_repair(
             "provider": str(
                 repair_metadata.get("provider")
                 or original_metadata.get("provider")
-                or "azure-foundry-claude"
+                or "azure-openai-gpt"
             ),
             "model_returned": str(
                 repair_metadata.get("model_returned")
@@ -1268,7 +1361,7 @@ def _attempt_targeted_validation_repair(
             "provider": str(
                 repair_metadata.get("provider")
                 or original_metadata.get("provider")
-                or "azure-foundry-claude"
+                or "azure-openai-gpt"
             ),
             "model_returned": str(
                 repair_metadata.get("model_returned")
@@ -1363,6 +1456,20 @@ def _chunk_split_recovery_reason(exc: BaseException) -> str | None:
     if int(details.get("status_code") or 0) == 413:
         return "request_too_large"
     message = str(exc).casefold()
+    validation_error = str(details.get("validation_error") or "").casefold()
+    wire_shape_markers = (
+        "did not contain compact translation units",
+        "does not contain json",
+        "did not contain a unit-shaped translation array",
+    )
+    if (
+        str(details.get("validation_stage") or "") == "parse"
+        and any(
+            marker in message or marker in validation_error
+            for marker in wire_shape_markers
+        )
+    ):
+        return "invalid_translation_wire_shape"
     if "request too large" in message or "request_too_large" in message:
         return "request_too_large"
     if "context window" in message:
@@ -1422,7 +1529,7 @@ def _failure_metadata(exc: BaseException, reason: str) -> dict[str, Any]:
     details = getattr(exc, "details", None)
     details = details if isinstance(details, Mapping) else {}
     return {
-        "provider": str(details.get("provider") or "azure-foundry-claude"),
+        "provider": str(details.get("provider") or "azure-openai-gpt"),
         "model_returned": str(details.get("model_returned") or ""),
         "prompt_version": str(details.get("prompt_version") or PROMPT_VERSION),
         "provider_attempts": int(details.get("provider_attempts") or 0),
@@ -1632,15 +1739,15 @@ def translate_full_transcript_once(
         or getattr(provider, "provider", None)
         or ""
     ).strip().lower()
-    if configured_provider and configured_provider != "azure-foundry-claude":
+    if configured_provider and configured_provider != "azure-openai-gpt":
         raise ValueError(
-            "Mathula TV Claude translation must use Azure AI Foundry "
-            f"(azure-foundry-claude), not {configured_provider!r}"
+            "Mathula TV translation must use Azure OpenAI GPT "
+            f"(azure-openai-gpt), not {configured_provider!r}"
         )
     if job.state == "synthesis_queued":
         raise ValueError("Migrate the validated legacy translation; do not regenerate it silently")
-    foundry_endpoint = str(getattr(provider_config, "base_url", "") or "")
-    foundry_deployment = str(getattr(provider_config, "model", "") or "")
+    ai_endpoint = str(getattr(provider_config, "endpoint", "") or "")
+    ai_deployment = str(getattr(provider_config, "model", "") or "")
 
     settings = pipeline.settings
     target_tokens = int(
@@ -1673,7 +1780,11 @@ def translate_full_transcript_once(
     effective_timeout = float(
         request_timeout_seconds
         if request_timeout_seconds is not None
-        else getattr(settings, "translation_request_timeout_seconds", settings.claude_timeout_seconds)
+        else getattr(
+            settings,
+            "translation_request_timeout_seconds",
+            getattr(settings, "gpt_timeout_seconds", 900),
+        )
     )
     effective_attempts = int(
         batch_max_retries
@@ -1744,11 +1855,11 @@ def translate_full_transcript_once(
     retrying_failed_translation = (
         job.state == "failed_retryable"
         and str((job.last_error or {}).get("stage") or "")
-        in {_STAGE, "translation"}
+        in {_STAGE, _LEGACY_STAGE, "translation"}
     )
     if job.state not in {"analysis_ready", "translation_running"} and not retrying_failed_translation:
         raise ValueError(
-            "Claude translation requires analysis_ready, translation_running, or "
+            "GPT translation requires analysis_ready, translation_running, or "
             f"a retryable translation failure, not {job.state}; "
             "use import-translation for an intentional reviewed override"
         )
@@ -2114,7 +2225,7 @@ def translate_full_transcript_once(
                     status = "warning"
                 elif kind == "request_attempt":
                     message = (
-                        f"Chunk {chunk_index}/{chunk_count}: Claude attempt "
+                        f"Chunk {chunk_index}/{chunk_count}: GPT attempt "
                         f"{event.get('attempt')}/{event.get('max_retries')}"
                     )
                     status = "running"
@@ -2142,7 +2253,7 @@ def translate_full_transcript_once(
                     status = "running"
                 elif kind == "structured_output_schema":
                     message = (
-                        f"Chunk {chunk_index}/{chunk_count}: Claude schema "
+                        f"Chunk {chunk_index}/{chunk_count}: GPT schema "
                         f"preflight passed ({int(event.get('schema_bytes') or 0) / 1024:.1f} KiB, "
                         f"{int(event.get('optional_parameters') or 0)} optional, "
                         f"{int(event.get('union_parameters') or 0)} unions)"
@@ -2167,7 +2278,7 @@ def translate_full_transcript_once(
                         event.get("response_body_bytes") or 0
                     )
                     message = (
-                        f"Chunk {chunk_index}/{chunk_count}: Claude usage "
+                        f"Chunk {chunk_index}/{chunk_count}: GPT usage "
                         f"input={int(event.get('input_tokens') or 0):,}, "
                         f"output={int(event.get('output_tokens') or 0):,}, "
                         f"thinking={int(event.get('thinking_tokens') or 0):,}, "
@@ -2375,7 +2486,7 @@ def translate_full_transcript_once(
                         "chunk_index": chunk_index,
                         "provider": str(
                             failure_metadata.get("provider")
-                            or "azure-foundry-claude"
+                            or "azure-openai-gpt"
                         ),
                     }
                 )
@@ -2435,10 +2546,10 @@ def translate_full_transcript_once(
             request_timeout_seconds=effective_timeout,
             provider_attempt_limit_per_chunk=effective_attempts,
             prompt_cache_requested=True,
-            foundry_endpoint=foundry_endpoint,
-            foundry_deployment=foundry_deployment,
-            streaming=True,
-            transport="server_sent_events",
+            ai_endpoint=ai_endpoint,
+            ai_deployment=ai_deployment,
+            streaming=False,
+            transport="responses_api",
         )
         installed, validation = prepare_installed_translation(
             response=merged_response,
@@ -2500,7 +2611,7 @@ def translate_full_transcript_once(
         )
 
         job.providers.update(
-            translation=aggregate_metadata.get("provider", "azure-foundry-claude"),
+            translation=aggregate_metadata.get("provider", "azure-openai-gpt"),
             translation_model=aggregate_metadata.get("model_returned", ""),
             translation_prompt_version=aggregate_metadata.get("prompt_version") or PROMPT_VERSION,
         )

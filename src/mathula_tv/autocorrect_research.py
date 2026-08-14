@@ -2416,7 +2416,7 @@ def _provider_progress_callback(batch_index: int, batch_count: int):
 
 
 def _entity_inventory_progress_callback(event: Mapping[str, Any]) -> None:
-    """Show content-free Claude telemetry for the pre-research inventory call."""
+    """Show content-free GPT telemetry for the pre-research inventory call."""
 
     kind = str(event.get("event") or "")
     prefix = "entity inventory AI"

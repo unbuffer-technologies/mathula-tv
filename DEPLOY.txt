@@ -1,0 +1,15 @@
+Mathula TV v13.19.10 coordinated breath-group repair
+
+Base: v13.19.9 anchor-deadline patch
+Target job: d724a4c947404afeae1d748363b41827
+
+From the Mathula TV repository root:
+
+  tar -xzf mathula-semantic-fit-coordinated-cluster-v13.19.10.tar.gz
+  python -m py_compile src/mathula_tv/direct_azure_dub.py src/mathula_tv/ai_provider.py
+
+Then rerun the same dub-azure command you used for the failed run, with --force.
+
+This patch deliberately does NOT change the source-calibrated Azure speaker rate
+and does NOT introduce whole-waveform time stretching into the semantic-fit
+repair path.

@@ -1,0 +1,19 @@
+mathula-all-gpt-v13.18.54-source.tar.gz
+
+Cumulative source overlay for Mathula TV v13.18.54.
+
+Core release identifiers:
+- mathula-direct-azure-dub-v46-all-gpt-v13.18.54
+- mathula-semantic-fit-global-batch-v18-all-gpt-v13.18.54
+- mathula-performance-plan-v7-all-gpt-v13.18.54
+- gpt-semantic-fit-zu-v10-all-gpt-v13.18.54
+
+Runtime provider policy:
+- Azure OpenAI GPT Responses API is the sole production AI transport;
+- translation, repair, inference, autocorrect, research, SEO, hook, editorial,
+  and semantic-fit operations are GPT-routed;
+- explicit Claude CLI routes fail closed;
+- stale Claude environment selectors cannot change the production factory;
+- historical Claude artifact identifiers remain read-only compatible.
+
+Verification: Python compile-all and 143 focused offline tests passed.

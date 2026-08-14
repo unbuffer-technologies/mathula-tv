@@ -27,6 +27,8 @@ class AzureTTSQCResult:
     protected_entities_present: bool
     passed: bool
     failures: list[str]
+    warnings: list[str]
+    alignment_padding_required_ms: int
     
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,6 +44,8 @@ class AzureTTSQCResult:
             "protected_entities_present": self.protected_entities_present,
             "passed": self.passed,
             "failures": self.failures,
+            "warnings": self.warnings,
+            "alignment_padding_required_ms": self.alignment_padding_required_ms,
         }
 
 
@@ -96,7 +100,7 @@ def validate_azure_tts_unit(
         protected_entities: List of protected entity placeholders expected in TTS text
         max_silence_ratio: Maximum ratio of silence to total duration
         max_clipping_ratio: Maximum ratio of clipped samples
-        duration_tolerance_ms: Allowed deviation from preferred duration
+        duration_tolerance_ms: Allowed deviation from preferred duration (for hard max check)
     
     Returns:
         AzureTTSQCResult with validation results
@@ -104,6 +108,8 @@ def validate_azure_tts_unit(
     unit_id = unit["unit_id"]
     speaker_id = unit["speaker_id"]
     failures = []
+    warnings = []
+    alignment_padding_required_ms = 0
     
     # Check WAV exists
     wav_exists = wav_path.is_file()
@@ -122,6 +128,8 @@ def validate_azure_tts_unit(
             protected_entities_present=False,
             passed=False,
             failures=failures,
+            warnings=warnings,
+            alignment_padding_required_ms=0,
         )
     
     # Check WAV is decodable
@@ -157,6 +165,8 @@ def validate_azure_tts_unit(
             protected_entities_present=False,
             passed=False,
             failures=failures,
+            warnings=warnings,
+            alignment_padding_required_ms=0,
         )
     
     # Check for effective silence
@@ -174,17 +184,33 @@ def validate_azure_tts_unit(
     if clipping_ratio > max_clipping_ratio:
         failures.append(f"Clipping ratio {clipping_ratio:.4f} exceeds threshold {max_clipping_ratio}")
     
-    # Check duration tolerance
+    # Check duration against preferred and maximum
     preferred_duration = int(unit.get("preferred_duration_ms", 0))
     max_duration = int(unit.get("maximum_duration_ms", 0))
-    duration_within_tolerance = (
-        preferred_duration > 0
-        and abs(duration_ms - preferred_duration) <= duration_tolerance_ms
-    )
-    if not duration_within_tolerance:
+    
+    # Calculate alignment padding if shorter than preferred
+    if preferred_duration > 0 and duration_ms < preferred_duration:
+        alignment_padding_required_ms = preferred_duration - duration_ms
+        warnings.append(f"Alignment padding required: {alignment_padding_required_ms}ms")
+    
+    # Check hard maximum duration (blocking failure if exceeded)
+    if max_duration > 0 and duration_ms > max_duration + duration_tolerance_ms:
         failures.append(
-            f"Duration {duration_ms}ms deviates from preferred {preferred_duration}ms by more than {duration_tolerance_ms}ms"
+            f"Duration {duration_ms}ms exceeds hard maximum {max_duration}ms by more than {duration_tolerance_ms}ms"
         )
+    # Check if longer than preferred but within maximum (non-blocking warning)
+    elif preferred_duration > 0 and duration_ms > preferred_duration + duration_tolerance_ms:
+        if max_duration > 0 and duration_ms <= max_duration + duration_tolerance_ms:
+            warnings.append(
+                f"Duration {duration_ms}ms exceeds preferred {preferred_duration}ms but within hard maximum {max_duration}ms"
+            )
+        elif max_duration == 0:
+            # No maximum specified, treat as warning only
+            warnings.append(
+                f"Duration {duration_ms}ms exceeds preferred {preferred_duration}ms by more than {duration_tolerance_ms}ms"
+            )
+    
+    duration_within_tolerance = not failures and not any("Duration" in w for w in warnings)
     
     # Check voice matches assignment
     voice_matches_assignment = True
@@ -217,6 +243,8 @@ def validate_azure_tts_unit(
         protected_entities_present=protected_entities_present,
         passed=passed,
         failures=failures,
+        warnings=warnings,
+        alignment_padding_required_ms=alignment_padding_required_ms,
     )
 
 
@@ -295,7 +323,7 @@ def validate_azure_tts_manifest(
             if not result.wav_exists or not result.wav_decodable:
                 blocking_failures.append(f"Unit {unit_id} has critical audio failure")
     
-    overall_passed = failed_count == 0 and not blocking_failures
+    overall_passed = not blocking_failures
     
     report = AzureTTSQCReport(
         schema_version="azure-tts-qc-v1",

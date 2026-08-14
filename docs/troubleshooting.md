@@ -5,14 +5,14 @@ Failures should be actionable, stage-specific, bounded, and secret-safe. Inspect
 | Symptom | Check and action |
 | --- | --- |
 | Protected live job command is refused | Add `--live-operation` only after confirming the literal job ID, credentials, expected state, and intended mutation. Never weaken the guard. |
-| Legacy job remains `synthesis_queued` | Run inspect/validate and the migration dry-run. Migrate only from that exact state; preserve existing translations and hashes. Do not run Claude automatically. |
-| Anthropic authentication/rate-limit/timeout/refusal/invalid JSON | Check the specific structured error, key availability, configured model, retry budget, and redacted validation summary. Repair only when allowed; never silently fall back to Azure OpenAI. |
+| Legacy job remains `synthesis_queued` | Run inspect/validate and the migration dry-run. Migrate only from that exact state; preserve existing translations and hashes. Do not start GPT automatically. |
+| GPT authentication/rate-limit/timeout/refusal/invalid JSON | Check `AZURE_AI_KEY`, endpoint, deployment agreement, output budget, retry budget, and the redacted validation summary. There is no model-provider fallback. |
 | Azure STT rejects media | Verify `analysis_mono.wav`, endpoint/region/locale, size and 240-minute policy, ffprobe metadata, and credentials. Do not truncate or invent cross-chunk speaker continuity. |
 | Azure speakers disagree with Pyannote | Keep Azure authoritative; record diagnostic disagreement/overlap in QC. Never overwrite labels silently. |
 | Configured Azure TTS voice unavailable | Run voice discovery in the configured region and select only an allowed returned `zu-ZA` voice. A name in `.env` is not availability proof. |
 | Azure TTS cancellation or malformed WAV | Inspect the secret-safe cancellation category, output format, SSML bounds, XML escaping, and retry class. Delete/promote only through atomic attempt handling. |
 | Name/number/date is pronounced poorly | Review `spoken_text` vs `tts_text`, dictionary precedence, normalisation, and SSML substitution; listen again and record a reviewed override. Never put respelling in subtitles. |
-| Azure speech cannot fit a hard window | Confirm bounded rate attempts. Request a targeted Claude unit repair; do not exceed rate bounds, remove critical facts, or truncate words. |
+| Azure speech cannot fit a hard window | Confirm the semantic-fit tolerance and measured Azure duration. Request a targeted GPT contraction; do not change speaker tempo, remove critical facts, or truncate words. |
 | Same-speaker reference missing/poor | Review rejected reel candidates for overlap, `UNKNOWN`, cross-speaker audio, silence, clipping, music/reverb, and voiced duration. Never substitute another speaker. |
 | OpenVoice import/CUDA/checkpoint/revision failure | Use the pinned Colab/Kaggle runtime, verify Python/Torch/OpenVoice revisions and checkpoint hashes before model load, and avoid installing GPU dependencies on the server. Server `MATHULA_TV_OPENVOICE_CHECKPOINT_HASHES_JSON` names/SHA-256 values must exactly match worker `MATHULA_TV_OPENVOICE_CHECKPOINTS_JSON`. |
 | CUDA out of memory | Stop cleanly, preserve the partial manifest, restart/select adequate GPU, reclaim only after lease expiry, and resume pending units within attempt limits. |

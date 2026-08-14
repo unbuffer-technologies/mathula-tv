@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .atomic_io import atomic_write_json, read_json
+from .autocorrect_stage import require_authoritative_transcript, run_autocorrection_first
 from .azure_stt import AzureSpeechError, AzureSpeechTranscriber, SpeechBackend, normalize
 from .config import Settings
 from .domain_classifier import classify
@@ -19,11 +20,64 @@ from .transcript_merge import reconcile
 from .translation import AzureAIError, JsonClient, TRANSLATION_PROMPT_VERSION, translate as translate_segments, validate_translation
 from .seo import generate_seo, validate_seo
 from .stt_phrases import configure_source_stt_backend
+from .webm_ingestion import file_sha256, normalize_webm_to_mp4, validate_supported_video
 
 
 class Orchestrator:
     def __init__(self, settings: Settings, gcs: GCSStore | None = None):
         self.settings, self.jobs, self.gcs = settings, JobStore(settings.work_dir), gcs
+
+    # Mathula WebM ingestion wrapper v2
+    def _submit_canonical_video(self, source: Path, target_language: str = "zu-ZA", force: bool = False):
+        source = Path(source).expanduser().resolve()
+        source_info = validate_supported_video(source)
+        original_sha256 = file_sha256(source)
+
+        if source.suffix.lower() == ".mp4":
+            job = self._submit_canonical_video(source, target_language, force)
+            canonical = Path(job.local_source_path)
+            job.media.setdefault("source_ingestion", {
+                "schema_version": "source-ingestion-v2",
+                "normalized": False,
+                "original_filename": source.name,
+                "original_path": str(canonical),
+                "original_extension": ".mp4",
+                "original_sha256": original_sha256,
+                "original_duration": float(source_info["duration"]),
+                "canonical_path": str(canonical),
+                "canonical_sha256": file_sha256(canonical),
+                "canonical_duration": float(source_info["duration"]),
+            })
+            job.objects.setdefault("source_media", str(canonical))
+            job.objects.setdefault("canonical_media", str(canonical))
+            self.jobs.save(job)
+            return job
+
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="mathula-webm-") as temporary_dir:
+            canonical_input = Path(temporary_dir) / "source.mp4"
+            normalization = normalize_webm_to_mp4(source, canonical_input)
+            job = self._submit_canonical_video(canonical_input, target_language, force)
+
+        job_dir = self.jobs.job_dir(job.job_id)
+        preserved_original = job_dir / "input" / source.name
+        preserved_original.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, preserved_original)
+        canonical = Path(job.local_source_path)
+
+        job.source_filename = source.name
+        job.objects["original_media"] = str(preserved_original)
+        job.objects["source_media"] = str(canonical)
+        job.objects["canonical_media"] = str(canonical)
+        job.media["source_ingestion"] = {
+            "schema_version": "source-ingestion-v2",
+            **normalization,
+            "original_filename": source.name,
+            "original_path": str(preserved_original),
+            "original_sha256": original_sha256,
+        }
+        self.jobs.save(job)
+        return job
 
     def submit(self, source: Path, target_language: str = "zu-ZA", force: bool = False) -> JobManifest:
         if target_language != "zu-ZA": raise ValueError("Only zu-ZA is enabled in this proof of concept")
@@ -64,7 +118,11 @@ class Orchestrator:
         return job
 
     def classify(self, job: JobManifest) -> dict:
-        transcript = read_json(self.jobs.job_dir(job.job_id) / "analysis/transcript_en.json")
+        authoritative = require_authoritative_transcript(
+            work_dir=self.settings.work_dir,
+            job_id=job.job_id,
+        )
+        transcript = read_json(Path(authoritative["path"]))
         result = classify(" ".join(s["source_text"] for s in transcript["segments"]))
         atomic_write_json(self.jobs.job_dir(job.job_id) / "analysis/domain_classification.json", result)
         return result
@@ -140,6 +198,12 @@ class Orchestrator:
         return output
 
     def translate_and_package(self, job: JobManifest, client: JsonClient, *, force: bool = False) -> dict:
+        # Legacy Azure OpenAI translation is also language AI and therefore
+        # cannot bypass the autocorrection-first gate.
+        require_authoritative_transcript(
+            work_dir=self.settings.work_dir,
+            job_id=job.job_id,
+        )
         if job.state == "synthesis_queued" and not force:
             translated = read_json(self.jobs.job_dir(job.job_id) / "translation/transcript_zu.json")
             seo = read_json(self.jobs.job_dir(job.job_id) / "translation/youtube_zu.json")
@@ -238,21 +302,64 @@ class Orchestrator:
             turns, source, warnings = select_authoritative(pyannote, azure, diagnostic_warning)
             job_dir = self.jobs.job_dir(job.job_id)
             transcript_path = job_dir / "analysis/transcript_en.json"
-            
-            # Check if a corrected transcript already exists
-            if transcript_path.is_file() and transcript_path.stat().st_size > 0:
-                # Use existing corrected transcript
-                transcript = read_json(transcript_path)
-                transcript["warnings"] = transcript.get("warnings", [])
-                transcript["warnings"].extend(warnings)
-                transcript["warnings"].append("Using existing corrected transcript")
-                atomic_write_json(transcript_path, transcript)
-            else:
-                # Reconcile from Azure STT words
-                transcript = reconcile(azure["words"], turns, source=source, tolerance=self.settings.speaker_tolerance_seconds)
-                transcript["warnings"].extend(warnings)
-                atomic_write_json(transcript_path, transcript)
-            
+
+            # Reconciliation produces an immutable raw source generation. The
+            # existing PostgreSQL autocorrect engine must render the effective
+            # transcript before classification, context enrichment, semantic
+            # analysis, or translation is allowed to run.
+            reconciled = reconcile(
+                azure["words"],
+                turns,
+                source=source,
+                tolerance=self.settings.speaker_tolerance_seconds,
+            )
+            reconciled["warnings"].extend(warnings)
+            autocorrect_state = run_autocorrection_first(
+                work_dir=self.settings.work_dir,
+                job=job,
+                reconciled_transcript=reconciled,
+            )
+            transcript = read_json(transcript_path)
+            job.media["raw_transcript_sha256"] = autocorrect_state[
+                "raw_transcript_sha256"
+            ]
+            job.media["authoritative_transcript_sha256"] = autocorrect_state[
+                "authoritative_transcript_sha256"
+            ]
+            job.media["autocorrection_state_sha256"] = checksum(
+                job_dir / "analysis/autocorrection_state.json"
+            )
+            if "autocorrection" not in job.completed_stages:
+                job.completed_stages.append("autocorrection")
+
+            if not autocorrect_state["ready_for_language_ai"]:
+                job.review_readiness = "autocorrection_review_required"
+                job.last_error = None
+                self.jobs.save(job)
+                if not self.gcs:
+                    self.gcs = GCSStore(
+                        self.settings.gcs_bucket,
+                        self.settings.gcs_prefix,
+                    )
+                for relative in (
+                    "analysis/transcript_en_raw.json",
+                    "analysis/transcript_en.json",
+                    "analysis/autocorrection_state.json",
+                    "analysis/autocorrection_report.json",
+                ):
+                    local = job_dir / relative
+                    if local.is_file():
+                        job.objects[Path(relative).stem] = self.gcs.upload(
+                            job.job_id, relative, local
+                        )
+                self.jobs.save(job)
+                self.gcs.upload_json(job.job_id, "status.json", job.to_dict())
+                return (
+                    "Autocorrection review required before language AI: "
+                    f"{autocorrect_state['review_count']} correction(s) pending"
+                )
+
+            job.review_readiness = "autocorrection_complete"
             classification = classify(" ".join(segment["source_text"] for segment in transcript["segments"]))
             classification_path = job_dir / "analysis/domain_classification.json"
             atomic_write_json(classification_path, classification)
@@ -263,7 +370,13 @@ class Orchestrator:
             
             # Update analysis input hashes based on actual file bytes
             inputs = {}
-            for name, path in (("transcript_en", transcript_path), ("domain_classification", classification_path), ("context", context_path)):
+            for name, path in (
+                ("transcript_en_raw", job_dir / "analysis/transcript_en_raw.json"),
+                ("transcript_en", transcript_path),
+                ("autocorrection_state", job_dir / "analysis/autocorrection_state.json"),
+                ("domain_classification", classification_path),
+                ("context", context_path),
+            ):
                 if not path.is_file() or not path.stat().st_size:
                     raise ValueError(f"Required analysis artifact is missing or empty: {path.name}")
                 inputs[name] = checksum(path)
@@ -273,6 +386,21 @@ class Orchestrator:
                 self.gcs = GCSStore(self.settings.gcs_bucket, self.settings.gcs_prefix)
             if pyannote_path.is_file():
                 job.objects["pyannote_diarization"] = self.gcs.upload(job.job_id, "analysis/pyannote_diarization.json", pyannote_path)
+            job.objects["transcript_en_raw"] = self.gcs.upload(
+                job.job_id,
+                "analysis/transcript_en_raw.json",
+                job_dir / "analysis/transcript_en_raw.json",
+            )
+            job.objects["autocorrection_state"] = self.gcs.upload(
+                job.job_id,
+                "analysis/autocorrection_state.json",
+                job_dir / "analysis/autocorrection_state.json",
+            )
+            job.objects["autocorrection_report"] = self.gcs.upload(
+                job.job_id,
+                "analysis/autocorrection_report.json",
+                job_dir / "analysis/autocorrection_report.json",
+            )
             job.objects["transcript_en"] = self.gcs.upload(job.job_id, "analysis/transcript_en.json", transcript_path)
             job.objects["domain_classification"] = self.gcs.upload(job.job_id, "analysis/domain_classification.json", classification_path)
             job.objects["context"] = self.gcs.upload(job.job_id, "analysis/context.json", context_path)

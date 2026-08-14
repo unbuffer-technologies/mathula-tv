@@ -9,8 +9,10 @@ python -m mathula_tv.cli inspect JOB_ID
 python -m mathula_tv.cli migrate-dubbing-state JOB_ID --dry-run
 python -m mathula_tv.cli prepare-source-derivatives JOB_ID
 python -m mathula_tv.cli build-dubbing-units JOB_ID
-python -m mathula_tv.cli translate JOB_ID --provider anthropic --model claude-opus-4-8 --live-operation
-python -m mathula_tv.cli repair-translation JOB_ID --provider anthropic --model claude-opus-4-8 --live-operation
+python -m mathula_tv.cli translate JOB_ID --provider azure-openai-gpt --model gpt-5.6-sol-1 --live-operation
+# Optional per-run overrides:
+python -m mathula_tv.cli translate JOB_ID --live-operation --batch-size 6 --context-units 2 --request-timeout-seconds 300 --batch-max-retries 2
+python -m mathula_tv.cli repair-translation JOB_ID --provider azure-openai-gpt --model gpt-5.6-sol-1 --live-operation
 python -m mathula_tv.cli prepare-dubbing JOB_ID
 python -m mathula_tv.cli validate-azure-voices JOB_ID --live-operation
 python -m mathula_tv.cli calibrate-azure-sources JOB_ID --live-operation
@@ -91,11 +93,11 @@ Voice discovery proves availability in the configured region; names in `.env` ar
 If—and only if—synthesis writes a reviewed affected-unit timing-repair queue and a human explicitly authorises changing those approved turns, run the bounded repair and resynthesize:
 
 ```bash
-python -m mathula_tv.cli repair-translation 19ba6d69f1b84132ba4f20599101834a --provider anthropic --model claude-opus-4-8 --live-operation
+python -m mathula_tv.cli repair-translation 19ba6d69f1b84132ba4f20599101834a --provider azure-openai-gpt --model gpt-5.6-sol-1 --live-operation
 python -m mathula_tv.cli synthesize 19ba6d69f1b84132ba4f20599101834a --backend azure-tts --live-operation
 ```
 
-This is a live Claude request and is not part of the default migration path. Review the old/new three-text forms, declared compression, protected entities, and attempt history before continuing; never resend the full clip for a unit-only timing repair. The repair artifact marks affected unit IDs, so the normal synthesis rerun regenerates those units and reuses verified unaffected WAVs.
+This is a live GPT request and is not part of the default migration path. Review the old/new three-text forms, declared compression, protected entities, and attempt history before continuing; never resend the full clip for a unit-only timing repair. The repair artifact marks affected unit IDs, so the normal synthesis rerun regenerates those units and reuses verified unaffected WAVs.
 
 ### 3. Build references, calibrations, embeddings, and the GPU plan
 
@@ -200,7 +202,7 @@ Normal `pytest` must not use credentials, network, GPU, or real model assets. En
 ```text
 MATHULA_TV_RUN_LIVE_AZURE_STT_TESTS=1
 MATHULA_TV_RUN_LIVE_AZURE_TTS_TESTS=1
-MATHULA_TV_RUN_LIVE_ANTHROPIC_TESTS=1
+MATHULA_TV_RUN_LIVE_AZURE_OPENAI_TESTS=1
 MATHULA_TV_RUN_LIVE_GCS_TESTS=1
 MATHULA_TV_RUN_LIVE_OPENVOICE_TESTS=1
 MATHULA_TV_RUN_LIVE_RENDER_TESTS=1
@@ -219,3 +221,32 @@ MATHULA_TV_FOUR_TURN_LIVE_TEST_RUNNER=module:callable
 ```
 
 Blank/missing runners skip their tests; the suite never invents a live runtime. These flags may incur cost or mutate external state. The complete four-turn test requires every provider/GCS/OpenVoice flag plus its own flag and runner, and it must preserve the existing translation. Never point contention/recovery tests at the protected job; use a disposable job/bucket fixture.
+
+## Resumable multivariant translation
+
+`translate` processes deterministic timeline units in bounded contiguous batches. Each validated batch is checkpointed under `translation/cloud_batches/` before the next provider request starts. An interrupted command can be rerun normally and will reuse valid checkpoints. Use `--restart-batches` only when an operator intentionally wants to discard the matching checkpoint session. Progress and provider retry/backoff events are written to stderr. On success, stdout contains only `Translation complete for job JOB_ID.` by default. Use `--json-output` when a calling script explicitly needs the complete installed translation JSON, and combine it with `--no-progress` for JSON-only output.
+
+Defaults can be configured with `MATHULA_TV_TRANSLATION_BATCH_SIZE`, `MATHULA_TV_TRANSLATION_CONTEXT_UNITS`, `MATHULA_TV_TRANSLATION_REQUEST_TIMEOUT_SECONDS`, and `MATHULA_TV_TRANSLATION_BATCH_MAX_RETRIES`.
+
+
+### Resumable translation provider budget
+
+Batched translation uses a session-scoped provider-call budget. Historical
+work from semantic analysis or prior dubbing repairs does not consume this budget.
+Every actual HTTP attempt, including retries and structured-output repairs, is
+reserved before the paid request starts and recorded in
+`translation/cloud_batches/<session>/provider_usage.json`.
+
+The default limit is 64 calls per translation session. Override it for one run
+without invalidating completed batch checkpoints:
+
+```bash
+python -m mathula_tv.cli translate "$JOB_ID" \
+  --live-operation \
+  --max-provider-calls 96
+```
+
+Persistent configuration uses
+`MATHULA_TV_TRANSLATION_MAX_PROVIDER_CALLS_PER_SESSION`.
+`MATHULA_TV_MAX_AI_CALLS_PER_JOB` remains the guardrail for non-translation
+GPT stages.

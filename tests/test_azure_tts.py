@@ -259,6 +259,26 @@ def test_synthesis_writes_canonical_atomic_wav_ssml_manifest_and_reuses_idempote
     assert len(boundary.audio_calls) == 1 and len(boundary.voice_calls) == 1
 
 
+def test_timeline_window_change_reuses_identical_synthesis(tmp_path):
+    boundary = Boundary(
+        voices=[json_response(VOICES)],
+        audio=[AzureTTSResponse(200, pcm_wav(tone_ms=500))],
+    )
+    service = backend(boundary)
+    output = tmp_path / "unit.wav"
+    first = service.synthesize(request(preferred_duration_ms=5700), output)
+    reused = service.synthesize(
+        request(preferred_duration_ms=9000, maximum_duration_ms=9500),
+        output,
+    )
+    assert reused.idempotent_reuse is True
+    assert reused.sha256 == first.sha256
+    assert len(boundary.audio_calls) == 1
+    with pytest.raises(AzureTTSIdempotencyError) as error:
+        service.synthesize(request(text="Umbhalo ohlukile."), output)
+    assert error.value.conflict_kind == "request_mismatch"
+
+
 def test_idempotency_detects_tampering_and_force_regenerates(tmp_path):
     boundary = Boundary(
         voices=[json_response(VOICES)],

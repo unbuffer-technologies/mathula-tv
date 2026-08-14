@@ -28,6 +28,7 @@ PRODUCTION_STATES = [
     "alignment_ready",
     "background_processing",
     "background_ready",
+    "mix_ready",
     "rendering",
     "review_ready",
 ]
@@ -55,7 +56,11 @@ ALLOWED: dict[str, set[str]] = {
     "alignment_running": {"alignment_ready"},
     "alignment_ready": {"background_processing"},
     "background_processing": {"background_ready"},
-    "background_ready": {"rendering"},
+    # The production pipeline verifies and writes the final mix before rendering.
+    # Keep the direct rendering transition for legacy orchestrators that still
+    # combine mixing and rendering in one stage.
+    "background_ready": {"mix_ready", "rendering"},
+    "mix_ready": {"rendering"},
     "rendering": {"review_ready"},
     "review_ready": set(),
     # Legacy rollback path. Production dispatch never selects a legacy backend.

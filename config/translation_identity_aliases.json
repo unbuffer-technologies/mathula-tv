@@ -1,0 +1,175 @@
+{
+  "schema_version": "mathula-translation-identity-aliases-v1",
+  "entities": [
+    {
+      "canonical_identity": "Madlanga Commission of Inquiry",
+      "source_forms": [
+        "Madlanga Commission of Inquiry",
+        "Madlanga Commission",
+        "the Commission",
+        "this Commission",
+        "that Commission",
+        "Judicial Commission of Inquiry"
+      ],
+      "locales": {
+        "zu-ZA": {
+          "specific_forms": [
+            "Khomishini kaMadlanga",
+            "Khomishini Yophenyo kaMadlanga",
+            "Khomishini yoPhenyo kaMadlanga",
+            "Khomishana kaMadlanga",
+            "Khomishana Yophenyo kaMadlanga",
+            "Khomishana yoPhenyo kaMadlanga",
+            "Khomishani kaMadlanga",
+            "Khomishani Yophenyo kaMadlanga",
+            "Khomishani yoPhenyo kaMadlanga",
+            "Khomishane kaMadlanga",
+            "Khomishane Yophenyo kaMadlanga",
+            "Khomishane yoPhenyo kaMadlanga"
+          ],
+          "generic_source_forms": [
+            "the Commission",
+            "this Commission",
+            "that Commission",
+            "Commission"
+          ],
+          "generic_forms": [
+            "Khomishini",
+            "Khomishana",
+            "Khomishani",
+            "Commission",
+            "Khomishane"
+          ],
+          "specific_token_groups": [
+            {
+              "label": "Khomishini … Madlanga",
+              "tokens": [
+                "Khomishini",
+                "Madlanga"
+              ],
+              "max_gap_tokens": 8
+            },
+            {
+              "label": "Khomishana … Madlanga",
+              "tokens": [
+                "Khomishana",
+                "Madlanga"
+              ],
+              "max_gap_tokens": 8
+            },
+            {
+              "label": "Khomishani … Madlanga",
+              "tokens": [
+                "Khomishani",
+                "Madlanga"
+              ],
+              "max_gap_tokens": 8
+            },
+            {
+              "label": "Khomishane … Madlanga",
+              "tokens": [
+                "Khomishane",
+                "Madlanga"
+              ],
+              "max_gap_tokens": 8
+            }
+          ],
+          "source_anchor_aliases": [
+            "Madlanga"
+          ],
+          "target_anchor_forms": [
+            "Madlanga"
+          ]
+        }
+      }
+    },
+    {
+      "canonical_identity": "Advocate Sandile Khumalo SC",
+      "source_forms": [
+        "Advocate Sandile Khumalo SC",
+        "Sandile Khumalo",
+        "Sandile Khumalo SC",
+        "Adv. Sandile Khumalo",
+        "Advocate Khumalo",
+        "Adv. Khumalo",
+        "Commissioner Khumalo"
+      ],
+      "locales": {
+        "zu-ZA": {
+          "specific_forms": [
+            "Khomishana Khumalo",
+            "Khomishani Khumalo",
+            "Khomishane Khumalo",
+            "Commissioner Khumalo"
+          ],
+          "specific_token_groups": [
+            {
+              "label": "Khomishana … Khumalo",
+              "tokens": [
+                "Khomishana",
+                "Khumalo"
+              ],
+              "max_gap_tokens": 1
+            },
+            {
+              "label": "Khomishani … Khumalo",
+              "tokens": [
+                "Khomishani",
+                "Khumalo"
+              ],
+              "max_gap_tokens": 1
+            },
+            {
+              "label": "Khomishane … Khumalo",
+              "tokens": [
+                "Khomishane",
+                "Khumalo"
+              ],
+              "max_gap_tokens": 1
+            }
+          ],
+          "compact_substitutions": [
+            {
+              "label": "Khumalo after source-attested Commissioner Khumalo",
+              "source_requires_all": [
+                "Commissioner Khumalo"
+              ],
+              "target_forms": [
+                "Khumalo"
+              ],
+              "reason": "The source explicitly identifies Commissioner Khumalo; compact may retain the surname only when natural and concise preserve the reviewed commissioner-title plus surname identity."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "canonical_identity": "National Prosecuting Authority",
+      "source_forms": [
+        "National Prosecuting Authority",
+        "NPA"
+      ],
+      "locales": {
+        "zu-ZA": {
+          "specific_forms": [
+            "National Prosecuting Authority",
+            "NPA"
+          ],
+          "compact_substitutions": [
+            {
+              "label": "NDPP as the directly named NPA recipient",
+              "source_requires_all": [
+                "NPA",
+                "NDPP"
+              ],
+              "target_forms": [
+                "NDPP"
+              ],
+              "reason": "The source names the NPA and immediately identifies the NDPP as the direct recipient; compact may retain the more specific direct recipient when natural and concise retain NPA."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

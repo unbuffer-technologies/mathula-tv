@@ -1,0 +1,22 @@
+mathula-performance-plan-v13.18.50-source.tar.gz
+
+Cumulative source overlay for Mathula TV v13.18.50.
+
+Core release identifiers:
+- mathula-direct-azure-dub-v42-measured-region-controller-v13.18.50
+- mathula-semantic-fit-global-batch-v14-measured-region-controller-v13.18.50
+- mathula-performance-plan-v3-v13.18.50
+- claude-semantic-fit-zu-v7-v13.18.50
+
+Primary changes:
+- continuous whole-region timing is authoritative;
+- isolated island timing is normalized advisory evidence;
+- bidirectional Azure-measured contract/expand/maintain feedback;
+- one performance candidate per measured feedback round;
+- at most three candidates per Claude request shard;
+- four fresh targeted performance attempts maximum;
+- resumable paid-candidate replay and fresh strategy budget;
+- accurate selected/scheduled/unresolved progress;
+- punctuation-tolerant, lexically strict beat ownership.
+
+Verification: 76 tests passed in the reconstructed full source tree.

@@ -71,7 +71,12 @@ class SubstitutionPart:
     tts_text: str
 
 
-SSMLPart = TextPart | BreakPart | EmphasisPart | SubstitutionPart
+@dataclass(frozen=True)
+class CharacterPart:
+    text: str
+
+
+SSMLPart = TextPart | BreakPart | EmphasisPart | SubstitutionPart | CharacterPart
 
 
 @dataclass(frozen=True)
@@ -225,6 +230,17 @@ class SafeSSMLBuilder:
                 rendered.append(
                     f'<sub alias="{escape(alias, quote=True)}">{escape(display, quote=False)}</sub>'
                 )
+            elif isinstance(part, CharacterPart):
+                text = _check_text(part.text, field_name="SSML character text")
+                if not text.strip() or not re.fullmatch(r"[A-Za-z0-9]+", text):
+                    raise SSMLValidationError(
+                        "SSML character text must be non-empty letters or digits"
+                    )
+                text_characters += len(text)
+                has_spoken_text = True
+                rendered.append(
+                    f'<say-as interpret-as="characters">{escape(text, quote=False)}</say-as>'
+                )
             else:
                 raise SSMLValidationError(f"Unknown SSML part type: {type(part).__name__}")
         if not has_spoken_text:
@@ -352,7 +368,18 @@ def validate_ssml(
 
     allowed_voices = frozenset(allowed_voices)
     verified_emphasis_voices = frozenset(verified_emphasis_voices)
-    allowed_tags = {_tag(name) for name in ("speak", "voice", "prosody", "break", "emphasis", "sub")}
+    allowed_tags = {
+        _tag(name)
+        for name in (
+            "speak",
+            "voice",
+            "prosody",
+            "break",
+            "emphasis",
+            "sub",
+            "say-as",
+        )
+    }
     allowed_attributes = {
         _tag("speak"): {"version", f"{{{XML_NAMESPACE}}}lang"},
         _tag("voice"): {"name"},
@@ -360,6 +387,7 @@ def validate_ssml(
         _tag("break"): {"time"},
         _tag("emphasis"): {"level"},
         _tag("sub"): {"alias"},
+        _tag("say-as"): {"interpret-as"},
     }
     for node in root.iter():
         if node.tag not in allowed_tags:
@@ -438,6 +466,17 @@ def validate_ssml(
             if not (child.attrib.get("alias") or "").strip() or not (child.text or "").strip():
                 raise SSMLValidationError("SSML substitution values cannot be empty")
             text_characters += len(child.text or "") + len(child.attrib["alias"])
+            has_spoken_text = True
+        elif child.tag == _tag("say-as"):
+            if child.attrib.get("interpret-as") != "characters":
+                raise SSMLValidationError(
+                    "SSML say-as interpretation is not allowlisted"
+                )
+            if not re.fullmatch(r"[A-Za-z0-9]+", child.text or ""):
+                raise SSMLValidationError(
+                    "SSML character text must be non-empty letters or digits"
+                )
+            text_characters += len(child.text or "")
             has_spoken_text = True
         else:
             raise SSMLValidationError("SSML contains an element in a disallowed position")

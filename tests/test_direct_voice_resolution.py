@@ -19,6 +19,25 @@ def _write(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2), encoding="utf-8")
 
 
+class _Metadata:
+    def to_dict(self) -> dict[str, object]:
+        return {"provider": "test", "model_returned": "context-model"}
+
+
+class _ContextVoiceProvider:
+    def __init__(self, speakers: list[dict[str, object]]) -> None:
+        self.speakers = speakers
+
+    def complete_structured(self, request):
+        return SimpleNamespace(
+            data={
+                "schema_version": "mathula-contextual-voice-family-inference-v1",
+                "speakers": self.speakers,
+            },
+            metadata=_Metadata(),
+        )
+
+
 def _renderer(tmp_path: Path) -> DirectAzureDubRenderer:
     settings = SimpleNamespace(work_dir=tmp_path)
     return DirectAzureDubRenderer(settings, SimpleNamespace())
@@ -137,6 +156,63 @@ def test_unknown_family_fails_instead_of_defaulting_to_themba(tmp_path) -> None:
 
     artifact = json.loads(output.read_text(encoding="utf-8"))
     assert artifact["unresolved_speakers"] == ["SPEAKER_00", "SPEAKER_01"]
+
+
+def test_transcript_ai_resolves_inconclusive_acoustic_voice_family(tmp_path) -> None:
+    analysis = _job_files(tmp_path, confidence=0.66)
+    transcript = json.loads((analysis / "transcript_en.json").read_text())
+    transcript["segments"][0].update(
+        {
+            "segment_id": "seg-1",
+            "source_text": "I can answer that question, ma'am.",
+        }
+    )
+    transcript["segments"][1].update(
+        {
+            "segment_id": "seg-2",
+            "source_text": "Thank you, sir. Please continue.",
+        }
+    )
+    _write(analysis / "transcript_en.json", transcript)
+    acoustic = json.loads((analysis / "acoustic_analysis.json").read_text())
+    acoustic["speakers"]["AZURE_2"]["confidence"] = 0.98
+    _write(analysis / "acoustic_analysis.json", acoustic)
+
+    provider = _ContextVoiceProvider(
+        [
+            {
+                "speaker_id": "SPEAKER_00",
+                "voice_family": "masculine",
+                "confidence": 0.93,
+                "inference_basis": "explicit_title_or_address",
+                "evidence_segment_ids": ["seg-2"],
+                "evidence_summary": "SPEAKER_01 addresses SPEAKER_00 as sir.",
+            }
+        ]
+    )
+    renderer = DirectAzureDubRenderer(
+        SimpleNamespace(work_dir=tmp_path),
+        SimpleNamespace(),
+        timing_repair_provider_factory=lambda: provider,
+    )
+    output = tmp_path / "jobs" / "job1" / "direct_dub" / "voice_resolution.json"
+
+    result = renderer._voice_assignments(
+        SimpleNamespace(job_id="job1"),
+        None,
+        DirectDubOptions(min_voice_family_confidence=0.70),
+        required_speaker_ids=["SPEAKER_00", "SPEAKER_01"],
+        output_path=output,
+    )
+
+    assert result["SPEAKER_00"]["selected_voice"] == "zu-ZA-ThembaNeural"
+    assert result["SPEAKER_00"]["voice_family_source"] == (
+        "ai_transcript_context"
+    )
+    assert result["SPEAKER_00"]["resolution_status"] == (
+        "contextual_transcript_voice_family"
+    )
+    assert result["SPEAKER_01"]["selected_voice"] == "zu-ZA-ThandoNeural"
 
 
 def test_verified_speechbrain_match_precedes_anonymous_gender(

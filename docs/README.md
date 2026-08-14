@@ -7,7 +7,7 @@ The Azure TTS → OpenVoice compatibility gate is currently `pending`; these gui
 | [Architecture](architecture.md) | End-to-end responsibilities, invariants, and artifacts |
 | [State machine](state-machine.md) | Production lifecycle and legacy migration |
 | [CLI](cli.md) | Normal commands and exact four-turn live runbook |
-| [Claude provider](claude-provider.md) | Full-clip translation, repairs, metadata, and safety |
+| [Azure GPT provider](gpt-provider.md) | Translation, repairs, metadata, and safety |
 | [Azure STT](azure-stt.md) | Authoritative transcription/diarization |
 | [Azure TTS](azure-tts.md) | Voice discovery, safe SSML, synthesis, and rate search |
 | [Pronunciation](pronunciation.md) | Three text forms and reviewed substitutions |
@@ -21,4 +21,4 @@ The Azure TTS → OpenVoice compatibility gate is currently `pending`; these gui
 | [Human review](human-review.md) | Voice rights, editorial/language review, publication boundary |
 | [Troubleshooting](troubleshooting.md) | Actionable, secret-safe failure handling |
 
-F5-TTS is not part of Mathula TV. OmniVoice is deprecated and unreachable pending deletion. Claude Opus 4.8 is the production AI default; Azure STT and Azure TTS are authoritative for speaker labels and isiZulu base pronunciation respectively; OpenVoice is the intended identity converter; Pyannote is diagnostic only. Mathula TV never uploads to YouTube.
+F5-TTS is not part of Mathula TV. OmniVoice is deprecated and unreachable pending deletion. Azure OpenAI GPT is the sole runtime AI provider; Azure STT and Azure TTS are authoritative for speaker labels and isiZulu base pronunciation respectively; OpenVoice is the intended identity converter; Pyannote is diagnostic only. Mathula TV never uploads to YouTube.

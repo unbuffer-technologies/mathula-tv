@@ -1,13 +1,57 @@
 import json
+
+import pytest
 from pathlib import Path
 
 from mathula_tv.atomic_io import atomic_write_json
 from mathula_tv.azure_stt import normalize
 from mathula_tv.config import Settings
+import mathula_tv.orchestrator as orchestrator_module
 from mathula_tv.orchestrator import Orchestrator
 from mathula_tv.media import checksum
 from test_azure_fast_stt import RAW
 
+
+
+
+@pytest.fixture(autouse=True)
+def completed_autocorrection_stage(monkeypatch):
+    def fake_stage(*, work_dir, job, reconciled_transcript, config=None):
+        job_dir = Path(work_dir) / "jobs" / job.job_id
+        analysis = job_dir / "analysis"
+        raw_path = analysis / "transcript_en_raw.json"
+        transcript_path = analysis / "transcript_en.json"
+        state_path = analysis / "autocorrection_state.json"
+        atomic_write_json(raw_path, dict(reconciled_transcript))
+        if transcript_path.is_file():
+            effective = json.loads(transcript_path.read_text(encoding="utf-8"))
+            effective.setdefault("warnings", []).append("Using existing corrected transcript")
+        else:
+            effective = dict(reconciled_transcript)
+        effective.setdefault(
+            "autocorrect",
+            {
+                "schema_version": "mathula-autocorrect-state-v1",
+                "active_correction_count": 0,
+                "overlays": [],
+            },
+        )
+        atomic_write_json(transcript_path, effective)
+        state = {
+            "review_count": 0,
+            "active_count": effective["autocorrect"].get("active_correction_count", 0),
+            "ready_for_language_ai": True,
+            "raw_transcript_sha256": checksum(raw_path),
+            "authoritative_transcript_sha256": checksum(transcript_path),
+        }
+        atomic_write_json(state_path, state)
+        return state
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "run_autocorrection_first",
+        fake_stage,
+    )
 
 class GCS:
     def __init__(self, pyannote): self.pyannote,self.uploads=pyannote,[]

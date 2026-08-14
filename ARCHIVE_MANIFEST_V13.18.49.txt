@@ -1,0 +1,22 @@
+Mathula TV performance-plan source overlay v13.18.49
+
+Files are relative to the mathula-tv repository root.
+
+6db3ff8cc54716a2b6de663dfbd6babf43753f236689beb3dc8c7474633a57a1  pyproject.toml
+d39b3a913c5d85885d729230e4c1e2bb8a7841b230984b8e3945b7b4107f4b82  PERFORMANCE_PLAN_V13.18.49.md
+2b9f036af5f858e2ff4af88ac43fc4773c72d51a7e81de247d1097770d45fd04  src/mathula_tv/ai_provider.py
+8bee58bbc5f46b4c5fd03e5777b8b58818a0fc37705a7c07ff27509bd9b5c948  src/mathula_tv/cli.py
+77829f22bac7e6089d029910fff8ff37f77cf7fd6b1954a20abf14685bcac97c  src/mathula_tv/direct_azure_dub.py
+c02e8a60fe05d122875e965811c7df9ab5e9dee8b411e42bed6f6fbd62d2b4f6  src/mathula_tv/transcript_lipsync.py
+e487bd18f5abc06cfa6d935ec2f6631b45459b0727886ec2d6b9d8e8c1a79258  tests/test_semantic_fit_mode.py
+e9aea9dc985be0b9b669b6725edfc66abb02df9a428f79e4374ee578ec691b2f  tests/test_transcript_lipsync.py
+
+Verification completed in the release workspace:
+- Python bytecode compilation: passed
+- Regression tests: 70 passed
+- Nine performance regions scheduled as three 3-candidate provider shards
+- Every shard checkpointed before the next provider request
+- Output-token ceiling scales with performance island count
+- Default timing mode remains balanced
+- semantic-fit remains available and unchanged in behavior
+- performance-plan remains opt-in

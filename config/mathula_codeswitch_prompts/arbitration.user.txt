@@ -1,0 +1,42 @@
+Arbitrate every supplied semantic, naturalness and deterministic issue claim.
+
+Rules:
+1. Decide every issue exactly once: accepted, rejected or unresolved.
+2. Treat deterministic known-error findings as evidence that must be disproved against the actual source and candidate, not as optional suggestions.
+3. Deduplicate overlapping findings while still giving every issue ID its own decision.
+4. For accepted findings, return exact substring patches. Set expected_count to the exact number of intended occurrences. Use 1 by default; use 2 only when the same correction intentionally applies to two identical repetitions. Python rejects a count mismatch.
+5. Supply translated_before/translated_after and tts_before/tts_after independently. Use null/null when a field does not change.
+6. Keep every patch as small as possible. Do not return full segments.
+7. Independently ensure every replacement preserves meaning and produces natural spoken isiZulu and natural code-switching. Do not mechanically copy an auditor's wording.
+8. A material source ambiguity cannot be repaired from text by guessing. Mark it unresolved and add the segment to human_review_segments.
+9. Preserve complete linked wordplay units, not only one half.
+10. Do not flatten deliberate elevated register into ordinary language merely to make a sentence grammatical. Use natural isiZulu scaffolding around preserved difficult English where appropriate.
+11. If a patch invalidates preserved-span metadata, provide a complete preserved_spans replacement only for that segment in preserved_span_updates.
+12. A claim with evidence_grounding_status="approximate" originated from an inexact model quote that Python grounded to the closest exact local text. Verify it independently against the complete source and candidate. Never patch from approximate evidence alone: reject it when unsupported, or mark it unresolved and require human review when it cannot be confirmed safely.
+
+Return:
+{
+  "schema_version":"mathula-code-switch-arbitration-decision-v2",
+  "accepted_findings":[{"issue_id":"...","segment_id":"...","reason":"..."}],
+  "rejected_findings":[{"issue_id":"...","segment_id":"...","reason":"..."}],
+  "unresolved_findings":[{"issue_id":"...","segment_id":"...","reason":"..."}],
+  "patches":[
+    {
+      "patch_id":"patch-seg-ID-001",
+      "segment_id":"exact ID",
+      "issue_ids":["accepted issue IDs"],
+      "translated_before":"exact candidate substring or null",
+      "translated_after":"replacement or null",
+      "translated_expected_count":1,
+      "tts_before":"exact candidate substring or null",
+      "tts_after":"replacement or null",
+      "tts_expected_count":1,
+      "reason":"why this minimal patch resolves the accepted issues"
+    }
+  ],
+  "preserved_span_updates":[{"segment_id":"exact ID","preserved_spans":[]}],
+  "human_review_segments":[]
+}
+
+PAYLOAD:
+{{PAYLOAD_JSON}}

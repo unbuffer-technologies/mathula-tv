@@ -12,9 +12,16 @@ MATHULA_TV_CLAUDE_TIMEOUT_SECONDS=900
 MATHULA_TV_CLAUDE_MAX_RETRIES=3
 MATHULA_TV_CLAUDE_EFFORT=high
 MATHULA_TV_CLAUDE_MAX_OUTPUT_TOKENS=50000
+
+# Translation uses its own fast profile. These override the global Claude mode.
+MATHULA_TV_TRANSLATION_CLAUDE_THINKING=disabled
+MATHULA_TV_TRANSLATION_CLAUDE_EFFORT=low
+MATHULA_TV_TRANSLATION_MAX_OUTPUT_TOKENS=100000
 MATHULA_TV_MAX_CLAUDE_CALLS_PER_JOB=20
 MATHULA_TV_MAX_TRANSLATION_REPAIRS_PER_UNIT=2
 ```
+
+The global `MATHULA_TV_CLAUDE_EFFORT` setting is not used for multivariant translation. Translation always resolves its dedicated thinking, effort, and output-token settings and records them in each cloud-run manifest.
 
 Keep the model identifier in configuration. The Anthropic adapter isolates model-specific request fields, enables adaptive thinking/effort only when supported, and avoids incompatible sampling combinations. Never log `ANTHROPIC_API_KEY`, headers, cookies, or full private request payloads.
 

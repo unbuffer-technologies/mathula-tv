@@ -1,0 +1,20 @@
+mathula-gpt-only-v13.18.52-source.tar.gz
+
+Cumulative source overlay for Mathula TV v13.18.52.
+
+Core release identifiers:
+- mathula-direct-azure-dub-v44-gpt-only-v13.18.52
+- mathula-semantic-fit-global-batch-v16-gpt-only-v13.18.52
+- mathula-performance-plan-v5-gpt-only-v13.18.52
+- gpt-semantic-fit-zu-v8-v13.18.52
+- gpt-semantic-fit-review-zu-v3-v13.18.52
+
+Provider boundary:
+- Azure OpenAI Responses API at /openai/v1/responses;
+- GPT-only production factory and CLI; no Claude runtime fallback;
+- old Claude selector values cannot reroute this release;
+- strict structured outputs within Azure limits, with local fail-closed
+  validation for deeper performance-plan envelopes;
+- no credentials persisted in source, metadata, or request summaries.
+
+Verification: 84 offline tests passed in the reconstructed full source tree.

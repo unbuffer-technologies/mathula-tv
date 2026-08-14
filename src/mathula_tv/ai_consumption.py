@@ -267,7 +267,7 @@ def _recommendations(
                 "message": (
                     "No translation cache reads were reported across multiple "
                     "chunks; consider a smaller context spine after confirming "
-                    "the Azure deployment supports Anthropic prompt caching."
+                    "the Azure GPT deployment reports cached input tokens."
                 ),
             }
         )

@@ -1,0 +1,86 @@
+Independently verify every repaired segment.
+
+For every segment, produce one approval_evidence item for each required check:
+{{REQUIRED_VERIFICATION_CHECKS}}
+
+Also answer every object in verification_obligations exactly once in obligation_results. Obligations were generated from:
+- material source ambiguities;
+- previously observed Mathula TV failure patterns;
+- linked or atomic wordplay;
+- preserved spans;
+- every applied repair;
+- deterministic post-repair findings.
+
+Do not approve a general category by quoting only an easy fragment. For linked wordplay, quote and evaluate the complete linked expression. For an applied repair, verify both that it fixed the original problem and that it introduced no new semantic, grammatical, register, or code-switching error.
+
+Recheck specifically:
+- subject, object, possessives, tense/aspect, negation, modality and attribution;
+- omissions and additions;
+- names, titles, brands, atomic phrases, linked wordplay, rhetorical lists and repetition;
+- deliberately elevated or comic register, including imbibe/imbibing and vocabulary cascades;
+- isiZulu grammar, morphology, concords, locatives, idiom and spoken naturalness;
+- literal calques such as ibisika for slang cutting;
+- malformed complements such as uqala ukhulume;
+- unnatural repetition such as Angisakhumbuli nokukhumbula;
+- malformed or awkward English/isiZulu hybrids;
+- translated_text versus tts_text meaning and pronunciation preparation;
+- preserved-span metadata;
+- unresolved source ambiguity.
+
+A material source homophone or ambiguity cannot be resolved from text alone. Mark its obligation human_review, use source_warning_decision=human_review, verdict=human_review, and safe_for_tts=false.
+
+ENUM DISCIPLINE:
+- approval_evidence.status must be exactly pass, fail, or not_applicable.
+- Never put human_review, partial, unresolved, warning, or review in approval_evidence.status. When an approval check requires review or is only partially satisfied, use fail.
+- obligation_results.status must be exactly pass, fail, or human_review.
+- Use human_review only in obligation_results, segment verdict, and source_warning_decision where the schema explicitly allows it.
+
+Return:
+{
+  "schema_version":"mathula-code-switch-verification-v3",
+  "overall_verdict":"accept|reject|human_review",
+  "summary":{"accept":0,"reject":0,"human_review":0},
+  "segments":[
+    {
+      "segment_id":"exact ID",
+      "verdict":"accept|reject|human_review",
+      "safe_for_tts":false,
+      "approval_evidence":[
+        {
+          "check":"one required check",
+          "status":"pass|fail|not_applicable",
+          "source_excerpt":"exact authoritative source excerpt; empty only for tts_equivalence or not_applicable",
+          "final_excerpt":"exact repaired target/TTS excerpt or empty for not_applicable",
+          "explanation":"what this exact evidence proves"
+        }
+      ],
+      "obligation_results":[
+        {
+          "obligation_id":"exact supplied obligation ID",
+          "status":"pass|fail|human_review",
+          "source_excerpt":"exact authoritative source excerpt; may be empty only for material-source-warning human_review",
+          "final_excerpt":"exact repaired target/TTS excerpt; may be empty only for human_review",
+          "explanation":"specific evidence-based judgment"
+        }
+      ],
+      "remaining_issues":[
+        {
+          "issue_id":"verify-seg-ID-001",
+          "severity":"critical|high|medium|low",
+          "category":"specific category",
+          "source_excerpt":"exact authoritative source excerpt",
+          "final_excerpt":"exact repaired target/TTS excerpt",
+          "explanation":"remaining problem",
+          "required_action":"repair_again|human_review|source_audio_review"
+        }
+      ],
+      "source_warning_decision":"none|resolved_by_audio|human_review",
+      "verification_notes":[]
+    }
+  ]
+}
+
+Do not return repaired text.
+
+PAYLOAD:
+{{PAYLOAD_JSON}}

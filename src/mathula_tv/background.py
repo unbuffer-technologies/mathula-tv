@@ -46,6 +46,7 @@ def prepare_background(
     separation_provider: SeparationProvider | None = None,
     reconstructed_ambience: Path | None = None,
     allow_review_ducking: bool = False,
+    azure_only: bool = False,
 ) -> dict[str, Any]:
     """Choose the strongest explicitly available background source."""
     candidate: BackgroundCandidate | None = None
@@ -64,7 +65,7 @@ def prepare_background(
         )
     elif reconstructed_ambience and reconstructed_ambience.is_file():
         candidate = BackgroundCandidate("reconstructed_ambience", reconstructed_ambience, "external", {})
-    elif allow_review_ducking:
+    elif allow_review_ducking or azure_only:
         temporary = output.with_name(f".{output.name}.ducked.partial.wav")
         duck_dialogue_regions(mix_source, temporary, source_dialogue)
         candidate = BackgroundCandidate("original_mix_ducked_review_only", temporary, "internal", {})
@@ -81,6 +82,8 @@ def prepare_background(
     staged = output.with_name(f".{output.name}.partial")
     shutil.copyfile(candidate.path, staged)
     staged.replace(output)
+    # Determine readiness and authorization based on mode
+    review_only_background = candidate.mode == "original_mix_ducked_review_only"
     return {
         "schema_version": "background-manifest-v1",
         "mode": candidate.mode,
@@ -90,6 +93,8 @@ def prepare_background(
         "output_path": str(output),
         "output_sha256": checksum(output),
         "publication_candidate": candidate.mode in PUBLICATION_MODES,
+        "production_authorized": not review_only_background,
+        "readiness": "review_preview_only" if review_only_background else "production_ready",
         "warnings": (
             ["Ducking reduces but does not remove original English dialogue; internal review only"]
             if candidate.mode == "original_mix_ducked_review_only"

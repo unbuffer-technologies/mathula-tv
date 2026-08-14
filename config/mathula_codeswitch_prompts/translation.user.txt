@@ -1,0 +1,54 @@
+Translate only target_segments. Context segments are read-only.
+
+Rules:
+1. Treat target_segments[].source_text as authoritative; do not reconstruct from words.
+2. Do not silently autocorrect remaining source uncertainty. Copy every supplied deterministic_source_warning into the matching segment and add other credible concerns.
+3. Translate ordinary words and grammar. Preserve names, brands, titles, nicknames, coined phrases, slogans, technical/rhetorically deliberate vocabulary, and linked wordplay only when justified.
+4. Preserved English remains the same speaker's natural code-switching.
+5. Keep linked wordplay intact. Preserve the complete pair "The Big W West Side. Woolworths side." rather than translating only its payoff. Do not produce constructions such as "Big W yase-West Side".
+6. Keep "the wool is water" atomic unless source audio/context establishes a different intended phrase.
+7. translated_text is canonical. tts_text may change only pronunciation spelling without changing meaning.
+8. preserved_spans metadata must exactly match source and output strings.
+9. A material source warning with confidence >= 0.70 must set human_review_recommended=true unless source audio has actually resolved it. Textual context alone must not erase a plausible homophone warning that changes meaning.
+10. Check direct address and rhetorical lists clause by clause; do not collapse distinct source clauses into identical target wording.
+11. Avoid redundant constructions such as using both phinda and futhi for the same single "again".
+12. Preserve possessives and relationships such as "his political and criminal connections" rather than replacing them with generic groups.
+13. Preserve reported/skeptical modality in "supposed to be so sick"; do not turn it into what ought to happen.
+14. Do not add treatment purpose to "has been admitted in hospital".
+15. Do not use literal ibisika for slang "cutting" in an indulgence/partying context.
+16. Recreate the deliberately pompous force of imbibe/imbibing and the intonation/incantation/proclivity/profusity/elocution/diction cascade without malformed hybrids or syntactically stranded English nouns.
+17. A suspected correction belongs only in source_warnings.suspected_text. Never place a suspected correction, homophone alternative, or approximate spelling in preserved_spans.source_text.
+18. preserved_spans.source_text must be copied character-for-character from authoritative source_text. If the target translates or adapts the phrase rather than preserving it, omit that phrase from preserved_spans.
+19. When uncertain about preservation metadata, omit the metadata entry rather than inventing a source span or target form. The translation itself must remain faithful and any material ambiguity must require human review.
+
+Return:
+{
+  "schema_version":"mathula-code-switch-candidate-v4",
+  "segments":[
+    {
+      "segment_id":"exact ID",
+      "speaker":"unchanged",
+      "start":0.0,
+      "end":0.0,
+      "source_text":"unchanged",
+      "translated_text":"natural code-switched isiZulu",
+      "tts_text":"TTS-ready equivalent",
+      "preserved_spans":[
+        {
+          "source_text":"exact source substring",
+          "translated_form":"exact target substring",
+          "tts_form":"exact TTS substring",
+          "reason":"brief reason"
+        }
+      ],
+      "source_warnings":[],
+      "human_review_recommended":false,
+      "translation_notes":[]
+    }
+  ]
+}
+
+Output every target segment exactly once in order.
+
+PAYLOAD:
+{{PAYLOAD_JSON}}

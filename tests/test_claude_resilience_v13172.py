@@ -125,6 +125,29 @@ def test_foundry_auto_falls_back_once_and_remembers_capability() -> None:
     assert second_payload["required_output_schema"] == SIMPLE_SCHEMA
 
 
+def test_foundry_auto_recognises_underscored_structured_outputs_error() -> None:
+    session = Session(
+        [
+            Response(
+                400,
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "structured_outputs not supported in your workspace.",
+                    }
+                },
+            ),
+            Response(body=_message()),
+        ]
+    )
+    provider = _foundry_provider(session)
+
+    assert provider.complete_structured(_request()).data == {"ok": True}
+    assert len(session.calls) == 2
+    assert "format" in session.calls[0][1]["json"]["output_config"]
+    assert "format" not in session.calls[1][1]["json"]["output_config"]
+
+
 def test_foundry_enabled_mode_fails_closed_when_format_is_unsupported() -> None:
     session = Session(
         [
@@ -183,6 +206,48 @@ def test_open_object_schema_keeps_prompt_and_local_validation_path() -> None:
     assert "format" not in body["output_config"]
     payload = json.loads(body["messages"][0]["content"])
     assert payload["required_output_schema"] == request.output_schema
+
+
+def test_closed_schema_drops_only_undeclared_properties_without_repair() -> None:
+    events = []
+    provider = _foundry_provider(
+        Session([Response(body=_message('{"ok":true,"explanation":"extra"}'))]),
+        foundry_structured_outputs="disabled",
+    ).with_request_options(event_callback=events.append)
+
+    response = provider.complete_structured(_request())
+
+    assert response.data == {"ok": True}
+    normalized = [
+        event
+        for event in events
+        if event.get("event") == "structured_output_normalized"
+    ]
+    assert normalized == [
+        {
+            "event": "structured_output_normalized",
+            "operation": "resilience_test",
+            "dropped_property_count": 1,
+            "dropped_property_paths": ["$.explanation"],
+        }
+    ]
+    assert (
+        response.metadata.request_summary["schema_normalization"]
+        ["dropped_property_paths"]
+        == ["$.explanation"]
+    )
+
+
+def test_unknown_property_cleanup_does_not_replace_missing_required_data() -> None:
+    provider = _foundry_provider(
+        Session([Response(body=_message('{"explanation":"extra"}'))]),
+        foundry_structured_outputs="disabled",
+    )
+
+    with pytest.raises(ClaudeInvalidStructuredOutput) as caught:
+        provider.complete_structured(_request())
+
+    assert "'ok' is a required property" in str(caught.value)
 
 
 def test_schema_complexity_is_rejected_before_http() -> None:

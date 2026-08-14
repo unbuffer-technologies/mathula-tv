@@ -11,7 +11,22 @@ from typing import Any, Mapping
 
 OUTPUT_SCHEMA_VERSION = "mathula-job-id-output-v1"
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
-_LEGACY_TIKTOK_HASHTAGS = {"#mathulatv"}
+_LEGACY_TIKTOK_HASHTAGS = {
+    "#bantufyzulu",
+    "#isizulu",
+    "#mathulatv",
+    "#mzansi",
+    "#ngesizulu",
+    "#southafrica",
+}
+_DISCOVERY_ACRONYM_HASHTAGS = {
+    "ekurhulenimetropolitanpolicedepartment": "#EMPD",
+    "independentpoliceinvestigativedirectorate": "#IPID",
+    "investigatingdirectorateagainstcorruption": "#IDAC",
+    "nationalprosecutingauthority": "#NPA",
+    "politicalkillingstaskteam": "#PKTT",
+    "southafricanpoliceservice": "#SAPS",
+}
 _DEFAULT_TIKTOK_ACCOUNTS_PATH = (
     Path(__file__).resolve().parents[2] / "config" / "tiktok_accounts.json"
 )
@@ -69,7 +84,22 @@ def load_seo_output_context(job_root: Path, target_language: str) -> SEOOutputCo
     legacy_path = job_root / "translation" / f"youtube_{code}.json"
     seo_path = tiktok_path if tiktok_path.is_file() else legacy_path
     if not seo_path.is_file():
-        raise OutputNamingError(f"SEO metadata is required before final rendering: {seo_path}")
+        from .localized_seo import build_deferred_localized_seo
+
+        seo_path = tiktok_path
+        seo_path.parent.mkdir(parents=True, exist_ok=True)
+        seo_path.write_text(
+            json.dumps(
+                build_deferred_localized_seo(
+                    job_id=job_id,
+                    target_language=target_language,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     try:
         seo = json.loads(seo_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -94,7 +124,7 @@ def load_seo_output_context(job_root: Path, target_language: str) -> SEOOutputCo
     )
 
 def publish_title_named_outputs(job_root: Path, canonical_video: Path, *, context: SEOOutputContext) -> NamedOutputArtifacts:
-    """Publish job-ID-named MP4 and individual SEO files directly in output/."""
+    """Publish the final hook-panel video and individual SEO files in output/."""
     job_root = Path(job_root)
     job_id = safe_job_id(job_root.name)
     canonical_video = Path(canonical_video)
@@ -112,6 +142,43 @@ def publish_title_named_outputs(job_root: Path, canonical_video: Path, *, contex
     for obsolete in output_root.glob("*SEO Package.tar.gz"):
         obsolete.unlink(missing_ok=True)
     return NamedOutputArtifacts(final_video, seo_files, context.title, job_id, context.seo_path)
+
+
+def publish_dubbed_master_outputs(
+    job_root: Path,
+    canonical_video: Path,
+    *,
+    context: SEOOutputContext,
+) -> NamedOutputArtifacts:
+    """Publish an explicitly named clean dubbed master plus SEO sidecars.
+
+    The master intentionally does not use the ``final_dubbed`` filename because
+    the TikTok hook/title-panel render is the publication final.
+    """
+    job_root = Path(job_root)
+    job_id = safe_job_id(job_root.name)
+    canonical_video = Path(canonical_video)
+    if not canonical_video.is_file() or canonical_video.stat().st_size <= 0:
+        raise FileNotFoundError(canonical_video)
+    output_root = job_root / "output"
+    output_root.mkdir(parents=True, exist_ok=True)
+    master_video = output_root / f"dubbed_master_{job_id}.mp4"
+    _atomic_copy(canonical_video, master_video)
+    seo_files: dict[str, Path] = {}
+    for key, (filename, payload) in _seo_file_payloads(context, job_id).items():
+        destination = output_root / filename
+        _atomic_write_bytes(destination, payload)
+        seo_files[key] = destination
+    for obsolete in output_root.glob("*SEO Package.tar.gz"):
+        obsolete.unlink(missing_ok=True)
+    return NamedOutputArtifacts(
+        master_video,
+        seo_files,
+        context.title,
+        job_id,
+        context.seo_path,
+    )
+
 
 def publish_job_id_transcript_alias(job_root: Path, job_id: str | None = None) -> Path:
     """Copy the canonical transcript to its manual-handoff job-ID filename."""
@@ -225,8 +292,12 @@ def _tiktok_hashtag_values(seo: Mapping[str, Any], code: str = "zu") -> list[str
     tags = seo.get("tags")
     if isinstance(tags, list):
         relevance_candidates.extend(_hashtag_from_seo_tag(value) for value in tags)
+    search_keywords = seo.get("search_keywords")
+    if isinstance(search_keywords, list):
+        relevance_candidates.extend(
+            _hashtag_from_seo_tag(value) for value in search_keywords
+        )
     relevance_candidates.extend(profile.get("discovery_hashtags") or [])
-    shared_candidates = list(profile.get("shared_hashtags") or [])
 
     result: list[str] = []
     seen: set[str] = set()
@@ -235,33 +306,25 @@ def _tiktok_hashtag_values(seo: Mapping[str, Any], code: str = "zu") -> list[str
     def add(value: Any) -> None:
         if len(result) >= max_hashtags:
             return
-        hashtag = str(value or "").strip()
+        hashtag = _canonical_discovery_hashtag(value)
         if not hashtag:
             return
-        if not hashtag.startswith("#"):
-            hashtag = f"#{hashtag}"
         key = hashtag.casefold()
         if key in _LEGACY_TIKTOK_HASHTAGS or key in seen:
             return
         seen.add(key)
         result.append(hashtag)
 
-    retired_brand = str(profile.get("brand_hashtag") or "").strip()
-    if retired_brand:
-        if not retired_brand.startswith("#"):
-            retired_brand = f"#{retired_brand}"
-        seen.add(retired_brand.casefold())
+    retired_brand_values = (
+        profile.get("brand_hashtag"),
+        profile.get("value_hashtag"),
+        _hashtag_from_seo_tag(profile.get("account_name")),
+    )
+    for retired_brand in retired_brand_values:
+        normalized_brand = _canonical_discovery_hashtag(retired_brand)
+        if normalized_brand:
+            seen.add(normalized_brand.casefold())
     add(profile.get("community_hashtag"))
-    add(profile.get("value_hashtag"))
-    reserved_shared = min(len(shared_candidates), max_hashtags - len(result))
-    relevance_limit = max_hashtags - reserved_shared
-    for value in relevance_candidates:
-        if len(result) >= relevance_limit:
-            break
-        add(value)
-    for value in shared_candidates:
-        add(value)
-    # Fill any slots left by duplicates or missing shared tags.
     for value in relevance_candidates:
         add(value)
     return result
@@ -303,17 +366,26 @@ def _tiktok_profile(seo: Mapping[str, Any], code: str) -> dict[str, Any]:
                 profile[key] = nested[key]
     if not str(profile.get("community_hashtag") or "").strip():
         raise OutputNamingError(f"TikTok account {code!r} has no community_hashtag")
-    if not str(profile.get("value_hashtag") or "").strip():
-        raise OutputNamingError(f"TikTok account {code!r} has no value_hashtag")
     return profile
+
+
+def _canonical_discovery_hashtag(value: Any) -> str:
+    hashtag = str(value or "").strip()
+    if not hashtag:
+        return ""
+    if not hashtag.startswith("#"):
+        hashtag = f"#{hashtag}"
+    compact_key = re.sub(r"[^a-z0-9]+", "", hashtag.casefold())
+    return _DISCOVERY_ACRONYM_HASHTAGS.get(compact_key, hashtag)
 
 
 def _hashtag_from_seo_tag(value: Any) -> str:
     words = re.findall(r"[A-Za-z0-9]+", str(value or ""))
-    return "#" + "".join(
+    hashtag = "#" + "".join(
         word if any(character.isupper() for character in word[1:]) else word[:1].upper() + word[1:]
         for word in words
     ) if words else ""
+    return _canonical_discovery_hashtag(hashtag)
 
 def _text_bytes(value: Any) -> bytes:
     return f"{str(value or '').strip()}\n".encode("utf-8")

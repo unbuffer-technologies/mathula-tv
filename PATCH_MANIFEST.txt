@@ -1,0 +1,40 @@
+Mathula TV semantic-fit coordinated cluster production patch v13.19.10
+Base: mathula-semantic-fit-anchor-deadline-v13.19.9
+Target job: d724a4c947404afeae1d748363b41827
+
+Problem observed after v13.19.9:
+- semantic-fit reached 11/20, then exhausted nine regions.
+- semantic-fit-provider consumed essentially the whole 10-minute wall time.
+- v13.19.9 still repaired each failing breath group as an independent semantic
+  unit and independently selected a candidate role per phrase.
+
+Changes:
+1. Adjacent failing breath groups are now one jointly-repairable linguistic
+   cluster. Meaning may redistribute between adjacent requested breath groups
+   inside that cluster while preserving the whole cluster meaning.
+2. One already-fitting immediate neighbour on each side is exposed as elastic
+   support. This fixes cases where an isiZulu clause fragment was assigned to
+   an unrealistically short source breath group. Frozen phrases farther away
+   remain immutable.
+3. natural_fit / alternate_grammar / aggressive_fit are now coordinated plans.
+   The server selects ONE candidate role for the whole repair cluster instead
+   of mixing unrelated candidates phrase-by-phrase.
+4. Cluster selection is driven by real Azure measurements: first minimize the
+   number of breath groups outside their windows, then worst window error,
+   total window error, total target delta, and finally naturalness role rank.
+5. Any elastic support phrase that is pushed outside its Azure timing window
+   becomes pending in the next repair round; it cannot silently degrade.
+6. Full-region semantic review remains mandatory before the repaired delivery
+   is selected.
+7. Source breath-group onsets remain locked. Source-calibrated speaker tempo
+   remains locked. No whole-waveform time stretch is added.
+8. Localized GPT calls are consolidated from max 4 regions / 12 groups to max
+   12 regions / 36 groups per request. The localized request is compact, so
+   this removes repeated provider-call overhead without restoring the old huge
+   whole-performance portfolio payload.
+9. Strategy/prompt/cache contracts are bumped to v13.19.10 so the failed
+   v13.19.9 repair responses are not treated as current strategy results.
+
+Validation performed:
+- Python bytecode compilation passed for direct_azure_dub.py and ai_provider.py.
+- Semantic-fit simulator/replay intentionally NOT run at user request.

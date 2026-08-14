@@ -163,6 +163,14 @@ def build_speaker_id_mapping(
     canonical_to_raw: dict[str, list[str]] = defaultdict(list)
     for raw, canonical in raw_to_canonical.items():
         canonical_to_raw[canonical].append(raw)
+    # A contextual handoff repair may deliberately split one faulty raw Azure
+    # label across several canonical speakers.  Preserve those audited direct
+    # links even though raw_to_canonical must remain a single dominant mapping
+    # for legacy raw acoustic artifacts.
+    for raw, candidates in direct_scores.items():
+        for canonical, duration in candidates.items():
+            if duration > 0 and raw not in canonical_to_raw[canonical]:
+                canonical_to_raw[canonical].append(raw)
 
     return {
         "schema_version": SPEAKER_ID_MAPPING_SCHEMA_VERSION,

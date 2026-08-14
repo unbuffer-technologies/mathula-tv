@@ -154,7 +154,7 @@ def test_resolve_azure_voices_no_fallback():
         ],
     )
     
-    with pytest.raises(ValueError, match="Failed to resolve voices"):
+    with pytest.raises(ValueError, match="Unable to resolve an Azure voice"):
         resolve_azure_voices(
             job_id="test-job",
             speaker_profiles=speaker_profiles,
@@ -233,3 +233,75 @@ def test_get_voice_for_speaker():
     
     voice = get_voice_for_speaker("SPEAKER_99", artifact)
     assert voice is None
+
+
+
+def test_same_family_speakers_share_anchor_but_keep_relative_delivery():
+    profiles = SpeakerProfilesArtifact(
+        job_id="multi-speaker",
+        speakers=[
+            {
+                "speaker_id": "MALE_LOW",
+                "tts_voice_family": "masculine",
+                "tts_voice_family_source": "cpu_acoustic_analysis",
+                "acoustic_confidence": 0.9,
+                "source_delivery": {"median_f0_hz": 105.0, "source_speech_rate_wps": 1.8},
+            },
+            {
+                "speaker_id": "MALE_HIGH",
+                "tts_voice_family": "masculine",
+                "tts_voice_family_source": "cpu_acoustic_analysis",
+                "acoustic_confidence": 0.9,
+                "source_delivery": {"median_f0_hz": 165.0, "source_speech_rate_wps": 2.8},
+            },
+            {
+                "speaker_id": "FEMALE_LOW",
+                "tts_voice_family": "feminine",
+                "tts_voice_family_source": "cpu_acoustic_analysis",
+                "acoustic_confidence": 0.9,
+                "source_delivery": {"median_f0_hz": 185.0, "source_speech_rate_wps": 2.0},
+            },
+            {
+                "speaker_id": "FEMALE_HIGH",
+                "tts_voice_family": "feminine",
+                "tts_voice_family_source": "cpu_acoustic_analysis",
+                "acoustic_confidence": 0.9,
+                "source_delivery": {"median_f0_hz": 265.0, "source_speech_rate_wps": 3.0},
+            },
+        ],
+    )
+
+    artifact = resolve_azure_voices(
+        "multi-speaker", profiles, "zu-ZA", fallback_allowed=False
+    )
+    by_id = {item["speaker_id"]: item for item in artifact.assignments}
+
+    assert by_id["MALE_LOW"]["selected_voice"] == "zu-ZA-ThembaNeural"
+    assert by_id["MALE_HIGH"]["selected_voice"] == "zu-ZA-ThembaNeural"
+    assert by_id["FEMALE_LOW"]["selected_voice"] == "zu-ZA-ThandoNeural"
+    assert by_id["FEMALE_HIGH"]["selected_voice"] == "zu-ZA-ThandoNeural"
+
+    assert by_id["MALE_LOW"]["base_prosody"]["pitch_percent"] < 0
+    assert by_id["MALE_HIGH"]["base_prosody"]["pitch_percent"] > 0
+    assert by_id["MALE_LOW"]["base_prosody"]["rate_percent"] < 0
+    assert by_id["MALE_HIGH"]["base_prosody"]["rate_percent"] > 0
+    assert by_id["FEMALE_LOW"]["base_prosody"] != by_id["FEMALE_HIGH"]["base_prosody"]
+
+
+def test_legacy_profiles_without_delivery_fields_remain_compatible():
+    profiles = SpeakerProfilesArtifact(
+        job_id="legacy",
+        speakers=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "tts_voice_family": "masculine",
+                "tts_voice_family_source": "authoritative_identity_gender",
+                "identity_confidence": 1.0,
+                "acoustic_confidence": 0.0,
+            }
+        ],
+    )
+    assignment = resolve_azure_voices("legacy", profiles, "zu-ZA").assignments[0]
+    assert assignment["selected_voice"] == "zu-ZA-ThembaNeural"
+    assert assignment["base_prosody"]["strategy"] == "neutral_family_anchor"
+    assert assignment["base_prosody"]["pitch_percent"] == 0

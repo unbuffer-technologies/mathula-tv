@@ -1,0 +1,71 @@
+Audit every target segment exhaustively for semantic fidelity.
+
+Mandatory checks for each segment:
+- subject and actor;
+- object/recipient/referent, including possessives such as his/her/their;
+- tense and aspect;
+- negation;
+- modality, attribution, allegation and skepticism;
+- omissions;
+- additions and inventions;
+- entity/title/brand identity;
+- atomic phrase integrity, linked wordplay and invented relationships;
+- wordplay, repetition, register and direct address;
+- distinct clauses in rhetorical lists remain distinct;
+- readable/TTS meaning equivalence;
+- material source ambiguity, especially homophones that change translation.
+
+Back-interpret the target before deciding it is faithful. Inspect known-error examples in the payload. Actively check that:
+- personal connections and possessives do not become generic politicians or networks;
+- supposed/alleged sickness does not become what ought to happen;
+- "has been admitted" does not lose aspect or gain an invented treatment purpose;
+- complete linked wordplay is not only partly preserved;
+- elocution and diction remain distinct concepts;
+- deliberate imbibe/imbibing register is not flattened into plain drinking.
+
+For each real issue, cite the closest possible source and candidate excerpts and specify the repair goal, not a complete rewrite. Python will canonicalize a slightly inexact quote to an exact local substring when the intended evidence is unambiguous, so do not omit a real issue merely because punctuation or spacing is difficult to reproduce. Use issue IDs beginning with "sem-". Do not flag harmless stylistic alternatives.
+
+Return:
+{
+  "schema_version":"mathula-semantic-audit-v1",
+  "audit_type":"semantic_fidelity",
+  "summary":{"critical":0,"high":0,"medium":0,"low":0},
+  "segments":[
+    {
+      "segment_id":"exact ID",
+      "verdict":"approved|issues_found|human_review_required",
+      "coverage":{
+        "subject_actor":true,
+        "object_referent":true,
+        "tense_aspect":true,
+        "negation":true,
+        "modality":true,
+        "omissions":true,
+        "additions":true,
+        "entities_atomic_phrases":true,
+        "wordplay_register":true,
+        "tts_equivalence":true
+      },
+      "issues":[
+        {
+          "issue_id":"sem-seg-ID-001",
+          "severity":"critical|high|medium|low",
+          "category":"specific category",
+          "source_excerpt":"closest source excerpt",
+          "candidate_excerpt":"closest target excerpt",
+          "source_analysis":"semantic frame",
+          "target_back_interpretation":"plain back-meaning",
+          "explanation":"precise mismatch",
+          "repair_goal":"meaning/function to restore without rewriting approved surroundings"
+        }
+      ],
+      "source_warnings":[]
+    }
+  ],
+  "global_findings":[]
+}
+
+Every coverage field must be true after checking. Python recomputes summary totals from the issue arrays.
+
+PAYLOAD:
+{{PAYLOAD_JSON}}

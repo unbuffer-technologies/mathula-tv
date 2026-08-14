@@ -75,7 +75,7 @@ PROJECT_ID="..."
   "$JOB_ID" \
   --user-id "$USER_ID" \
   --project-id "$PROJECT_ID" \
-  --ai-model "$MATHULA_TV_CLAUDE_MODEL"
+  --ai-model "$AZURE_AI_DEPLOYMENT"
 ```
 
 New AI or registry suggestions are reviewable. They do not auto-apply.

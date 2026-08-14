@@ -88,7 +88,8 @@ class AzureTTSError(PipelineError):
 
 
 class AzureTTSIdempotencyError(AzureTTSError):
-    def __init__(self, message: str):
+    def __init__(self, message: str, *, conflict_kind: str = "artifact_integrity"):
+        self.conflict_kind = conflict_kind
         super().__init__(message, category="idempotency_conflict", retryable=False)
 
 
@@ -671,17 +672,11 @@ class AzureTTSBackend:
             raise AzureTTSIdempotencyError("Azure TTS manifest is unreadable") from exc
         if not isinstance(manifest, dict) or manifest.get("schema_version") != self.manifest_schema_version:
             raise AzureTTSIdempotencyError("Azure TTS manifest schema is invalid")
-        if manifest.get("request_hash") != request_hash:
-            raise AzureTTSIdempotencyError(
-                "Azure TTS output belongs to a different request; use forced regeneration to replace it"
-            )
         try:
             stored_ssml = ssml_path.read_text(encoding="utf-8").removesuffix("\n")
             audio = output_path.read_bytes()
         except OSError as exc:
             raise AzureTTSIdempotencyError("Azure TTS output artifacts are unreadable") from exc
-        if stored_ssml != document.xml or hashlib.sha256(stored_ssml.encode("utf-8")).hexdigest() != document.sha256:
-            raise AzureTTSIdempotencyError("Azure TTS SSML artifact failed hash verification")
         result_value = manifest.get("result")
         if not isinstance(result_value, dict):
             raise AzureTTSIdempotencyError("Azure TTS manifest result is invalid")
@@ -689,6 +684,17 @@ class AzureTTSBackend:
             result = AzureTTSResult.from_dict(result_value, idempotent_reuse=True)
         except (KeyError, TypeError, ValueError) as exc:
             raise AzureTTSIdempotencyError("Azure TTS manifest result is malformed") from exc
+        request_hash_matches = manifest.get("request_hash") == request_hash
+        stored_ssml_hash = hashlib.sha256(stored_ssml.encode("utf-8")).hexdigest()
+        if stored_ssml_hash != result.ssml_hash:
+            raise AzureTTSIdempotencyError(
+                "Azure TTS SSML artifact failed hash verification"
+            )
+        if stored_ssml != document.xml or stored_ssml_hash != document.sha256:
+            raise AzureTTSIdempotencyError(
+                "Azure TTS output belongs to a different synthesis request",
+                conflict_kind="request_mismatch",
+            )
         expected = {
             "backend": self.provider,
             "turn_id": request.turn_id,
@@ -709,7 +715,46 @@ class AzureTTSBackend:
             "manifest_path": str(manifest_path),
             "ssml_summary": document.summary,
         }
-        if any(getattr(result, name) != value for name, value in expected.items()):
+        # Preferred/maximum duration describe the target timeline but do not
+        # affect Azure's SSML or returned waveform. A cadence-plan change may
+        # therefore safely reuse byte-identical speech when every synthesis
+        # identity field and the stored SSML still match. Older manifests retain
+        # their original timing metadata and request hash for auditability.
+        timing_metadata = {
+            "preferred_duration_ms",
+            "maximum_duration_ms",
+            "request_hash",
+        }
+        identity_expected = (
+            expected
+            if request_hash_matches
+            else {
+                name: value
+                for name, value in expected.items()
+                if name not in timing_metadata
+            }
+        )
+        if any(
+            getattr(result, name) != value
+            for name, value in identity_expected.items()
+        ):
+            conflict_kind = (
+                "artifact_integrity"
+                if request_hash_matches
+                else "request_mismatch"
+            )
+            raise AzureTTSIdempotencyError(
+                "Azure TTS manifest does not match the deterministic request metadata",
+                conflict_kind=conflict_kind,
+            )
+        if not request_hash_matches and stored_ssml != document.xml:
+            raise AzureTTSIdempotencyError(
+                "Azure TTS output belongs to a different synthesis request",
+                conflict_kind="request_mismatch",
+            )
+        if request_hash_matches and any(
+            getattr(result, name) != value for name, value in expected.items()
+        ):
             raise AzureTTSIdempotencyError("Azure TTS manifest does not match the deterministic request metadata")
         if not isinstance(result.attempt, int) or result.attempt < 1:
             raise AzureTTSIdempotencyError("Azure TTS manifest attempt is invalid")

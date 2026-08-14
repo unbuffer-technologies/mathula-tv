@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from mathula_tv.ai_provider import DEFAULT_CLAUDE_MODEL, PRODUCTION_AI_PROVIDER
+from mathula_tv.ai_provider import DEFAULT_GPT_DEPLOYMENT, PRODUCTION_AI_PROVIDER
 import mathula_tv.azure_stt as azure_stt
 from mathula_tv.azure_stt import AzureSTTRouter
 from mathula_tv.cli import parser
@@ -11,14 +11,15 @@ from mathula_tv.diarization import select_authoritative
 def test_production_provider_defaults_and_optional_pyannote(tmp_path, monkeypatch):
     for name in (
         "MATHULA_TV_AI_PROVIDER",
-        "MATHULA_TV_CLAUDE_MODEL",
+        "AZURE_AI_DEPLOYMENT",
+        "AZURE_OPENAI_CHAT_DEPLOYMENT",
         "MATHULA_TV_ENABLE_PYANNOTE_DIAGNOSTIC",
         "MATHULA_TV_OPENVOICE_REVISION",
     ):
         monkeypatch.delenv(name, raising=False)
     settings = load_settings(tmp_path)
-    assert settings.ai_provider == PRODUCTION_AI_PROVIDER == "anthropic"
-    assert settings.claude_model == DEFAULT_CLAUDE_MODEL == "claude-opus-4-8"
+    assert settings.ai_provider == PRODUCTION_AI_PROVIDER == "azure-openai-gpt"
+    assert settings.gpt_model == DEFAULT_GPT_DEPLOYMENT == "gpt-5.6-sol-1"
     assert settings.pyannote_enabled is False
     assert settings.openvoice_revision == ""  # live GPU preparation requires an immutable reviewed SHA
 

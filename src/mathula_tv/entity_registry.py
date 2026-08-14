@@ -14,6 +14,7 @@ from .atomic_io import read_json
 
 ENTITY_REGISTRY_SCHEMA = "mathula-entity-registry-v1"
 ENTITY_BINDINGS_SCHEMA = "entity-bindings-v1"
+ENTITY_MATCHER_VERSION = "mathula-entity-matcher-v2-no-single-letter-surfaces"
 _SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -28,7 +29,95 @@ _CURLY_QUOTES = {
     "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
     "\u201a": "'", "\u201b": "'", "\u201e": '"', "\u201f": '"',
 }
-_TITLE_VARIANTS = re.compile(r"\b(?:Mr|Mrs|Ms|Dr|Prof|Hon|Adv|Chief|Justice|Judge|President|Minister|Premier|Mayor|Cllr|Sen|Rep|Gov|Gen|Col|Capt|Lt|Sgt|Rev|Fr|Sr)\.?\s*", re.IGNORECASE)
+_TITLE_VARIANTS = re.compile(
+    r"\b(?:Mr|Mrs|Ms|Dr|Prof|Hon|Adv|Chief|Justice|Judge|President|Minister|Premier|Mayor|Cllr|Sen|Rep|Gov|Gen|Col|Capt|Lt|Sgt|Rev|Fr|Sr)\.?(?=\s|$)\s*",
+    re.IGNORECASE,
+)
+
+# Reviewed person-title spellings used only to derive collision-safe
+# title-plus-surname aliases. A derived form is never indexed as a source alias
+# and a bare surname is never generated.
+_PERSON_TITLE_KEYS = {
+    "adv": "advocate",
+    "advocate": "advocate",
+    "commissioner": "commissioner",
+    "mr": "mr",
+    "mrs": "mrs",
+    "ms": "ms",
+    "dr": "doctor",
+    "doctor": "doctor",
+    "prof": "professor",
+    "professor": "professor",
+    "hon": "honourable",
+    "honourable": "honourable",
+    "chief": "chief",
+    "justice": "justice",
+    "judge": "judge",
+    "president": "president",
+    "minister": "minister",
+    "premier": "premier",
+    "mayor": "mayor",
+    "cllr": "councillor",
+    "councillor": "councillor",
+    "sen": "senator",
+    "senator": "senator",
+    "rep": "representative",
+    "representative": "representative",
+    "gov": "governor",
+    "governor": "governor",
+    "gen": "general",
+    "general": "general",
+    "col": "colonel",
+    "colonel": "colonel",
+    "capt": "captain",
+    "captain": "captain",
+    "lt": "lieutenant",
+    "lieutenant": "lieutenant",
+    "sgt": "sergeant",
+    "sergeant": "sergeant",
+    "rev": "reverend",
+    "reverend": "reverend",
+    "fr": "father",
+    "father": "father",
+    "sr": "sister",
+    "sister": "sister",
+    "brigadier": "brigadier",
+}
+_PERSON_TITLE_SURFACES = {
+    "advocate": ("Advocate", "Adv."),
+    "commissioner": ("Commissioner",),
+    "mr": ("Mr",),
+    "mrs": ("Mrs",),
+    "ms": ("Ms",),
+    "doctor": ("Dr", "Doctor"),
+    "professor": ("Prof.", "Professor"),
+    "honourable": ("Hon.", "Honourable"),
+    "chief": ("Chief",),
+    "justice": ("Justice",),
+    "judge": ("Judge",),
+    "president": ("President",),
+    "minister": ("Minister",),
+    "premier": ("Premier",),
+    "mayor": ("Mayor",),
+    "councillor": ("Cllr", "Councillor"),
+    "senator": ("Sen.", "Senator"),
+    "representative": ("Rep.", "Representative"),
+    "governor": ("Gov.", "Governor"),
+    "general": ("Gen.", "General"),
+    "colonel": ("Col.", "Colonel"),
+    "captain": ("Capt.", "Captain"),
+    "lieutenant": ("Lt.", "Lieutenant"),
+    "sergeant": ("Sgt.", "Sergeant"),
+    "reverend": ("Rev.", "Reverend"),
+    "father": ("Fr.", "Father"),
+    "sister": ("Sr.", "Sister"),
+    "brigadier": ("Brigadier",),
+}
+_PERSON_POSTNOMINALS = {
+    "sc", "kc", "mp", "mpl", "mec", "phd", "md", "qc", "esq",
+}
+_PERSON_WORD = re.compile(r"[^\W_]+(?:[-'’][^\W_]+)*\.?", re.UNICODE)
+_IDENTITY_DASHES = "-\u2010\u2011\u2012\u2013\u2014\u2015\u2212"
 
 
 @dataclass(frozen=True)
@@ -122,7 +211,7 @@ class EntityBinding:
     """Job-local entity binding for a single unit."""
     unit_id: str
     protected_source_text: str
-    bindings: dict[str, EntityMatch]
+    bindings: dict[str, str | EntityMatch | Mapping[str, Any]]
     placeholder_map: dict[str, str]  # placeholder -> entity_id
 
 
@@ -262,6 +351,16 @@ class EntityRegistry:
         text = text.strip().lower()
         return text
 
+    @staticmethod
+    def _source_surface_is_safe(normalized: str) -> bool:
+        """Reject aliases too short to identify an entity in ordinary prose."""
+
+        words = str(normalized or "").split()
+        if len(words) != 1:
+            return True
+        lexical = re.sub(r"[^\w]+", "", words[0], flags=re.UNICODE)
+        return len(lexical) >= 3
+
     def match_entities(self, text: str, unit_id: str = "") -> list[EntityMatch]:
         """Match entities in source text using longest-match-first."""
         matches = []
@@ -275,13 +374,18 @@ class EntityRegistry:
             
             # Check canonical
             norm_canonical = self._normalize_text(entity.canonical_text)
-            if norm_canonical in text_lower:
+            if (
+                self._source_surface_is_safe(norm_canonical)
+                and norm_canonical in text_lower
+            ):
                 candidates.append((entity, norm_canonical, "canonical"))
             
             # Check aliases (skip ambiguous short ones)
             for alias in entity.aliases:
                 norm_alias = self._normalize_text(alias)
                 if norm_alias in text_lower:
+                    if not self._source_surface_is_safe(norm_alias):
+                        continue
                     # Skip ambiguous short aliases
                     if norm_alias.split() == 1 and norm_alias in _AMBIGUOUS_SHORT_ALIASES:
                         continue
@@ -293,7 +397,10 @@ class EntityRegistry:
             # Check STT phrases
             for phrase in entity.stt_phrases:
                 norm_phrase = self._normalize_text(phrase)
-                if norm_phrase in text_lower:
+                if (
+                    self._source_surface_is_safe(norm_phrase)
+                    and norm_phrase in text_lower
+                ):
                     candidates.append((entity, norm_phrase, "stt_phrase"))
         
         # Sort by length (longest first) for proper matching
@@ -341,6 +448,215 @@ class EntityRegistry:
             raise ValueError(f"Unknown entity_id: {entity_id}")
         return self._entities[entity_id]
 
+    @staticmethod
+    def _person_words(text: str) -> list[str]:
+        return [match.group(0) for match in _PERSON_WORD.finditer(str(text or ""))]
+
+    @staticmethod
+    def _person_title_key(token: str) -> str | None:
+        return _PERSON_TITLE_KEYS.get(str(token or "").strip().rstrip(".").casefold())
+
+    @staticmethod
+    def _identity_surface_key(text: str) -> str:
+        value = unicodedata.normalize("NFKC", str(text or ""))
+        value = re.sub(f"[{re.escape(_IDENTITY_DASHES)}]", " ", value)
+        value = value.replace(".", " ")
+        value = re.sub(r"[^\w'’]+", " ", value, flags=re.UNICODE)
+        return " ".join(value.casefold().split())
+
+    def _person_surname(self, entity: Entity) -> str | None:
+        words = self._person_words(entity.canonical_text)
+        while words and words[-1].rstrip(".").casefold() in _PERSON_POSTNOMINALS:
+            words.pop()
+        return words[-1].rstrip(".") if words else None
+
+    def _reviewed_person_title_keys(self, entity: Entity) -> tuple[str, ...]:
+        if entity.entity_type != "person":
+            return ()
+        surname = self._person_surname(entity)
+        if not surname:
+            return ()
+        surname_key = self._identity_surface_key(surname)
+        found: list[str] = []
+        seen: set[str] = set()
+        for form in (entity.display_text, entity.canonical_text, *entity.aliases):
+            words = self._person_words(form)
+            surname_index = next(
+                (
+                    index
+                    for index, word in enumerate(words)
+                    if self._identity_surface_key(word) == surname_key
+                ),
+                None,
+            )
+            if surname_index is None:
+                continue
+            for word in words[:surname_index]:
+                title_key = self._person_title_key(word)
+                if title_key is None or title_key in seen:
+                    continue
+                seen.add(title_key)
+                found.append(title_key)
+        return tuple(found)
+
+    def _raw_person_title_surname_forms(self, entity: Entity) -> tuple[str, ...]:
+        surname = self._person_surname(entity)
+        if entity.entity_type != "person" or not surname:
+            return ()
+        forms: list[str] = []
+        for title_key in self._reviewed_person_title_keys(entity):
+            for surface in _PERSON_TITLE_SURFACES.get(title_key, ()):
+                forms.append(f"{surface} {surname}")
+        return tuple(forms)
+
+    def _derived_person_form_is_unambiguous(self, entity: Entity, form: str) -> bool:
+        candidate_key = self._identity_surface_key(form)
+        owners: set[str] = set()
+        for other in self._entities.values():
+            if (
+                not other.active
+                or not other.must_preserve
+                or other.entity_type != "person"
+            ):
+                continue
+            reviewed_and_derived = (
+                other.display_text,
+                other.canonical_text,
+                *other.aliases,
+                *self._raw_person_title_surname_forms(other),
+            )
+            if any(
+                self._identity_surface_key(other_form) == candidate_key
+                for other_form in reviewed_and_derived
+            ):
+                owners.add(other.entity_id)
+        return owners == {entity.entity_id}
+
+    def _source_supported_person_forms(
+        self,
+        entity: Entity,
+        source_text: str,
+    ) -> tuple[str, ...]:
+        """Return safe title combinations explicitly used with this surname.
+
+        The source may use a composite role such as
+        ``Advocate-Commissioner Khumalo`` while the reviewed registry stores the
+        full identity and individual role aliases. Only reviewed title tokens
+        are accepted, every component title-plus-surname form must resolve
+        uniquely to this entity, and no bare surname is ever produced.
+        """
+
+        surname = self._person_surname(entity)
+        title_keys = self._reviewed_person_title_keys(entity)
+        if entity.entity_type != "person" or not surname or not title_keys:
+            return ()
+
+        token_patterns: list[str] = []
+        for title_key in title_keys:
+            for surface in _PERSON_TITLE_SURFACES.get(title_key, ()):
+                escaped = re.escape(surface.rstrip("."))
+                token_patterns.append(rf"{escaped}\.?")
+        if not token_patterns:
+            return ()
+        title_token = "(?:" + "|".join(sorted(set(token_patterns), key=len, reverse=True)) + ")"
+        separator = rf"(?:\s*[{re.escape(_IDENTITY_DASHES)}]\s*|\s+)"
+        pattern = re.compile(
+            rf"(?<!\w)(?P<titles>{title_token}(?:{separator}{title_token}){{0,3}})"
+            rf"{separator}(?P<surname>{re.escape(surname)})(?!\w)",
+            re.IGNORECASE,
+        )
+
+        forms: list[str] = []
+        seen: set[str] = set()
+        for match in pattern.finditer(unicodedata.normalize("NFKC", source_text)):
+            matched_title_keys = [
+                self._person_title_key(word)
+                for word in re.split(
+                    rf"(?:\s*[{re.escape(_IDENTITY_DASHES)}]\s*|\s+)",
+                    match.group("titles").strip(),
+                )
+                if word
+            ]
+            if not matched_title_keys or any(key is None for key in matched_title_keys):
+                continue
+            component_forms = [
+                f"{_PERSON_TITLE_SURFACES[key][0]} {surname}"
+                for key in matched_title_keys
+                if key is not None
+            ]
+            if not component_forms or not all(
+                self._derived_person_form_is_unambiguous(entity, form)
+                for form in component_forms
+            ):
+                continue
+
+            full_titles = [_PERSON_TITLE_SURFACES[key][0] for key in matched_title_keys if key]
+            candidates = [
+                f"{'-'.join(full_titles)} {surname}",
+                f"{' '.join(full_titles)} {surname}",
+                *component_forms,
+            ]
+            for candidate in candidates:
+                candidate_key = candidate.casefold()
+                if candidate_key in seen:
+                    continue
+                seen.add(candidate_key)
+                forms.append(candidate)
+        return tuple(forms)
+
+    def approved_identity_forms(
+        self,
+        text: str,
+        *,
+        source_text: str | None = None,
+    ) -> tuple[str, ...]:
+        """Return reviewed and collision-safe forms for one protected identity.
+
+        Translation validation protects the entity identity, not necessarily one
+        literal source spelling. Reviewed aliases remain authoritative. For a
+        person, title-plus-surname forms may also be derived when the title is
+        already reviewed for that identity and the derived form is unique across
+        active protected people. Source-supported composite titles are accepted
+        under the same fail-closed rule. Bare surnames are never derived.
+        """
+
+        supplied = str(text or "").strip()
+        if not supplied:
+            return ()
+        normalised = self._normalize_text(supplied)
+        entity_id = self._canonical_index.get(normalised)
+        if entity_id is None:
+            alias_ids = tuple(dict.fromkeys(self._alias_index.get(normalised, ())))
+            if len(alias_ids) != 1 or normalised in self._alias_collisions:
+                return (supplied,)
+            entity_id = alias_ids[0]
+
+        entity = self._entities.get(entity_id)
+        if entity is None or not entity.active or not entity.must_preserve:
+            return (supplied,)
+
+        values = [supplied, entity.display_text, entity.canonical_text, *entity.aliases]
+        values.extend(
+            form
+            for form in self._raw_person_title_surname_forms(entity)
+            if self._derived_person_form_is_unambiguous(entity, form)
+        )
+        if source_text:
+            values.extend(self._source_supported_person_forms(entity, source_text))
+
+        forms: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            candidate = str(value or "").strip()
+            if not candidate:
+                continue
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            forms.append(candidate)
+        return tuple(forms)
+
     @property
     def sha256(self) -> str:
         """SHA-256 of the registry file."""
@@ -356,7 +672,7 @@ class EntityRegistry:
         return dict(self._alias_collisions)
 
 
-def protect_text_with_placeholders(text: str, matches: list[EntityMatch]) -> tuple[str, dict[str, EntityMatch]]:
+def protect_text_with_placeholders(text: str, matches: list[EntityMatch]) -> tuple[str, dict[str, str]]:
     """Replace matched entities with stable placeholders."""
     if not matches:
         return text, {}
@@ -365,7 +681,7 @@ def protect_text_with_placeholders(text: str, matches: list[EntityMatch]) -> tup
     sorted_matches = sorted(matches, key=lambda m: m.source_char_start, reverse=True)
     
     protected_text = text
-    bindings: dict[str, EntityMatch] = {}
+    bindings: dict[str, str] = {}
     
     for match in sorted_matches:
         placeholder = f"[[MATHULA_ENTITY:{match.entity_id}]]"
@@ -379,26 +695,56 @@ def protect_text_with_placeholders(text: str, matches: list[EntityMatch]) -> tup
     return protected_text, bindings
 
 
-def restore_display_text(text: str, bindings: dict[str, EntityMatch], registry: EntityRegistry) -> str:
-    """Restore display text from placeholders."""
-    for placeholder, match in bindings.items():
-        entity = registry.get_entity(match.entity_id)
+def _binding_entity_id(binding: str | EntityMatch | Mapping[str, Any]) -> str:
+    """Return an entity ID from persisted or in-memory binding shapes."""
+    if isinstance(binding, str):
+        entity_id = binding
+    elif isinstance(binding, EntityMatch):
+        entity_id = binding.entity_id
+    elif isinstance(binding, Mapping):
+        entity_id = str(binding.get("entity_id", ""))
+    else:
+        raise TypeError(
+            "Entity placeholder binding must be an entity ID string, "
+            "EntityMatch, or mapping"
+        )
+
+    entity_id = entity_id.strip()
+    if not entity_id:
+        raise ValueError("Entity placeholder binding has no entity_id")
+    return entity_id
+
+
+def restore_display_text(
+    text: str,
+    bindings: Mapping[str, str | EntityMatch | Mapping[str, Any]],
+    registry: EntityRegistry,
+) -> str:
+    """Restore display text from persisted or in-memory placeholders."""
+    for placeholder, binding in bindings.items():
+        entity = registry.get_entity(_binding_entity_id(binding))
         text = text.replace(placeholder, entity.display_text)
     return text
 
 
-def restore_tts_text(text: str, bindings: dict[str, EntityMatch], registry: EntityRegistry, locale: str = "zu-ZA", voice: str | None = None) -> str:
-    """Restore approved spoken form from placeholders."""
-    for placeholder, match in bindings.items():
-        entity = registry.get_entity(match.entity_id)
+def restore_tts_text(
+    text: str,
+    bindings: Mapping[str, str | EntityMatch | Mapping[str, Any]],
+    registry: EntityRegistry,
+    locale: str = "zu-ZA",
+    voice: str | None = None,
+) -> str:
+    """Restore approved spoken form from persisted or in-memory placeholders."""
+    for placeholder, binding in bindings.items():
+        entity = registry.get_entity(_binding_entity_id(binding))
         spoken_form, _ = entity.get_spoken_form(locale, voice)
         text = text.replace(placeholder, spoken_form)
     return text
 
 
 def validate_placeholder_integrity(
-    original_bindings: dict[str, EntityMatch],
-    restored_bindings: dict[str, EntityMatch],
+    original_bindings: Mapping[str, Any],
+    restored_bindings: Mapping[str, Any],
     unit_id: str = "",
 ) -> dict[str, Any]:
     """Validate that all placeholders survive exactly once."""
@@ -428,6 +774,7 @@ def validate_placeholder_integrity(
 __all__ = [
     "ENTITY_REGISTRY_SCHEMA",
     "ENTITY_BINDINGS_SCHEMA",
+    "ENTITY_MATCHER_VERSION",
     "Entity",
     "EntityMatch",
     "EntityBinding",

@@ -146,7 +146,22 @@ def normalize_translation_units(
             raise ValueError(f"Unit {unit_id} has unexpected protected entities: {unexpected_entities}")
         
         protected_terms = tuple(str(value) for value in item.get("protected_entities_found", ()))
-        changes = list(item.get("text_changes", ()))
+        supplied_changes = list(item.get("text_changes", ()))
+        model_spoken_to_tts_changes = [
+            change
+            for change in supplied_changes
+            if isinstance(change, Mapping) and str(change.get("layer", "")) == "spoken_to_tts"
+        ]
+        # The model may propose hidden TTS wording, but only the reviewed
+        # application pronunciation dictionary owns spoken-to-TTS substitutions
+        # and their character spans.  Rebuild those spans deterministically below
+        # instead of combining model spans with application spans, which can
+        # overlap when a broad phrase contains a narrower code-switched token.
+        changes = [
+            change
+            for change in supplied_changes
+            if not (isinstance(change, Mapping) and str(change.get("layer", "")) == "spoken_to_tts")
+        ]
         if faithful != spoken and not changes:
             timing_strategy = str(item.get("timing_strategy") or "timing-aware spoken delivery")
             detail = item.get("omitted_or_compressed_detail") or []
@@ -157,7 +172,7 @@ def normalize_translation_units(
                     spoken,
                     layer="faithful_to_spoken",
                     change_type=change_type,
-                    reason=f"Claude timing strategy: {timing_strategy}; recorded detail: {detail}",
+                    reason=f"GPT timing strategy: {timing_strategy}; recorded detail: {detail}",
                     protected_terms=protected_terms,
                     human_review_required=True,
                 )
@@ -175,13 +190,21 @@ def normalize_translation_units(
                 "without a reviewed pronunciation dictionary"
             )
         proposal_review = None
-        if pronunciation_dictionary is not None and supplied_tts != target.tts_text:
+        if pronunciation_dictionary is not None and (
+            supplied_tts != target.tts_text or model_spoken_to_tts_changes
+        ):
             proposal_review = {
-                "claude_tts_text_proposal": supplied_tts,
+                "ai_tts_text_proposal": supplied_tts,
                 "application_tts_text": target.tts_text,
+                "proposal_matches_application": supplied_tts == target.tts_text,
                 "applied": False,
-                "reason": "Only reviewed application pronunciation entries may alter TTS text",
-                "human_review_required": True,
+                "reason": (
+                    "Only reviewed application pronunciation entries may alter TTS text; "
+                    "model-supplied spoken_to_tts spans were discarded and rebuilt deterministically"
+                ),
+                "discarded_model_spoken_to_tts_change_count": len(model_spoken_to_tts_changes),
+                "discarded_model_spoken_to_tts_changes": model_spoken_to_tts_changes,
+                "human_review_required": supplied_tts != target.tts_text,
             }
         normalized.append(
             {
@@ -200,6 +223,7 @@ def normalize_translation_units(
         "units": normalized,
         "seo": translation.get("seo", {}),
         "metadata": translation.get("metadata", {}),
+        "semantic_annotations": translation.get("semantic_annotations", {}),
     }
 
 

@@ -1,0 +1,20 @@
+mathula-gpt-output-budget-v13.18.53-source.tar.gz
+
+Cumulative source overlay for Mathula TV v13.18.53.
+
+Core release identifiers:
+- mathula-direct-azure-dub-v45-gpt-output-budget-v13.18.53
+- mathula-semantic-fit-global-batch-v17-gpt-output-budget-v13.18.53
+- mathula-performance-plan-v6-gpt-output-budget-v13.18.53
+- gpt-semantic-fit-zu-v9-output-budget-v13.18.53
+
+Primary correction:
+- the 4,096-token semantic-fit ceiling is removed;
+- GPT reasoning and visible structured output receive separate capacity;
+- portfolio calls have a defensive 16,384-token minimum;
+- candidate generation uses low reasoning and independent review remains
+  medium effort;
+- progress reports budget adjustment and reasoning tokens;
+- GPT-5.6 Sol's 128,000-token ceiling is validated locally.
+
+Verification: 86 release tests and 45 shared-boundary checks passed offline.

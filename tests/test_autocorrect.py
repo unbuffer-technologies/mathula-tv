@@ -7,6 +7,7 @@ from mathula_tv.autocorrect import (
     AutocorrectError,
     PgSession,
     clean_user_term,
+    curated_hint_auto_applies,
     public_dictionary_candidates,
     stable_id,
     validate_ai_response,
@@ -131,3 +132,20 @@ def test_stable_public_ids_are_deterministic():
     first = stable_id("public_term", "heard", "correct", "en-ZA")
     second = stable_id("public_term", "heard", "correct", "en-ZA")
     assert first == second
+
+
+def test_curated_hint_rules_auto_apply_by_default():
+    assert curated_hint_auto_applies({
+        "pattern": r"\bhorse[\s-]+curry\b",
+        "replacement": "hoshkhari",
+    }) is True
+    assert curated_hint_auto_applies({
+        "pattern": "ambiguous",
+        "replacement": "candidate",
+        "auto_apply": False,
+    }) is False
+    assert curated_hint_auto_applies({
+        "pattern": "ambiguous",
+        "replacement": "candidate",
+        "review_required": True,
+    }) is False

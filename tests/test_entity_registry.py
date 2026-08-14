@@ -495,3 +495,79 @@ def test_entity_invalid_translation_policy():
             do_not_confuse_with=(),
             sources=(),
         )
+
+
+def test_approved_identity_forms_return_reviewed_aliases_and_fail_closed() -> None:
+    registry = EntityRegistry()
+    assert registry.approved_identity_forms("Economic Freedom Fighters") == (
+        "Economic Freedom Fighters",
+        "EFF",
+    )
+    assert registry.approved_identity_forms("EFF") == (
+        "EFF",
+        "Economic Freedom Fighters",
+    )
+    assert registry.approved_identity_forms("Unknown Example") == ("Unknown Example",)
+
+
+def test_approved_identity_forms_derive_safe_person_title_surname_aliases() -> None:
+    registry = EntityRegistry()
+    forms = registry.approved_identity_forms("Advocate Sandile Khumalo SC")
+
+    assert "Advocate Khumalo" in forms
+    assert "Adv. Khumalo" in forms
+    assert "Commissioner Khumalo" in forms
+    assert "Khumalo" not in forms
+
+    source_forms = registry.approved_identity_forms(
+        "Advocate Sandile Khumalo SC",
+        source_text=(
+            "Earlier, we heard one of the Commissioners, "
+            "Advocate-Commissioner Khumalo, in fact, talk about how,"
+        ),
+    )
+    assert "Advocate-Commissioner Khumalo" in source_forms
+    assert "Advocate Commissioner Khumalo" in source_forms
+    assert "Advocate Khumalo" in source_forms
+    assert "Commissioner Khumalo" in source_forms
+    assert "Khumalo" not in source_forms
+
+
+def test_derived_person_title_surname_alias_rejects_registry_collision(
+    sample_registry_json,
+) -> None:
+    payload = json.loads(json.dumps(sample_registry_json))
+    first = payload["entities"][0]
+    first.update(
+        {
+            "canonical_text": "Advocate John Doe",
+            "display_text": "Advocate John Doe",
+            "aliases": ["John Doe", "Adv. John Doe"],
+            "stt_phrases": ["Advocate John Doe", "John Doe", "Adv. John Doe"],
+        }
+    )
+    second = json.loads(json.dumps(first))
+    second.update(
+        {
+            "entity_id": "person_jane_doe",
+            "canonical_text": "Advocate Jane Doe",
+            "display_text": "Advocate Jane Doe",
+            "aliases": ["Jane Doe", "Advocate Doe"],
+            "stt_phrases": ["Advocate Jane Doe", "Jane Doe", "Advocate Doe"],
+        }
+    )
+    payload["entities"].append(second)
+    payload["validation"]["entity_count"] = len(payload["entities"])
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+        json.dump(payload, handle)
+        registry_path = Path(handle.name)
+    try:
+        registry = EntityRegistry(registry_path)
+        forms = registry.approved_identity_forms("Advocate John Doe")
+    finally:
+        registry_path.unlink(missing_ok=True)
+
+    assert "Advocate Doe" not in forms
+    assert "Adv. Doe" not in forms
+    assert "Doe" not in forms

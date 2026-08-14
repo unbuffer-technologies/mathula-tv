@@ -30,7 +30,6 @@ from .youtube_ingestion import (
     record_youtube_submission,
 )
 from .production_pipeline import ProductionDubbingPipeline
-from .translation import AzureOpenAIClient
 from .tts_ssml import SSMLBounds
 from .viral_moments_cli import add_viral_moments_command, run_viral_moments_command
 
@@ -39,6 +38,7 @@ LIVE_COMPATIBILITY_JOB_ID = "19ba6d69f1b84132ba4f20599101834a"
 EXTERNAL_COMMANDS = {
     "transcribe",
     "resume-autocorrect-research",
+    "repair-speaker-turns",
     "translate",
     "repair-translation",
     "validate-azure-voices",
@@ -50,6 +50,7 @@ EXTERNAL_COMMANDS = {
     "queue-voice-conversion",
     "reconcile-voice-conversion",
     "dub-azure",
+    "optimize-dub",
     "edit-tiktok",
 }
 _POST_AUTOCORRECT_STAGES = {
@@ -85,22 +86,19 @@ def create_speech_backend(settings):
 def create_translation_backend(provider: str | None = None, model: str | None = None):
     selected = (
         provider
-        or os.getenv("MATHULA_TV_AI_PROVIDER")
-        or "azure-foundry-claude"
+        or "azure-openai-gpt"
     ).strip().lower()
-    if selected == "anthropic":
+    if selected in {"anthropic", "azure-foundry-claude"}:
         raise ValueError(
-            "Mathula TV Claude calls must use Azure AI Foundry; "
-            "set --provider azure-foundry-claude"
+            "v13.18.54 is GPT-only; use v13.18.51 or older for Claude"
         )
-    if selected == "azure-foundry-claude":
+    if selected in {"azure-openai-gpt", "azure-openai", "gpt"}:
         environment = dict(os.environ)
-        environment["MATHULA_TV_AI_PROVIDER"] = selected
+        environment["MATHULA_TV_AI_PROVIDER"] = "azure-openai-gpt"
         if model:
-            environment["MATHULA_TV_FOUNDRY_CLAUDE_DEPLOYMENT"] = model
+            environment["AZURE_OPENAI_CHAT_DEPLOYMENT"] = model
+            environment["AZURE_AI_DEPLOYMENT"] = model
         return create_production_ai_provider(environment)
-    if selected in {"azure-openai-legacy", "azure-openai-test"}:
-        return AzureOpenAIClient.from_environment()
     raise ValueError(f"Unsupported AI provider: {selected}; no fallback is configured")
 
 
@@ -124,46 +122,6 @@ def create_tts_backend(settings) -> AzureTTSBackend:
         timeout_seconds=settings.azure_tts_timeout_seconds,
         max_retries=settings.azure_tts_max_retries,
         ssml_bounds=bounds,
-    )
-
-
-def create_translation_client(settings):
-    key = os.getenv("AZURE_SPEECH_KEY", "")
-    if not key:
-        raise ValueError("AZURE_SPEECH_KEY is missing")
-    if not settings.azure_ai_endpoint:
-        raise ValueError("AZURE_AI_ENDPOINT is missing")
-    if not settings.azure_ai_deployment:
-        raise ValueError("AZURE_AI_DEPLOYMENT is missing")
-
-    class SimpleJsonClient:
-        def __init__(self, endpoint, deployment, api_version, key):
-            self.deployment = deployment
-            self.api_version = api_version
-            self.request_durations = []
-            self.endpoint = endpoint
-            self.key = key
-
-        def __call__(self, payload):
-            import time
-            import requests
-            start = time.time()
-            headers = {
-                "Content-Type": "application/json",
-                "api-key": self.key,
-            }
-            url = f"{self.endpoint}/openai/deployments/{self.deployment}/chat/completions?api-version={self.api_version}"
-            response = requests.post(url, headers=headers, json=payload, timeout=600)
-            response.raise_for_status()
-            duration = time.time() - start
-            self.request_durations.append(duration)
-            return response.json()
-
-    return SimpleJsonClient(
-        endpoint=settings.azure_ai_endpoint,
-        deployment=settings.azure_ai_deployment,
-        api_version=settings.azure_ai_api_version,
-        key=key,
     )
 
 
@@ -391,6 +349,30 @@ def _publication_ai_progress_payload(
             "Editorial AI retrying after "
             f"{event.get('delay_seconds')}s ({event.get('reason')})"
         )
+        status = "warning"
+    elif kind == "structured_output_normalized":
+        count = int(event.get("dropped_property_count") or 0)
+        application_normalizer_applied = bool(
+            event.get("application_normalizer_applied")
+        )
+        paths = [
+            str(value)
+            for value in (event.get("dropped_property_paths") or [])
+        ]
+        path_text = ", ".join(paths[:3])
+        if len(paths) > 3:
+            path_text += f", +{len(paths) - 3} more"
+        actions: list[str] = []
+        if count:
+            actions.append(
+                f"removed {count} schema-forbidden "
+                f"propert{'y' if count == 1 else 'ies'}"
+                + (f": {path_text}" if path_text else "")
+            )
+        if application_normalizer_applied:
+            actions.append("restored safely derivable omitted metadata")
+        message = "Editorial AI " + " and ".join(actions)
+        message += "; strict local validation continues"
         status = "warning"
     else:
         # Do not print every low-level SSE delta.
@@ -627,6 +609,7 @@ def parser() -> argparse.ArgumentParser:
     for name in ("process", "transcribe", "diarize", "retry", "validate", "inspect"):
         _add_job_command(commands, name)
     _add_job_command(commands, "resume-autocorrect-research")
+    _add_job_command(commands, "repair-speaker-turns")
     status = _add_job_command(commands, "status")
     status.add_argument(
         "--json",
@@ -717,6 +700,34 @@ def parser() -> argparse.ArgumentParser:
     dub_azure.add_argument("--timeline-panel-host", default="127.0.0.1")
     dub_azure.add_argument("--timeline-panel-port", type=int, default=8765)
     dub_azure.add_argument(
+        "--timing-mode",
+        choices=("balanced", "semantic-fit", "performance-plan"),
+        default="balanced",
+        help=(
+            "balanced keeps prepared variants and bounded tempo repair; "
+            "semantic-fit locks speaker tempo and iteratively searches for an "
+            "Azure-measured, semantically reviewed delivery; performance-plan "
+            "uses Azure word-timed speech islands as the timing authority and "
+            "treats STT blocks only as audit members"
+        ),
+    )
+    dub_azure.add_argument(
+        "--semantic-fit-max-attempts",
+        type=int,
+        default=12,
+        help=(
+            "Maximum measured AI candidates per block in semantic-fit mode; "
+            "performance-plan uses at most four one-candidate measured "
+            "feedback rounds"
+        ),
+    )
+    dub_azure.add_argument(
+        "--semantic-fit-tolerance-ms",
+        type=int,
+        default=250,
+        help="Allowed duration shortfall around the fixed semantic-fit target",
+    )
+    dub_azure.add_argument(
         "--refresh-voice-analysis",
         action="store_true",
         help=(
@@ -749,6 +760,25 @@ def parser() -> argparse.ArgumentParser:
         dest="json_output",
         action="store_true",
         help="Print the complete dubbing and publication report as JSON",
+    )
+
+    optimize_dub = _add_job_command(commands, "optimize-dub")
+    optimize_dub.add_argument("--max-rounds", type=int, default=2)
+    optimize_dub.add_argument("--audit-only", action="store_true")
+    optimize_dub.add_argument("--min-confidence", type=float, default=0.70)
+    optimize_dub.add_argument("--voice-map", type=Path)
+    optimize_dub.add_argument("--minimum-production-score", type=float, default=82.0)
+    optimize_dub.add_argument("--maximum-aggregate-wer", type=float, default=0.40)
+    optimize_dub.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    optimize_dub.add_argument(
+        "--json",
+        "--json-output",
+        dest="json_output",
+        action="store_true",
     )
 
 
@@ -883,6 +913,30 @@ def _reset_for_autocorrect_research(job: Any) -> str:
     job.attempt_history.append(
         {
             "stage": "autocorrect_name_research_rerun",
+            "status": "started",
+            "from_state": previous_state,
+            "to_state": "analysis_running",
+            "started_at": utcnow(),
+        }
+    )
+    return previous_state
+
+
+def _reset_for_contextual_speaker_repair(job: Any) -> str:
+    """Rebuild analysis from saved Azure words without retranscription."""
+
+    previous_state = str(job.state)
+    job.state = "analysis_running"
+    job.completed_stages = [
+        stage
+        for stage in job.completed_stages
+        if stage not in _POST_AUTOCORRECT_STAGES
+    ]
+    job.review_readiness = "contextual_speaker_turn_repair"
+    job.last_error = None
+    job.attempt_history.append(
+        {
+            "stage": "contextual_speaker_turn_repair",
             "status": "started",
             "from_state": previous_state,
             "to_state": "analysis_running",
@@ -1046,8 +1100,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(dry, indent=2))
             return 0
 
-        # Preserve the explicitly selectable Azure OpenAI legacy/test adapter.
-        # Normal Settings always has ai_provider=anthropic and uses production below.
+        # Lightweight test settings may omit provider fields; production always
+        # uses the GPT-only provider factory below.
         if args.command == "translate" and not hasattr(settings, "ai_provider"):
             result = app.translate_and_package(
                 job,
@@ -1084,32 +1138,30 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "prepare-dubbing":
             print(json.dumps(production.prepare_dubbing(job, force=args.force), ensure_ascii=False, indent=2))
         elif args.command == "translate":
-            provider_name = args.provider or settings.ai_provider
-            if provider_name in {"azure-openai-legacy", "azure-openai-test"}:
-                result = app.translate_and_package(
-                    job,
-                    create_translation_backend(provider_name, args.model),
-                    force=args.force,
-                )
-            else:
-                provider = create_translation_backend(
-                    provider_name,
-                    args.model or settings.claude_model,
-                )
-                result = production.translate(
-                    job,
-                    provider,
-                    force=args.force,
-                    batch_size=args.batch_size,
-                    context_units=args.context_units,
-                    request_timeout_seconds=args.request_timeout_seconds,
-                    batch_max_retries=args.batch_max_retries,
-                    max_provider_calls=args.max_provider_calls,
-                    restart_batches=args.restart_batches,
-                    progress=(
-                        None if args.no_progress else _translation_progress_callback()
-                    ),
-                )
+            provider_name = (
+                args.provider
+                or "azure-openai-gpt"
+            )
+            provider = create_translation_backend(
+                provider_name,
+                args.model
+                or os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
+                or os.getenv("AZURE_AI_DEPLOYMENT"),
+            )
+            result = production.translate(
+                job,
+                provider,
+                force=args.force,
+                batch_size=args.batch_size,
+                context_units=args.context_units,
+                request_timeout_seconds=args.request_timeout_seconds,
+                batch_max_retries=args.batch_max_retries,
+                max_provider_calls=args.max_provider_calls,
+                restart_batches=args.restart_batches,
+                progress=(
+                    None if args.no_progress else _translation_progress_callback()
+                ),
+            )
             _print_translation_result(
                 job_id=job.job_id,
                 result=result,
@@ -1133,10 +1185,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "repair-translation":
-            provider_name = args.provider or settings.ai_provider
-            if provider_name != "azure-foundry-claude":
-                raise ValueError("Timing repair requires Azure AI Foundry Claude")
-            provider = create_translation_backend(provider_name, args.model or settings.claude_model)
+            provider_name = (
+                args.provider
+                or "azure-openai-gpt"
+            )
+            if provider_name not in {"azure-openai-gpt", "azure-openai", "gpt"}:
+                raise ValueError("Timing repair requires Azure OpenAI GPT in v13.18.54")
+            provider = create_translation_backend(
+                provider_name,
+                args.model
+                or os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
+                or os.getenv("AZURE_AI_DEPLOYMENT"),
+            )
             print(
                 json.dumps(
                     production.repair_translation_units(job, provider, force=args.force),
@@ -1405,12 +1465,19 @@ def main(argv: list[str] | None = None) -> int:
             from .direct_azure_dub import (
                 DirectAzureDubRenderer,
                 DirectDubOptions,
+                create_direct_azure_backend,
             )
 
-            azure_tts_backend = create_tts_backend(settings)
+            azure_tts_backend = create_direct_azure_backend(
+                settings,
+                max_rate_percent=settings.azure_rate_max_percent,
+            )
             renderer = DirectAzureDubRenderer(
                 settings,
                 azure_tts_backend,
+                # Created lazily for unresolved transcript-context voice
+                # inference, or later if the finalization conductor is needed.
+                timing_repair_provider_factory=create_production_ai_provider,
             )
             progress_elapsed = {"seconds": 0.0}
             phase_timing = _PhaseDurationTracker()
@@ -1431,11 +1498,24 @@ def main(argv: list[str] | None = None) -> int:
                 job,
                 voice_map_path=args.voice_map,
                 options=DirectDubOptions(
+                    timing_mode=args.timing_mode,
+                    semantic_fit_max_attempts=args.semantic_fit_max_attempts,
+                    semantic_fit_tolerance_ms=args.semantic_fit_tolerance_ms,
                     max_azure_rate_percent=min(
                         10,
                         azure_tts_backend.ssml_bounds.rate_max_percent,
                     ),
                     min_voice_family_confidence=args.min_confidence,
+                    # The publication pass immediately follows and performs the
+                    # single required CFR H.264 encode. Keep the intermediate
+                    # clean master as a fast video-copy remux.
+                    clean_master_video_mode=os.getenv(
+                        "MATHULA_TV_CLEAN_MASTER_VIDEO_MODE",
+                        "stream_copy",
+                    ).strip().lower(),
+                    finalization_ai_rounds=int(
+                        os.getenv("MATHULA_TV_FINALIZATION_AI_ROUNDS", "2")
+                    ),
                 ),
                 force=args.force,
                 refresh_voice_analysis=args.refresh_voice_analysis,
@@ -1538,6 +1618,88 @@ def main(argv: list[str] | None = None) -> int:
                 result=result,
                 json_output=args.json_output,
             )
+        elif args.command == "optimize-dub":
+            from .direct_azure_dub import DirectAzureDubRenderer, DirectDubOptions
+            from .dub_mastering import DubMasteringLoop, DubMasteringThresholds
+
+            azure_tts_backend = create_tts_backend(settings)
+            stt_backend = create_speech_backend(settings)
+            renderer = DirectAzureDubRenderer(
+                settings,
+                azure_tts_backend,
+                timing_repair_provider_factory=create_production_ai_provider,
+            )
+            mastering_started = time.monotonic()
+
+            def mastering_progress(event: dict[str, Any]) -> None:
+                if not args.progress:
+                    return
+                payload = dict(event)
+                payload.setdefault(
+                    "elapsed_seconds",
+                    max(0.0, time.monotonic() - mastering_started),
+                )
+                _print_direct_dub_progress(payload)
+
+            loop = DubMasteringLoop(
+                stt_backend=stt_backend,
+                renderer=renderer,
+                progress_callback=(mastering_progress if args.progress else None),
+            )
+            result = loop.run(
+                job,
+                options=DirectDubOptions(
+                    max_azure_rate_percent=min(
+                        10,
+                        azure_tts_backend.ssml_bounds.rate_max_percent,
+                    ),
+                    min_voice_family_confidence=args.min_confidence,
+                    clean_master_video_mode=os.getenv(
+                        "MATHULA_TV_CLEAN_MASTER_VIDEO_MODE",
+                        "stream_copy",
+                    ).strip().lower(),
+                    finalization_ai_rounds=int(
+                        os.getenv("MATHULA_TV_FINALIZATION_AI_ROUNDS", "2")
+                    ),
+                ),
+                max_rounds=args.max_rounds,
+                audit_only=args.audit_only,
+                thresholds=DubMasteringThresholds(
+                    minimum_production_score=args.minimum_production_score,
+                    maximum_aggregate_wer=args.maximum_aggregate_wer,
+                ),
+                voice_map_path=args.voice_map,
+            )
+            if args.json_output:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                best_round = next(
+                    (
+                        value
+                        for value in result.get("rounds") or []
+                        if int(value.get("round") or 0)
+                        == int(result.get("best_round") or 0)
+                    ),
+                    {},
+                )
+                print(
+                    f"Dub mastering {result['state']} for job {job.job_id}: "
+                    f"best score {result['best_production_score']:.1f}/100; "
+                    f"report {settings.work_dir / 'jobs' / job.job_id / 'direct_dub' / 'mastering' / 'report.json'}"
+                )
+                dimensions = best_round.get("quality_dimensions") or {}
+                if dimensions:
+                    print(
+                        "Quality dimensions: "
+                        + ", ".join(
+                            f"{name.replace('_', ' ')}={float(value):.1f}"
+                            for name, value in dimensions.items()
+                        )
+                    )
+                print(
+                    "Production blockers in best round: "
+                    f"{int(best_round.get('production_blocker_count') or 0)}"
+                )
         elif args.command == "enroll-speaker":
             from .known_speakers import enrol_known_speaker
             from .media import prepare_source_derivatives
@@ -1578,6 +1740,39 @@ def main(argv: list[str] | None = None) -> int:
             )
             app.jobs.save(job)
             print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.command == "repair-speaker-turns":
+            job_root = app.jobs.job_dir(job.job_id)
+            azure_diarization = job_root / "analysis" / "azure_diarization.json"
+            if not azure_diarization.is_file():
+                raise ValueError(
+                    "Cannot rebuild contextual speaker turns without "
+                    f"{azure_diarization}"
+                )
+            previous_state = _reset_for_contextual_speaker_repair(job)
+            app.jobs.save(job)
+            result = app.process(job)
+            repaired_transcript = read_json(
+                job_root / "analysis" / "transcript_en.json"
+            )
+            repairs = repaired_transcript.get("speaker_turn_repairs", [])
+            print(
+                json.dumps(
+                    {
+                        "job_id": job.job_id,
+                        "from_state": previous_state,
+                        "state": job.state,
+                        "speaker_turn_repair_count": len(repairs),
+                        "speaker_turn_repairs": repairs,
+                        "analysis_result": result,
+                        "next_step": (
+                            "Run translate with --live-operation; changed source "
+                            "identity invalidates stale translation checkpoints"
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
         elif args.command == "resume-autocorrect-research":
             job_root = app.jobs.job_dir(job.job_id)
             azure_diarization = (

@@ -1,0 +1,20 @@
+mathula-performance-plan-v13.18.51-source.tar.gz
+
+Cumulative source overlay for Mathula TV v13.18.51.
+
+Core release identifiers:
+- mathula-direct-azure-dub-v43-review-normalization-v13.18.51
+- mathula-semantic-fit-global-batch-v15-review-normalization-v13.18.51
+- mathula-performance-plan-v4-v13.18.51
+- claude-semantic-fit-review-zu-v2-v13.18.51
+
+Primary correction:
+- contradictory Claude semantic reviews are conservatively normalized into
+  candidate rejections rather than terminating the dub;
+- malformed review collection/scalar types and numeric scores are normalized;
+- semantic acceptance still requires empty reason codes at both provider and
+  renderer boundaries;
+- the strategy bump replays cached candidates and supplies a fresh bounded
+  performance attempt budget.
+
+Verification: 77 tests passed in the reconstructed full source tree.

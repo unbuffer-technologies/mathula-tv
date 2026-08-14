@@ -1,0 +1,113 @@
+{
+  "schema_version": "mathula-tiktok-accounts-v1",
+  "max_hashtags": 5,
+  "shared_hashtags": [
+    "#Mzansi",
+    "#SouthAfrica"
+  ],
+  "accounts": {
+    "zu": {
+      "account_name": "Bantufy Zulu",
+      "brand_hashtag": "#BantufyZulu",
+      "community_hashtag": "#ZuluTikTok",
+      "value_hashtag": "#NgesiZulu",
+      "discovery_hashtags": [
+        "#IsiZulu",
+        "#ZuluTikTok",
+        "#Izindaba",
+        "#IzindabaNgesiZulu",
+        "#SouthAfricanNews",
+        "#NewsTok"
+      ]
+    },
+    "nso": {
+      "account_name": "Bantufy Sepedi",
+      "brand_hashtag": "#BantufySepedi",
+      "community_hashtag": "#SepediTikTok",
+      "value_hashtag": "#KaSepedi",
+      "discovery_hashtags": [
+        "#Sepedi",
+        "#SesothoSaLeboa",
+        "#SepediTikTok",
+        "#Ditaba"
+      ]
+    },
+    "st": {
+      "account_name": "Bantufy Sesotho",
+      "brand_hashtag": "#BantufySesotho",
+      "community_hashtag": "#SesothoTikTok",
+      "value_hashtag": "#KaSesotho",
+      "discovery_hashtags": [
+        "#Sesotho",
+        "#SesothoTikTok",
+        "#Ditaba"
+      ]
+    },
+    "tn": {
+      "account_name": "Bantufy Setswana",
+      "brand_hashtag": "#BantufySetswana",
+      "community_hashtag": "#SetswanaTikTok",
+      "value_hashtag": "#KaSetswana",
+      "discovery_hashtags": [
+        "#Setswana",
+        "#SetswanaTikTok",
+        "#Dikgang"
+      ]
+    },
+    "ve": {
+      "account_name": "Bantufy Venda",
+      "brand_hashtag": "#BantufyVenda",
+      "community_hashtag": "#VendaTikTok",
+      "value_hashtag": "#NgaTshivenda",
+      "discovery_hashtags": [
+        "#Tshivenda",
+        "#VendaTikTok",
+        "#Mafhungo"
+      ]
+    },
+    "xh": {
+      "account_name": "Bantufy Xhosa",
+      "brand_hashtag": "#BantufyXhosa",
+      "community_hashtag": "#XhosaTikTok",
+      "value_hashtag": "#NgesiXhosa",
+      "discovery_hashtags": [
+        "#IsiXhosa",
+        "#XhosaTikTok",
+        "#Iindaba"
+      ]
+    },
+    "ts": {
+      "account_name": "Bantufy Tsonga",
+      "brand_hashtag": "#BantufyTsonga",
+      "community_hashtag": "#TsongaTikTok",
+      "value_hashtag": "#Hi_Xitsonga",
+      "discovery_hashtags": [
+        "#XiTsonga",
+        "#TsongaTikTok",
+        "#Mahungu"
+      ]
+    },
+    "ss": {
+      "account_name": "Bantufy Swati",
+      "brand_hashtag": "#BantufySwati",
+      "community_hashtag": "#SwatiTikTok",
+      "value_hashtag": "#NgesiSwati",
+      "discovery_hashtags": [
+        "#SiSwati",
+        "#SwatiTikTok",
+        "#Tindzaba"
+      ]
+    },
+    "nr": {
+      "account_name": "Bantufy Ndebele",
+      "brand_hashtag": "#BantufyNdebele",
+      "community_hashtag": "#NdebeleTikTok",
+      "value_hashtag": "#NgesiNdebele",
+      "discovery_hashtags": [
+        "#IsiNdebele",
+        "#NdebeleTikTok",
+        "#Iindaba"
+      ]
+    }
+  }
+}

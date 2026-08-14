@@ -1,0 +1,19 @@
+Mathula TV performance-plan source overlay v13.18.48
+
+Files are relative to the mathula-tv repository root.
+
+6db3ff8cc54716a2b6de663dfbd6babf43753f236689beb3dc8c7474633a57a1  pyproject.toml
+69e6c204486eac403d334a4b5eada4ab86dc959b68cec42c3ab6e4f52d0c4926  PERFORMANCE_PLAN_V13.18.48.md
+32d5d077a020a29069ab78efcb97f7e3e6d4d0bbfeed94f07bbfb82370025fd3  src/mathula_tv/ai_provider.py
+8bee58bbc5f46b4c5fd03e5777b8b58818a0fc37705a7c07ff27509bd9b5c948  src/mathula_tv/cli.py
+954e7678de946b30730887faba4c04dcdcd3deb45dcd3b7a4c9c1dd8528aee23  src/mathula_tv/direct_azure_dub.py
+c02e8a60fe05d122875e965811c7df9ab5e9dee8b411e42bed6f6fbd62d2b4f6  src/mathula_tv/transcript_lipsync.py
+808c8d71724cbc4dc3b94ae3cc213b9da8053fc4ae6cfef52a860112796ab3c6  tests/test_semantic_fit_mode.py
+e9aea9dc985be0b9b669b6725edfc66abb02df9a428f79e4374ee578ec691b2f  tests/test_transcript_lipsync.py
+
+Verification completed in the release workspace:
+- Python bytecode compilation: passed
+- Regression tests: 69 passed
+- Default timing mode remains balanced
+- semantic-fit remains available and unchanged in behavior
+- performance-plan is opt-in

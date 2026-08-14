@@ -16,6 +16,7 @@ import json
 import math
 import re
 import shutil
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from functools import lru_cache
@@ -358,6 +359,16 @@ def _first_text(item: Mapping[str, Any], keys: Sequence[str]) -> str:
     return ""
 
 
+def _is_punctuation_only_source_text(value: str) -> bool:
+    """Return true only when every visible character is punctuation."""
+
+    text = str(value or "").strip()
+    return bool(text) and all(
+        unicodedata.category(character).startswith(("P", "Z"))
+        for character in text
+    )
+
+
 def _timeline_items(value: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     for key in ("segments", "units", "turns"):
         items = value.get(key)
@@ -496,6 +507,12 @@ def extract_source_units(
             raise MultivariantTranslationError(
                 f"Source unit {unit_id} has invalid timing {start_ms}-{end_ms}ms"
             )
+        # Azure can occasionally emit punctuation-only pseudo-phrases such as
+        # "......." for silence or an abandoned recognition hypothesis. They
+        # contain no speech to translate or synthesize, so exclude them before
+        # spending AI tokens. Their source-video interval remains untouched.
+        if _is_punctuation_only_source_text(source_text):
+            continue
         protected = _explicit_protected_spans(item)
         for value in _binding_spans(entity_bindings, unit_id):
             if value not in protected:
@@ -751,7 +768,7 @@ def _compact_optional_detail_is_source_grounded(
     anchor_words = [word.casefold() for word in _identity_words(anchor)]
     source_words = {word.casefold() for word in _identity_words(source_text)}
     exact_source_phrase = _contains_protected_span(source_text, candidate)
-    # Claude sometimes describes an omitted source detail with a compact
+    # GPT can describe an omitted source detail with a compact
     # semantic label rather than an exact quotation, for example
     # ``Crime Intelligence Head role`` for source wording such as ``the head of
     # Crime Intelligence``. Accept that metadata label only when at least two
@@ -820,7 +837,7 @@ def _apply_source_specific_identity_expansion(
     """Restore a source-specific reviewed identity before strict validation.
 
     A deterministic entity binding may require a fully identified institution
-    even when Claude returns only a generic target noun (for example
+    even when GPT returns only a generic target noun (for example
     ``iKhomishini``) or an anaphoric sentence that omits the institution name.
     Rejecting the complete paid chunk is wasteful when the application already
     owns a reviewed target-language identity.
@@ -932,7 +949,7 @@ def _apply_source_specific_identity_expansion(
 
             policy = "append_reviewed_identity_suffix_to_generic_target"
             if expanded is None:
-                # Claude may omit the commission noun entirely while preserving
+                # GPT may omit the commission noun entirely while preserving
                 # the rest of the sentence.  Use the exact reviewed identity as
                 # an appositional spoken topic rather than paying for another
                 # generation or inventing new target-language wording.
@@ -980,7 +997,7 @@ def _apply_protected_identity_compression_floor_fallback(
 ) -> list[dict[str, Any]]:
     """Restore missing protected identities from a valid sibling variant.
 
-    Claude can preserve all required identities in one delivery variant while
+    GPT can preserve all required identities in one delivery variant while
     dropping or translating them beyond recognition in another. Repeating the
     paid full-transcript request is wasteful, but inventing or splicing target-
     language wording locally would be unsafe. The deterministic fallback is to
@@ -1007,9 +1024,10 @@ def _apply_protected_identity_compression_floor_fallback(
         _normalise_space(str(raw_span))
         for raw_span in protected_spans
         if _normalise_space(str(raw_span))
-        and _protected_span_policy(
+        and _unit_protected_span_policy(
             _normalise_space(str(raw_span)),
             target_locale=target_locale,
+            source_text=source_text,
         )
         == "hard_identity"
     ]
@@ -1146,7 +1164,7 @@ def _apply_undeclared_omission_compression_floor_fallback(
 ) -> list[dict[str, Any]]:
     """Replace an unsafe shorter variant with the nearest richer model output.
 
-    Claude can correctly shorten a sentence but describe the removed material in
+    GPT can correctly shorten a sentence but describe the removed material in
     ``omitted_optional_details`` without declaring the same item at unit level.
     The validator must not silently bless that metadata disagreement because the
     omitted item may be required or protected.  Repeating the entire paid
@@ -1242,7 +1260,7 @@ def normalize_multivariant_response(
 ) -> dict[str, Any]:
     """Restore deterministic envelope and source-bound fields locally.
 
-    Only generated translation fields are accepted from Claude. Immutable job
+    Only generated translation fields are accepted from GPT. Immutable job
     metadata, source timing, source text, and variant identities are restored
     from the exact request. Unknown model fields are discarded rather than
     leaking into the strict installed schema. No model retry or repair request
@@ -1297,7 +1315,7 @@ def normalize_multivariant_response(
                 ).strip()
                 if variant_id in VARIANT_IDS and variant_id not in variants_by_id:
                     variants_by_id[variant_id] = item
-            # Claude occasionally preserves order but omits the redundant ID.
+            # GPT can preserve order but omit the redundant ID.
             if len(positional_variants) == len(VARIANT_IDS):
                 for variant_id, item in zip(VARIANT_IDS, positional_variants):
                     variants_by_id.setdefault(variant_id, item)
@@ -1327,7 +1345,7 @@ def normalize_multivariant_response(
                     variant[field] = raw_variant[field]
 
             # ``preserved_english_spans`` is descriptive model metadata, not
-            # translated speech. Claude can occasionally copy a source noun into
+            # translated speech. GPT can copy a source noun into
             # this list even after translating it (for example ``Witness`` ->
             # ``ufakazi``). A false metadata claim must not invalidate an
             # otherwise complete and truthful one-call translation. Required
@@ -1961,6 +1979,41 @@ def _protected_span_policy(
     return "hard_identity"
 
 
+def _source_text_grounds_protected_identity(
+    span: str,
+    *,
+    source_text: str,
+) -> bool:
+    """Return whether this exact source unit contains a reviewed source form."""
+
+    return any(
+        _contains_protected_span(source_text, form)
+        for form in _approved_protected_forms(span)
+        if str(form).strip()
+    )
+
+
+def _unit_protected_span_policy(
+    span: str,
+    *,
+    target_locale: str,
+    source_text: str,
+) -> str:
+    """Classify a protected identity within its source-unit boundary.
+
+    A binding can carry useful context from the registry, but it must not force
+    a brand or person name into translated speech when no reviewed source form
+    occurs in this unit.
+    """
+
+    policy = _protected_span_policy(span, target_locale=target_locale)
+    if policy != "hard_identity":
+        return policy
+    if _source_text_grounds_protected_identity(span, source_text=source_text):
+        return policy
+    return "context_bound_identity"
+
+
 def _contextual_translation_identity_forms(
     span: str,
     *,
@@ -2145,9 +2198,10 @@ def identity_requirements_for_unit(
         result.append(
             {
                 "required_span": span,
-                "policy": _protected_span_policy(
+                "policy": _unit_protected_span_policy(
                     span,
                     target_locale=target_locale,
+                    source_text=source_text,
                 ),
                 "accepted_forms": list(
                     _approved_translation_identity_forms(
@@ -2279,7 +2333,21 @@ def restore_missing_hard_identities_in_unit(
     warnings.extend(repairs)
     translated_unit["warnings"] = warnings
     normalized = normalize_multivariant_response(candidate, request=request)
-    validation = validate_multivariant_response(normalized, request=request)
+    try:
+        validation = validate_multivariant_response(normalized, request=request)
+    except MultivariantTranslationError as exc:
+        # Preserve the successful mutation when full-chunk validation advances
+        # to another unit. The coordinator can then repair that next unit
+        # locally instead of misreporting this mutation as a failure and
+        # issuing a provider request for the already-fixed first unit.
+        exc.details = {
+            "validation_stage": "validator",
+            "validation_error": f"MultivariantTranslationError: {exc}",
+            "candidate_output": normalized,
+            "local_identity_repairs": repairs,
+            "local_identity_repair_advanced_to_next_failure": True,
+        }
+        raise
     return normalized, validation, repairs
 
 
@@ -2458,9 +2526,10 @@ def validate_multivariant_response(
             for span in protected:
                 if not span:
                     continue
-                policy = _protected_span_policy(
+                policy = _unit_protected_span_policy(
                     span,
                     target_locale=expected_locale,
+                    source_text=source_text,
                 )
                 approved_forms = _approved_translation_identity_forms(
                     span,
@@ -2505,7 +2574,8 @@ def validate_multivariant_response(
                             else "generic_contextual_reference"
                             if contextual_match is not None
                             else "contextual_reference_unverified"
-                            if policy == "contextual_identity"
+                            if policy
+                            in {"contextual_identity", "context_bound_identity"}
                             else "missing_hard_identity"
                         ),
                     }
@@ -2557,10 +2627,17 @@ def validate_multivariant_response(
             unresolved_missing_spans: list[dict[str, Any]] = []
             for item in missing_spans:
                 span = str(item["required_span"])
-                if item.get("policy") == "contextual_identity":
+                if item.get("policy") in {
+                    "contextual_identity",
+                    "context_bound_identity",
+                }:
                     if item.get("contextual_match") is not None:
                         item["omission_policy"] = (
                             "reviewed_generic_contextual_identity_reference"
+                        )
+                    elif item.get("policy") == "context_bound_identity":
+                        item["omission_policy"] = (
+                            "context_binding_not_lexically_grounded_in_source_unit"
                         )
                     else:
                         # Entity binding remains authoritative metadata. Spoken

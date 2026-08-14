@@ -78,6 +78,8 @@ def run_ffmpeg_with_progress(
 ) -> None:
     """Run one FFmpeg command and expose machine-readable encode progress."""
 
+    operation = "remux" if stage == "video_remux" else "encode"
+
     progress_command = [
         *command[:-1],
         "-stats_period",
@@ -94,7 +96,7 @@ def run_ffmpeg_with_progress(
         {
             "stage": stage,
             "status": "started",
-            "message": "Starting FFmpeg clean-master encode",
+            "message": f"Starting FFmpeg clean-master {operation}",
             "current": 0,
             "total": total,
             "percent": 0.0,
@@ -170,10 +172,10 @@ def run_ffmpeg_with_progress(
             "stage": stage,
             "status": "completed" if completed else "running",
             "message": (
-                "FFmpeg clean-master encode completed"
+                f"FFmpeg clean-master {operation} completed"
                 if completed
                 else (
-                    "FFmpeg clean-master encoding: "
+                    f"FFmpeg clean-master {operation} in progress: "
                     + ", ".join(detail_parts)
                 )
             ),
@@ -343,6 +345,8 @@ def render_review_mp4(
     runner: Callable[..., Any] = subprocess.run,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     popen_factory: Callable[..., Any] | None = None,
+    video_mode: str | None = None,
+    progress_stage: str = "video_render",
 ) -> dict[str, Any]:
     """Render a smooth playback master with regenerated CFR timestamps.
 
@@ -374,7 +378,11 @@ def render_review_mp4(
     if width <= 0 or height <= 0:
         raise RenderFailure("Source video has invalid dimensions")
 
-    mode = os.getenv("MATHULA_TV_FINAL_VIDEO_MODE", "smooth_cfr").strip().lower()
+    mode = (
+        video_mode
+        if video_mode is not None
+        else os.getenv("MATHULA_TV_FINAL_VIDEO_MODE", "smooth_cfr")
+    ).strip().lower()
     if mode not in {"smooth_cfr", "stream_copy"}:
         raise RenderFailure(
             "MATHULA_TV_FINAL_VIDEO_MODE must be smooth_cfr or stream_copy",
@@ -467,7 +475,7 @@ def render_review_mp4(
                 expected_duration_seconds=source_duration,
                 progress_callback=progress_callback,
                 popen_factory=popen_factory,
-                stage="video_render",
+                stage=progress_stage,
             )
         else:
             runner(command, check=True)
