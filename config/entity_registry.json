@@ -3,7 +3,7 @@
   "registry_id": "south_africa_public_figures_and_madlanga_commission",
   "title": "Mathula TV Entity Registry",
   "description": "Append-friendly protected-entity registry for translation, Azure STT/TTS, OpenVoice dubbing, subtitles and quality-control checks. The initial seed covers Madlanga Commission members, indexed witnesses, named figures, known counsel, organisations, locations and recurring phrases.",
-  "updated_at": "2026-07-21T00:00:00+02:00",
+  "updated_at": "2026-08-18T20:30:00+00:00",
   "coverage": {
     "primary_domain": "madlanga_commission",
     "public_record_through": "2026-07-16",
@@ -76,7 +76,7 @@
     }
   ],
   "validation": {
-    "entity_count": 127,
+    "entity_count": 128,
     "alias_collision_count": 3,
     "alias_collisions": [
       {
@@ -117,6 +117,71 @@
   },
   "entities": [
     {
+      "entity_id": "organisation_sa_first_forum",
+      "entity_type": "organisation",
+      "canonical_text": "SA First Forum",
+      "display_text": "SA First Forum",
+      "aliases": [
+        "S.A. First Forum"
+      ],
+      "domains": [
+        "south_africa_politics",
+        "south_africa_news"
+      ],
+      "roles": [
+        {
+          "role": "protected_term",
+          "context": "south_africa_politics",
+          "status": "referenced"
+        }
+      ],
+      "source_status": "public_record",
+      "active": true,
+      "must_preserve": true,
+      "translation_policy": "protected_token",
+      "stt_phrases": [
+        "SA First Forum",
+        "S A First Forum"
+      ],
+      "spoken_forms": {
+        "zu-ZA": {
+          "default": "Ess Ey Ferst Forum",
+          "voices": {
+            "zu-ZA-ThembaNeural": "Ess Ey Ferst Forum",
+            "zu-ZA-ThandoNeural": "Ess Ey Ferst Forum"
+          },
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T19:54:00+00:00",
+          "approved_by": null
+        },
+        "nso-ZA": {
+          "default": null,
+          "voices": {},
+          "status": "not_tested",
+          "last_tested_at": null,
+          "approved_by": null
+        },
+        "xh-ZA": {
+          "default": null,
+          "voices": {},
+          "status": "not_tested",
+          "last_tested_at": null,
+          "approved_by": null
+        },
+        "af-ZA": {
+          "default": null,
+          "voices": {},
+          "status": "not_tested",
+          "last_tested_at": null,
+          "approved_by": null
+        }
+      },
+      "do_not_confuse_with": [],
+      "sources": [
+        "user_provided"
+      ]
+    },
+    {
       "entity_id": "alleged_network_the_big_five_cartel",
       "entity_type": "alleged_network",
       "canonical_text": "The Big Five cartel",
@@ -148,13 +213,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Tha Big Faiv car-tell",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Thuh Bigg Faiv kar-tel",
+            "zu-ZA-ThandoNeural": "Tha Big Faiv car-tell"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -946,13 +1011,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Ay-ro-ton co-kayn bust",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Ay-ro-ton co-kayn bust",
+            "zu-ZA-ThandoNeural": "Ay-ro-ton co-kayn bust"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -1010,13 +1075,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Khan Ma-lema Sayed net-wurk",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Khan Ma-lema Sayed net-wurk",
+            "zu-ZA-ThandoNeural": "Khan Ma-lema Sayed net-wurk"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -1210,13 +1275,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Pawrt Shepstone co-kayn thefft",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Pawrt Shepstone co-kayn thefft",
+            "zu-ZA-ThandoNeural": "Pawrt Shepstone co-kayn thefft"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -1276,13 +1341,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Mad-langa Commission",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Mad-langa Commission",
+            "zu-ZA-ThandoNeural": "Mad-langa Commission"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -1407,13 +1472,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Cat Vee Eye Pee Pro-tection",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Cat Vee Eye Pee Pro-tection",
+            "zu-ZA-ThandoNeural": "Cat Vee Eye Pee Pro-tection"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -1471,13 +1536,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Kona-links",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Kona-links",
+            "zu-ZA-ThandoNeural": "Kona-links"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -1604,13 +1669,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Dee Are Kay Tactical",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Dee Are Kay Tactical",
+            "zu-ZA-ThandoNeural": "Dee Are Kay Tactical"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -1801,13 +1866,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Ghau-teng Traf-fik Puh-lease",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Ghau-teng Traf-fik Puh-lease",
+            "zu-ZA-ThandoNeural": "Ghau-teng Traf-fik Puh-lease"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -1865,13 +1930,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Independent Puh-lease In-ves-ti-gative Directorate",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Independent Puh-lease In-ves-ti-gative Directorate",
+            "zu-ZA-ThandoNeural": "Independent Puh-lease In-ves-ti-gative Directorate"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -1936,13 +2001,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Investigating Directorate Against Kuh-rup-shun",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Investigating Directorate Against Kuh-rup-shun",
+            "zu-ZA-ThandoNeural": "Investigating Directorate Against Kuh-rup-shun"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -2136,13 +2201,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Luk-so Africa Brand Investments",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Luk-so Africa Brand Investments",
+            "zu-ZA-ThandoNeural": "Luk-so Africa Brand Investments"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -2204,13 +2269,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Mud-lung-ga Commission of In-quiry",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Mud-lung-ga Commission of In-quiry",
+            "zu-ZA-ThandoNeural": "Mud-lung-ga Commission of In-quiry"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -2270,13 +2335,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Medi-kair Tush-wah-neh, diss-trickt",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Medi-kair Tush-wah-neh, diss-trickt",
+            "zu-ZA-ThandoNeural": "Medi-kair Tush-wah-neh, diss-trickt"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -2336,13 +2401,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Medi-kair twenty four Holdings",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Medi-kair twenty four Holdings",
+            "zu-ZA-ThandoNeural": "Medi-kair twenty four Holdings"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -2600,13 +2665,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Parliamentary Add Hok Committee on Puh-lee-sing",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Parliamentary Add Hok Committee on Puh-lee-sing",
+            "zu-ZA-ThandoNeural": "Parliamentary Add Hok Committee on Puh-lee-sing"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -2671,13 +2736,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Ess Ay Pee Ess Crime Intelligence",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Ess Ay Pee Ess Crime Intelligence",
+            "zu-ZA-ThandoNeural": "Ess Ay Pee Ess Crime Intelligence"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -2735,13 +2800,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "South African Nar-cotics Enforcement Bureau",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "South African Nar-cotics Enforcement Bureau",
+            "zu-ZA-ThandoNeural": "South African Nar-cotics Enforcement Bureau"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -2867,13 +2932,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Tactical Operations Man-age-ment Section",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Tactical Operations Man-age-ment Section",
+            "zu-ZA-ThandoNeural": "Tactical Operations Man-age-ment Section"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -3068,13 +3133,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Wull-wurths",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Wull-wurths",
+            "zu-ZA-ThandoNeural": "Wull-wurths"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -7482,13 +7547,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Blue laits",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Blue laits",
+            "zu-ZA-ThandoNeural": "Blue laits"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -7546,13 +7611,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Kona-links cig-uh-rets",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Conna-links sig-a-rets",
+            "zu-ZA-ThandoNeural": "Kona-links cig-uh-rets"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -7613,13 +7678,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "hosh-kha-ree",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "hosh-kha-ree",
+            "zu-ZA-ThandoNeural": "hosh-kha-ree"
           },
-          "status": "needs_human_reference",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -7677,13 +7742,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Indian ka-bal",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Indian ka-bal",
+            "zu-ZA-ThandoNeural": "Indian ka-bal"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -7743,13 +7808,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Kil-ar-nee soo-ji-lite stones",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Kill-ar-nee soo-juh-lite stones",
+            "zu-ZA-ThandoNeural": "Kil-ar-nee soo-ji-lite stones"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -7809,13 +7874,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Pres-teez bricks",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Pres-teez bricks",
+            "zu-ZA-ThandoNeural": "Pres-teez bricks"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -7939,13 +8004,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Wool-wurths money baag",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Wool-wurths money baag",
+            "zu-ZA-ThandoNeural": "Wool-wurths money baag"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -8002,13 +8067,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Yellow Jerzee truck",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Yellow Jerzee truck",
+            "zu-ZA-ThandoNeural": "Yellow Jerzee truck"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -8200,13 +8265,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Durr-bin Peer Number One",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Durr-bin Peer Number One",
+            "zu-ZA-ThandoNeural": "Durr-bin Peer Number One"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -8266,13 +8331,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Durr-bin Peer, Two",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Durr-bin Peer, Two",
+            "zu-ZA-ThandoNeural": "Durr-bin Peer, Two"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -8330,13 +8395,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Hawt-on",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Hawt-on",
+            "zu-ZA-ThandoNeural": "Hawt-on"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -8396,13 +8461,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Isi-pingo",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Isi-pingo",
+            "zu-ZA-ThandoNeural": "Isi-pingo"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -8462,13 +8527,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Kgosi Mampuru the Second Correctional Centre",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Kgosi Mampuru the Second Correctional Centre",
+            "zu-ZA-ThandoNeural": "Kgosi Mampuru the Second Correctional Centre"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -8528,13 +8593,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Kil-lar-ney",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Kil-lar-ney",
+            "zu-ZA-ThandoNeural": "Kil-lar-ney"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:30:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {
@@ -8724,13 +8789,13 @@
       ],
       "spoken_forms": {
         "zu-ZA": {
-          "default": null,
+          "default": "Pohrt Shep-stohn",
           "voices": {
-            "zu-ZA-ThembaNeural": null,
-            "zu-ZA-ThandoNeural": null
+            "zu-ZA-ThembaNeural": "Pohrt Shep-stohn",
+            "zu-ZA-ThandoNeural": "Pohrt Shep-stohn"
           },
-          "status": "needs_calibration",
-          "last_tested_at": null,
+          "status": "automated_dual_locale_verified",
+          "last_tested_at": "2026-08-18T20:42:00+00:00",
           "approved_by": null
         },
         "nso-ZA": {

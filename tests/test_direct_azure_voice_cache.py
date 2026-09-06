@@ -13,8 +13,10 @@ from mathula_tv.direct_azure_dub import (
     DirectAzureDubRenderer,
     DirectDubArtifacts,
     DirectDubOptions,
+    SpeechBlock,
 )
 from mathula_tv.models import JobManifest
+from mathula_tv.pronunciation import PronunciationDictionary
 
 
 class _Backend:
@@ -263,3 +265,44 @@ def test_explicit_refresh_bypasses_voice_cache(
         )
 
     assert observed["refresh"] is True
+
+
+def test_render_fingerprint_changes_with_pronunciation_dictionary(
+    tmp_path: Path,
+) -> None:
+    renderer = _renderer(tmp_path)
+    job = _job(tmp_path, renderer)
+    translation = tmp_path / "translation.json"
+    translation.write_text("{}", encoding="utf-8")
+    seo = tmp_path / "seo.json"
+    seo.write_text("{}", encoding="utf-8")
+    block = SpeechBlock(
+        "block-1",
+        "SPEAKER_00",
+        0,
+        2_000,
+        ("seg-1",),
+        "KZN",
+        "KZN",
+        "KZN",
+    )
+
+    def fingerprint(dictionary_version: str) -> str:
+        return renderer._request_fingerprint(
+            job,
+            translation,
+            [block],
+            {"SPEAKER_00": _assignment()},
+            DirectDubOptions(),
+            PronunciationDictionary(
+                dictionary_version,
+                language="zu-ZA",
+                job_id=job.job_id,
+            ),
+            None,
+            seo,
+            {},
+            {},
+        )
+
+    assert fingerprint("v1") != fingerprint("v2")

@@ -4,6 +4,7 @@ from mathula_tv.pronunciation import (
     PronunciationDictionary,
     PronunciationEntry,
     build_initialism_ssml_parts,
+    with_web_researched_organisation_pronunciations,
     expand_initials_for_tts,
     normalise_dates_for_tts,
     normalise_numbers_for_tts,
@@ -98,9 +99,7 @@ def test_npa_uses_reviewed_zulu_letter_names_with_attached_prefixes():
     )
 
     assert target.spoken_text == "I-NPA ikhuluma ngecala le-NPA ne-NPA."
-    assert target.tts_text == (
-        "I-En Pee Ey ikhuluma ngecala le-En Pee Ey ne-En Pee Ey."
-    )
+    assert target.tts_text == ("I-En Pee Ey ikhuluma ngecala le-En Pee Ey ne-En Pee Ey.")
     assert [item.before for item in target.pronunciation_substitutions] == [
         "NPA",
         "NPA",
@@ -134,9 +133,7 @@ def test_other_reviewed_sa_party_initialisms_are_spelled_letter_by_letter():
         PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
     )
     result = dictionary.apply("MK, MKP, DA, IFP ne-UDM")
-    assert result.tts_text == (
-        "Em Kay, Em Kay Pee, Dee Ey, Eye Eff Pee ne-You Dee Em"
-    )
+    assert result.tts_text == ("Em Kay, Em Kay Pee, Dee Ey, Eye Eff Pee ne-You Dee Em")
 
 
 @pytest.mark.parametrize(
@@ -147,9 +144,7 @@ def test_organisation_initialisms_support_all_sa_language_accounts(language):
     dictionary = with_default_organisation_initialisms(
         PronunciationDictionary("v1", language=language, job_id="job-123")
     )
-    assert dictionary.apply("ANC EFF MKP").tts_text == (
-        "Ay En See EFF Em Kay Pee"
-    )
+    assert dictionary.apply("ANC EFF MKP").tts_text == ("Ay En See EFF Em Kay Pee")
 
 
 def test_zulu_initialism_profile_uses_human_selected_aliases_and_character_mode():
@@ -166,20 +161,325 @@ def test_zulu_initialism_profile_uses_human_selected_aliases_and_character_mode(
     assert build_initialism_ssml_parts(text, language="xh-ZA") == ()
 
 
+def test_kzn_character_mode_preserves_fused_zulu_prefixes():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    text = "eKZN, aseKZN, baseKZN nase-KZN; KZN."
+    result = dictionary.apply(text)
+
+    assert result.spoken_text == result.tts_text == text
+    assert [item.before for item in result.substitutions] == [
+        "KZN",
+        "KZN",
+        "KZN",
+        "KZN",
+        "KZN",
+    ]
+    assert build_initialism_ssml_parts(result.tts_text, language="zu-ZA") == (
+        TextPart("e"),
+        CharacterPart("KZN"),
+        TextPart(", "),
+        TextPart("ase"),
+        CharacterPart("KZN"),
+        TextPart(", "),
+        TextPart("base"),
+        CharacterPart("KZN"),
+        TextPart(" nase-"),
+        CharacterPart("KZN"),
+        TextPart("; "),
+        CharacterPart("KZN"),
+        TextPart("."),
+    )
+
+
+def test_kzn_character_mode_does_not_touch_words_containing_same_letters():
+    text = "eKZNology AKZN KZName inkzn"
+    assert build_initialism_ssml_parts(text, language="zu-ZA") == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "prefix"),
+    (
+        ("SA First Forum", ""),
+        ("i-SA First Forum", "i-"),
+        ("ye-SA First Forum", "ye-"),
+    ),
+)
+def test_sa_first_forum_spells_only_reviewed_initials(text, prefix):
+    parts = build_initialism_ssml_parts(text, language="zu-ZA")
+
+    expected_prefix = (TextPart(prefix),) if prefix else ()
+    assert parts == (
+        *expected_prefix,
+        CharacterPart("SA"),
+        TextPart(" First Forum"),
+    )
+
+
+def test_sa_character_mode_is_scoped_to_first_forum_name():
+    text = "SA iseningizimu, SASA, nese-SA Reserve"
+    assert build_initialism_ssml_parts(text, language="zu-ZA") == ()
+
+
+def test_hawks_uses_verified_ama_plural_code_switch():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    target = build_target_text(
+        "Ama-Hawks athi azophenya.",
+        dictionary=dictionary,
+        protected_terms=("Hawks",),
+    )
+
+    assert target.spoken_text == "Ama-Hawks athi azophenya."
+    assert target.tts_text == "Ama-Horks athi azophenya."
+    assert target.pronunciation_substitutions[0].before == "Hawks"
+    assert target.pronunciation_substitutions[0].after == "Horks"
+
+
+def test_hawks_calibration_is_not_masked_by_job_research():
+    stale_web_override = PronunciationEntry(
+        display_text="The Hawks",
+        spoken_text="The Hawks",
+        tts_text="The Hawks",
+        language="zu-ZA",
+        source="web_research",
+        confidence=0.94,
+        kind="organisation_name",
+    )
+    dictionary = with_web_researched_organisation_pronunciations(
+        with_default_organisation_initialisms(
+            PronunciationDictionary(
+                "v1",
+                language="zu-ZA",
+                job_id="job-123",
+                job_overrides=(stale_web_override,),
+            )
+        ),
+        {
+            "accepted_corrections": [
+                {
+                    "entity_type": "organisation",
+                    "canonical_text": "The Hawks",
+                    "confidence": 0.94,
+                    "pronunciation_mode": "word_name",
+                    "pronunciation_tts_text": "The Hawks",
+                    "pronunciation_confidence": 0.94,
+                    "grounded_source_urls": ["https://example.test/hawks"],
+                    "grounded_pronunciation_evidence_urls": ["https://example.test/hawks"],
+                }
+            ]
+        },
+    )
+
+    assert dictionary.apply("Ama-Hawks athi").tts_text == "Ama-Horks athi"
+    assert not any(
+        entry.display_text == "The Hawks" and entry.source == "web_research" for entry in dictionary.job_overrides
+    )
+
+
+def test_justice_college_uses_verified_code_switch():
+    """Live TTS+STT calibration (job 33cd7b46...): unmodified "Justice College"
+    embedded in isiZulu was recovered by en-ZA Azure STT as a garbled
+    "Chastique Koleke"; the hidden alias "Jastis Koleji" recovered a clean,
+    literal "Justice College". Captions must stay unaffected -- this is a
+    TTS-only alias.
+    """
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    target = build_target_text(
+        "waseBritish Rabanda Justice College usejoyina manje.",
+        dictionary=dictionary,
+        protected_terms=("Justice College",),
+    )
+
+    assert target.spoken_text == "waseBritish Rabanda Justice College usejoyina manje."
+    assert target.tts_text == "waseBritish Rabanda Jastis Koleji usejoyina manje."
+    assert target.pronunciation_substitutions[0].before == "Justice College"
+    assert target.pronunciation_substitutions[0].after == "Jastis Koleji"
+
+
+@pytest.mark.parametrize("letter", tuple("ABCDEFGHIJK"))
+def test_anonymous_witness_designation_uses_character_mode(letter):
+    assert build_initialism_ssml_parts(f"u-Witness {letter} uyafakaza", language="zu-ZA") == (
+        TextPart("u-Witness "),
+        CharacterPart(letter),
+        TextPart(" uyafakaza"),
+    )
+
+
+def test_web_researched_organisation_pronunciation_is_phrase_scoped():
+    dictionary = with_web_researched_organisation_pronunciations(
+        with_default_organisation_initialisms(PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")),
+        {
+            "accepted_corrections": [
+                {
+                    "entity_type": "organisation",
+                    "canonical_text": "SA First Forum",
+                    "representative_text": "SA press forum",
+                    "aliases": ["SA press forum"],
+                    "confidence": 0.99,
+                    "grounded_source_urls": ["https://example.test/report"],
+                }
+            ]
+        },
+    )
+
+    result = dictionary.apply("ye-SA First Forum ne-SA Reserve")
+    assert result.spoken_text == "ye-SA First Forum ne-SA Reserve"
+    assert result.tts_text == "ye-Ess Ey Ferst Forum ne-SA Reserve"
+    assert not dictionary.job_overrides
+    assert any(
+        entry.display_text == "SA First Forum" and entry.source == "application_default" for entry in dictionary.entries
+    )
+
+
+def test_grounded_big_five_rendering_changes_only_hidden_tts_text():
+    pronunciation_url = "https://broadcaster.example/video/big-five"
+    dictionary = with_web_researched_organisation_pronunciations(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123"),
+        {
+            "accepted_corrections": [
+                {
+                    "entity_type": "organisation",
+                    "canonical_text": "The Big Five cartel",
+                    "confidence": 1.0,
+                    "grounded_source_urls": [pronunciation_url],
+                    "pronunciation_mode": "word_name",
+                    "pronunciation_tts_text": "The Big Faiv cartel",
+                    "pronunciation_confidence": 0.97,
+                    "pronunciation_language": "en-ZA",
+                    "pronunciation_ipa": "/ðə bɪɡ faɪv kɑːtəl/",
+                    "grounded_pronunciation_evidence_urls": [pronunciation_url],
+                }
+            ]
+        },
+    )
+
+    result = dictionary.apply("Ama-WhatsApp omholi we-The Big Five cartel, uJothan Msibi.")
+    assert result.spoken_text == ("Ama-WhatsApp omholi we-The Big Five cartel, uJothan Msibi.")
+    assert result.tts_text == ("Ama-WhatsApp omholi we-The Big Faiv cartel, uJothan Msibi.")
+    assert dictionary.job_overrides[-1].display_text == "The Big Five cartel"
+    assert "pronunciation_language=en-ZA" in dictionary.job_overrides[-1].notes
+    assert "pronunciation_ipa=/ðə bɪɡ faɪv kɑːtəl/" in dictionary.job_overrides[-1].notes
+
+
+def test_web_researched_pronunciation_rejects_ungrounded_or_uncorroborated_names():
+    base = PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    research = {
+        "accepted_corrections": [
+            {
+                "entity_type": "organisation",
+                "canonical_text": "SA First Forum",
+                "representative_text": "First Forum",
+                "confidence": 0.99,
+                "grounded_source_urls": ["https://example.test/report"],
+            },
+            {
+                "entity_type": "organisation",
+                "canonical_text": "AB News",
+                "representative_text": "AB News",
+                "confidence": 0.99,
+                "grounded_source_urls": [],
+            },
+        ]
+    }
+
+    assert with_web_researched_organisation_pronunciations(base, research) == base
+
+
+def test_web_researched_pronunciation_is_idempotent_and_retires_stale_override():
+    base = PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    research = {
+        "accepted_corrections": [
+            {
+                "entity_type": "organisation",
+                "canonical_text": "SA First Forum",
+                "representative_text": "SA press forum",
+                "confidence": 0.99,
+                "grounded_source_urls": ["https://example.test/report"],
+            }
+        ]
+    }
+    researched = with_web_researched_organisation_pronunciations(base, research)
+
+    assert with_web_researched_organisation_pronunciations(researched, research) == researched
+    assert with_web_researched_organisation_pronunciations(researched, None) == base
+
+
+def test_long_researched_initialism_requires_direct_pronunciation_evidence():
+    base = PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    item = {
+        "entity_type": "organisation",
+        "canonical_text": "ABC Forum",
+        "representative_text": "ABC Forum",
+        "confidence": 0.99,
+        "grounded_source_urls": ["https://example.test/identity"],
+    }
+
+    assert with_web_researched_organisation_pronunciations(base, {"accepted_corrections": [item]}) == base
+    researched = with_web_researched_organisation_pronunciations(
+        base,
+        {
+            "accepted_corrections": [
+                {
+                    **item,
+                    "pronunciation_mode": "initialism",
+                    "pronunciation_evidence_urls": ["https://example.test/pronunciation"],
+                }
+            ]
+        },
+    )
+    assert researched.apply("ABC Forum").tts_text == "Ey Bee See Forum"
+
+
+def test_job_override_remains_authoritative_for_fused_kzn():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary(
+            "v1",
+            language="zu-ZA",
+            job_id="job-123",
+            job_overrides=(
+                PronunciationEntry(
+                    display_text="KZN",
+                    spoken_text="KZN",
+                    tts_text="reviewed regional reading",
+                    language="zu-ZA",
+                    kind="initials",
+                    source="human_review",
+                ),
+            ),
+        )
+    )
+
+    assert dictionary.apply("eKZN aseKZN").tts_text == ("ereviewed regional reading asereviewed regional reading")
+
+
+def test_south_african_police_service_uses_reviewed_hidden_code_switch():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    target = build_target_text(
+        "I-South African Police Service iphendulile.",
+        dictionary=dictionary,
+        protected_terms=("South African Police Service",),
+    )
+
+    assert target.spoken_text == "I-South African Police Service iphendulile."
+    assert target.tts_text == "I-South African Police Sir-vis iphendulile."
+    assert target.pronunciation_substitutions[0].kind == "organisation_name"
+
+
 def test_zulu_code_switch_place_names_keep_display_text_and_use_reviewed_tts_aliases():
     dictionary = with_default_organisation_initialisms(
         PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
     )
-    result = dictionary.apply(
-        "Namhlanje iTshwane ifana neLondon; bantu baseBuffalo City."
-    )
+    result = dictionary.apply("Namhlanje iTshwane ifana neLondon; bantu baseBuffalo City.")
 
-    assert result.spoken_text == (
-        "Namhlanje iTshwane ifana neLondon; bantu baseBuffalo City."
-    )
-    assert result.tts_text == (
-        "Namhlanje i Tšhwane ifana ne Landen; bantu base Baffalo Siti."
-    )
+    assert result.spoken_text == ("Namhlanje iTshwane ifana neLondon; bantu baseBuffalo City.")
+    assert result.tts_text == ("Namhlanje i Tšhwane ifana ne Landen; bantu base Baffalo Siti.")
     assert {item.kind for item in result.substitutions} == {"place_name"}
 
 
@@ -203,9 +503,7 @@ def test_updated_application_default_replaces_stale_saved_default():
     dictionary = PronunciationDictionary(
         "v1",
         language="zu-ZA",
-        entries=(
-            entry("EFF", "EFF", "initials", source="application_default"),
-        ),
+        entries=(entry("EFF", "EFF", "initials", source="application_default"),),
     )
     augmented = with_default_organisation_initialisms(dictionary)
     assert augmented.apply("EFF").tts_text == "Ee Eff Eff"
@@ -291,12 +589,15 @@ def test_protected_term_cannot_disappear_silently():
         protected_terms=["Feroz Khan"],
         human_review_required=True,
     )
-    assert build_target_text(
-        faithful,
-        spoken_text=spoken,
-        changes=[reviewed],
-        protected_terms=["Feroz Khan"],
-    ).spoken_text == spoken
+    assert (
+        build_target_text(
+            faithful,
+            spoken_text=spoken,
+            changes=[reviewed],
+            protected_terms=["Feroz Khan"],
+        ).spoken_text
+        == spoken
+    )
 
 
 def test_legacy_upgrade_preserves_approved_wording_in_all_three_forms():

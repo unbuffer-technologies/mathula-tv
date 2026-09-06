@@ -1,9 +1,11 @@
 from contextlib import contextmanager
+import json
 
 import pytest
 
 from mathula_tv.autocorrect import (
     AI_RESPONSE_SCHEMA,
+    apply_ai_advice,
     AutocorrectError,
     PgSession,
     clean_user_term,
@@ -149,3 +151,105 @@ def test_curated_hint_rules_auto_apply_by_default():
         "replacement": "candidate",
         "review_required": True,
     }) is False
+
+
+class AdviceSession:
+    def __init__(self, row):
+        self.row = row
+        self.updates = []
+        self.events = []
+
+    def execute(self, query, parameters=()):
+        normalized = " ".join(query.split())
+        if normalized.startswith("SELECT * FROM corrections"):
+            return FakeCursor([self.row])
+        if normalized.startswith("UPDATE corrections"):
+            self.updates.append(parameters)
+            self.row["replacement_text"] = parameters[0]
+            self.row["entity_id"] = parameters[1]
+            self.row["status"] = parameters[2]
+            return FakeCursor([])
+        if normalized.startswith("INSERT INTO events"):
+            self.events.append(parameters)
+            return FakeCursor([])
+        raise AssertionError(normalized)
+
+
+class AdviceStore:
+    def __init__(self, row):
+        self.session = AdviceSession(row)
+
+    @contextmanager
+    def transaction(self):
+        yield self.session
+
+
+def _advice_store(*, candidate_score: float) -> AdviceStore:
+    return AdviceStore(
+        {
+            "correction_id": "correction-1",
+            "status": "suggested",
+            "heard_text": "malanga",
+            "replacement_text": "malanga",
+            "entity_id": None,
+            "reason": "low-confidence STT token",
+            "candidates_json": json.dumps(
+                [
+                    {
+                        "candidate_id": "entity:madlanga",
+                        "replacement_text": "Madlanga",
+                        "entity_id": "madlanga",
+                        "score": candidate_score,
+                    }
+                ]
+            ),
+        }
+    )
+
+
+def test_high_confidence_ai_candidate_is_auto_applied() -> None:
+    store = _advice_store(candidate_score=0.91)
+
+    summary = apply_ai_advice(
+        store,
+        job_id="job-1",
+        advice={
+            "correction-1": {
+                "candidate_id": "entity:madlanga",
+                "decision": "ACCEPT_CANDIDATE",
+                "confidence": 0.97,
+                "reason": "Context matches the known commission name",
+                "question": "",
+            }
+        },
+        auto_apply_confidence=0.92,
+        minimum_candidate_score=0.75,
+    )
+
+    assert store.session.row["replacement_text"] == "Madlanga"
+    assert store.session.row["status"] == "auto_applied"
+    assert summary["auto_applied_count"] == 1
+    assert store.session.events[0][2] == "ai_autocorrect_applied"
+
+
+def test_low_confidence_ai_acceptance_remains_reviewable() -> None:
+    store = _advice_store(candidate_score=0.91)
+
+    summary = apply_ai_advice(
+        store,
+        job_id="job-1",
+        advice={
+            "correction-1": {
+                "candidate_id": "entity:madlanga",
+                "decision": "ACCEPT_CANDIDATE",
+                "confidence": 0.80,
+                "reason": "Plausible but uncertain",
+                "question": "",
+            }
+        },
+        auto_apply_confidence=0.92,
+    )
+
+    assert store.session.row["status"] == "suggested"
+    assert summary["auto_applied_count"] == 0
+    assert summary["suggested_count"] == 1

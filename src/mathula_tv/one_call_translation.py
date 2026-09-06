@@ -15,7 +15,9 @@ import math
 import os
 import re
 import shutil
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -43,6 +45,7 @@ from .multivariant_translation import (
 from .semantic_translation_chunks import (
     adaptive_context_spine_tokens,
     build_semantic_batch_requests,
+    build_single_handoff_batch_request,
     estimate_unit_tokens,
     sha256_json,
 )
@@ -95,6 +98,25 @@ def _provider_metadata(response: Any) -> dict[str, Any]:
         "model_returned": str(getattr(metadata, "model_returned", "") or ""),
         "prompt_version": str(getattr(metadata, "prompt_version", "") or PROMPT_VERSION),
     }
+
+
+def _is_retryable_translation_failure(job: Any, configured_provider: str) -> bool:
+    if str(getattr(job, "state", "") or "") != "failed_retryable":
+        return False
+    last_error = dict(getattr(job, "last_error", None) or {})
+    if str(last_error.get("stage") or "") in {_STAGE, _LEGACY_STAGE, "translation"}:
+        return True
+    details = (
+        dict(last_error.get("details") or {})
+        if isinstance(last_error.get("details"), Mapping)
+        else {}
+    )
+    return (
+        configured_provider == "manual-chatgpt"
+        and bool(last_error.get("retryable"))
+        and str(last_error.get("code") or "") == "manual_ai_response_required"
+        and str(details.get("operation") or "") == "multivariant_translation"
+    )
 
 
 def _safe_error(pipeline: Any, exc: BaseException) -> dict[str, Any]:
@@ -234,6 +256,49 @@ def _prior_terminology_legacy(
     return result
 
 
+def _parallel_terminology_conflicts(
+    responses: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Find cross-wave glossary disagreements before translated text is installed."""
+
+    established: dict[str, tuple[str, bool, int]] = {}
+    conflicts: list[dict[str, Any]] = []
+    for chunk_index, response in enumerate(responses, start=1):
+        for item in response.get("global_terminology") or []:
+            if not isinstance(item, Mapping):
+                continue
+            source_term = str(item.get("source_term") or "").strip()
+            target = " ".join(
+                str(item.get("target_rendering") or "").split()
+            )
+            key = source_term.casefold()
+            signature = (target.casefold(), bool(item.get("preserve_english")))
+            if not key or not target:
+                continue
+            previous = established.get(key)
+            if previous is None:
+                established[key] = (signature[0], signature[1], chunk_index)
+                continue
+            # ``preserve_english`` is advisory generation metadata.  When both
+            # chunks already chose the exact same visible target rendering,
+            # a boolean disagreement cannot create inconsistent dub text and
+            # must not invalidate an otherwise coherent serial repair.
+            if signature[0] == previous[0]:
+                continue
+            conflicts.append(
+                {
+                    "source_term": source_term,
+                    "first_chunk": previous[2],
+                    "conflicting_chunk": chunk_index,
+                    "first_target": previous[0],
+                    "conflicting_target": signature[0],
+                    "first_preserve_english": previous[1],
+                    "conflicting_preserve_english": signature[1],
+                }
+            )
+    return conflicts
+
+
 def _resumable_session_manifest(
     *,
     job_root: Path,
@@ -317,6 +382,40 @@ def _load_checkpoint(
         return None
     response = read_json(response_path)
     validate_multivariant_response(response, request=request)
+    return response, read_json(metadata_path)
+
+
+def _load_validated_parallel_checkpoint(
+    *,
+    chunk_dir: Path,
+    source_batch: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Load a parallel checkpoint whose original continuity hash is obsolete.
+
+    A terminology-conflict artifact explicitly identifies the first unsafe
+    chunk. Checkpoints before that boundary were already validated and should
+    not be repurchased merely because serial replay would construct a different
+    prior-context hash for the second member of each former parallel wave.
+    """
+
+    completed = chunk_dir / "completed.json"
+    response_path = chunk_dir / "translation_response.json"
+    metadata_path = chunk_dir / "provider_metadata.json"
+    if not (completed.is_file() and response_path.is_file() and metadata_path.is_file()):
+        return None
+    marker = read_json(completed)
+    if marker.get("parallel_wave") is not True:
+        return None
+    translation_batch = source_batch.get("translation_batch")
+    batch = translation_batch if isinstance(translation_batch, Mapping) else {}
+    expected_unit_ids = [str(value) for value in batch.get("requested_unit_ids") or []]
+    checkpoint_unit_ids = [str(value) for value in marker.get("unit_ids") or []]
+    if not expected_unit_ids or checkpoint_unit_ids != expected_unit_ids:
+        return None
+    response = read_json(response_path)
+    validation = validate_multivariant_response(response, request=source_batch)
+    if validation.get("response_sha256") != marker.get("response_sha256"):
+        return None
     return response, read_json(metadata_path)
 
 
@@ -1711,6 +1810,100 @@ def _attempt_chunk_split_recovery(
     return merged, metadata, validation
 
 
+def _execute_chunk_provider_work(
+    *,
+    provider: Any,
+    chunk_dir: Path,
+    batch_request: Mapping[str, Any],
+    saved_validation_failure: BaseException | None,
+    saved_split_failure: BaseException | None,
+    emit: Callable[..., None],
+    chunk_index: int,
+    chunk_count: int,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Run one provider-backed chunk, including the established safe recoveries."""
+
+    if saved_split_failure is not None:
+        repaired = _attempt_chunk_split_recovery(
+            provider=provider,
+            chunk_dir=chunk_dir,
+            batch_request=batch_request,
+            original_error=saved_split_failure,
+            emit=emit,
+            chunk_index=chunk_index,
+            chunk_count=chunk_count,
+        )
+        if repaired is None:
+            raise saved_split_failure
+        return repaired
+    if saved_validation_failure is not None:
+        repaired = _attempt_targeted_identity_repair(
+            provider=provider,
+            chunk_dir=chunk_dir,
+            batch_request=batch_request,
+            original_error=saved_validation_failure,
+            emit=emit,
+            chunk_index=chunk_index,
+            chunk_count=chunk_count,
+        )
+        if repaired is None:
+            repaired = _attempt_targeted_validation_repair(
+                provider=provider,
+                chunk_dir=chunk_dir,
+                batch_request=batch_request,
+                original_error=saved_validation_failure,
+                emit=emit,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
+        if repaired is None:
+            raise saved_validation_failure
+        return repaired
+
+    try:
+        response = provider.translate_multivariant(batch_request)
+        response_data = dict(response.data)
+        validation = validate_multivariant_response(
+            response_data,
+            request=batch_request,
+        )
+        metadata = _provider_metadata(response)
+        return response_data, metadata, validation
+    except BaseException as initial_error:
+        repaired = _attempt_targeted_identity_repair(
+            provider=provider,
+            chunk_dir=chunk_dir,
+            batch_request=batch_request,
+            original_error=initial_error,
+            emit=emit,
+            chunk_index=chunk_index,
+            chunk_count=chunk_count,
+        )
+        if repaired is None:
+            repaired = _attempt_targeted_validation_repair(
+                provider=provider,
+                chunk_dir=chunk_dir,
+                batch_request=batch_request,
+                original_error=initial_error,
+                emit=emit,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
+        if repaired is None:
+            repaired = _attempt_chunk_split_recovery(
+                provider=provider,
+                chunk_dir=chunk_dir,
+                batch_request=batch_request,
+                original_error=initial_error,
+                emit=emit,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
+        if repaired is None:
+            raise
+        return repaired
+
+
 def translate_full_transcript_once(
     pipeline: Any,
     job: Any,
@@ -1722,6 +1915,7 @@ def translate_full_transcript_once(
     request_timeout_seconds: float | None = None,
     batch_max_retries: int | None = None,
     max_provider_calls: int | None = None,
+    parallelism: int | None = None,
     restart_batches: bool = False,
     progress: ProgressCallback | None = None,
     chunk_target_tokens: int | None = None,
@@ -1739,10 +1933,12 @@ def translate_full_transcript_once(
         or getattr(provider, "provider", None)
         or ""
     ).strip().lower()
-    if configured_provider and configured_provider != "azure-openai-gpt":
+    if configured_provider and configured_provider not in {
+        "azure-openai-gpt", "manual-chatgpt"
+    }:
         raise ValueError(
-            "Mathula TV translation must use Azure OpenAI GPT "
-            f"(azure-openai-gpt), not {configured_provider!r}"
+            "Mathula TV translation must use Azure OpenAI GPT or the explicit "
+            f"manual-chatgpt override, not {configured_provider!r}"
         )
     if job.state == "synthesis_queued":
         raise ValueError("Migrate the validated legacy translation; do not regenerate it silently")
@@ -1805,8 +2001,24 @@ def translate_full_transcript_once(
     max_units = int(
         batch_size
         if batch_size is not None
-        else os.getenv("MATHULA_TV_TRANSLATION_MAX_UNITS_PER_CHUNK", "18")
+        else os.getenv("MATHULA_TV_TRANSLATION_MAX_UNITS_PER_CHUNK", "22")
     )
+    effective_parallelism = int(
+        parallelism
+        if parallelism is not None
+        else os.getenv("MATHULA_TV_TRANSLATION_PARALLELISM", "2")
+    )
+    manual_single_handoff = (
+        configured_provider == "manual-chatgpt"
+        and os.getenv(
+            "MATHULA_TV_MANUAL_TRANSLATION_SINGLE_HANDOFF", "1"
+        ).strip().casefold()
+        not in {"0", "false", "no", "off"}
+    )
+    if manual_single_handoff:
+        # A human-mediated provider should require one upload/install cycle for
+        # the normal translation pass, not one cycle per cloud-sized chunk.
+        effective_parallelism = 1
     if target_tokens <= 0 or hard_tokens < target_tokens:
         raise ValueError("translation chunk token budgets are invalid")
     if spine_tokens is not None and spine_tokens < 1000:
@@ -1817,6 +2029,8 @@ def translate_full_transcript_once(
         raise ValueError("translation request timeout must be a positive finite number")
     if effective_attempts <= 0 or provider_call_limit <= 0:
         raise ValueError("translation retry and provider-call limits must be positive")
+    if effective_parallelism <= 0 or effective_parallelism > 4:
+        raise ValueError("translation parallelism must be between 1 and 4")
 
     started_at = time.monotonic()
 
@@ -1852,10 +2066,8 @@ def translate_full_transcript_once(
             emit("complete", "Reusing the current source-bound translation", status="completed")
             return existing
 
-    retrying_failed_translation = (
-        job.state == "failed_retryable"
-        and str((job.last_error or {}).get("stage") or "")
-        in {_STAGE, _LEGACY_STAGE, "translation"}
+    retrying_failed_translation = _is_retryable_translation_failure(
+        job, configured_provider
     )
     if job.state not in {"analysis_ready", "translation_running"} and not retrying_failed_translation:
         raise ValueError(
@@ -1950,15 +2162,33 @@ def translate_full_transcript_once(
             # translation result or block checkpoint recovery.
             return
 
-    batches, plan = build_semantic_batch_requests(
-        request,
-        target_tokens=target_tokens,
-        hard_tokens=hard_tokens,
-        context_units=effective_context_units,
-        context_spine_tokens=spine_tokens,
-        max_units=max_units,
-        max_output_tokens=output_ceiling,
-    )
+    if manual_single_handoff:
+        manual_output_ceiling = int(
+            os.getenv(
+                "MATHULA_TV_MANUAL_TRANSLATION_MAX_OUTPUT_TOKENS",
+                str(max(100_000, output_ceiling)),
+            )
+        )
+        if manual_output_ceiling <= 0:
+            raise ValueError(
+                "MATHULA_TV_MANUAL_TRANSLATION_MAX_OUTPUT_TOKENS must be positive"
+            )
+        batches, plan = build_single_handoff_batch_request(
+            request,
+            context_spine_tokens=spine_tokens,
+            max_output_tokens=manual_output_ceiling,
+        )
+        output_ceiling = manual_output_ceiling
+    else:
+        batches, plan = build_semantic_batch_requests(
+            request,
+            target_tokens=target_tokens,
+            hard_tokens=hard_tokens,
+            context_units=effective_context_units,
+            context_spine_tokens=spine_tokens,
+            max_units=max_units,
+            max_output_tokens=output_ceiling,
+        )
     chunk_count = len(batches)
     session_key = hashlib.sha256(
         f"{request['request_sha256']}:{PROMPT_VERSION}:{plan['plan_sha256']}".encode("utf-8")
@@ -2002,15 +2232,27 @@ def translate_full_transcript_once(
             "continuity_payload_policy": continuity_payload_policy,
             "context_units": effective_context_units,
             "max_units_per_chunk": max_units,
+            "parallelism": effective_parallelism,
+            "parallel_strategy": (
+                "serial_validated_continuity"
+                if effective_parallelism == 1
+                else "validated_seed_then_parallel_waves_v1"
+            ),
             "request_timeout_seconds": effective_timeout,
             "provider_attempt_limit_per_chunk": effective_attempts,
             "provider_http_request_limit_per_session": provider_call_limit,
             "chunk_max_output_tokens": output_ceiling,
+            "manual_single_handoff": manual_single_handoff,
         },
+    )
+    prepare_message = (
+        f"Prepared {len(request.get('units') or [])} units in one manual AI handoff"
+        if manual_single_handoff
+        else f"Prepared {len(request.get('units') or [])} units in {chunk_count} semantic chunks"
     )
     emit(
         "prepare",
-        f"Prepared {len(request.get('units') or [])} units in {chunk_count} semantic chunks",
+        prepare_message,
         current=0,
         total=chunk_count,
         context_spine_units=plan["context_spine"]["source_unit_count"],
@@ -2048,8 +2290,473 @@ def translate_full_transcript_once(
             provider_http_requests_started = 0
     attempt = pipeline.jobs.begin_attempt(job, _STAGE, forced=force)
 
+    budget_lock = threading.Lock()
+    progress_lock = threading.Lock()
+
+    def build_parallel_request(
+        source_batch: Mapping[str, Any],
+        continuity_responses: list[Mapping[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        batch_request = json.loads(json.dumps(source_batch, ensure_ascii=False))
+        translation_batch = dict(batch_request.get("translation_batch") or {})
+        translation_batch["cacheable_context"] = plan["context_spine"]
+        if continuity_payload_policy == "legacy_full_three_variant_tail_v1":
+            translation_batch["prior_translated_context"] = (
+                _prior_context_legacy(continuity_responses)
+            )
+            translation_batch["prior_global_terminology"] = (
+                _prior_terminology_legacy(continuity_responses)
+            )
+        else:
+            translation_batch["prior_translated_context"] = _prior_context(
+                continuity_responses
+            )
+            translation_batch["prior_global_terminology"] = _prior_terminology(
+                continuity_responses,
+                batch_request,
+            )
+        batch_request["translation_batch"] = translation_batch
+        batch_request["request_sha256"] = sha256_json(
+            {
+                key: value
+                for key, value in batch_request.items()
+                if key != "request_sha256"
+            }
+        )
+        return batch_request, translation_batch
+
+    def run_parallel_chunk(
+        chunk_index: int,
+        batch_request: dict[str, Any],
+        translation_batch: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], float]:
+        nonlocal provider_http_requests_started
+        chunk_started = time.monotonic()
+        chunk_dir = session_root / f"chunk_{chunk_index:04d}"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(chunk_dir / "translation_request.json", batch_request)
+        (chunk_dir / "provider_stream_events.jsonl").write_text("", encoding="utf-8")
+        (chunk_dir / "translation_response.partial.txt").write_text("", encoding="utf-8")
+
+        def parallel_emit(*args: Any, **kwargs: Any) -> None:
+            with progress_lock:
+                emit(*args, **kwargs)
+
+        def request_guard(event: dict[str, Any]) -> None:
+            nonlocal provider_http_requests_started
+            with budget_lock:
+                if provider_http_requests_started >= provider_call_limit:
+                    raise RuntimeError(
+                        "MATHULA_TV_TRANSLATION_MAX_PROVIDER_CALLS_PER_SESSION "
+                        "reached before translation completed"
+                    )
+                provider_http_requests_started += 1
+                atomic_write_json(
+                    budget_path,
+                    {
+                        "schema_version": "mathula.translation.provider-call-budget.v1",
+                        "updated_at": _utcnow(),
+                        "limit": provider_call_limit,
+                        "started": provider_http_requests_started,
+                        "remaining": provider_call_limit
+                        - provider_http_requests_started,
+                        "chunk_index": chunk_index,
+                        "provider_attempt": int(event.get("attempt") or 1),
+                        "parallelism": effective_parallelism,
+                    },
+                )
+
+        def provider_event(event: dict[str, Any]) -> None:
+            kind = str(event.get("event") or "provider")
+            if kind not in {
+                "request_attempt",
+                "request_metrics",
+                "http_response",
+                "response_usage",
+                "retry_backoff",
+                "translation_wire_contract",
+            }:
+                return
+            if kind == "request_attempt":
+                message = (
+                    f"Chunk {chunk_index}/{chunk_count}: GPT attempt "
+                    f"{event.get('attempt')}/{event.get('max_retries')}"
+                )
+            elif kind == "request_metrics":
+                message = (
+                    f"Chunk {chunk_index}/{chunk_count}: sending "
+                    f"{int(event.get('request_body_bytes') or 0) / 1024:.1f} KiB "
+                    f"JSON (~{int(event.get('estimated_input_tokens') or 0):,} "
+                    "input tokens estimated)"
+                )
+            elif kind == "http_response":
+                message = (
+                    f"Chunk {chunk_index}/{chunk_count}: HTTP "
+                    f"{int(event.get('status_code') or 0)}"
+                )
+            elif kind == "response_usage":
+                message = (
+                    f"Chunk {chunk_index}/{chunk_count}: GPT usage "
+                    f"input={int(event.get('input_tokens') or 0):,}, "
+                    f"output={int(event.get('output_tokens') or 0):,}, "
+                    f"cache-read={int(event.get('cache_read_input_tokens') or 0):,}"
+                )
+            elif kind == "retry_backoff":
+                message = (
+                    f"Chunk {chunk_index}/{chunk_count}: retrying after "
+                    f"{event.get('delay_seconds')}s ({event.get('reason')})"
+                )
+            else:
+                message = (
+                    f"Chunk {chunk_index}/{chunk_count}: compact response enabled; "
+                    f"provider max_output_tokens={event.get('max_output_tokens')}"
+                )
+            parallel_emit(
+                "provider",
+                message,
+                status=("warning" if kind == "retry_backoff" else "running"),
+                current=chunk_index - 1,
+                total=chunk_count,
+                chunk_index=chunk_index,
+                provider_event=kind,
+                parallel=True,
+            )
+
+        batch_provider = provider
+        with_options = getattr(provider, "with_request_options", None)
+        if callable(with_options):
+            batch_provider = with_options(
+                timeout_seconds=effective_timeout,
+                max_retries=effective_attempts,
+                event_callback=provider_event,
+                request_guard=request_guard,
+            )
+        parallel_emit(
+            "chunk",
+            (
+                f"Sending chunk {chunk_index}/{chunk_count}: "
+                f"{len(batch_request.get('units') or [])} units, "
+                f"~{translation_batch.get('estimated_source_tokens')} source "
+                "tokens (parallel wave)"
+            ),
+            current=chunk_index - 1,
+            total=chunk_count,
+            chunk_index=chunk_index,
+            parallel=True,
+        )
+        response_data, metadata, validation = _execute_chunk_provider_work(
+            provider=batch_provider,
+            chunk_dir=chunk_dir,
+            batch_request=batch_request,
+            saved_validation_failure=None,
+            saved_split_failure=None,
+            emit=parallel_emit,
+            chunk_index=chunk_index,
+            chunk_count=chunk_count,
+        )
+        metadata.update(
+            {
+                "chunk_index": chunk_index,
+                "chunk_count": chunk_count,
+                "request_sha256": batch_request["request_sha256"],
+                "estimated_source_tokens": translation_batch.get(
+                    "estimated_source_tokens"
+                ),
+                "max_output_tokens": translation_batch.get("max_output_tokens"),
+                "context_spine_sha256": translation_batch.get(
+                    "context_spine_sha256"
+                ),
+                "parallel_wave": True,
+            }
+        )
+        return response_data, metadata, validation, time.monotonic() - chunk_started
+
+    fresh_parallel_session = (
+        effective_parallelism > 1
+        and chunk_count > 1
+        and not any(session_root.glob("chunk_[0-9][0-9][0-9][0-9]"))
+    )
+    parallel_conflict_repair: dict[str, Any] | None = None
+
     try:
-        for chunk_index, source_batch in enumerate(batches, start=1):
+        serial_batches = list(enumerate(batches, start=1))
+        conflict_path = session_root / "parallel_terminology_conflicts.json"
+        if not fresh_parallel_session and conflict_path.is_file():
+            saved_conflict = read_json(conflict_path)
+            first_repair_chunk = int(
+                saved_conflict.get("first_serial_repair_chunk") or 0
+            )
+            if (
+                saved_conflict.get("status")
+                != "automatic_serial_repair_completed"
+                and 1 < first_repair_chunk <= chunk_count
+            ):
+                reusable_prefix: list[
+                    tuple[dict[str, Any], dict[str, Any]]
+                ] = []
+                for chunk_index in range(1, first_repair_chunk):
+                    checkpoint = _load_validated_parallel_checkpoint(
+                        chunk_dir=session_root / f"chunk_{chunk_index:04d}",
+                        source_batch=batches[chunk_index - 1],
+                    )
+                    if checkpoint is None:
+                        reusable_prefix = []
+                        break
+                    reusable_prefix.append(checkpoint)
+                if len(reusable_prefix) == first_repair_chunk - 1:
+                    for chunk_index, (response_data, metadata) in enumerate(
+                        reusable_prefix,
+                        start=1,
+                    ):
+                        responses.append(response_data)
+                        metadata_items.append(metadata)
+                        record_chunk_consumption(metadata, chunk_index=chunk_index)
+                        emit(
+                            "chunk",
+                            (
+                                f"Chunk {chunk_index}/{chunk_count} reused from "
+                                "the validated pre-conflict parallel prefix"
+                            ),
+                            status="completed",
+                            current=chunk_index,
+                            total=chunk_count,
+                            chunk_index=chunk_index,
+                            checkpoint_reused=True,
+                            parallel_prefix_reused=True,
+                        )
+                    parallel_conflict_repair = dict(saved_conflict)
+                    parallel_conflict_repair.update(
+                        {
+                            "status": "serial_repair_resumed",
+                            "resumed_at": _utcnow(),
+                            "reused_prefix_chunk_count": first_repair_chunk - 1,
+                            "recovery": (
+                                "Validated pre-conflict parallel checkpoints were "
+                                "reused; serial repair resumed at the first unsafe "
+                                "chunk."
+                            ),
+                        }
+                    )
+                    atomic_write_json(conflict_path, parallel_conflict_repair)
+                    serial_batches = list(
+                        enumerate(
+                            batches[first_repair_chunk - 1 :],
+                            start=first_repair_chunk,
+                        )
+                    )
+                    emit(
+                        "parallel-fallback",
+                        (
+                            f"Reused validated chunks 1-{first_repair_chunk - 1}; "
+                            f"resuming serial terminology repair at chunk "
+                            f"{first_repair_chunk}/{chunk_count}"
+                        ),
+                        status="warning",
+                        current=first_repair_chunk - 1,
+                        total=chunk_count,
+                        chunk_index=first_repair_chunk,
+                    )
+        if fresh_parallel_session:
+            emit(
+                "parallel",
+                (
+                    "Using one validated continuity seed followed by bounded "
+                    f"parallel waves of up to {effective_parallelism} chunks"
+                ),
+                current=0,
+                total=chunk_count,
+                parallelism=effective_parallelism,
+            )
+            next_chunk = 1
+            while next_chunk <= chunk_count:
+                wave_size = 1 if next_chunk == 1 else effective_parallelism
+                wave_stop = min(chunk_count + 1, next_chunk + wave_size)
+                continuity_snapshot = list(responses)
+                wave_requests: dict[
+                    int, tuple[dict[str, Any], dict[str, Any]]
+                ] = {}
+                for chunk_index in range(next_chunk, wave_stop):
+                    wave_requests[chunk_index] = build_parallel_request(
+                        batches[chunk_index - 1],
+                        continuity_snapshot,
+                    )
+
+                wave_results: dict[
+                    int,
+                    tuple[dict[str, Any], dict[str, Any], dict[str, Any], float],
+                ] = {}
+                wave_errors: dict[int, BaseException] = {}
+                with ThreadPoolExecutor(max_workers=len(wave_requests)) as executor:
+                    futures = {
+                        executor.submit(
+                            run_parallel_chunk,
+                            chunk_index,
+                            batch_request,
+                            translation_batch,
+                        ): chunk_index
+                        for chunk_index, (
+                            batch_request,
+                            translation_batch,
+                        ) in wave_requests.items()
+                    }
+                    for future in as_completed(futures):
+                        chunk_index = futures[future]
+                        try:
+                            wave_results[chunk_index] = future.result()
+                        except BaseException as exc:
+                            wave_errors[chunk_index] = exc
+
+                for chunk_index in sorted(wave_results):
+                    response_data, metadata, validation, elapsed = wave_results[
+                        chunk_index
+                    ]
+                    batch_request, translation_batch = wave_requests[chunk_index]
+                    chunk_dir = session_root / f"chunk_{chunk_index:04d}"
+                    atomic_write_json(
+                        chunk_dir / "translation_response.json", response_data
+                    )
+                    atomic_write_json(chunk_dir / "provider_metadata.json", metadata)
+                    atomic_write_json(chunk_dir / "validation.json", validation)
+                    atomic_write_json(
+                        chunk_dir / "completed.json",
+                        {
+                            "schema_version": (
+                                "mathula.translation.semantic-chunk-checkpoint.v1"
+                            ),
+                            "completed_at": _utcnow(),
+                            "chunk_index": chunk_index,
+                            "chunk_count": chunk_count,
+                            "request_sha256": batch_request["request_sha256"],
+                            "response_sha256": validation.get("response_sha256"),
+                            "unit_ids": translation_batch.get("requested_unit_ids"),
+                            "parallel_wave": True,
+                        },
+                    )
+                    if not wave_errors or chunk_index < min(wave_errors):
+                        responses.append(response_data)
+                        metadata_items.append(metadata)
+                    record_chunk_consumption(metadata, chunk_index=chunk_index)
+                    emit(
+                        "chunk",
+                        f"Chunk {chunk_index}/{chunk_count} validated and checkpointed",
+                        status="completed",
+                        current=len(responses),
+                        total=chunk_count,
+                        chunk_index=chunk_index,
+                        elapsed_chunk_seconds=elapsed,
+                        parallel=True,
+                    )
+
+                if wave_errors:
+                    failed_index = min(wave_errors)
+                    exc = wave_errors[failed_index]
+                    batch_request, _ = wave_requests[failed_index]
+                    chunk_dir = session_root / f"chunk_{failed_index:04d}"
+                    safe_error = _safe_error(pipeline, exc)
+                    failure_metadata = dict(_exception_details(exc))
+                    failure_metadata.update(
+                        {
+                            "request_sha256": batch_request["request_sha256"],
+                            "chunk_index": failed_index,
+                            "provider": str(
+                                failure_metadata.get("provider")
+                                or "azure-openai-gpt"
+                            ),
+                            "parallel_wave": True,
+                        }
+                    )
+                    record_chunk_consumption(
+                        failure_metadata,
+                        chunk_index=failed_index,
+                        status="failed",
+                    )
+                    atomic_write_json(
+                        chunk_dir / "failure.json",
+                        {
+                            "schema_version": (
+                                "mathula.translation.semantic-chunk-failure.v1"
+                            ),
+                            "failed_at": _utcnow(),
+                            "chunk_index": failed_index,
+                            "request_sha256": batch_request["request_sha256"],
+                            "completed_chunks_preserved": len(responses),
+                            "error": safe_error,
+                            "parallel_wave": True,
+                        },
+                    )
+                    job.last_error = safe_error
+                    pipeline.jobs.save(job)
+                    emit(
+                        "failed",
+                        (
+                            f"Chunk {failed_index}/{chunk_count} failed; "
+                            f"{len(responses)} completed checkpoint(s) remain reusable"
+                        ),
+                        status="warning",
+                        current=len(responses),
+                        total=chunk_count,
+                        chunk_index=failed_index,
+                        parallel=True,
+                    )
+                    raise exc
+                next_chunk = wave_stop
+
+            terminology_conflicts = _parallel_terminology_conflicts(responses)
+            if terminology_conflicts:
+                conflict_path = session_root / "parallel_terminology_conflicts.json"
+                first_repair_chunk = min(
+                    int(item["conflicting_chunk"])
+                    for item in terminology_conflicts
+                )
+                invalidated_checkpoints: list[str] = []
+                for chunk_index in range(first_repair_chunk, chunk_count + 1):
+                    chunk_dir = session_root / f"chunk_{chunk_index:04d}"
+                    completed_path = chunk_dir / "completed.json"
+                    if not completed_path.is_file():
+                        continue
+                    invalidated_path = chunk_dir / "completed.parallel-conflict.json"
+                    completed_path.replace(invalidated_path)
+                    invalidated_checkpoints.append(str(invalidated_path))
+                parallel_conflict_repair = {
+                    "schema_version": (
+                        "mathula.translation.parallel-terminology-conflicts.v1"
+                    ),
+                    "status": "automatic_serial_repair_running",
+                    "conflict_count": len(terminology_conflicts),
+                    "conflicts": terminology_conflicts,
+                    "first_serial_repair_chunk": first_repair_chunk,
+                    "invalidated_checkpoints": invalidated_checkpoints,
+                    "recovery": (
+                        "Translation is automatically continuing serially from "
+                        "the first conflicting chunk."
+                    ),
+                }
+                atomic_write_json(conflict_path, parallel_conflict_repair)
+                emit(
+                    "parallel-fallback",
+                    (
+                        "Parallel terminology differed across a wave; preserving "
+                        f"chunks 1-{first_repair_chunk - 1} and automatically "
+                        f"repairing chunks {first_repair_chunk}-{chunk_count} "
+                        "with serial continuity"
+                    ),
+                    status="warning",
+                    current=first_repair_chunk - 1,
+                    total=chunk_count,
+                    chunk_index=first_repair_chunk,
+                )
+                responses = responses[: first_repair_chunk - 1]
+                metadata_items = metadata_items[: first_repair_chunk - 1]
+                serial_batches = list(
+                    enumerate(
+                        batches[first_repair_chunk - 1 :],
+                        start=first_repair_chunk,
+                    )
+                )
+            else:
+                serial_batches = []
+
+        for chunk_index, source_batch in serial_batches:
             chunk_started = time.monotonic()
             batch_request = json.loads(json.dumps(source_batch, ensure_ascii=False))
             translation_batch = dict(batch_request.get("translation_batch") or {})
@@ -2359,84 +3066,16 @@ def translate_full_transcript_once(
                 chunk_index=chunk_index,
             )
             try:
-                if saved_split_failure is not None:
-                    repaired = _attempt_chunk_split_recovery(
-                        provider=batch_provider,
-                        chunk_dir=chunk_dir,
-                        batch_request=batch_request,
-                        original_error=saved_split_failure,
-                        emit=emit,
-                        chunk_index=chunk_index,
-                        chunk_count=chunk_count,
-                    )
-                    if repaired is None:
-                        raise saved_split_failure
-                    response_data, metadata, validation = repaired
-                elif saved_validation_failure is not None:
-                    repaired = _attempt_targeted_identity_repair(
-                        provider=batch_provider,
-                        chunk_dir=chunk_dir,
-                        batch_request=batch_request,
-                        original_error=saved_validation_failure,
-                        emit=emit,
-                        chunk_index=chunk_index,
-                        chunk_count=chunk_count,
-                    )
-                    if repaired is None:
-                        repaired = _attempt_targeted_validation_repair(
-                            provider=batch_provider,
-                            chunk_dir=chunk_dir,
-                            batch_request=batch_request,
-                            original_error=saved_validation_failure,
-                            emit=emit,
-                            chunk_index=chunk_index,
-                            chunk_count=chunk_count,
-                        )
-                    if repaired is None:
-                        raise saved_validation_failure
-                    response_data, metadata, validation = repaired
-                else:
-                    try:
-                        response = batch_provider.translate_multivariant(batch_request)
-                        response_data = dict(response.data)
-                        validation = validate_multivariant_response(
-                            response_data,
-                            request=batch_request,
-                        )
-                        metadata = _provider_metadata(response)
-                    except BaseException as initial_error:
-                        repaired = _attempt_targeted_identity_repair(
-                            provider=batch_provider,
-                            chunk_dir=chunk_dir,
-                            batch_request=batch_request,
-                            original_error=initial_error,
-                            emit=emit,
-                            chunk_index=chunk_index,
-                            chunk_count=chunk_count,
-                        )
-                        if repaired is None:
-                            repaired = _attempt_targeted_validation_repair(
-                                provider=batch_provider,
-                                chunk_dir=chunk_dir,
-                                batch_request=batch_request,
-                                original_error=initial_error,
-                                emit=emit,
-                                chunk_index=chunk_index,
-                                chunk_count=chunk_count,
-                            )
-                        if repaired is None:
-                            repaired = _attempt_chunk_split_recovery(
-                                provider=batch_provider,
-                                chunk_dir=chunk_dir,
-                                batch_request=batch_request,
-                                original_error=initial_error,
-                                emit=emit,
-                                chunk_index=chunk_index,
-                                chunk_count=chunk_count,
-                            )
-                        if repaired is None:
-                            raise
-                        response_data, metadata, validation = repaired
+                response_data, metadata, validation = _execute_chunk_provider_work(
+                    provider=batch_provider,
+                    chunk_dir=chunk_dir,
+                    batch_request=batch_request,
+                    saved_validation_failure=saved_validation_failure,
+                    saved_split_failure=saved_split_failure,
+                    emit=emit,
+                    chunk_index=chunk_index,
+                    chunk_count=chunk_count,
+                )
                 metadata.update(
                     {
                         "chunk_index": chunk_index,
@@ -2521,6 +3160,32 @@ def translate_full_transcript_once(
                 )
                 raise
 
+        if parallel_conflict_repair is not None:
+            remaining_conflicts = _parallel_terminology_conflicts(responses)
+            conflict_path = session_root / "parallel_terminology_conflicts.json"
+            if remaining_conflicts:
+                parallel_conflict_repair.update(
+                    {
+                        "status": "automatic_serial_repair_failed",
+                        "remaining_conflict_count": len(remaining_conflicts),
+                        "remaining_conflicts": remaining_conflicts,
+                        "failed_at": _utcnow(),
+                    }
+                )
+                atomic_write_json(conflict_path, parallel_conflict_repair)
+                raise MultivariantTranslationError(
+                    "Automatic serial terminology repair still produced conflicting "
+                    f"global terminology; see {conflict_path}"
+                )
+            parallel_conflict_repair.update(
+                {
+                    "status": "automatic_serial_repair_completed",
+                    "resolved_at": _utcnow(),
+                    "remaining_conflict_count": 0,
+                }
+            )
+            atomic_write_json(conflict_path, parallel_conflict_repair)
+
         emit("merge", "Merging and validating all semantic translation chunks", current=chunk_count, total=chunk_count)
         merged_response = merge_multivariant_batch_responses(request=request, responses=responses)
         aggregate_metadata = _aggregate_metadata(
@@ -2541,6 +3206,17 @@ def translate_full_transcript_once(
             ),
             continuity_payload_policy=continuity_payload_policy,
             context_units=effective_context_units,
+            parallelism=effective_parallelism,
+            parallel_strategy=(
+                "validated_seed_then_parallel_waves_v1"
+                if fresh_parallel_session
+                else "serial_validated_continuity"
+            ),
+            automatic_serial_repair_from_chunk=(
+                parallel_conflict_repair.get("first_serial_repair_chunk")
+                if parallel_conflict_repair is not None
+                else None
+            ),
             provider_http_requests_started=provider_http_requests_started,
             provider_http_request_limit=provider_call_limit,
             request_timeout_seconds=effective_timeout,

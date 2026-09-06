@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import struct
 import tempfile
 import time
 import wave
@@ -315,7 +316,7 @@ class AzureTTSBackend:
         max_retries: int = 3,
         ssml_bounds: SSMLBounds | None = None,
         verified_emphasis_voices: Sequence[str] = (),
-        trim_digital_silence_ms: int = 200,
+        trim_digital_silence_ms: int = 2000,
         maximum_response_bytes: int = 100 * 1024 * 1024,
         sleep: Callable[[float], None] = time.sleep,
     ):
@@ -842,6 +843,28 @@ class AzureTTSBackend:
         )
 
 
+# Real Azure TTS output rarely lands on literal 0x0000 for its "silent" lead-in/
+# trail -- it's low-level dither/quantization noise instead (confirmed real case:
+# a 16-bit PCM tail alternating between -1 and 0 for over 800ms). An exact-byte
+# match therefore misses the overwhelming majority of real silence. Real speech
+# in every clip inspected had an RMS in the hundreds to thousands (out of a
+# +/-32768 range); this threshold is far below that -- it can only ever remove
+# genuine noise-floor silence, never real speech, however quiet.
+SILENCE_AMPLITUDE_THRESHOLD = 32
+
+
+def _frame_is_near_silent(frame_bytes: bytes, *, sample_width: int, threshold: int) -> bool:
+    if sample_width == 2:
+        values = struct.unpack(f"<{len(frame_bytes) // 2}h", frame_bytes)
+    elif sample_width == 1:
+        values = [byte - 128 for byte in frame_bytes]
+    else:
+        # Uncommon sample width: fall back to the original exact-zero definition
+        # rather than guessing at an unfamiliar PCM layout's amplitude range.
+        return frame_bytes == b"\x00" * len(frame_bytes)
+    return all(-threshold <= value <= threshold for value in values)
+
+
 def canonicalize_pcm_wav(
     data: bytes,
     *,
@@ -849,6 +872,7 @@ def canonicalize_pcm_wav(
     channels: int,
     sample_width: int,
     trim_digital_silence_ms: int,
+    silence_amplitude_threshold: int = SILENCE_AMPLITUDE_THRESHOLD,
 ) -> tuple[bytes, dict[str, int]]:
     if not data:
         raise ValueError("response is empty")
@@ -869,14 +893,19 @@ def canonicalize_pcm_wav(
     frame_width = channels * sample_width
     if frame_count <= 0 or len(frames) != frame_count * frame_width:
         raise ValueError("audio contains no complete PCM frames")
-    silence_frame = b"\x00" * frame_width
     leading = 0
-    while leading < frame_count and frames[leading * frame_width : (leading + 1) * frame_width] == silence_frame:
+    while leading < frame_count and _frame_is_near_silent(
+        frames[leading * frame_width : (leading + 1) * frame_width],
+        sample_width=sample_width,
+        threshold=silence_amplitude_threshold,
+    ):
         leading += 1
     trailing = 0
-    while trailing < frame_count - leading and frames[
-        (frame_count - trailing - 1) * frame_width : (frame_count - trailing) * frame_width
-    ] == silence_frame:
+    while trailing < frame_count - leading and _frame_is_near_silent(
+        frames[(frame_count - trailing - 1) * frame_width : (frame_count - trailing) * frame_width],
+        sample_width=sample_width,
+        threshold=silence_amplitude_threshold,
+    ):
         trailing += 1
     if leading + trailing >= frame_count:
         raise ValueError("audio contains only digital silence")

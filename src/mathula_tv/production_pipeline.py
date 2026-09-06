@@ -65,6 +65,7 @@ from .errors import (
     TranslationTimingFailure,
 )
 from .gcs_store import GCSStore
+from .local_store import LocalStore
 from .intelligibility import IntelligibilityAuditor
 from .job_store import JobStore
 from .logging_utils import redact
@@ -101,6 +102,7 @@ from .pronunciation import (
     PronunciationEntry,
     build_initialism_ssml_parts,
     with_default_organisation_initialisms,
+    with_web_researched_organisation_pronunciations,
 )
 from .quality import inspect_wav
 from .qc import write_qc_report
@@ -188,7 +190,9 @@ class ProductionDubbingPipeline:
     def __init__(self, settings: Settings, gcs: GCSStore | None = None, stt_backend: SpeechBackend | None = None):
         self.settings = settings
         self.jobs = JobStore(settings.work_dir)
-        self.gcs = gcs
+        # Local filesystem is the normal artifact backend.  Colab/remote-worker
+        # commands opt into GCS by passing a GCSStore explicitly.
+        self.gcs = gcs if gcs is not None else LocalStore(settings.work_dir)
         self._stt_backend = stt_backend
 
     def paths(self, job_id: str) -> DubbingArtifacts:
@@ -805,6 +809,7 @@ class ProductionDubbingPipeline:
         request_timeout_seconds: float | None = None,
         batch_max_retries: int | None = None,
         max_provider_calls: int | None = None,
+        parallelism: int | None = None,
         restart_batches: bool = False,
         progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
@@ -826,6 +831,7 @@ class ProductionDubbingPipeline:
                 request_timeout_seconds=request_timeout_seconds,
                 batch_max_retries=batch_max_retries,
                 max_provider_calls=max_provider_calls,
+                parallelism=parallelism,
                 restart_batches=restart_batches,
                 progress=progress,
             )
@@ -3855,6 +3861,15 @@ class ProductionDubbingPipeline:
                 job_id=job.job_id,
             )
         dictionary = with_default_organisation_initialisms(dictionary)
+        research_path = (
+            self.paths(job.job_id).job_root
+            / "analysis"
+            / "autocorrection_name_research.json"
+        )
+        dictionary = with_web_researched_organisation_pronunciations(
+            dictionary,
+            read_json(research_path) if research_path.is_file() else None,
+        )
         atomic_write_json(path, dictionary.to_dict())
         return dictionary
 

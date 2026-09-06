@@ -22,6 +22,26 @@ def test_production_provider_defaults_and_optional_pyannote(tmp_path, monkeypatc
     assert settings.gpt_model == DEFAULT_GPT_DEPLOYMENT == "gpt-5.6-sol-1"
     assert settings.pyannote_enabled is False
     assert settings.openvoice_revision == ""  # live GPU preparation requires an immutable reviewed SHA
+    # New/unvalidated fast path (see azure_tts_sdk.py) must default off -- it
+    # touches real Azure billing/audio quality and hasn't been validated on a
+    # real job yet, unlike enable_island_timing which defaults on.
+    assert settings.enable_sdk_group_synthesis is False
+    # Phase 14: a second, independent, also-unvalidated fast path (turn-level
+    # bookmark synthesis) -- must default off for the same reason, and must be
+    # independently toggleable from enable_sdk_group_synthesis above.
+    assert settings.enable_turn_group_synthesis is False
+
+
+def test_sdk_group_synthesis_env_toggle_flips_the_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATHULA_TV_ENABLE_SDK_GROUP_SYNTHESIS", "1")
+    settings = load_settings(tmp_path)
+    assert settings.enable_sdk_group_synthesis is True
+
+
+def test_turn_group_synthesis_env_toggle_flips_the_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATHULA_TV_ENABLE_TURN_GROUP_SYNTHESIS", "1")
+    settings = load_settings(tmp_path)
+    assert settings.enable_turn_group_synthesis is True
 
 
 def test_azure_speaker_labels_are_authoritative_when_pyannote_disagrees():

@@ -12,11 +12,13 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .atomic_io import atomic_write_json, read_json
 from .autocorrect import (
+    apply_ai_advice,
     AutocorrectError,
+    build_ai_request,
     JobPaths,
     Store,
     detect_candidates,
@@ -26,11 +28,14 @@ from .autocorrect import (
     reset_source,
     sha256_json,
 )
+from .autocorrect_ai import rank_with_gpt
 from .autocorrect_research import run_name_research_autocorrection
 from .media import checksum
 from .models import JobManifest, utcnow
 
-AUTOCORRECT_FIRST_STAGE_SCHEMA = "autocorrection-first-stage-v2-name-research"
+AUTOCORRECT_FIRST_STAGE_SCHEMA = (
+    "autocorrection-first-stage-v3-constrained-ai-stt-repair"
+)
 
 REVIEW_STATUSES = {"suggested", "needs_review"}
 BLOCKING_REVIEW_SOURCE_TYPES = {"ambiguous_hint", "confusion_hint"}
@@ -52,6 +57,23 @@ class AutocorrectStageConfig:
     max_candidates: int
     low_confidence_threshold: float
     auto_confirmation_threshold: int
+    # Appended defaults preserve existing positional construction.
+    ai_enabled: bool = True
+    ai_maximum_corrections: int = 100
+    ai_auto_apply_confidence: float = 0.92
+    ai_minimum_candidate_score: float = 0.75
+
+    def __post_init__(self) -> None:
+        if self.ai_maximum_corrections < 1:
+            raise ValueError("AI autocorrect maximum must be positive")
+        if not 0 <= self.ai_auto_apply_confidence <= 1:
+            raise ValueError(
+                "AI autocorrect confidence must be between 0 and 1"
+            )
+        if not 0 <= self.ai_minimum_candidate_score <= 1:
+            raise ValueError(
+                "AI autocorrect candidate score must be between 0 and 1"
+            )
 
     @classmethod
     def from_environment(cls, project_root: Path) -> "AutocorrectStageConfig":
@@ -106,6 +128,31 @@ class AutocorrectStageConfig:
                 os.getenv(
                     "MATHULA_TV_AUTOCORRECT_AUTO_CONFIRMATIONS",
                     "2",
+                )
+            ),
+            ai_enabled=os.getenv(
+                "MATHULA_TV_AUTOCORRECT_AI_ENABLED", "1"
+            ).strip().casefold()
+            not in {"0", "false", "no", "off"},
+            ai_maximum_corrections=max(
+                1,
+                int(
+                    os.getenv(
+                        "MATHULA_TV_AUTOCORRECT_AI_MAXIMUM_CORRECTIONS",
+                        "100",
+                    )
+                ),
+            ),
+            ai_auto_apply_confidence=float(
+                os.getenv(
+                    "MATHULA_TV_AUTOCORRECT_AI_AUTO_APPLY_CONFIDENCE",
+                    "0.92",
+                )
+            ),
+            ai_minimum_candidate_score=float(
+                os.getenv(
+                    "MATHULA_TV_AUTOCORRECT_AI_MINIMUM_CANDIDATE_SCORE",
+                    "0.75",
                 )
             ),
         )
@@ -420,6 +467,11 @@ def run_autocorrection_first(
     job: JobManifest,
     reconciled_transcript: Mapping[str, Any],
     config: AutocorrectStageConfig | None = None,
+    ai_ranker: Callable[
+        [dict[str, Any]],
+        tuple[dict[str, dict[str, Any]], dict[str, Any]],
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     """Render the authoritative transcript before classification or translation.
 
@@ -439,6 +491,15 @@ def run_autocorrection_first(
     atomic_write_json(raw_path, dict(reconciled_transcript))
 
     paths = JobPaths.for_job(Path(work_dir), job.job_id)
+    ai_summary: dict[str, Any] = {
+        "status": "not_run",
+        "candidate_count": 0,
+        "decision_count": 0,
+        "auto_applied_count": 0,
+        "suggested_count": 0,
+        "dismissed_count": 0,
+        "review_count": 0,
+    }
     store = Store(config.database_url, schema=config.schema)
     try:
         raw_hash = sha256_json(dict(reconciled_transcript))
@@ -478,6 +539,94 @@ def run_autocorrection_first(
             low_confidence_threshold=config.low_confidence_threshold,
             auto_confirmation_threshold=config.auto_confirmation_threshold,
         )
+        ai_request = build_ai_request(
+            store,
+            job_id=job.job_id,
+            source_document=source,
+            maximum=config.ai_maximum_corrections,
+        )
+        atomic_write_json(paths.ai_request, ai_request)
+        candidate_count = len(ai_request.get("spans") or [])
+        ai_summary["candidate_count"] = candidate_count
+        if not config.ai_enabled:
+            ai_summary["status"] = "disabled"
+            atomic_write_json(
+                paths.ai_response,
+                {
+                    "schema_version": "mathula-autocorrect-ai-run-v1",
+                    **ai_summary,
+                    "request_sha256": ai_request.get("request_sha256"),
+                    "completed_at": utcnow(),
+                },
+            )
+        elif candidate_count == 0:
+            ai_summary["status"] = "no_candidates"
+            atomic_write_json(
+                paths.ai_response,
+                {
+                    "schema_version": "mathula-autocorrect-ai-run-v1",
+                    **ai_summary,
+                    "request_sha256": ai_request.get("request_sha256"),
+                    "completed_at": utcnow(),
+                },
+            )
+        else:
+            try:
+                advice, generation = (ai_ranker or rank_with_gpt)(ai_request)
+                application = apply_ai_advice(
+                    store,
+                    job_id=job.job_id,
+                    advice=advice,
+                    auto_apply_confidence=(
+                        config.ai_auto_apply_confidence
+                    ),
+                    minimum_candidate_score=(
+                        config.ai_minimum_candidate_score
+                    ),
+                )
+            except Exception as exc:
+                # Deterministic corrections remain authoritative when the AI
+                # service is unavailable or returns invalid output.
+                ai_summary.update(
+                    {
+                        "status": "failed_safe",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+                atomic_write_json(
+                    paths.ai_response,
+                    {
+                        "schema_version": "mathula-autocorrect-ai-run-v1",
+                        **ai_summary,
+                        "request_sha256": ai_request.get("request_sha256"),
+                        "completed_at": utcnow(),
+                    },
+                )
+            else:
+                ai_summary.update(
+                    {
+                        "status": "completed",
+                        **application,
+                    }
+                )
+                atomic_write_json(
+                    paths.ai_response,
+                    {
+                        "schema_version": "mathula-autocorrect-ai-run-v1",
+                        **ai_summary,
+                        "request_sha256": ai_request.get("request_sha256"),
+                        "auto_apply_confidence": (
+                            config.ai_auto_apply_confidence
+                        ),
+                        "minimum_candidate_score": (
+                            config.ai_minimum_candidate_score
+                        ),
+                        "decisions": list(advice.values()),
+                        "generation": generation,
+                        "completed_at": utcnow(),
+                    },
+                )
         state = render_effective_transcript(
             store,
             paths=paths,
@@ -550,6 +699,20 @@ def run_autocorrection_first(
         ),
         "name_research_unresolved_count": int(
             research_artifact.get("unresolved_count", 0) or 0
+        ),
+        "ai_stt_autocorrect_status": ai_summary.get("status"),
+        "ai_stt_autocorrect_artifact_path": str(paths.ai_response),
+        "ai_stt_candidate_count": int(
+            ai_summary.get("candidate_count", 0) or 0
+        ),
+        "ai_stt_decision_count": int(
+            ai_summary.get("decision_count", 0) or 0
+        ),
+        "ai_stt_auto_applied_count": int(
+            ai_summary.get("auto_applied_count", 0) or 0
+        ),
+        "ai_stt_review_count": int(
+            ai_summary.get("review_count", 0) or 0
         ),
         "ready_for_language_ai": ready,
         "language_ai_blocked": not ready,
@@ -626,5 +789,14 @@ def require_authoritative_transcript(
         ),
         "name_research_unresolved_count": int(
             state.get("name_research_unresolved_count", 0) or 0
+        ),
+        "ai_stt_autocorrect_status": state.get(
+            "ai_stt_autocorrect_status"
+        ),
+        "ai_stt_auto_applied_count": int(
+            state.get("ai_stt_auto_applied_count", 0) or 0
+        ),
+        "ai_stt_review_count": int(
+            state.get("ai_stt_review_count", 0) or 0
         ),
     }

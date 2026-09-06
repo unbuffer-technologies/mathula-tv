@@ -153,7 +153,10 @@ def render_video(source: Path, audio: Path, output: Path) -> None:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError:
         command[command.index("copy")] = "libx264"
-        command[command.index("-c:a"):command.index("-c:a")] = ["-preset", "medium", "-crf", "20"]
+        # TikTok re-encodes every upload to its own delivery profile, so a slow,
+        # high-fidelity local encode here buys nothing durable -- this path only
+        # runs when the cheap stream-copy attempt above failed anyway.
+        command[command.index("-c:a"):command.index("-c:a")] = ["-preset", "veryfast", "-crf", "20"]
         subprocess.run(command, check=True)
     temporary.replace(output)
     probe(output)

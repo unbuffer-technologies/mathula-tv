@@ -24,6 +24,13 @@ def _result() -> dict:
         "translation": {
             "immutable": True,
         },
+        "post_tts_qa": {
+            "state": "passed",
+            "publication_authorized": True,
+            "best_production_score": 98.45,
+            "aggregate_word_error_rate": 0.029412,
+            "production_blocker_count": 0,
+        },
         "idempotent_reuse": False,
         "tiktok_edit": {"technical": "details"},
     }
@@ -47,6 +54,7 @@ def test_dub_azure_prints_readable_summary_by_default(capsys) -> None:
         "Title panel: UKhaas: uJohnson usakhuluma ngokuhlaselwa\n"
         "Translation: unchanged\n"
         "Publication render: created\n"
+        "Post-TTS QA: passed · score 98.45/100 · WER 0.029 · 0 blocker(s)\n"
     )
     assert "sha256" not in captured.out
     assert "technical" not in captured.out
@@ -140,3 +148,19 @@ def test_dub_azure_summary_uses_readable_not_reported_fallback(capsys) -> None:
     assert "Duration: not reported" in output
     assert "Media: not reported" in output
     assert "unknown · unknown" not in output
+
+
+def test_dub_azure_summary_reports_explicitly_disabled_qa(capsys) -> None:
+    _print_dub_azure_result(
+        job_id="job-no-qa",
+        result={
+            "post_tts_qa": {
+                "state": "disabled",
+                "publication_authorized": True,
+                "reason": "explicit_no_qa_stt",
+            }
+        },
+        json_output=False,
+    )
+
+    assert "Post-TTS QA: disabled" in capsys.readouterr().out

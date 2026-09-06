@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 import argparse
-import json
 
-from huggingface_hub import snapshot_download
+try:
+    from huggingface_hub import snapshot_download
+except ImportError as exc:
+    raise SystemExit(
+        "Missing huggingface_hub. Install Mathula voice dependencies with: "
+        "python -m pip install -e \".[speaker-recognition]\" --no-build-isolation"
+    ) from exc
+
+
+try:
+    import safetensors
+except ImportError as exc:
+    raise SystemExit(
+        "Missing safetensors. Install Mathula voice dependencies with: "
+        "python -m pip install -e \".[speaker-recognition]\" --no-build-isolation"
+    ) from exc
 
 from mathula_tv.voice_family_classifier import (
     VOICE_GENDER_MODEL_ID,
@@ -31,18 +45,9 @@ def main() -> int:
         revision=VOICE_GENDER_MODEL_REVISION,
         force_download=args.force,
     )
-    print(
-        json.dumps(
-            {
-                "status": "installed",
-                "model": VOICE_GENDER_MODEL_ID,
-                "revision": VOICE_GENDER_MODEL_REVISION,
-                "snapshot": snapshot,
-                "runtime_mode": "local_files_only",
-            },
-            indent=2,
-        )
-    )
+    print(f"Installed voice-family classifier: {VOICE_GENDER_MODEL_ID}@{VOICE_GENDER_MODEL_REVISION}")
+    print(f"Cache: {snapshot}")
+    print("Runtime mode: local_files_only")
     return 0
 
 

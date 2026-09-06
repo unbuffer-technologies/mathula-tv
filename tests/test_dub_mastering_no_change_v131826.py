@@ -220,6 +220,8 @@ def test_loop_stops_before_retranscribing_an_identical_repair_render(
     assert result["stopped_reason"] == "repair_render_produced_identical_audio"
     assert result["round_count"] == 1
     assert result["rounds"][0]["repair_audio_changed"] is False
-    assert backend.calls == 1
+    # Dual-locale QA performs one target-language and one en-ZA call, then
+    # stops before another repair-round pair for identical audio.
+    assert backend.calls == 2
     assert renderer.render_calls == 2  # attempted repair, then best-payload restore
     assert read_json(direct_root / "mastering_overrides.json")["overrides"] == []

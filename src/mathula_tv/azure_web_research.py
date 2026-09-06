@@ -39,7 +39,19 @@ class AzureWebResearchConfig:
     api_key: str
     deployment: str
     timeout_seconds: float = 900.0
-    max_retries: int = 2
+    # Deliberately tight (real production incident, 2026-09-02): this value
+    # governs BOTH the expensive web-search-bearing outer loop (up to 2 tool
+    # aliases x this many attempts each -- every attempt is a REAL search,
+    # billed for whatever page content it retrieves) AND the cheap, no-
+    # search JSON-transport repair step's own retry loop. A real job with
+    # only 19 short pronunciation candidates spent 200,263 input tokens and
+    # 8 total attempts on this one call alone -- roughly 61% of that job's
+    # entire token spend -- because a higher retry budget let genuine
+    # transient failures silently re-run the FULL real web search rather
+    # than failing fast. A hard, predictable ceiling on both cost and
+    # latency is a deliberate, stated priority for this pipeline: never
+    # let a repair/retry loop have unbounded token or time budget.
+    max_retries: int = 1
     max_output_tokens: int = 0
     web_search_tool: str = "auto"
 
@@ -95,7 +107,7 @@ class AzureWebResearchConfig:
                 env.get("MATHULA_TV_AUTOCORRECT_RESEARCH_TIMEOUT_SECONDS", "900")
             ),
             max_retries=int(
-                env.get("MATHULA_TV_AUTOCORRECT_RESEARCH_MAX_RETRIES", "2")
+                env.get("MATHULA_TV_AUTOCORRECT_RESEARCH_MAX_RETRIES", "1")
             ),
             max_output_tokens=int(
                 env.get("MATHULA_TV_AUTOCORRECT_RESEARCH_MAX_OUTPUT_TOKENS", "0")

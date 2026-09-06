@@ -72,6 +72,7 @@ from .pronunciation import (
     PronunciationDictionary,
     build_initialism_ssml_parts,
     with_default_organisation_initialisms,
+    with_web_researched_organisation_pronunciations,
 )
 from .rendering import render_review_mp4
 from .tts_ssml import BreakPart, SSMLBounds, SSMLPart, TextPart
@@ -118,12 +119,16 @@ SOURCE_WORD_ALIGNMENT_VERSION = (
     "mathula-source-word-speaker-alignment-v1-v13.18.19"
 )
 SOURCE_PAUSE_ALIGNMENT_VERSION = (
-    "mathula-source-pause-alignment-v7-media-clamped-word-timing-v13.19.7"
+    "mathula-source-pause-alignment-v9-terminal-punctuation-cap-v13.19.12"
 )
 MINIMUM_SOURCE_PAUSE_MS = 350
 SOURCE_PAUSE_BASELINE_MS = 100
 MINIMUM_INSERTED_SOURCE_PAUSE_MS = 250
 MAXIMUM_INSERTED_SOURCE_PAUSE_MS = 3000
+# Azure adds its own substantial sentence-final breath. Keep explicit source
+# silence below one second at terminal punctuation so the two pauses do not
+# combine into a production-blocking stop.
+MAXIMUM_TERMINAL_INSERTED_SOURCE_PAUSE_MS = 900
 SOURCE_PAUSE_TRANSITION_ROOM_MS = 100
 SEMANTIC_FIT_SCHEMA_VERSION = "mathula-semantic-fit-v2-v13.18.34"
 SEMANTIC_FIT_VALIDATOR_VERSION = (
@@ -2231,6 +2236,41 @@ def attach_transcript_lipsync_plan(
     return adjusted, plan
 
 
+def _protected_entity_boundary_indices(
+    text: str,
+    protected_entities: Sequence[str],
+) -> set[int]:
+    """Return word boundaries that would split a protected entity surface."""
+
+    word_matches = list(re.finditer(r"\S+", str(text), re.UNICODE))
+    text_tokens = [_normalised_words(match.group(0)) for match in word_matches]
+    flattened = [tokens[0] if len(tokens) == 1 else "".join(tokens) for tokens in text_tokens]
+    forbidden: set[int] = set()
+    for entity in protected_entities:
+        entity_tokens = _normalised_words(str(entity))
+        if len(entity_tokens) < 2:
+            continue
+        for start in range(len(flattened) - len(entity_tokens) + 1):
+            matched = True
+            for offset, expected in enumerate(entity_tokens):
+                actual = flattened[start + offset]
+                if actual == expected:
+                    continue
+                if (
+                    offset == 0
+                    and actual.endswith(expected)
+                    and len(actual) - len(expected) <= 4
+                ):
+                    continue
+                matched = False
+                break
+            if matched:
+                forbidden.update(
+                    range(start + 1, start + len(entity_tokens))
+                )
+    return forbidden
+
+
 def build_source_pause_ssml_parts(
     text: str,
     source_pause_anchors: Sequence[Mapping[str, Any]],
@@ -2240,6 +2280,7 @@ def build_source_pause_ssml_parts(
     fill_pause_budget: bool = False,
     pause_max_ms: int = 2000,
     prioritize_island_boundaries: bool = False,
+    protected_entities: Sequence[str] = (),
 ) -> tuple[tuple[SSMLPart, ...], dict[str, Any]]:
     """Insert bounded source-aligned breaks without changing approved text."""
 
@@ -2263,6 +2304,10 @@ def build_source_pause_ssml_parts(
     }
     if len(word_matches) < 2 or pause_budget_ms < MINIMUM_INSERTED_SOURCE_PAUSE_MS:
         return (), empty_audit
+    protected_boundaries = _protected_entity_boundary_indices(
+        value,
+        protected_entities,
+    )
 
     candidates: list[dict[str, Any]] = []
     for raw_anchor in source_pause_anchors:
@@ -2294,9 +2339,32 @@ def build_source_pause_ssml_parts(
                 nearby_punctuation,
                 key=lambda index: (abs(index - boundary_word_index), index),
             )
+        original_boundary_word_index = boundary_word_index
+        if boundary_word_index in protected_boundaries:
+            safe_boundaries = [
+                index
+                for index in range(1, len(word_matches))
+                if index not in protected_boundaries
+            ]
+            if not safe_boundaries:
+                continue
+            boundary_word_index = min(
+                safe_boundaries,
+                key=lambda index: (
+                    abs(index - original_boundary_word_index),
+                    0 if index in punctuation_boundaries else 1,
+                    index,
+                ),
+            )
         candidates.append(
             {
                 "target_boundary_word_index": boundary_word_index,
+                "original_target_boundary_word_index": (
+                    original_boundary_word_index
+                ),
+                "protected_entity_boundary_adjusted": (
+                    boundary_word_index != original_boundary_word_index
+                ),
                 "requested_pause_ms": min(
                     MAXIMUM_INSERTED_SOURCE_PAUSE_MS,
                     requested_ms,
@@ -2496,11 +2564,25 @@ def build_source_pause_ssml_parts(
         if duration_ms < MINIMUM_INSERTED_SOURCE_PAUSE_MS:
             continue
         boundary = int(item["target_boundary_word_index"])
+        target_left_text = word_matches[boundary - 1].group(0)
+        terminal_boundary = bool(
+            re.search(r"[.!?…][\"'”’\)\]}]*$", target_left_text)
+        )
+        uncapped_duration_ms = duration_ms
+        if terminal_boundary and not prioritize_island_boundaries:
+            duration_ms = min(
+                duration_ms,
+                MAXIMUM_TERMINAL_INSERTED_SOURCE_PAUSE_MS,
+            )
         insertions.append(
             {
                 **item,
                 "duration_ms": duration_ms,
-                "target_left_text": word_matches[boundary - 1].group(0),
+                "uncapped_duration_ms": uncapped_duration_ms,
+                "terminal_punctuation_cap_applied": (
+                    duration_ms != uncapped_duration_ms
+                ),
+                "target_left_text": target_left_text,
                 "target_right_text": word_matches[boundary].group(0),
                 "target_character_offset": word_matches[boundary].start(),
             }
@@ -4615,6 +4697,7 @@ class DirectAzureDubRenderer:
                     fill_pause_budget=True,
                     pause_max_ms=pause_max_ms,
                     prioritize_island_boundaries=word_timed_lipsync,
+                    protected_entities=block.protected_entities,
                 )
             pause_alignment = {
                 **pause_alignment,
@@ -10974,6 +11057,15 @@ class DirectAzureDubRenderer:
         pronunciation_dictionary = with_default_organisation_initialisms(
             pronunciation_dictionary
         )
+        name_research_path = (
+            self.jobs.job_dir(job.job_id)
+            / "analysis"
+            / "autocorrection_name_research.json"
+        )
+        pronunciation_dictionary = with_web_researched_organisation_pronunciations(
+            pronunciation_dictionary,
+            read_json(name_research_path) if name_research_path.is_file() else None,
+        )
         atomic_write_json(dictionary_path, pronunciation_dictionary.to_dict())
         boundary_normalizations: list[dict[str, Any]] = []
         segments = load_approved_segments(
@@ -10997,6 +11089,7 @@ class DirectAzureDubRenderer:
         blocks = coalesce_same_speaker_segments(
             segments,
             max_gap_ms=options.same_speaker_gap_ms,
+            preserve_opening_segment=True,
         )
         if not blocks:
             raise DirectDubError("Approved translation contains no speakable segments")
@@ -11264,6 +11357,7 @@ class DirectAzureDubRenderer:
                 blocks,
                 assignments,
                 options,
+                pronunciation_dictionary,
                 clean_background_stem,
                 seo_context.seo_path,
                 collision_resolution_payload,
@@ -11328,6 +11422,7 @@ class DirectAzureDubRenderer:
                 blocks,
                 assignments,
                 options,
+                pronunciation_dictionary,
                 clean_background_stem,
                 seo_context.seo_path,
                 collision_resolution_payload,
@@ -14163,6 +14258,7 @@ class DirectAzureDubRenderer:
                         2000,
                     )
                 ),
+                protected_entities=block.protected_entities,
             )
             if pause_alignment.get("applied") and pause_parts:
                 pause_request = replace(request, parts=pause_parts)
@@ -14831,6 +14927,7 @@ class DirectAzureDubRenderer:
         blocks: Sequence[SpeechBlock],
         assignments: Mapping[str, Mapping[str, Any]],
         options: DirectDubOptions,
+        pronunciation_dictionary: PronunciationDictionary,
         clean_background_stem: Path | None,
         seo_path: Path,
         timeline_collision_resolutions: Mapping[str, Any],
@@ -14841,6 +14938,7 @@ class DirectAzureDubRenderer:
             "job_id": job.job_id,
             "source_sha256": checksum(Path(job.local_source_path)),
             "translation_sha256": checksum(translation_path),
+            "pronunciation_dictionary_sha256": pronunciation_dictionary.sha256,
             "seo_sha256": checksum(seo_path),
             "timeline_collision_resolutions": dict(
                 timeline_collision_resolutions
@@ -16611,6 +16709,7 @@ def coalesce_same_speaker_segments(
     segments: Sequence[ApprovedSegment],
     *,
     max_gap_ms: int = 1200,
+    preserve_opening_segment: bool = False,
 ) -> list[SpeechBlock]:
     """Join adjacent same-speaker units and preserve aligned variant families."""
     if max_gap_ms < 0:
@@ -16680,7 +16779,17 @@ def coalesce_same_speaker_segments(
             continue
         previous = pending[-1]
         gap_ms = segment.start_ms - previous.end_ms
-        if segment.speaker_id == previous.speaker_id and gap_ms <= max_gap_ms:
+        opening_segment_locked = (
+            preserve_opening_segment
+            and len(blocks) == 0
+            and len(pending) == 1
+            and pending[0].start_ms <= 1_000
+        )
+        if (
+            segment.speaker_id == previous.speaker_id
+            and gap_ms <= max_gap_ms
+            and not opening_segment_locked
+        ):
             pending.append(segment)
         else:
             flush()

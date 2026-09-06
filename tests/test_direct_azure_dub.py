@@ -68,6 +68,26 @@ def test_does_not_merge_same_speaker_across_meaningful_silence() -> None:
     ]
 
 
+def test_preserves_opening_unit_as_local_lipsync_endpoint() -> None:
+    segments = [
+        _segment("unit_0001", "SPEAKER_00", 110, 7445, "opening name anchor"),
+        _segment("unit_0002", "SPEAKER_00", 7445, 13863, "next clause"),
+        _segment("unit_0003", "SPEAKER_00", 13863, 21198, "third clause"),
+    ]
+
+    blocks = coalesce_same_speaker_segments(
+        segments,
+        max_gap_ms=1200,
+        preserve_opening_segment=True,
+    )
+
+    assert [block.segment_ids for block in blocks] == [
+        ("unit_0001",),
+        ("unit_0002", "unit_0003"),
+    ]
+    assert blocks[0].end_ms == 7445
+
+
 def test_borrows_only_bounded_trailing_transition_silence() -> None:
     blocks = [
         SpeechBlock("block_0001", "A", 0, 1000, ("s1",), "", "qala", "qala"),

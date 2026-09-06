@@ -16,6 +16,7 @@ from mathula_tv.direct_azure_dub import (
     build_performance_regions,
     build_semantic_island_ssml_parts,
     build_semantic_phrase_groups,
+    build_source_pause_ssml_parts,
     calibrate_source_pause_ssml_parts,
     DirectAzureDubRenderer,
     DirectDubError,
@@ -33,6 +34,29 @@ from mathula_tv.direct_azure_dub import (
 )
 from mathula_tv.errors import ClaudeRateLimit
 from mathula_tv.tts_ssml import BreakPart
+
+
+def test_source_pause_never_splits_a_protected_entity() -> None:
+    parts, audit = build_source_pause_ssml_parts(
+        "ukhuluma i-The Big Five cartel namuhla",
+        (
+            {
+                "source_progress": 0.5,
+                "source_gap_ms": 900,
+                "requested_pause_ms": 700,
+                "pause_kind": "phrase_pause",
+            },
+        ),
+        pause_budget_ms=700,
+        protected_entities=("The Big Five cartel",),
+    )
+
+    assert parts
+    insertion = audit["insertions"][0]
+    assert insertion["target_left_text"] not in {"i-The", "Big", "Five"}
+    assert insertion["source_gaps"][0][
+        "protected_entity_boundary_adjusted"
+    ] is True
 
 
 class _MeasuredBackend:

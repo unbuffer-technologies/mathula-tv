@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -9,12 +8,19 @@ from mathula_tv.atomic_io import atomic_write_json, read_json
 from mathula_tv.multivariant_translation import (
     INSTALLED_SCHEMA_VERSION,
     MultivariantTranslationError,
+    SYSTEM_PROMPT,
     build_translation_request,
     export_translation_package,
     install_manual_translation,
     normalize_multivariant_response,
     validate_multivariant_response,
 )
+
+
+def test_prompt_forbids_doubled_determiners_for_code_switched_names() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+    assert 'do not produce doubled determiners such as "I-The Hawks"' in prompt
+    assert '"Ama-Hawks athi"' in prompt
 
 
 def _source() -> dict:
@@ -109,6 +115,61 @@ def test_validates_source_bound_multivariant_response() -> None:
     result = validate_multivariant_response(_response(request), request=request)
     assert result["valid"] is True
     assert result["unit_count"] == 1
+
+
+def test_rejects_large_local_named_anchor_drift() -> None:
+    request = build_translation_request(
+        transcript=_source(),
+        target_locale="zu-ZA",
+        job_id="job-local-anchor-drift",
+    )
+    response = _response(request)
+    response["units"][0]["variants"][0]["spoken_text"] = (
+        "UDr Levy Ndou usemcimbini we-EFF eThohoyandou namhlanje."
+    )
+
+    with pytest.raises(
+        MultivariantTranslationError,
+        match=r"moves local named anchor 'Dr Levy Ndou'.*preserve its local source progression",
+    ):
+        validate_multivariant_response(response, request=request)
+
+
+def test_entity_binding_preserves_source_reference_specificity() -> None:
+    transcript = {
+        "language": "en-ZA",
+        "segments": [
+            {
+                "segment_id": "unit_0098",
+                "speaker": "SPEAKER_00",
+                "start": 0.0,
+                "end": 5.0,
+                "source_text": "Matlala was supposed to testify.",
+            }
+        ],
+    }
+    bindings = {
+        "per_unit_bindings": {
+            "unit_0098": {
+                "matches": [
+                    {
+                        "matched_source_text": "Matlala",
+                        "display_text": "Vusimuzi “Cat” Matlala",
+                        "canonical_text": "Vusimuzi Cat Matlala",
+                    }
+                ]
+            }
+        }
+    }
+
+    request = build_translation_request(
+        transcript=transcript,
+        target_locale="zu-ZA",
+        job_id="job-reference-specificity",
+        entity_bindings=bindings,
+    )
+
+    assert request["units"][0]["protected_spans"] == ["Matlala"]
 
 
 def test_rejects_substring_name_corruption() -> None:

@@ -227,6 +227,27 @@ def test_long_source_pause_is_split_into_azure_safe_breaks() -> None:
     assert '<break time="260ms" />' in document.xml
 
 
+def test_terminal_source_pause_does_not_double_azure_sentence_pause() -> None:
+    parts, audit = build_source_pause_ssml_parts(
+        "UZibi uhola le nhlamba. Ngakho siyaqhubeka.",
+        [
+            {
+                "source_progress": 0.5,
+                "source_gap_ms": 1740,
+                "requested_pause_ms": 1640,
+                "pause_kind": "island_boundary",
+            }
+        ],
+        pause_budget_ms=1640,
+    )
+
+    pauses = [part.duration_ms for part in parts if isinstance(part, BreakPart)]
+    assert pauses == [900]
+    assert audit["total_added_pause_ms"] == 900
+    assert audit["insertions"][0]["uncapped_duration_ms"] == 1640
+    assert audit["insertions"][0]["terminal_punctuation_cap_applied"] is True
+
+
 def test_source_pause_snaps_to_nearby_punctuation_boundary() -> None:
     _parts, audit = build_source_pause_ssml_parts(
         "i-Dee Ey, vumelani i-Dee Ey, gxilani",

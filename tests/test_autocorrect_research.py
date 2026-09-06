@@ -53,6 +53,86 @@ def correction() -> dict:
     }
 
 
+def test_researched_corrections_do_not_cascade_short_alias_into_long_replacement():
+    source = {
+        "segments": [
+            {
+                "segment_id": "seg-1",
+                "source_text": ("Ekurhuleni Mmunicipality and Ekurhuleni considered it."),
+            }
+        ]
+    }
+    corrected, _ = apply_researched_corrections(
+        source,
+        [
+            {
+                "segment_id": "seg-1",
+                "raw_text": "Ekurhuleni Mmunicipality",
+                "canonical_text": "City of Ekurhuleni",
+                "entity_type": "organisation",
+            },
+            {
+                "segment_id": "seg-1",
+                "raw_text": "Ekurhuleni",
+                "canonical_text": "City of Ekurhuleni",
+                "entity_type": "organisation",
+            },
+        ],
+    )
+
+    assert corrected["segments"][0]["source_text"] == ("City of Ekurhuleni and City of Ekurhuleni considered it.")
+
+
+def test_entity_cluster_preserves_valid_single_token_name_shape():
+    source = {
+        "segments": [
+            {
+                "segment_id": "seg-1",
+                "source_text": "Imogen met Mswazi and Mcibi.",
+            }
+        ]
+    }
+    canonical = "Jothan Mswazi Msibi"
+    corrections = [
+        {
+            "entity_id": "imogen",
+            "entity_type": "person",
+            "canonical_text": "Imogen Maboikanyo Mashazi",
+            "mentions": [{"segment_id": "seg-1", "raw_text": "Imogen"}],
+        },
+        {
+            "entity_id": "msibi",
+            "entity_type": "person",
+            "canonical_text": canonical,
+            "mentions": [
+                {"segment_id": "seg-1", "raw_text": "Mswazi"},
+                {"segment_id": "seg-1", "raw_text": "Mcibi"},
+            ],
+        },
+    ]
+
+    # Exercise the same cluster expansion used after web research.
+    from mathula_tv.autocorrect_research import _expand_entity_corrections
+
+    corrected, _ = apply_researched_corrections(source, _expand_entity_corrections(corrections))
+    assert corrected["segments"][0]["source_text"] == ("Imogen met Mswazi and Msibi.")
+
+
+def test_person_repair_does_not_inject_unspoken_legal_middle_name() -> None:
+    from mathula_tv.autocorrect_research import _mention_replacement
+
+    canonical = "Jothan Zanemvula Mswazi Msibi"
+
+    assert _mention_replacement("Jotham Mswazi", canonical, "person") == ("Jothan Mswazi")
+    assert _mention_replacement("Joshua Mswazium CB", canonical, "person") == ("Jothan Mswazi Msibi")
+    assert _mention_replacement("Jotham and Swazim Sibi", canonical, "person") == (
+        "Jothan Mswazi Msibi"
+    )
+    assert _mention_replacement("M Sibi", canonical, "person") == "Mswazi Msibi"
+    assert _mention_replacement("Imogen", "Dr Imogen Mashazi", "person") == "Imogen"
+    assert _mention_replacement("Dr Imogen", "Dr Imogen Mashazi", "person") == "Dr Imogen"
+
+
 class Metadata:
     server_tool_evidence = (
         {"url": "https://www.npa.gov.za/media/kganyago-khumalo", "title": "NPA"},
@@ -126,6 +206,8 @@ class EntityProvider:
         if self.error is not None:
             raise self.error
         assert request.operation == "autocorrect_entity_inventory"
+        assert request.effort == "low"
+        assert request.max_output_tokens == 12_000
         if self.entities is None:
             candidates = extract_name_candidates(request.payload["transcript"])
             entities = [
@@ -162,6 +244,133 @@ def test_extracts_sentence_initial_name_candidate() -> None:
     assert any(item["raw_text"] == "Kanyaku" for item in candidates)
 
 
+def test_deterministic_coverage_queues_name_omitted_by_ai_inventory() -> None:
+    from mathula_tv.autocorrect_research import (
+        _augment_inventory_with_deterministic_name_coverage,
+    )
+
+    source = {
+        "segments": [
+            {
+                "segment_id": "seg-1",
+                "source_text": "Reporter Alice Smith interviewed François Dupont.",
+            }
+        ]
+    }
+    inventory = {
+        "status": "completed",
+        "entities": [
+            {
+                "entity_id": "alice-smith",
+                "canonical_name": "Alice Smith",
+                "entity_type": "person",
+                "confidence": 0.99,
+                "needs_research": False,
+                "reason": "Clear in transcript",
+                "surface_forms": ["Alice Smith"],
+                "mentions": [{"segment_id": "seg-1", "raw_text": "Alice Smith"}],
+            }
+        ],
+    }
+
+    augmented = _augment_inventory_with_deterministic_name_coverage(inventory, source)
+
+    assert augmented["status"] == "completed_with_coverage_backstop"
+    assert augmented["all_detected_names_queued_for_research"] is True
+    assert augmented["deterministic_coverage_fallback_entity_count"] == 1
+    fallback = next(
+        item for item in augmented["candidate_entities"] if item["representative_text"] == "François Dupont"
+    )
+    assert fallback["research_goals"] == [
+        "canonical_identity",
+        "target_locale_pronunciation",
+    ]
+
+
+def test_deterministic_coverage_attaches_repeated_short_name_to_existing_entity() -> None:
+    from mathula_tv.autocorrect_research import (
+        _augment_inventory_with_deterministic_name_coverage,
+    )
+
+    source = {
+        "segments": [
+            {"segment_id": "seg-1", "source_text": "Alice Smith spoke."},
+            {
+                "segment_id": "seg-2",
+                "source_text": "Anyway, Smith answered later.",
+            },
+        ]
+    }
+    inventory = {
+        "status": "completed",
+        "entities": [
+            {
+                "entity_id": "alice-smith",
+                "canonical_name": "Alice Smith",
+                "entity_type": "person",
+                "confidence": 0.99,
+                "needs_research": False,
+                "reason": "Clear in transcript",
+                "surface_forms": ["Alice Smith"],
+                "mentions": [{"segment_id": "seg-1", "raw_text": "Alice Smith"}],
+            }
+        ],
+    }
+
+    augmented = _augment_inventory_with_deterministic_name_coverage(inventory, source)
+
+    assert augmented["deterministic_coverage_fallback_entity_count"] == 0
+    assert augmented["entity_count"] == 1
+    assert augmented["entities"][0]["mentions"][-1] == {
+        "segment_id": "seg-2",
+        "raw_text": "Smith",
+    }
+
+
+def test_web_schema_tolerates_anonymous_label_and_empty_optional_fields() -> None:
+    from mathula_tv.autocorrect_research import _OUTPUT_SCHEMA
+
+    correction = _OUTPUT_SCHEMA["properties"]["corrections"]["items"]["properties"]
+    assert "anonymous_witness" in correction["entity_type"]["enum"]
+    assert "minLength" not in correction["canonical_text"]
+    assert "minLength" not in correction["pronunciation_ipa"]
+
+
+def test_inventory_drops_single_common_word_from_person_name_cluster() -> None:
+    from mathula_tv.autocorrect_research import _normalise_entity_inventory
+
+    source = {
+        "segments": [
+            {
+                "segment_id": "seg-1",
+                "source_text": "Jotham Mswazi was using the badge.",
+            }
+        ]
+    }
+    response = {
+        "entities": [
+            {
+                "entity_id": "msibi",
+                "canonical_name": "Jothan Mswazi Msibi",
+                "entity_type": "person",
+                "confidence": 0.8,
+                "needs_research": True,
+                "reason": "STT variants",
+                "surface_forms": ["Jotham Mswazi", "was"],
+                "mentions": [
+                    {"segment_id": "seg-1", "raw_text": "Jotham Mswazi"},
+                    {"segment_id": "seg-1", "raw_text": "was"},
+                ],
+            }
+        ]
+    }
+
+    normalized = _normalise_entity_inventory(response, source)
+
+    assert normalized["entities"][0]["mentions"] == [{"segment_id": "seg-1", "raw_text": "Jotham Mswazi"}]
+    assert normalized["entities"][0]["surface_forms"] == ["Jotham Mswazi"]
+
+
 def test_accepts_two_source_same_story_correction() -> None:
     accepted, rejected = validate_researched_corrections(
         {"corrections": [correction()]},
@@ -182,9 +391,179 @@ def test_rejects_unsupported_name_replacement() -> None:
         actual_evidence_urls=["https://example.com/claim"],
     )
     assert accepted == []
-    assert rejected[0]["validation_reason"] == (
-        "insufficient_independent_or_authoritative_sources"
+    assert rejected[0]["validation_reason"] == ("insufficient_independent_or_authoritative_sources")
+
+
+def test_accepts_092_identity_confidence_with_three_independent_domains() -> None:
+    item = correction()
+    item["confidence"] = 0.93
+    item["source_urls"] = [
+        "https://one.example/report",
+        "https://two.example/report",
+        "https://three.example/report",
+    ]
+
+    accepted, rejected = validate_researched_corrections(
+        {"corrections": [item]},
+        candidates=extract_name_candidates(transcript()),
+        actual_evidence_urls=item["source_urls"],
     )
+
+    assert rejected == []
+    assert accepted[0]["canonical_text"] == "Kganyago"
+
+
+def test_keeps_095_threshold_for_only_two_independent_domains() -> None:
+    item = correction()
+    item["confidence"] = 0.93
+    item["source_urls"] = [
+        "https://one.example/report",
+        "https://two.example/report",
+    ]
+
+    accepted, rejected = validate_researched_corrections(
+        {"corrections": [item]},
+        candidates=extract_name_candidates(transcript()),
+        actual_evidence_urls=item["source_urls"],
+    )
+
+    assert accepted == []
+    assert rejected[0]["validation_reason"] == ("confidence_below_evidence_tier_threshold")
+
+
+def _big_five_pronunciation_candidate() -> dict:
+    return {
+        "entity_id": "the-big-five-cartel",
+        "entity_type": "organisation",
+        "representative_text": "Big Five cartel",
+        "canonical_name_hint": "The Big Five cartel",
+        "aliases": ["Big Five cartel", "Big Five organized crime cartel"],
+        "mentions": [
+            {"segment_id": "seg-1", "raw_text": "Big Five cartel"},
+        ],
+        "needs_identity_research": False,
+        "needs_pronunciation_research": True,
+        "research_goals": ["target_locale_pronunciation"],
+    }
+
+
+def test_accepts_grounded_pronunciation_without_rewriting_transcript() -> None:
+    pronunciation_url = "https://news.example.test/video/big-five-cartel"
+    response = {
+        "corrections": [
+            {
+                "entity_id": "the-big-five-cartel",
+                "entity_type": "organisation",
+                "canonical_text": "The Big Five cartel",
+                "confidence": 1.0,
+                "source_urls": [pronunciation_url],
+                "story_match_terms": ["cartel", "commission"],
+                "reason": "Canonical identity is unchanged.",
+                "pronunciation_mode": "word_name",
+                "pronunciation_evidence_urls": [pronunciation_url],
+                "pronunciation_tts_text": "The Big Faiv cartel",
+                "pronunciation_confidence": 0.97,
+                "pronunciation_reason": "The recording says Five, not fever.",
+            }
+        ]
+    }
+
+    accepted, rejected = validate_researched_corrections(
+        response,
+        candidates=[_big_five_pronunciation_candidate()],
+        actual_evidence_urls=[pronunciation_url],
+    )
+
+    assert rejected == []
+    assert accepted[0]["correction_mode"] == "target_locale_pronunciation"
+    assert accepted[0]["grounded_pronunciation_evidence_urls"] == [pronunciation_url]
+
+    from mathula_tv.autocorrect_research import _expand_entity_corrections
+
+    source = {"segments": [{"segment_id": "seg-1", "source_text": "The Big Five cartel spoke."}]}
+    corrected, applied = apply_researched_corrections(source, _expand_entity_corrections(accepted))
+    assert corrected["segments"] == source["segments"]
+    assert applied == []
+
+
+def test_rejects_ungrounded_or_renamed_stable_entity_pronunciation() -> None:
+    candidate = _big_five_pronunciation_candidate()
+    item = {
+        "entity_id": "the-big-five-cartel",
+        "entity_type": "organisation",
+        "canonical_text": "The Big Five cartel",
+        "pronunciation_mode": "word_name",
+        "pronunciation_evidence_urls": ["https://unseen.example/pronunciation"],
+        "pronunciation_tts_text": "The Big Faiv cartel",
+        "pronunciation_confidence": 0.97,
+    }
+    accepted, rejected = validate_researched_corrections(
+        {"corrections": [item]},
+        candidates=[candidate],
+        actual_evidence_urls=[],
+    )
+    assert accepted == []
+    assert rejected[0]["validation_reason"] == ("pronunciation_has_no_direct_grounded_evidence")
+
+    renamed = {**item, "canonical_text": "Big Five Gang"}
+    accepted, rejected = validate_researched_corrections(
+        {"corrections": [renamed]},
+        candidates=[candidate],
+        actual_evidence_urls=["https://unseen.example/pronunciation"],
+    )
+    assert accepted == []
+    assert rejected[0]["validation_reason"] == ("stable_inventory_identity_must_not_change")
+
+
+def test_accepts_inventory_approved_spoken_alias_for_pronunciation() -> None:
+    url = "https://broadcaster.example/video/the-hawks"
+    candidate = {
+        "entity_id": "dpci",
+        "entity_type": "organisation",
+        "representative_text": "The Hawks",
+        "canonical_name_hint": "Directorate for Priority Crime Investigation",
+        "aliases": [
+            "The Hawks",
+            "Directorate for Priority Crime Investigation",
+        ],
+        "mentions": [{"segment_id": "seg-1", "raw_text": "The Hawks"}],
+        "needs_identity_research": False,
+        "needs_pronunciation_research": True,
+        "research_goals": ["target_locale_pronunciation"],
+    }
+    item = {
+        "entity_id": "dpci",
+        "entity_type": "organisation",
+        "canonical_text": "The Hawks",
+        "pronunciation_mode": "word_name",
+        "pronunciation_evidence_urls": [url],
+        "pronunciation_tts_text": "Dha Hoks",
+        "pronunciation_confidence": 0.94,
+    }
+
+    accepted, rejected = validate_researched_corrections(
+        {"corrections": [item]},
+        candidates=[candidate],
+        actual_evidence_urls=[url],
+    )
+
+    assert rejected == []
+    assert accepted[0]["canonical_text"] == "The Hawks"
+    assert accepted[0]["correction_mode"] == "target_locale_pronunciation"
+
+
+def test_source_provenance_exposes_only_exact_ingested_urls() -> None:
+    from mathula_tv.autocorrect_research import _source_provenance_urls
+
+    assert _source_provenance_urls(
+        {
+            "youtube_source": {
+                "requested_url": "https://www.youtube.com/watch?v=source123",
+                "video_id": "source123",
+                "title": "Untrusted title text",
+            }
+        }
+    ) == ["https://www.youtube.com/watch?v=source123"]
 
 
 def test_applies_name_to_authoritative_transcript_and_words() -> None:
@@ -213,7 +592,6 @@ def test_research_call_is_cached_by_authoritative_input(tmp_path: Path) -> None:
         job=job,
         transcript=transcript(),
         provider=provider,
-
         entity_provider=EntityProvider(),
     )
     second = run_name_research_autocorrection(
@@ -221,7 +599,6 @@ def test_research_call_is_cached_by_authoritative_input(tmp_path: Path) -> None:
         job=job,
         transcript=transcript(),
         provider=provider,
-
         entity_provider=EntityProvider(),
     )
 
@@ -270,9 +647,7 @@ def test_console_corrections_can_be_disabled(capsys, monkeypatch) -> None:
 
 def test_anonymous_witness_designations_are_not_research_candidates() -> None:
     source = transcript()
-    source["segments"][0]["source_text"] = (
-        "Witness M appeared before the Madlanga Commission with Andrea Johnson."
-    )
+    source["segments"][0]["source_text"] = "Witness M appeared before the Madlanga Commission with Andrea Johnson."
     candidates = extract_name_candidates(source)
     raw = {item["raw_text"] for item in candidates}
     assert "Witness M" not in raw
@@ -281,9 +656,7 @@ def test_anonymous_witness_designations_are_not_research_candidates() -> None:
 
 def test_builds_madlanga_commission_research_profile() -> None:
     profile = build_research_profile(
-        transcript={
-            "complete_text": "The Madlanga Commission heard Advocate Andrea Johnson."
-        },
+        transcript={"complete_text": "The Madlanga Commission heard Advocate Andrea Johnson."},
         source_metadata={
             "youtube_source": {
                 "title": "Madlanga Commission Day 146 | Andrea Johnson",
@@ -291,9 +664,7 @@ def test_builds_madlanga_commission_research_profile() -> None:
             }
         },
         local_context={
-            "entity_bindings": {
-                "entities_found_global": ["case_or_inquiry_madlanga_commission"]
-            },
+            "entity_bindings": {"entities_found_global": ["case_or_inquiry_madlanga_commission"]},
             "context_providers": [],
         },
     )
@@ -309,15 +680,11 @@ def test_accepts_one_official_madlanga_commission_source() -> None:
         **correction(),
         "raw_text": "Padayashi",
         "canonical_text": "Padayachee",
-        "source_urls": [
-            "https://criminaljusticecommission.org.za/hearings/2026/07/14"
-        ],
+        "source_urls": ["https://criminaljusticecommission.org.za/hearings/2026/07/14"],
         "story_match_terms": ["IDAC", "Khumalo", "Madlanga Commission"],
     }
     source = transcript()
-    source["segments"][0]["source_text"] = (
-        "Padayashi testified about IDAC and Khumalo at the Madlanga Commission."
-    )
+    source["segments"][0]["source_text"] = "Padayashi testified about IDAC and Khumalo at the Madlanga Commission."
     accepted, rejected = validate_researched_corrections(
         {"corrections": [item]},
         candidates=extract_name_candidates(source),
@@ -333,8 +700,7 @@ def test_madlanga_profile_and_local_context_reach_research_agent(tmp_path: Path)
     (job_root / "analysis").mkdir(parents=True)
     (job_root / "input").mkdir(parents=True)
     (job_root / "input" / "youtube_source.json").write_text(
-        '{"title":"Madlanga Commission Day 146 | Andrea Johnson",'
-        '"channel":"SABC News","video_id":"abc"}',
+        '{"title":"Madlanga Commission Day 146 | Andrea Johnson","channel":"SABC News","video_id":"abc"}',
         encoding="utf-8",
     )
     (job_root / "analysis" / "domain_classification.json").write_text(
@@ -362,28 +728,24 @@ def test_madlanga_profile_and_local_context_reach_research_agent(tmp_path: Path)
         job=job,
         transcript=transcript(),
         provider=provider,
-
         entity_provider=EntityProvider(),
     )
 
     payload = provider.last_request.payload
     assert payload["research_profile"]["name"] == "madlanga_commission"
     assert payload["research_profile"]["hearing_clues"]["day_numbers"] == ["146"]
-    assert payload["local_context"]["context_providers"][0][
-        "provider_name"
-    ] == "commission-master-case"
+    assert payload["local_context"]["context_providers"][0]["provider_name"] == "commission-master-case"
     assert payload["requirements"]["preserve_anonymous_witness_designations"] is True
+    assert payload["requirements"]["perform_entity_specific_web_search_for_every_supplied_entity"] is True
+    assert payload["requirements"]["preserve_non_african_source_language_pronunciation"] is True
 
 
-def test_new_job_reads_candidate_matched_master_case_before_context_exists(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_new_job_reads_candidate_matched_master_case_before_context_exists(tmp_path: Path, monkeypatch) -> None:
     job_root = tmp_path / "working" / "jobs" / "job-madlanga-new"
     (job_root / "analysis").mkdir(parents=True)
     (job_root / "input").mkdir(parents=True)
     (job_root / "input" / "youtube_source.json").write_text(
-        '{"title":"Madlanga Commission | Khumalo charges",'
-        '"channel":"SABC News","video_id":"abc"}',
+        '{"title":"Madlanga Commission | Khumalo charges","channel":"SABC News","video_id":"abc"}',
         encoding="utf-8",
     )
     master_case = tmp_path / "master_case_state.json"
@@ -407,21 +769,17 @@ def test_new_job_reads_candidate_matched_master_case_before_context_exists(
         job=job,
         transcript=transcript(),
         provider=provider,
-
         entity_provider=EntityProvider(),
     )
 
-    master_context = provider.last_request.payload["local_context"][
-        "commission_master_case"
-    ]
+    master_context = provider.last_request.payload["local_context"]["commission_master_case"]
     assert master_context["status"] == "loaded"
     assert any(
-        "Kganyago" in item["name"] or "Kganyago" in item["excerpt"]
-        for item in master_context["candidate_matches"]
+        "Kganyago" in item["name"] or "Kganyago" in item["excerpt"] for item in master_context["candidate_matches"]
     )
 
 
-def test_exact_registry_name_is_not_sent_for_web_research(tmp_path: Path) -> None:
+def test_exact_registry_name_is_sent_for_pronunciation_research(tmp_path: Path) -> None:
     job_root = tmp_path / "working" / "jobs" / "job-known"
     (job_root / "analysis").mkdir(parents=True)
     registry = tmp_path / "entity_registry.json"
@@ -448,12 +806,11 @@ def test_exact_registry_name_is_not_sent_for_web_research(tmp_path: Path) -> Non
         transcript=source,
         registry_path=registry,
         provider=provider,
-
         entity_provider=EntityProvider(),
     )
 
-    assert provider.calls == 0
-    assert result["artifact"]["status"] == "no_research_candidates"
+    assert provider.calls == 1
+    assert result["artifact"]["status"] == "completed"
     assert result["artifact"]["extracted_candidate_count"] >= 1
 
 
@@ -465,9 +822,7 @@ def test_latest_configured_confusion_guard_is_preserved(tmp_path: Path) -> None:
     config = tmp_path / "config"
     config.mkdir()
     (config / "autocorrect_hints.json").write_text(
-        '{"rules":[{"pattern":"\\\\bKanyaku\\\\b",'
-        '"replacement":"Kganyago","flags":["IGNORECASE"],'
-        '"auto_apply":true}]}',
+        '{"rules":[{"pattern":"\\\\bKanyaku\\\\b","replacement":"Kganyago","flags":["IGNORECASE"],"auto_apply":true}]}',
         encoding="utf-8",
     )
     source = transcript()
@@ -479,9 +834,7 @@ def test_latest_configured_confusion_guard_is_preserved(tmp_path: Path) -> None:
         )
 
 
-def test_default_research_backend_uses_azure_responses_web_search(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_default_research_backend_uses_azure_responses_web_search(tmp_path: Path, monkeypatch) -> None:
     job_root = tmp_path / "working" / "jobs" / "job-azure"
     (job_root / "analysis").mkdir(parents=True)
     job = SimpleNamespace(
@@ -511,15 +864,12 @@ def test_default_research_backend_uses_azure_responses_web_search(
         job=job,
         transcript=transcript(),
         provider=None,
-
         entity_provider=EntityProvider(),
         force=True,
     )
 
     assert backend.calls == 1
-    assert result["transcript"]["segments"][0]["source_text"].startswith(
-        "Kganyago"
-    )
+    assert result["transcript"]["segments"][0]["source_text"].startswith("Kganyago")
 
 
 def test_failed_research_artifact_is_not_reused_as_cache(tmp_path: Path) -> None:
@@ -545,7 +895,6 @@ def test_failed_research_artifact_is_not_reused_as_cache(tmp_path: Path) -> None
         job=job,
         transcript=transcript(),
         provider=failing,
-
         entity_provider=EntityProvider(),
     )
     assert first["artifact"]["status"] == "research_failed_advisory"
@@ -556,16 +905,13 @@ def test_failed_research_artifact_is_not_reused_as_cache(tmp_path: Path) -> None
         job=job,
         transcript=transcript(),
         provider=succeeding,
-
         entity_provider=EntityProvider(),
     )
 
     assert failing.calls == 1
     assert succeeding.calls == 1
     assert second["artifact"]["status"] == "completed"
-    assert second["transcript"]["segments"][0]["source_text"].startswith(
-        "Kganyago"
-    )
+    assert second["transcript"]["segments"][0]["source_text"].startswith("Kganyago")
 
 
 def test_large_transcript_is_compacted_and_batched(tmp_path: Path, monkeypatch) -> None:
@@ -585,9 +931,7 @@ def test_large_transcript_is_compacted_and_batched(tmp_path: Path, monkeypatch) 
                 "segment_id": f"seg-{index}",
                 "start": index * 2.0,
                 "end": index * 2.0 + 1.5,
-                "source_text": (
-                    f"NPA spokesperson {name} discussed Khumalo and the charges."
-                ),
+                "source_text": (f"NPA spokesperson {name} discussed Khumalo and the charges."),
                 "words": [{"text": name}] * 1000,
             }
         )
@@ -626,7 +970,6 @@ def test_large_transcript_is_compacted_and_batched(tmp_path: Path, monkeypatch) 
         job=job,
         transcript=source,
         provider=provider,
-
         entity_provider=EntityProvider(),
         force=True,
     )
@@ -635,16 +978,23 @@ def test_large_transcript_is_compacted_and_batched(tmp_path: Path, monkeypatch) 
     assert all("transcript" not in payload for payload in provider.calls)
     assert all("transcript_context" in payload for payload in provider.calls)
     assert all(len(str(payload)) < 100_000 for payload in provider.calls)
-    assert result["artifact"]["request_compaction"][
-        "full_transcript_json_chars"
-    ] > result["artifact"]["request_compaction"][
-        "largest_batch_request_json_chars"
-    ] * 5
+    assert (
+        result["artifact"]["request_compaction"]["full_transcript_json_chars"]
+        > result["artifact"]["request_compaction"]["largest_batch_request_json_chars"] * 5
+    )
 
 
-def test_one_failed_batch_does_not_discard_successful_kganyago_correction(
-    tmp_path: Path, monkeypatch
+def test_research_batch_never_exceeds_per_entity_web_search_capacity(
+    monkeypatch,
 ) -> None:
+    from mathula_tv.autocorrect_research import _research_batch_size
+
+    monkeypatch.setenv("MATHULA_TV_AUTOCORRECT_RESEARCH_BATCH_SIZE", "20")
+
+    assert _research_batch_size() == 8
+
+
+def test_one_failed_batch_does_not_discard_successful_kganyago_correction(tmp_path: Path, monkeypatch) -> None:
     job_root = tmp_path / "working" / "jobs" / "job-partial"
     (job_root / "analysis").mkdir(parents=True)
     source = transcript()
@@ -681,16 +1031,13 @@ def test_one_failed_batch_does_not_discard_successful_kganyago_correction(
         job=job,
         transcript=source,
         provider=provider,
-
         entity_provider=EntityProvider(),
         force=True,
     )
 
     assert result["artifact"]["status"] == "completed_with_batch_failures"
     assert result["artifact"]["applied_count"] == 1
-    assert result["transcript"]["segments"][0]["source_text"].startswith(
-        "Kganyago"
-    )
+    assert result["transcript"]["segments"][0]["source_text"].startswith("Kganyago")
     assert result["artifact"]["batch_failures"]
 
 
@@ -714,7 +1061,6 @@ def test_job_cache_ignores_volatile_autocorrect_timestamps(tmp_path: Path) -> No
         job=job,
         transcript=first_transcript,
         provider=provider,
-
         entity_provider=EntityProvider(),
     )
     second = run_name_research_autocorrection(
@@ -722,7 +1068,6 @@ def test_job_cache_ignores_volatile_autocorrect_timestamps(tmp_path: Path) -> No
         job=job,
         transcript=second_transcript,
         provider=provider,
-
         entity_provider=EntityProvider(),
     )
 
@@ -730,13 +1075,9 @@ def test_job_cache_ignores_volatile_autocorrect_timestamps(tmp_path: Path) -> No
     assert second["artifact"]["cache_reused"] is True
 
 
-def test_accepted_correction_cache_reused_across_matching_jobs(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_accepted_correction_cache_reused_across_matching_jobs(tmp_path: Path, monkeypatch) -> None:
     cache_dir = tmp_path / "shared-name-cache"
-    monkeypatch.setenv(
-        "MATHULA_TV_AUTOCORRECT_RESEARCH_CACHE_DIR", str(cache_dir)
-    )
+    monkeypatch.setenv("MATHULA_TV_AUTOCORRECT_RESEARCH_CACHE_DIR", str(cache_dir))
     first_root = tmp_path / "working" / "jobs" / "job-a"
     second_root = tmp_path / "working" / "jobs" / "job-b"
     (first_root / "analysis").mkdir(parents=True)
@@ -754,7 +1095,6 @@ def test_accepted_correction_cache_reused_across_matching_jobs(
         job=first_job,
         transcript=transcript(),
         provider=first_provider,
-
         entity_provider=EntityProvider(),
     )
     assert first_provider.calls == 1
@@ -768,10 +1108,7 @@ def test_accepted_correction_cache_reused_across_matching_jobs(
 
         def complete_structured(self, request):
             self.calls += 1
-            assert [
-                item["representative_text"]
-                for item in request.payload["candidate_entities"]
-            ] == ["Khumalo"]
+            assert [item["representative_text"] for item in request.payload["candidate_entities"]] == ["Khumalo"]
             candidate = request.payload["candidate_entities"][0]
             return SimpleNamespace(
                 data={
@@ -799,23 +1136,137 @@ def test_accepted_correction_cache_reused_across_matching_jobs(
         job=second_job,
         transcript=second_source,
         provider=second_provider,
-
         entity_provider=EntityProvider(),
     )
 
     assert second_provider.calls == 1
-    assert second["transcript"]["segments"][0]["source_text"].startswith(
-        "Kganyago"
-    )
-    assert second["artifact"]["persistent_cache"][
-        "accepted_correction_hits"
-    ] == 1
+    assert second["transcript"]["segments"][0]["source_text"].startswith("Kganyago")
+    assert second["artifact"]["persistent_cache"]["accepted_correction_hits"] == 1
     assert second["artifact"]["provider_call_count"] == 1
 
 
-def test_progress_reports_batch_start_and_completion(
-    tmp_path: Path, capsys, monkeypatch
-) -> None:
+def test_grounded_foreign_name_pronunciation_is_learned_by_canonical_name(tmp_path: Path, monkeypatch) -> None:
+    cache_dir = tmp_path / "shared-pronunciation-cache"
+    monkeypatch.setenv("MATHULA_TV_AUTOCORRECT_RESEARCH_CACHE_DIR", str(cache_dir))
+    identity_urls = [
+        "https://official.example/jozef-kowalski",
+        "https://news.example/jozef-kowalski",
+    ]
+    pronunciation_url = "https://video.example/jozef-says-name"
+
+    class ForeignMetadata:
+        server_tool_evidence = tuple({"url": url, "title": "Evidence"} for url in [*identity_urls, pronunciation_url])
+
+        def to_dict(self):
+            return {
+                "provider": "test",
+                "server_tool_evidence": list(self.server_tool_evidence),
+            }
+
+    class ForeignProvider:
+        calls = 0
+
+        def complete_structured(self, request):
+            self.calls += 1
+            candidate = request.payload["candidate_entities"][0]
+            return SimpleNamespace(
+                data={
+                    "schema_version": "mathula-autocorrect-name-research-v2",
+                    "corrections": [
+                        {
+                            "entity_id": candidate["entity_id"],
+                            "canonical_text": "Józef Kowalski",
+                            "entity_type": "person",
+                            "confidence": 0.99,
+                            "source_urls": identity_urls,
+                            "story_match_terms": ["interview", "Warsaw"],
+                            "reason": "Official identity and same-story report agree.",
+                            "pronunciation_mode": "word_name",
+                            "pronunciation_evidence_urls": [pronunciation_url],
+                            "pronunciation_tts_text": "Yoo-zef Ko-val-ski",
+                            "pronunciation_confidence": 0.96,
+                            "pronunciation_reason": "The bearer says his name in Polish.",
+                            "pronunciation_language": "pl-PL",
+                            "pronunciation_ipa": "/ˈjuzɛf kɔˈvalskʲi/",
+                            "pronunciation_source_text": "Józef Kowalski",
+                        }
+                    ],
+                    "unresolved_candidates": [],
+                },
+                metadata=ForeignMetadata(),
+            )
+
+    first_root = tmp_path / "working" / "jobs" / "foreign-a"
+    second_root = tmp_path / "working" / "jobs" / "foreign-b"
+    (first_root / "analysis").mkdir(parents=True)
+    (second_root / "analysis").mkdir(parents=True)
+    uncertain_entity = [
+        {
+            "entity_id": "jozef",
+            "canonical_name": "",
+            "entity_type": "person",
+            "confidence": 0.4,
+            "needs_research": True,
+            "reason": "STT spelling is uncertain",
+            "surface_forms": ["Yosef Kovalski"],
+            "mentions": [{"segment_id": "seg-1", "raw_text": "Yosef Kovalski"}],
+        }
+    ]
+    first_source = {"segments": [{"segment_id": "seg-1", "source_text": "Yosef Kovalski spoke in Warsaw."}]}
+    provider = ForeignProvider()
+    first = run_name_research_autocorrection(
+        job_root=first_root,
+        job=SimpleNamespace(
+            job_id="foreign-a",
+            source_filename="interview.mp4",
+            local_source_path="/tmp/a.mp4",
+            source_language="en-ZA",
+        ),
+        transcript=first_source,
+        provider=provider,
+        entity_provider=EntityProvider(uncertain_entity),
+        force=True,
+    )
+    assert first["artifact"]["persistent_cache"]["learned_canonical_pronunciations"] == 1
+
+    stable_entity = [
+        {
+            **uncertain_entity[0],
+            "canonical_name": "Józef Kowalski",
+            "confidence": 0.99,
+            "needs_research": False,
+            "reason": "Canonical spelling is clear",
+            "surface_forms": ["Józef Kowalski"],
+            "mentions": [{"segment_id": "seg-1", "raw_text": "Józef Kowalski"}],
+        }
+    ]
+    second = run_name_research_autocorrection(
+        job_root=second_root,
+        job=SimpleNamespace(
+            job_id="foreign-b",
+            source_filename="second interview.mp4",
+            local_source_path="/tmp/b.mp4",
+            source_language="en-ZA",
+        ),
+        transcript={
+            "segments": [
+                {
+                    "segment_id": "seg-1",
+                    "source_text": "Józef Kowalski spoke in Warsaw.",
+                }
+            ]
+        },
+        provider=ForeignProvider(),
+        entity_provider=EntityProvider(stable_entity),
+    )
+
+    assert second["artifact"]["persistent_cache"]["accepted_correction_hits"] == 1
+    learned = second["artifact"]["accepted_corrections"][0]
+    assert learned["pronunciation_language"] == "pl-PL"
+    assert learned["pronunciation_tts_text"] == "Yoo-zef Ko-val-ski"
+
+
+def test_progress_reports_batch_start_and_completion(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.setenv("MATHULA_TV_AUTOCORRECT_SHOW_PROGRESS", "1")
     job_root = tmp_path / "working" / "jobs" / "job-progress"
     (job_root / "analysis").mkdir(parents=True)
@@ -832,7 +1283,6 @@ def test_progress_reports_batch_start_and_completion(
         job=job,
         transcript=transcript(),
         provider=provider,
-
         entity_provider=EntityProvider(),
         force=True,
     )
@@ -890,9 +1340,7 @@ def test_candidate_extraction_strips_possessive_punctuation() -> None:
         "segments": [
             {
                 "segment_id": "seg-1",
-                "source_text": (
-                    "Brigadier Dineo Mokwele's statement mentioned the NDPP's review."
-                ),
+                "source_text": ("Brigadier Dineo Mokwele's statement mentioned the NDPP's review."),
             }
         ]
     }
@@ -902,12 +1350,14 @@ def test_candidate_extraction_strips_possessive_punctuation() -> None:
     assert "NDPP" not in raw  # stable exact institutional acronym
 
 
-def test_registry_display_and_stt_forms_skip_web_research(tmp_path: Path) -> None:
+def test_registry_display_and_stt_forms_still_receive_pronunciation_research(
+    tmp_path: Path,
+) -> None:
     job_root = tmp_path / "working" / "jobs" / "job-registry"
     (job_root / "analysis").mkdir(parents=True)
     registry = tmp_path / "entity_registry.json"
     registry.write_text(
-        '''{
+        """{
           "entities": [
             {
               "canonical_text": "Judicial Commission of Inquiry into Allegations of State Capture",
@@ -916,7 +1366,7 @@ def test_registry_display_and_stt_forms_skip_web_research(tmp_path: Path) -> Non
               "stt_phrases": ["State Capture Commission"]
             }
           ]
-        }''',
+        }""",
         encoding="utf-8",
     )
     provider = Provider()
@@ -941,7 +1391,6 @@ def test_registry_display_and_stt_forms_skip_web_research(tmp_path: Path) -> Non
         transcript=source,
         registry_path=registry,
         provider=provider,
-
         entity_provider=EntityProvider(),
     )
 
@@ -950,7 +1399,7 @@ def test_registry_display_and_stt_forms_skip_web_research(tmp_path: Path) -> Non
         for item in provider.last_request.payload["candidate_entities"]
         for alias in item.get("research_aliases", item.get("aliases", []))
     }
-    assert "Zondo Commission" not in sent
+    assert "Zondo Commission" in sent
     assert "Kanyaku" in sent
     assert result["artifact"]["known_registry_hit_count"] >= 1
 
@@ -967,10 +1416,7 @@ def test_actual_news_snippet_filters_normal_words_before_research() -> None:
             },
             {
                 "segment_id": "seg-2",
-                "source_text": (
-                    "Malanga Commission. For example, Advocate Mhutibi referred to "
-                    "Mr. Kaiser Kanyahude."
-                ),
+                "source_text": ("Malanga Commission. For example, Advocate Mhutibi referred to Mr. Kaiser Kanyahude."),
             },
         ]
     }
@@ -984,8 +1430,7 @@ def test_actual_news_snippet_filters_normal_words_before_research() -> None:
     ]
 
 
-
-def test_web_search_receives_only_ai_confirmed_uncertain_names(tmp_path: Path) -> None:
+def test_web_search_receives_all_inventory_entities_for_pronunciation(tmp_path: Path) -> None:
     job_root = tmp_path / "working" / "jobs" / "job-ai-gate"
     (job_root / "analysis").mkdir(parents=True)
     source = {
@@ -1018,9 +1463,7 @@ def test_web_search_receives_only_ai_confirmed_uncertain_names(tmp_path: Path) -
             "needs_research": False,
             "reason": "Stable and internally consistent court name",
             "surface_forms": ["Constitutional Court"],
-            "mentions": [
-                {"segment_id": "seg-1", "raw_text": "Constitutional Court"}
-            ],
+            "mentions": [{"segment_id": "seg-1", "raw_text": "Constitutional Court"}],
         },
         {
             "entity_id": "eff",
@@ -1051,11 +1494,12 @@ def test_web_search_receives_only_ai_confirmed_uncertain_names(tmp_path: Path) -
         def complete_structured(self, request):
             self.calls += 1
             self.last_request = request
-            assert [
-                item["representative_text"]
-                for item in request.payload["candidate_entities"]
-            ] == ["Mr. Blosser"]
-            candidate = request.payload["candidate_entities"][0]
+            assert [item["representative_text"] for item in request.payload["candidate_entities"]] == [
+                "Parliament",
+                "Constitutional Court",
+                "EFF",
+                "Mr. Blosser",
+            ]
             return SimpleNamespace(
                 data={
                     "schema_version": "mathula-autocorrect-name-research-v2",
@@ -1065,6 +1509,7 @@ def test_web_search_receives_only_ai_confirmed_uncertain_names(tmp_path: Path) -
                             "entity_id": candidate["entity_id"],
                             "reason": "not enough evidence",
                         }
+                        for candidate in request.payload["candidate_entities"]
                     ],
                 },
                 metadata=Metadata(),
@@ -1090,11 +1535,18 @@ def test_web_search_receives_only_ai_confirmed_uncertain_names(tmp_path: Path) -
     assert result["artifact"]["candidate_source"] == "ai_entity_inventory_clusters"
     assert result["artifact"]["entity_count"] == 4
     assert result["artifact"]["research_entity_count"] == 1
-    assert result["artifact"]["candidate_count"] == 1
-    assert result["artifact"]["candidate_name_spans"][0]["raw_text"] == "Mr. Blosser"
+    assert result["artifact"]["candidate_count"] == 4
+    assert {item["raw_text"] for item in result["artifact"]["candidate_name_spans"]} == {
+        "Parliament",
+        "Constitutional Court",
+        "EFF",
+        "Mr. Blosser",
+    }
 
 
-def test_inventory_groups_aliases_without_researching_certain_entity(tmp_path: Path) -> None:
+def test_inventory_groups_aliases_for_one_pronunciation_research_entity(
+    tmp_path: Path,
+) -> None:
     job_root = tmp_path / "working" / "jobs" / "job-aliases"
     (job_root / "analysis").mkdir(parents=True)
     source = {
@@ -1141,13 +1593,14 @@ def test_inventory_groups_aliases_without_researching_certain_entity(tmp_path: P
         force=True,
     )
 
-    assert web.calls == 0
-    assert result["artifact"]["status"] == "no_research_candidates"
+    assert web.calls == 1
+    assert result["artifact"]["status"] == "completed"
     assert result["artifact"]["entity_count"] == 1
     assert result["artifact"]["inventory_mention_count"] == 2
+    assert result["artifact"]["candidate_count"] == 1
 
 
-def test_inventory_failure_skips_web_and_leaves_transcript_unchanged(tmp_path: Path) -> None:
+def test_inventory_failure_uses_deterministic_web_research_backstop(tmp_path: Path) -> None:
     job_root = tmp_path / "working" / "jobs" / "job-inventory-failure"
     (job_root / "analysis").mkdir(parents=True)
     web = Provider()
@@ -1168,9 +1621,11 @@ def test_inventory_failure_skips_web_and_leaves_transcript_unchanged(tmp_path: P
         force=True,
     )
 
-    assert web.calls == 0
-    assert result["artifact"]["status"] == "entity_inventory_failed_advisory"
-    assert result["transcript"] == source
+    assert web.calls == 1
+    assert result["artifact"]["status"] == "completed"
+    assert result["artifact"]["entity_inventory_status"] == ("completed_with_deterministic_fallback")
+    assert result["artifact"]["candidate_count"] == 2
+    assert result["transcript"]["segments"][0]["source_text"].startswith("Kganyago said")
 
 
 def test_incomplete_web_json_is_rejected_locally_without_schema_repair(
@@ -1219,7 +1674,7 @@ def test_incomplete_web_json_is_rejected_locally_without_schema_repair(
     assert result["artifact"]["status"] == "completed"
     assert result["artifact"]["applied_count"] == 0
     assert any(
-        item["validation_reason"] == "confidence_below_0.95"
+        item["validation_reason"] == "insufficient_same_story_clues"
         for item in result["artifact"]["rejected_corrections"]
     )
 
@@ -1255,10 +1710,7 @@ def test_uncertain_alias_cluster_is_researched_once_and_propagated(
         "needs_research": True,
         "reason": "Conflicting phonetic spellings across repeated references",
         "surface_forms": aliases,
-        "mentions": [
-            {"segment_id": f"seg-{index}", "raw_text": alias}
-            for index, alias in enumerate(aliases, start=1)
-        ],
+        "mentions": [{"segment_id": f"seg-{index}", "raw_text": alias} for index, alias in enumerate(aliases, start=1)],
     }
 
     class ClusterProvider:

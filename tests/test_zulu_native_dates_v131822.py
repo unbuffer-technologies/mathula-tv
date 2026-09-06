@@ -150,3 +150,65 @@ def test_date_normalizer_is_isolated_from_other_locales_and_month_mentions() -> 
     assert ZU_NATIVE_DATE_PRONUNCIATION_VERSION.startswith(
         "mathula-zu-native-calendar-date"
     )
+
+
+# Real user-reported production defect (job 8372120960474ef6b1d75af7de51a605):
+# a bare year with no day attached ("Month YYYY", or the Zulu-possessive
+# "ka-YYYY" glue) fell through the day-requiring _ZU_CALENDAR_DATE mechanism
+# entirely and was read either digit-by-digit or as a raw cardinal "amount"
+# instead of a natural year. Calibrated live via real Azure zu-ZA-ThandoNeural
+# synthesis + en-ZA STT round-trip; the user picked plain English spelling
+# ("twenty twenty-four") over a phonetic respelling by ear.
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    (
+        (
+            "kuningi okwakwenzeka ngoDisemba 2024, futhi okuningi",
+            "kuningi okwakwenzeka ngoDisemba twenty twenty-four, futhi okuningi",
+        ),
+        (
+            "kwakunguNovemba ka-2024, uDisemba ka-2024 noma uJanuwari ka-2025",
+            "kwakunguNovemba ka-twenty twenty-four, uDisemba ka-twenty twenty-four "
+            "noma uJanuwari ka-twenty twenty-faif",
+        ),
+        ("ngonyaka ka-1999", "ngonyaka ka-nineteen ninety-nine"),
+        ("ngonyaka ka-2000", "ngonyaka ka-twenty hundred"),
+        ("ngonyaka ka-2005", "ngonyaka ka-twenty oh faif"),
+        (
+            "ngasekupheleni kuka-2024, mhlawumbe ekuqaleni kuka-2025",
+            "ngasekupheleni kuka-twenty twenty-four, mhlawumbe ekuqaleni "
+            "kuka-twenty twenty-faif",
+        ),
+    ),
+)
+def test_bare_year_with_no_day_gets_a_natural_english_year_reading(
+    source: str, expected: str,
+) -> None:
+    result = _dictionary().apply(source)
+    assert result.spoken_text == source
+    assert result.tts_text == expected
+
+
+def test_a_year_shaped_number_with_no_month_or_ka_context_keeps_its_reference_reading() -> None:
+    # Deliberately scoped to real date-context evidence (a month name, or the
+    # "ka-" glue) -- a first, broader attempt at this fix (any bare 19xx/20xx
+    # token) was caught by the existing suite regressing a genuinely unrelated
+    # docket/reference number that happens to be year-shaped. "elingu-" is not
+    # the date-reference "ka-" glue, so this stays untouched by either
+    # mechanism (same as before this fix, out of its scope).
+    result = _dictionary().apply("Icala elingu-2024 alikaqedwa.")
+    assert "twenty twenty-four" not in result.tts_text
+
+
+def test_a_full_day_month_year_date_still_leaves_its_own_year_digits_raw() -> None:
+    # The day-attached case (_ZU_CALENDAR_DATE) is untouched by this fix --
+    # confirmed deliberately scoped to the day-less case only, matching the
+    # existing established behavior asserted elsewhere in this file (e.g.
+    # test_target_text_audits_date_change_without_changing_caption).
+    result = _dictionary().apply("Sihlehlisele umhla ka-3 Mashi 2026.")
+    assert result.tts_text == "Sihlehlisele umhla wesithathu kuNdasa 2026."
+
+
+def test_a_five_digit_reference_number_is_unaffected_by_the_year_exclusion() -> None:
+    result = _dictionary().apply("Icala elingu-30245 alikaqedwa.")
+    assert "twenty twenty-four" not in result.tts_text

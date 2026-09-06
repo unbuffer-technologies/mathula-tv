@@ -15,6 +15,7 @@ _PROVENANCE = object()
 _VOICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _LANGUAGE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){1,2}\Z")
 _URL = re.compile(r"(?:https?|file|ftp|data):", re.IGNORECASE)
+_BOOKMARK_MARK = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 
 class SSMLValidationError(ValueError):
@@ -295,6 +296,90 @@ class SafeSSMLBuilder:
             raise SSMLValidationError(f"SSML {name} must be between {lower} and {upper}")
 
 
+def build_group_bookmark_ssml(
+    islands: Sequence[tuple[str, str]],
+    *,
+    voice: str,
+    allowed_voices: Iterable[str],
+    bounds: SSMLBounds | None = None,
+    verified_emphasis_voices: Iterable[str] = (),
+    language: str = "zu-ZA",
+    rate_percent: int = 0,
+    pitch_percent: int = 0,
+    volume_percent: int = 0,
+) -> tuple[str, str]:
+    """Build one bookmarked SSML document covering a whole group's speech islands.
+
+    Each island is marked with a self-closing ``<bookmark mark="{island_id}"/>``
+    immediately before its text, so a single Speech SDK synthesis call can report
+    the real audio offset where each island's speech begins via the
+    ``BookmarkReached`` event (see ``speech_islands.slice_wav_by_bookmarks``).
+    Kept deliberately separate from ``SafeSSMLBuilder.build()``: islands never
+    carry ``BreakPart``/``EmphasisPart``/``SubstitutionPart``/``CharacterPart``
+    (``build_island_phrase_groups`` always emits a single plain-text part per
+    island), so this only needs text+bookmark handling, not the full
+    ``SSMLPart`` union. Returns ``(xml, sha256)`` rather than an ``SSMLDocument``
+    since there is no other consumer of that dataclass's per-request metadata
+    parity contract (``validate_document``) for a bookmarked group document.
+    """
+    allowed_voices_set = frozenset(str(item).strip() for item in allowed_voices)
+    if voice not in allowed_voices_set:
+        raise SSMLValidationError(f"Azure TTS voice is not allowlisted: {voice}")
+    if not _LANGUAGE.fullmatch(language):
+        raise SSMLValidationError("SSML language is invalid")
+    resolved_bounds = bounds or SSMLBounds()
+    SafeSSMLBuilder._in_bounds(
+        "rate", rate_percent, resolved_bounds.rate_min_percent, resolved_bounds.rate_max_percent
+    )
+    SafeSSMLBuilder._in_bounds(
+        "pitch", pitch_percent, resolved_bounds.pitch_min_percent, resolved_bounds.pitch_max_percent
+    )
+    SafeSSMLBuilder._in_bounds(
+        "volume", volume_percent, resolved_bounds.volume_min_percent, resolved_bounds.volume_max_percent
+    )
+    if not islands:
+        raise SSMLValidationError("SSML must contain at least one island")
+    if len(islands) > resolved_bounds.max_parts:
+        raise SSMLValidationError("SSML contains too many parts")
+
+    seen_marks: set[str] = set()
+    rendered: list[str] = []
+    text_characters = 0
+    for island_id, text in islands:
+        mark = str(island_id)
+        if not _BOOKMARK_MARK.fullmatch(mark):
+            raise SSMLValidationError(f"Invalid SSML bookmark mark: {mark!r}")
+        if mark in seen_marks:
+            raise SSMLValidationError(f"Duplicate SSML bookmark mark: {mark!r}")
+        seen_marks.add(mark)
+        checked_text = _check_text(text, field_name="SSML island text")
+        if not checked_text.strip():
+            raise SSMLValidationError(f"SSML island text cannot be empty: {mark!r}")
+        text_characters += len(checked_text)
+        rendered.append(f'<bookmark mark="{escape(mark, quote=True)}" />')
+        rendered.append(escape(checked_text, quote=False))
+    if text_characters > resolved_bounds.max_text_characters:
+        raise SSMLValidationError("SSML text exceeds the configured character limit")
+
+    body = "".join(rendered)
+    xml = (
+        f'<speak version="1.0" xmlns="{SSML_NAMESPACE}" xml:lang="{language}">'
+        f'<voice name="{voice}">'
+        f'<prosody rate="{_format_signed(rate_percent, "%")}" '
+        f'pitch="{_format_signed(pitch_percent, "%")}" '
+        f'volume="{_format_signed(volume_percent, "%")}">{body}</prosody>'
+        "</voice></speak>"
+    )
+    validate_ssml(
+        xml,
+        bounds=resolved_bounds,
+        allowed_voices=allowed_voices_set,
+        verified_emphasis_voices=verified_emphasis_voices,
+    )
+    digest = hashlib.sha256(xml.encode("utf-8")).hexdigest()
+    return xml, digest
+
+
 def validate_document(
     document: SSMLDocument,
     *,
@@ -378,6 +463,7 @@ def validate_ssml(
             "emphasis",
             "sub",
             "say-as",
+            "bookmark",
         )
     }
     allowed_attributes = {
@@ -388,6 +474,7 @@ def validate_ssml(
         _tag("emphasis"): {"level"},
         _tag("sub"): {"alias"},
         _tag("say-as"): {"interpret-as"},
+        _tag("bookmark"): {"mark"},
     }
     for node in root.iter():
         if node.tag not in allowed_tags:
@@ -434,6 +521,40 @@ def validate_ssml(
         "volume", volume, bounds.volume_min_percent, bounds.volume_max_percent
     )
 
+    counts = _validate_prosody_children(
+        prosody, voice_name=voice.attrib["name"], bounds=bounds, verified_emphasis_voices=verified_emphasis_voices,
+    )
+    if not counts["has_spoken_text"]:
+        raise SSMLValidationError("SSML must contain non-empty spoken text")
+    if counts["parts"] > bounds.max_parts or counts["text_characters"] > bounds.max_text_characters:
+        raise SSMLValidationError("SSML exceeds configured size bounds")
+    if counts["total_pause_ms"] > bounds.total_pause_max_ms:
+        raise SSMLValidationError("SSML pauses exceed the configured total pause limit")
+    return {
+        "voice": voice.attrib["name"],
+        "language": language,
+        "rate_percent": rate,
+        "pitch_percent": pitch,
+        "volume_percent": volume,
+        "text_characters": counts["text_characters"],
+        "break_count": counts["break_count"],
+        "substitution_count": counts["substitution_count"],
+        "total_pause_ms": counts["total_pause_ms"],
+    }
+
+
+def _validate_prosody_children(
+    prosody: ET.Element,
+    *,
+    voice_name: str,
+    bounds: SSMLBounds,
+    verified_emphasis_voices: Iterable[str],
+) -> dict[str, int | bool]:
+    """Validate and tally one <prosody> element's own children (break/emphasis/
+    sub/say-as/bookmark plus interleaved text) -- extracted so ``validate_ssml``
+    doesn't hand-duplicate this per-element logic inline.
+    """
+    verified_emphasis_voices = frozenset(verified_emphasis_voices)
     text_characters = len(prosody.text or "")
     total_pause_ms = 0
     break_count = 0
@@ -453,7 +574,7 @@ def validate_ssml(
             if child.text and child.text.strip():
                 raise SSMLValidationError("SSML break elements cannot contain text")
         elif child.tag == _tag("emphasis"):
-            if voice.attrib["name"] not in verified_emphasis_voices:
+            if voice_name not in verified_emphasis_voices:
                 raise SSMLValidationError("SSML emphasis is not verified for the selected voice")
             if child.attrib.get("level") not in {"reduced", "moderate", "strong"}:
                 raise SSMLValidationError("SSML emphasis level is not allowlisted")
@@ -478,28 +599,24 @@ def validate_ssml(
                 )
             text_characters += len(child.text or "")
             has_spoken_text = True
+        elif child.tag == _tag("bookmark"):
+            if child.text and child.text.strip():
+                raise SSMLValidationError("SSML bookmark elements cannot contain text")
+            if not _BOOKMARK_MARK.fullmatch(child.attrib.get("mark", "")):
+                raise SSMLValidationError("SSML bookmark mark is invalid")
         else:
             raise SSMLValidationError("SSML contains an element in a disallowed position")
         if child.tail:
             text_characters += len(child.tail)
             has_spoken_text = has_spoken_text or bool(child.tail.strip())
             parts += 1
-    if not has_spoken_text:
-        raise SSMLValidationError("SSML must contain non-empty spoken text")
-    if parts > bounds.max_parts or text_characters > bounds.max_text_characters:
-        raise SSMLValidationError("SSML exceeds configured size bounds")
-    if total_pause_ms > bounds.total_pause_max_ms:
-        raise SSMLValidationError("SSML pauses exceed the configured total pause limit")
     return {
-        "voice": voice.attrib["name"],
-        "language": language,
-        "rate_percent": rate,
-        "pitch_percent": pitch,
-        "volume_percent": volume,
         "text_characters": text_characters,
         "break_count": break_count,
         "substitution_count": substitution_count,
         "total_pause_ms": total_pause_ms,
+        "parts": parts,
+        "has_spoken_text": has_spoken_text,
     }
 
 

@@ -10,16 +10,21 @@ authoritative translation and speaker identities remain immutable.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import subprocess
+import sys
 import unicodedata
+import wave
+from array import array
 from difflib import SequenceMatcher
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .ai_consumption import consumption_record, update_ai_consumption_report
 from .atomic_io import atomic_write_json, read_json
 from .azure_stt import SpeechBackend, normalize as normalize_azure_stt
 from .direct_azure_dub import (
@@ -27,19 +32,30 @@ from .direct_azure_dub import (
     DirectAzureDubRenderer,
     DirectDubOptions,
 )
+from .entity_pronunciation_audit import entity_surface_recognized
 from .media import checksum
 from .models import JobManifest
 
 
-DUB_MASTERING_SCHEMA_VERSION = "mathula-dub-mastering-loop-v6-v13.18.29"
-DUB_MASTERING_ROUND_SCHEMA_VERSION = "mathula-dub-mastering-round-v6"
-DUB_MASTERING_POLICY_VERSION = "mathula-production-dub-score-v6"
+DUB_MASTERING_SCHEMA_VERSION = "mathula-dub-mastering-loop-v9-dual-locale-entity-qa"
+DUB_MASTERING_ROUND_SCHEMA_VERSION = "mathula-dub-mastering-round-v9"
+DUB_MASTERING_POLICY_VERSION = "mathula-production-dub-score-v9"
+POST_TTS_QUALITY_GATE_SCHEMA_VERSION = "mathula-post-tts-stt-quality-gate-v1"
 SAFE_OVERRIDE_CARRY_FORWARD_POLICIES = {
     "mathula-production-dub-score-v5",
+    "mathula-production-dub-score-v6",
+    "mathula-production-dub-score-v7",
+    "mathula-production-dub-score-v8",
 }
 ProgressCallback = Callable[[dict[str, Any]], None]
 _WORD = re.compile(r"[^\W_]+(?:[-’'][^\W_]+)*", re.UNICODE)
+_TITLE_WORD = re.compile(r"\b[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’.-]*\b")
 _VARIANT_ORDER = ("natural", "concise", "compact")
+_TITLED_PERSON_ENTITY = re.compile(
+    r"^(?:advocate|chief|doctor|dr|general|justice|judge|major[-\s]+general|"
+    r"minister|mr|mrs|ms|professor|sergeant)\b",
+    re.IGNORECASE,
+)
 _IDENTITY_STOP_WORDS = frozenset(
     {
         "advocate",
@@ -80,6 +96,323 @@ def _words(value: str) -> list[str]:
         for token in _WORD.findall(unicodedata.normalize("NFKC", str(value)))
         if (normalized := _normalise_word(token))
     ]
+
+
+def _azure_recognized_text(raw: Mapping[str, Any]) -> str:
+    combined = " ".join(
+        str(item.get("text") or "")
+        for item in raw.get("combinedPhrases") or ()
+        if isinstance(item, Mapping)
+    ).strip()
+    if combined:
+        return combined
+    return " ".join(
+        str(item.get("text") or "")
+        for item in raw.get("phrases") or ()
+        if isinstance(item, Mapping)
+    ).strip()
+
+
+def apply_english_entity_pronunciation_gate(
+    audit: dict[str, Any],
+    *,
+    protected_entities: Sequence[str],
+    raw_english_stt: Mapping[str, Any],
+    raw_response_path: Path | None = None,
+) -> dict[str, Any]:
+    """Fail a mastered dub when en-ZA STT loses a protected entity surface."""
+
+    transcription = _azure_recognized_text(raw_english_stt)
+    supplied_entities = list(
+        dict.fromkeys(
+            " ".join(str(value).split()).strip()
+            for value in protected_entities
+            if " ".join(str(value).split()).strip()
+        )
+    )
+    dimensions = audit.setdefault("quality_dimensions", {})
+    old_identity_score = float(dimensions.get("protected_identity_recognition") or 0.0)
+    assessed_keys: set[str] = set()
+    locally_recognized_keys: set[str] = set()
+    assessment_block_counts: dict[str, int] = {}
+    assessed_surfaces: dict[str, list[str]] = {}
+    assessment_metadata_present = False
+    for block in audit.get("blocks") or ():
+        if not isinstance(block, Mapping):
+            continue
+        if "protected_entities_assessed" in block:
+            assessment_metadata_present = True
+        for assessment in block.get("protected_entities_assessed") or ():
+            if not isinstance(assessment, Mapping):
+                continue
+            key = str(assessment.get("entity") or "").casefold()
+            if not key:
+                continue
+            assessed_keys.add(key)
+            assessment_block_counts[key] = assessment_block_counts.get(key, 0) + 1
+            surface = " ".join(
+                str(value)
+                for value in assessment.get("expected_surface_tokens") or ()
+                if str(value).strip()
+            ).strip()
+            if surface:
+                assessed_surfaces.setdefault(key, []).append(surface)
+            if assessment.get("recognized") is True:
+                locally_recognized_keys.add(key)
+    entities = [
+        value
+        for value in supplied_entities
+        if not assessment_metadata_present or value.casefold() in assessed_keys
+    ]
+    english_recognized_keys = {
+        value.casefold()
+        for value in entities
+        if entity_surface_recognized(value, transcription)
+        or any(
+            entity_surface_recognized(surface, transcription)
+            for surface in assessed_surfaces.get(value.casefold(), ())
+        )
+    }
+
+    # Target-locale STT predictably anglicises some isolated code switches
+    # (for example ``Hawks`` -> ``house``).  Let the dedicated en-ZA pass
+    # arbitrate only when that entity is assessed in one timeline block.  A
+    # repeated entity remains blocked because whole-program English STT cannot
+    # prove which occurrence it recognized.
+    for block in audit.get("blocks") or ():
+        if not isinstance(block, dict):
+            continue
+        reconciled_keys: set[str] = set()
+        for assessment in block.get("protected_entities_assessed") or ():
+            if not isinstance(assessment, dict):
+                continue
+            key = str(assessment.get("entity") or "").casefold()
+            if (
+                assessment.get("recognized") is not True
+                and key in english_recognized_keys
+                and assessment_block_counts.get(key) == 1
+            ):
+                assessment["recognized"] = True
+                assessment["match_policy"] = "dual-locale-en-za-arbitrated-v1"
+                assessment["verification_locale"] = "en-ZA"
+                reconciled_keys.add(key)
+                locally_recognized_keys.add(key)
+        if not reconciled_keys:
+            continue
+        block["protected_entities_missing"] = [
+            value
+            for value in block.get("protected_entities_missing") or ()
+            if str(value).casefold() not in reconciled_keys
+        ]
+        if not block["protected_entities_missing"]:
+            block["reason_codes"] = [
+                value
+                for value in block.get("reason_codes") or ()
+                if value != "protected_entity_not_recognized"
+            ]
+            block["production_blockers"] = [
+                value
+                for value in block.get("production_blockers") or ()
+                if value != "protected_entity_not_recognized"
+            ]
+            block["passed"] = not block["reason_codes"]
+            block["production_gate_passed"] = not block["production_blockers"]
+
+    # The en-ZA pass is an arbiter for entities the target-locale pass could
+    # not recognize; it must never overturn a positive block-local result.
+    # Whole-program English STT is intentionally noisy on isiZulu carrier
+    # speech and cannot localize a repeated name to a particular occurrence.
+    failed = [
+        value
+        for value in entities
+        if value.casefold() not in locally_recognized_keys
+        and value.casefold() not in english_recognized_keys
+    ]
+    failed_keys = {value.casefold() for value in failed}
+    for block in audit.get("blocks") or ():
+        if not isinstance(block, dict):
+            continue
+        block_failures = [
+            str(value)
+            for value in block.get("protected_entities") or ()
+            if str(value).casefold() in failed_keys
+        ]
+        if not block_failures:
+            continue
+        block["english_stt_entities_missing"] = block_failures
+        block["reason_codes"] = list(
+            dict.fromkeys(
+                [
+                    *block.get("reason_codes", []),
+                    "english_code_switch_pronunciation_failure",
+                ]
+            )
+        )
+        block["production_blockers"] = list(
+            dict.fromkeys(
+                [
+                    *block.get("production_blockers", []),
+                    "english_code_switch_pronunciation_failure",
+                ]
+            )
+        )
+        block["passed"] = False
+        block["production_gate_passed"] = False
+
+    passed_count = len(entities) - len(failed)
+    english_score = 100.0 * passed_count / len(entities) if entities else 100.0
+    local_score = (
+        100.0 * len(locally_recognized_keys) / len(assessed_keys)
+        if assessed_keys
+        else 100.0
+    )
+    dimensions["protected_identity_recognition"] = round(
+        min(local_score, english_score), 2
+    )
+    audit["production_score"] = round(
+        min(
+            100.0,
+            max(
+                0.0,
+                float(audit.get("production_score") or 0.0)
+                + 0.15
+                * (
+                    float(dimensions["protected_identity_recognition"])
+                    - old_identity_score
+                ),
+            ),
+        ),
+        2,
+    )
+    failed_block_count = sum(
+        not bool(block.get("passed"))
+        for block in audit.get("blocks") or ()
+        if isinstance(block, Mapping)
+    )
+    production_blocker_count = sum(
+        not bool(block.get("production_gate_passed"))
+        for block in audit.get("blocks") or ()
+        if isinstance(block, Mapping)
+    )
+    audit["failed_block_count"] = max(failed_block_count, len(failed))
+    audit["production_blocker_count"] = max(
+        production_blocker_count, len(failed)
+    )
+    thresholds = audit.get("thresholds") or {}
+    audit["production_ready"] = (
+        not failed
+        and audit["production_blocker_count"] == 0
+        and float(audit.get("production_score") or 0.0)
+        >= float(thresholds.get("minimum_production_score") or 0.0)
+        and float(audit.get("aggregate_word_error_rate") or 0.0)
+        <= float(thresholds.get("maximum_aggregate_wer") or 1.0)
+    )
+    result = {
+        "verification_locale": "en-ZA",
+        "phrase_hints_used": False,
+        "recognized_text": transcription,
+        "protected_entity_count": len(entities),
+        "unassessable_entity_count": len(supplied_entities) - len(entities),
+        "passed_entity_count": passed_count,
+        "failed_entity_count": len(failed),
+        "failed_entities": failed,
+        "passed": not failed,
+        "raw_response_path": (
+            str(raw_response_path) if raw_response_path is not None else None
+        ),
+    }
+    audit["english_code_switch_qa"] = result
+    return result
+
+
+def _named_local_anchors(text: str) -> list[dict[str, Any]]:
+    """Extract conservative multiword names with source-relative positions."""
+
+    matches = list(_TITLE_WORD.finditer(text))
+    runs: list[list[re.Match[str]]] = []
+    current: list[re.Match[str]] = []
+    for match in matches:
+        if current:
+            gap = text[current[-1].end() : match.start()]
+            if re.fullmatch(r"[\s\"'“”‘’]*", gap) is None:
+                if len(current) >= 3:
+                    runs.append(current)
+                current = []
+        current.append(match)
+    if len(current) >= 3:
+        runs.append(current)
+    return [
+        {
+            "anchor": " ".join(match.group(0) for match in run),
+            "tokens": [_normalise_word(match.group(0)) for match in run],
+            "relative_position": round(run[0].start() / max(1, len(text)), 6),
+        }
+        for run in runs
+    ]
+
+
+def _anchor_position_in_target(
+    text: str,
+    anchor_tokens: Sequence[str],
+    *,
+    reference_position: float | None = None,
+) -> float | None:
+    matches = list(_WORD.finditer(text))
+    tokens = [_normalise_word(match.group(0)) for match in matches]
+    prefixes = {
+        "a", "e", "i", "o", "u", "ka", "ku", "kwa", "kuka", "laka",
+        "luka", "na", "ne", "no", "nga", "ngo", "ngu", "se", "si",
+    }
+    positions: list[float] = []
+    for index in range(len(tokens) - len(anchor_tokens) + 1):
+        candidate = tokens[index : index + len(anchor_tokens)]
+        first = candidate[0]
+        expected_first = anchor_tokens[0]
+        first_matches = first == expected_first
+        if not first_matches and first.endswith(expected_first):
+            first_matches = first[: -len(expected_first)] in prefixes
+        if first_matches and candidate[1:] == list(anchor_tokens[1:]):
+            positions.append(
+                round(matches[index].start() / max(1, len(text)), 6)
+            )
+    if not positions:
+        return None
+    if reference_position is None:
+        return positions[0]
+    # Repeated named entities are common in broadcast summaries. Compare the
+    # source occurrence with the nearest target occurrence instead of falsely
+    # treating an earlier, additional mention as information-order drift.
+    return min(positions, key=lambda value: abs(value - reference_position))
+
+
+def _local_information_order_anomalies(
+    source_text: str,
+    target_text: str,
+    *,
+    maximum_drift: float,
+) -> list[dict[str, Any]]:
+    anomalies: list[dict[str, Any]] = []
+    for anchor in _named_local_anchors(source_text):
+        target_position = _anchor_position_in_target(
+            target_text,
+            anchor["tokens"],
+            reference_position=float(anchor["relative_position"]),
+        )
+        if target_position is None:
+            continue
+        drift = abs(float(target_position) - float(anchor["relative_position"]))
+        if drift > maximum_drift:
+            anomalies.append(
+                {
+                    "anchor": anchor["anchor"],
+                    "source_relative_position": anchor["relative_position"],
+                    "target_relative_position": target_position,
+                    "absolute_relative_drift": round(drift, 6),
+                    "maximum_allowed_drift": maximum_drift,
+                    "detector": "multiword_named_anchor_relative_position_v1",
+                }
+            )
+    return anomalies
 
 
 def _tts_text_fingerprint(value: str) -> str:
@@ -308,20 +641,202 @@ def _identity_surface_tokens(entity: str, *references: str) -> list[str]:
         for value in _words(entity)
         if value not in _IDENTITY_STOP_WORDS and len(value) >= 3
     ]
-    reference_tokens = {value for reference in references for value in _words(reference)}
-    return [value for value in identity_tokens if value in reference_tokens]
+    reference_tokens = [value for reference in references for value in _words(reference)]
+    return [
+        value
+        for value in identity_tokens
+        if any(
+            value == reference
+            or (
+                reference.endswith(value)
+                and len(reference) - len(value) <= 4
+            )
+            for reference in reference_tokens
+        )
+    ]
+
+
+def _delivery_identity_surface_tokens(
+    entity: str,
+    spoken_text: str,
+    tts_text: str,
+) -> list[str]:
+    """Return the surface that was actually sent to TTS for an identity.
+
+    Pronunciation entries may replace a protected written name with a reviewed
+    spoken alias (for example the full Independent Police Investigative
+    Directorate name with ``Ai-pid``).  Auditing only the written surface then
+    rejects audio that correctly contains the approved alias.  Map the entity's
+    token span from approved spoken text into the corresponding TTS token span;
+    fall back to the historic shared-token matcher when no complete span exists.
+    """
+
+    entity_tokens = _words(entity)
+    spoken_tokens = _words(spoken_text)
+    tts_tokens = _words(tts_text)
+    if not entity_tokens or not spoken_tokens or not tts_tokens:
+        return _identity_surface_tokens(entity, spoken_text, tts_text)
+
+    entity_start: int | None = None
+    for start in range(len(spoken_tokens) - len(entity_tokens) + 1):
+        candidate = spoken_tokens[start : start + len(entity_tokens)]
+        if all(
+            actual == expected
+            or (
+                actual.endswith(expected)
+                and len(actual) - len(expected) <= 4
+            )
+            for expected, actual in zip(entity_tokens, candidate, strict=True)
+        ):
+            entity_start = start
+            break
+    if entity_start is None:
+        return _identity_surface_tokens(entity, spoken_text, tts_text)
+
+    entity_end = entity_start + len(entity_tokens)
+    mapped: list[str] = []
+    matcher = SequenceMatcher(a=spoken_tokens, b=tts_tokens, autojunk=False)
+    for tag, spoken_start, spoken_end, tts_start, tts_end in matcher.get_opcodes():
+        overlap_start = max(entity_start, spoken_start)
+        overlap_end = min(entity_end, spoken_end)
+        if overlap_start >= overlap_end:
+            continue
+        if tag == "equal":
+            offset_start = overlap_start - spoken_start
+            offset_end = overlap_end - spoken_start
+            mapped.extend(tts_tokens[tts_start + offset_start : tts_start + offset_end])
+        elif tag == "replace":
+            mapped.extend(tts_tokens[tts_start:tts_end])
+
+    # Use the delivery mapping only when pronunciation deliberately compresses
+    # the identity (normally a full organisation name spoken as its acronym).
+    # Same-length phonetic respellings such as ``Five`` -> ``Faiv`` are better
+    # assessed against the canonical tokens so numeric STT forms still match.
+    if mapped and len(mapped) < len(entity_tokens):
+        return mapped
+    return _identity_surface_tokens(entity, spoken_text, tts_text)
+
+
+def _code_switch_phonetic_skeleton(value: str) -> str:
+    """Collapse conservative English/isiZulu STT spelling equivalents."""
+
+    normalized = _normalise_word(value)
+    # en-ZA is non-rhotic before a consonant (``cartel`` -> ``katel``,
+    # ``Sergeant`` -> ``sagent``).  Model that narrow environment without
+    # deleting intervocalic/name-internal r sounds such as ``Carrim``.
+    normalized = re.sub(r"r(?=[^aeiouy])", "", normalized)
+    normalized = re.sub(r"r$", "", normalized)
+    normalized = normalized.replace("ph", "f").replace("th", "t")
+    normalized = normalized.replace("c", "k").replace("q", "k")
+    normalized = normalized.translate(
+        str.maketrans({"b": "p", "d": "t", "g": "k", "v": "f", "z": "s"})
+    )
+    normalized = re.sub(r"[aeiouywh]+", "", normalized)
+    return re.sub(r"(.)\1+", r"\1", normalized)
+
+
+def _identity_token_match(expected: str, candidate: str) -> bool:
+    if expected == candidate:
+        return True
+    number_equivalents = {
+        "0": "zero",
+        "1": "one",
+        "2": "two",
+        "3": "three",
+        "4": "four",
+        "5": "five",
+        "6": "six",
+        "7": "seven",
+        "8": "eight",
+        "9": "nine",
+    }
+    if (
+        number_equivalents.get(candidate) == expected
+        or number_equivalents.get(expected) == candidate
+    ):
+        return True
+    if candidate.endswith(expected) and len(candidate) - len(expected) <= 4:
+        return True
+    if len(expected) >= 3:
+        expected_skeleton = _code_switch_phonetic_skeleton(expected)
+        candidate_skeleton = _code_switch_phonetic_skeleton(candidate)
+        if (
+            expected_skeleton == candidate_skeleton
+            and (
+                len(expected_skeleton) >= 2
+                or len(expected) >= 4
+            )
+        ):
+            return True
+        if (
+            len(expected_skeleton) >= 3
+            and candidate_skeleton.startswith(expected_skeleton)
+            and len(candidate_skeleton) - len(expected_skeleton) <= 2
+        ):
+            # Azure often fuses a following isiZulu conjunction to a foreign
+            # surname (``Carrim kanye`` -> ``karimganye``).
+            return True
+        if (
+            len(expected_skeleton) >= 2
+            and candidate_skeleton == expected_skeleton + "s"
+        ):
+            # Likewise, a following concord can surface as a single sibilant
+            # on a short nickname (``Cat`` -> ``kats``).
+            return True
+    threshold = 0.78 if len(expected) <= 5 else 0.70
+    return SequenceMatcher(None, expected, candidate).ratio() >= threshold
+
+
+def _identity_joined_token_match(expected: str, candidate: str) -> bool:
+    """Conservatively match only genuine one-to-two token boundary errors."""
+
+    if expected == candidate:
+        return True
+    expected_skeleton = _code_switch_phonetic_skeleton(expected)
+    candidate_skeleton = _code_switch_phonetic_skeleton(candidate)
+    if len(expected_skeleton) >= 3 and expected_skeleton == candidate_skeleton:
+        return True
+    if (
+        len(expected_skeleton) >= 3
+        and candidate_skeleton.endswith(expected_skeleton)
+        and len(candidate_skeleton) - len(expected_skeleton) <= 2
+    ):
+        return True
+    return SequenceMatcher(None, expected, candidate).ratio() >= 0.86
 
 
 def _contains_identity_surface(text: str, surface_tokens: Sequence[str]) -> bool:
     observed = _words(text)
-    for expected in surface_tokens:
-        threshold = 0.78 if len(expected) <= 5 else 0.70
-        if not any(
-            SequenceMatcher(None, expected, candidate).ratio() >= threshold
-            for candidate in observed
-        ):
+    expected = list(surface_tokens)
+    if not expected:
+        return True
+
+    # Match one continuous identity surface while tolerating the two common
+    # Azure boundary errors: an isiZulu concord fused to the first name, and a
+    # pair of code-switched English words returned as one token (or vice versa).
+    def matches(expected_index: int, observed_index: int) -> bool:
+        if expected_index == len(expected):
+            return True
+        if observed_index >= len(observed):
             return False
-    return True
+        if _identity_token_match(
+            expected[expected_index],
+            observed[observed_index],
+        ) and matches(expected_index + 1, observed_index + 1):
+            return True
+        if expected_index + 1 < len(expected) and _identity_joined_token_match(
+            expected[expected_index] + expected[expected_index + 1],
+            observed[observed_index],
+        ) and matches(expected_index + 2, observed_index + 1):
+            return True
+        if observed_index + 1 < len(observed) and _identity_joined_token_match(
+            expected[expected_index],
+            observed[observed_index] + observed[observed_index + 1],
+        ) and matches(expected_index + 1, observed_index + 2):
+            return True
+        return False
+
+    return any(matches(0, index) for index in range(len(observed)))
 
 
 def _planned_pause_boundaries(block: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -408,12 +923,112 @@ def _timing_sanity_partitions(
     return adjusted, corrections
 
 
+def _pcm_rms_ratio(data: bytes, sample_width: int) -> float:
+    """Return PCM RMS as a fraction of full scale without external codecs."""
+
+    if not data:
+        return 0.0
+    if sample_width == 1:
+        samples = [value - 128 for value in data]
+        full_scale = 127
+    elif sample_width in (2, 4):
+        typecode = "h" if sample_width == 2 else "i"
+        values = array(typecode)
+        values.frombytes(data[: len(data) - len(data) % sample_width])
+        if sys.byteorder != "little":
+            values.byteswap()
+        samples = values
+        full_scale = (1 << (sample_width * 8 - 1)) - 1
+    elif sample_width == 3:
+        samples = [
+            int.from_bytes(data[index : index + 3], "little", signed=True)
+            for index in range(0, len(data) - 2, 3)
+        ]
+        full_scale = (1 << 23) - 1
+    else:
+        raise ValueError("unsupported PCM sample width")
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(value * value for value in samples) / len(samples)) / full_scale
+
+
+def _audio_silence_evidence(
+    audio_path: Path | None,
+    *,
+    start_ms: int,
+    end_ms: int,
+    silence_dbfs: float = -45.0,
+    frame_ms: int = 20,
+) -> dict[str, Any] | None:
+    """Measure the longest real PCM silence inside an STT word gap.
+
+    The isolated dialogue bus is preferred by the caller. This avoids treating
+    background music as speech and prevents an unrecognized spoken phrase from
+    becoming a fabricated pause blocker.
+    """
+
+    if audio_path is None or not audio_path.is_file() or end_ms <= start_ms:
+        return None
+    try:
+        with wave.open(str(audio_path), "rb") as source:
+            if source.getcomptype() != "NONE":
+                return None
+            sample_rate = source.getframerate()
+            channels = source.getnchannels()
+            sample_width = source.getsampwidth()
+            if sample_rate <= 0 or channels <= 0 or sample_width not in (1, 2, 3, 4):
+                return None
+            first_frame = max(0, round(start_ms * sample_rate / 1000))
+            final_frame = min(
+                source.getnframes(),
+                round(end_ms * sample_rate / 1000),
+            )
+            if final_frame <= first_frame:
+                return None
+            source.setpos(first_frame)
+            frames_per_window = max(1, round(frame_ms * sample_rate / 1000))
+            silence_ratio = 10 ** (silence_dbfs / 20.0)
+            cursor_frame = first_frame
+            current_start: int | None = None
+            longest_start = first_frame
+            longest_end = first_frame
+            while cursor_frame < final_frame:
+                frame_count = min(frames_per_window, final_frame - cursor_frame)
+                data = source.readframes(frame_count)
+                if not data:
+                    break
+                silent = _pcm_rms_ratio(data, sample_width) <= silence_ratio
+                if silent and current_start is None:
+                    current_start = cursor_frame
+                if not silent and current_start is not None:
+                    if cursor_frame - current_start > longest_end - longest_start:
+                        longest_start, longest_end = current_start, cursor_frame
+                    current_start = None
+                cursor_frame += frame_count
+            if current_start is not None and cursor_frame - current_start > longest_end - longest_start:
+                longest_start, longest_end = current_start, cursor_frame
+    except (EOFError, OSError, ValueError, wave.Error):
+        return None
+
+    silence_start_ms = round(longest_start * 1000 / sample_rate)
+    silence_end_ms = round(longest_end * 1000 / sample_rate)
+    return {
+        "path": str(audio_path),
+        "method": "dialogue_pcm_silence_v1",
+        "threshold_dbfs": silence_dbfs,
+        "start_ms": silence_start_ms,
+        "end_ms": silence_end_ms,
+        "duration_ms": max(0, silence_end_ms - silence_start_ms),
+    }
+
+
 def _internal_pause_observations(
     words: Sequence[Mapping[str, Any]],
     *,
     expected_text: str,
     threshold_ms: int,
     planned_boundaries: Sequence[Mapping[str, Any]] = (),
+    dialogue_audio_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     pauses: list[dict[str, Any]] = []
     expected_tokens = re.findall(r"\S+", expected_text)
@@ -454,15 +1069,39 @@ def _internal_pause_observations(
             allowed_ms = max(1300, threshold_ms)
         if gap_ms < allowed_ms:
             continue
+        audio_evidence = _audio_silence_evidence(
+            dialogue_audio_path,
+            start_ms=left_end,
+            end_ms=right_start,
+        )
+        if audio_evidence is not None:
+            measured_pause_ms = int(audio_evidence["duration_ms"])
+            if measured_pause_ms < allowed_ms:
+                continue
+            pause_start_ms = int(audio_evidence["start_ms"])
+            pause_end_ms = int(audio_evidence["end_ms"])
+            validation_method = str(audio_evidence["method"])
+        else:
+            measured_pause_ms = gap_ms
+            pause_start_ms = left_end
+            pause_end_ms = right_start
+            validation_method = "stt_word_gap_fallback"
         pauses.append(
             {
                 "after": str(left.get("text") or ""),
                 "before": str(right.get("text") or ""),
-                "start_ms": left_end,
-                "end_ms": right_start,
-                "duration_ms": gap_ms,
+                "start_ms": pause_start_ms,
+                "end_ms": pause_end_ms,
+                "duration_ms": measured_pause_ms,
+                "observed_word_gap_ms": gap_ms,
                 "expected_boundary": boundary,
                 "allowed_duration_ms": allowed_ms,
+                "validation_method": validation_method,
+                "audio_evidence_path": (
+                    str(audio_evidence["path"])
+                    if audio_evidence is not None
+                    else None
+                ),
             }
         )
     return pauses
@@ -533,6 +1172,7 @@ class DubMasteringThresholds:
     minimum_time_stretch_ratio: float = 1 / 1.08
     maximum_rate_delta_percent: int = 10
     maximum_cross_speaker_overlap_ms: int = 250
+    maximum_local_anchor_drift: float = 0.30
     maximum_overrides_per_round: int = 8
 
     def validate(self) -> None:
@@ -544,6 +1184,8 @@ class DubMasteringThresholds:
             raise ValueError("minimum production score is invalid")
         if self.maximum_internal_pause_ms < 100:
             raise ValueError("maximum internal pause is too small")
+        if not 0 <= self.maximum_local_anchor_drift <= 1:
+            raise ValueError("maximum local anchor drift is invalid")
         if self.maximum_overrides_per_round < 1:
             raise ValueError("maximum overrides per round must be positive")
 
@@ -561,6 +1203,9 @@ def analyze_mastered_dub(
 
     thresholds = thresholds or DubMasteringThresholds()
     thresholds.validate()
+    dialogue_audio_path = audio_path.with_name("dialogue.wav")
+    if not dialogue_audio_path.is_file():
+        dialogue_audio_path = audio_path
     stt_words = [
         dict(value)
         for value in normalized_stt.get("words") or []
@@ -608,6 +1253,12 @@ def analyze_mastered_dub(
             or block.get("tts_text")
             or ""
         ).strip()
+        source_text = str(block.get("source_text") or "").strip()
+        local_order_anomalies = _local_information_order_anomalies(
+            source_text,
+            expected_spoken,
+            maximum_drift=thresholds.maximum_local_anchor_drift,
+        )
         expected_tts = tts_references[index] or expected_spoken
         exact_spoken_wer = word_error_rate(expected_spoken, hypothesis)
         exact_tts_wer = word_error_rate(expected_tts, hypothesis)
@@ -635,7 +1286,7 @@ def analyze_mastered_dub(
         missing: list[str] = []
         unassessable: list[str] = []
         for entity in protected:
-            surface = _identity_surface_tokens(
+            surface = _delivery_identity_surface_tokens(
                 entity,
                 expected_spoken,
                 expected_tts,
@@ -661,6 +1312,7 @@ def analyze_mastered_dub(
                 expected_text=expected,
                 threshold_ms=thresholds.maximum_internal_pause_ms,
                 planned_boundaries=_planned_pause_boundaries(block),
+                dialogue_audio_path=dialogue_audio_path,
             )
             if wer <= 0.35
             and len(recognized_words) >= max(2, round(expected_count * 0.70))
@@ -688,6 +1340,8 @@ def analyze_mastered_dub(
             reason_codes.append("excessive_time_expansion")
         if abs(rate_delta) > thresholds.maximum_rate_delta_percent:
             reason_codes.append("azure_rate_delta_excessive")
+        if local_order_anomalies:
+            reason_codes.append("local_information_order_drift")
 
         production_blockers: list[str] = []
         if wer > thresholds.maximum_block_wer and expected_count >= 4:
@@ -704,6 +1358,8 @@ def analyze_mastered_dub(
             production_blockers.append("excessive_time_expansion")
         if abs(rate_delta) > max(14, thresholds.maximum_rate_delta_percent):
             production_blockers.append("azure_rate_delta_excessive")
+        if local_order_anomalies:
+            production_blockers.append("local_information_order_drift")
 
         previous = raw_blocks[index - 1] if index else None
         same_speaker_jump = 0.0
@@ -737,10 +1393,21 @@ def analyze_mastered_dub(
                 "start_ms": start_ms,
                 "end_ms": end_ms,
                 "expected_text": expected,
+                "source_text": source_text,
                 "expected_spoken_text": expected_spoken,
                 "expected_tts_text": expected_tts,
                 "quality_reference_used": reference_used,
                 "transcribed_text": hypothesis,
+                "recognized_word_timeline": [
+                    {
+                        "text": str(word.get("text") or ""),
+                        "start": word.get("start"),
+                        "end": word.get("end"),
+                        "confidence": word.get("confidence"),
+                    }
+                    for word in recognized_words
+                ],
+                "local_information_order_anomalies": local_order_anomalies,
                 "expected_word_count": expected_count,
                 "recognized_word_count": len(recognized_words),
                 "timestamp_window_word_count": len(timestamp_words),
@@ -817,6 +1484,10 @@ def analyze_mastered_dub(
         "cross_speaker_timeline_collision" in value["reason_codes"]
         for value in observations
     )
+    local_information_order_failure_count = sum(
+        "local_information_order_drift" in value["production_blockers"]
+        for value in observations
+    )
     production_pause_count = sum(
         "unexpected_internal_pause" in value["production_blockers"]
         for value in observations
@@ -875,19 +1546,24 @@ def analyze_mastered_dub(
         0.0,
         100.0 * (1.0 - collision_count / max(1, len(observations))),
     )
+    local_semantic_alignment_score = (
+        0.0 if local_information_order_failure_count else 100.0
+    )
     dimensions = {
         "intelligibility": round(intelligibility_score, 2),
         "protected_identity_recognition": round(identity_score, 2),
         "pause_naturalness": round(pause_score, 2),
         "tempo_naturalness": round(tempo_score, 2),
         "speaker_collision_safety": round(collision_score, 2),
+        "local_semantic_alignment": round(local_semantic_alignment_score, 2),
     }
     weights = {
-        "intelligibility": 0.45,
-        "protected_identity_recognition": 0.20,
+        "intelligibility": 0.35,
+        "protected_identity_recognition": 0.15,
         "pause_naturalness": 0.10,
-        "tempo_naturalness": 0.20,
+        "tempo_naturalness": 0.15,
         "speaker_collision_safety": 0.05,
+        "local_semantic_alignment": 0.20,
     }
     score = round(
         sum(dimensions[key] * weight for key, weight in weights.items()),
@@ -900,6 +1576,8 @@ def analyze_mastered_dub(
         and production_pause_count == 0
         and production_tempo_failure_count == 0
         and collision_count == 0
+        and local_information_order_failure_count == 0
+        and not production_failed
     )
     return {
         "schema_version": DUB_MASTERING_ROUND_SCHEMA_VERSION,
@@ -937,6 +1615,9 @@ def analyze_mastered_dub(
         "tempo_failure_count": tempo_failure_count,
         "production_tempo_failure_count": production_tempo_failure_count,
         "collision_count": collision_count,
+        "local_information_order_failure_count": (
+            local_information_order_failure_count
+        ),
         "blocks": observations,
     }
 
@@ -1035,16 +1716,15 @@ def build_mastering_override_plan(
         elif "same_speaker_tempo_jump" in reason_codes:
             factor = float(block.get("effective_tempo_factor") or 1.0)
             direction = "shorter" if factor > 1.0 else "richer"
-        elif any(
-            code in reason_codes
-            for code in (
-                "high_word_error_rate",
-                "protected_entity_not_recognized",
-            )
-        ):
+        elif "high_word_error_rate" in reason_codes:
             direction = "richer" if current != "natural" else None
         elif "unexpected_internal_pause" in reason_codes:
             direction = "shorter"
+        elif "protected_entity_not_recognized" in reason_codes:
+            # All approved variants preserve protected names verbatim. Moving
+            # along the semantic richness ladder cannot repair pronunciation
+            # and previously spent the only repair round on unrelated wording.
+            direction = None
         if direction is None:
             continue
         selected = _next_audio_distinct_variant(
@@ -1154,15 +1834,267 @@ class DubMasteringLoop:
         *,
         stt_backend: SpeechBackend,
         renderer: DirectAzureDubRenderer,
+        qa_review_provider_factory: Callable[[], Any] | None = None,
         progress_callback: ProgressCallback | None = None,
     ):
         self.stt_backend = stt_backend
         self.renderer = renderer
+        self.qa_review_provider_factory = qa_review_provider_factory
+        self._qa_review_provider: Any | None = None
         self.progress_callback = progress_callback
 
     def _emit(self, stage: str, message: str, **details: Any) -> None:
         if self.progress_callback is not None:
             self.progress_callback({"stage": stage, "message": message, **details})
+
+    def _apply_ai_local_timeline_reviews(
+        self,
+        *,
+        audit: dict[str, Any],
+        direct_report: Mapping[str, Any],
+        cache_root: Path | None = None,
+    ) -> None:
+        """Independently review only blocks prefiltered for local semantic drift."""
+
+        candidates = [
+            block
+            for block in audit.get("blocks") or []
+            if isinstance(block, dict)
+            and block.get("local_information_order_anomalies")
+        ]
+        audit["qa_ai"] = {
+            "policy": "deterministic_prefilter_then_independent_ai_review_v1",
+            "candidate_count": len(candidates),
+            "reviewed_count": 0,
+            "rejected_count": 0,
+            "error_count": 0,
+            "cache_reused_count": 0,
+            "provider_configured": self.qa_review_provider_factory is not None,
+        }
+        if not candidates:
+            return
+        if self.qa_review_provider_factory is None:
+            for block in candidates:
+                block["qa_ai_review"] = {
+                    "status": "not_configured",
+                    "deterministic_gate_retained": True,
+                }
+            return
+        if self._qa_review_provider is None:
+            self._qa_review_provider = self.qa_review_provider_factory()
+        provider = self._qa_review_provider
+        raw_by_id = {
+            _source_block_id(value.get("block_id")): value
+            for value in direct_report.get("blocks") or []
+            if isinstance(value, Mapping)
+        }
+        self._emit(
+            "mastering-ai-qa",
+            (
+                f"Reviewing {len(candidates)} timestamp-localized semantic "
+                "anomaly block(s) with AI"
+            ),
+            candidate_count=len(candidates),
+        )
+        for block in candidates:
+            block_id = str(block.get("block_id") or "")
+            raw = raw_by_id.get(block_id, {})
+            natural = next(
+                (
+                    str(value.get("spoken_text") or "")
+                    for value in raw.get("variants") or []
+                    if isinstance(value, Mapping)
+                    and str(value.get("variant_id") or "") == "natural"
+                ),
+                str(block.get("expected_spoken_text") or ""),
+            )
+            required_facts = []
+            for index, value in enumerate(raw.get("required_facts") or [], start=1):
+                if isinstance(value, Mapping):
+                    fact = dict(value)
+                    fact.setdefault("fact_id", f"fact_{index:04d}")
+                    required_facts.append(fact)
+                elif str(value).strip():
+                    required_facts.append(
+                        {"fact_id": f"fact_{index:04d}", "text": str(value).strip()}
+                    )
+            payload = {
+                "schema_version": "mathula.semantic-fit.v1",
+                "operation": "semantic_fit_review",
+                "unit_id": block_id,
+                "source_text": str(block.get("source_text") or ""),
+                "approved_faithful_translation": natural,
+                "candidate": {
+                    "spoken_text": str(block.get("expected_spoken_text") or ""),
+                    "tts_text": str(block.get("expected_tts_text") or ""),
+                    "post_tts_transcribed_text": str(
+                        block.get("transcribed_text") or ""
+                    ),
+                    "measured_duration_ms": max(
+                        0,
+                        int(block.get("end_ms") or 0)
+                        - int(block.get("start_ms") or 0),
+                    ),
+                    "omitted_or_compressed_detail": [],
+                },
+                "required_facts": required_facts,
+                "optional_details": list(raw.get("optional_details") or []),
+                "protected_entities": list(raw.get("protected_entities") or []),
+                "post_tts_timeline_evidence": {
+                    "review_contract_version": (
+                        "post_tts_local_timeline_reference_specificity_v2"
+                    ),
+                    "block_start_ms": block.get("start_ms"),
+                    "block_end_ms": block.get("end_ms"),
+                    "deterministic_anomalies": list(
+                        block.get("local_information_order_anomalies") or []
+                    ),
+                    "recognized_words": list(
+                        block.get("recognized_word_timeline") or []
+                    ),
+                    "review_contract": (
+                        "Check local information order and recognizable "
+                        "pronunciation, not only whole-block meaning or WER."
+                    ),
+                },
+                "content_trust": "untrusted_data",
+            }
+            try:
+                payload_sha256 = hashlib.sha256(
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                cache_path = (
+                    cache_root / f"{payload_sha256}.json"
+                    if cache_root is not None
+                    else None
+                )
+                cache_reused = bool(cache_path is not None and cache_path.is_file())
+                if cache_reused and cache_path is not None:
+                    cached = read_json(cache_path)
+                    review = dict(cached.get("review") or {})
+                    metadata_dict = dict(cached.get("metadata") or {})
+                    audit["qa_ai"]["cache_reused_count"] += 1
+                else:
+                    response = provider.review_semantic_fit(payload)
+                    review = dict(getattr(response, "data", {}) or {})
+                    metadata = getattr(response, "metadata", None)
+                    metadata_dict = (
+                        metadata.to_dict()
+                        if metadata is not None
+                        and callable(getattr(metadata, "to_dict", None))
+                        else {}
+                    )
+                    if cache_path is not None:
+                        cache_path.parent.mkdir(parents=True, exist_ok=True)
+                        atomic_write_json(
+                            cache_path,
+                            {
+                                "schema_version": "mathula-post-tts-ai-qa-cache-v1",
+                                "payload_sha256": payload_sha256,
+                                "review": review,
+                                "metadata": metadata_dict,
+                            },
+                        )
+                accepted = review.get("accepted") is True
+                block["qa_ai_review"] = {
+                    "status": "accepted" if accepted else "rejected",
+                    "review": review,
+                    "metadata": metadata_dict,
+                    "cache_reused": cache_reused,
+                    "payload_sha256": payload_sha256,
+                    "deterministic_gate_retained": True,
+                }
+                audit["qa_ai"]["reviewed_count"] += 1
+                if not accepted:
+                    audit["qa_ai"]["rejected_count"] += 1
+                    block["reason_codes"] = list(
+                        dict.fromkeys(
+                            [
+                                *block.get("reason_codes", []),
+                                "qa_ai_local_timeline_rejection",
+                            ]
+                        )
+                    )
+                    block["production_blockers"] = list(
+                        dict.fromkeys(
+                            [
+                                *block.get("production_blockers", []),
+                                "qa_ai_local_timeline_rejection",
+                            ]
+                        )
+                    )
+            except Exception as exc:
+                audit["qa_ai"]["error_count"] += 1
+                block["qa_ai_review"] = {
+                    "status": "error",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc)[:500],
+                    "deterministic_gate_retained": True,
+                }
+
+    def _configure_protected_entity_phrases(
+        self,
+        direct_report: Mapping[str, Any],
+        *,
+        job_root: Path | None = None,
+    ) -> tuple[str, ...]:
+        """Bias mastering STT toward the identities it is required to audit."""
+
+        phrases: list[str] = []
+        seen: set[str] = set()
+        for block in direct_report.get("blocks") or []:
+            if not isinstance(block, Mapping):
+                continue
+            for value in block.get("protected_entities") or []:
+                phrase = " ".join(str(value).split()).strip()
+                key = phrase.casefold()
+                if phrase and key not in seen:
+                    seen.add(key)
+                    phrases.append(phrase)
+        # Older direct-dub reports may predate entity propagation. The binding
+        # artifact is the authoritative job inventory and must still drive the
+        # final English-STT publication gate.
+        bindings_path = (
+            job_root / "analysis" / "entity_bindings.json"
+            if job_root is not None
+            else None
+        )
+        if bindings_path is not None and bindings_path.is_file():
+            bindings = read_json(bindings_path)
+            for unit in (bindings.get("per_unit_bindings") or {}).values():
+                if not isinstance(unit, Mapping):
+                    continue
+                for match in unit.get("matches") or ():
+                    if not isinstance(match, Mapping):
+                        continue
+                    phrase = " ".join(
+                        str(
+                            match.get("canonical_text")
+                            or match.get("matched_source_text")
+                            or ""
+                        ).split()
+                    ).strip()
+                    key = phrase.casefold()
+                    if phrase and key not in seen:
+                        seen.add(key)
+                        phrases.append(phrase)
+        target = getattr(self.stt_backend, "fast", self.stt_backend)
+        if hasattr(target, "phrase_list"):
+            existing = [
+                " ".join(str(value).split()).strip()
+                for value in getattr(target, "phrase_list", ()) or ()
+            ]
+            combined = list(dict.fromkeys(value for value in (*existing, *phrases) if value))
+            object.__setattr__(target, "phrase_list", tuple(combined))
+            if getattr(target, "phrase_biasing_weight", None) is None:
+                object.__setattr__(target, "phrase_biasing_weight", 1.6)
+            return tuple(combined)
+        return ()
 
     def _transcribe_cached(
         self,
@@ -1171,10 +2103,14 @@ class DubMasteringLoop:
         locale: str,
         mastering_root: Path,
         round_number: int,
+        phrase_list: Sequence[str] = (),
     ) -> tuple[dict[str, Any], Path, bool]:
         audio_sha = checksum(audio_path)
+        phrase_fingerprint = hashlib.sha256(
+            (locale + "\n" + "\n".join(phrase_list)).encode("utf-8")
+        ).hexdigest()[:12]
         cache_root = mastering_root / "stt_cache"
-        cache_path = cache_root / f"{audio_sha}.json"
+        cache_path = cache_root / f"{audio_sha}-{phrase_fingerprint}.json"
         if cache_path.is_file():
             return read_json(cache_path), cache_path, True
         self._emit(
@@ -1289,8 +2225,8 @@ class DubMasteringLoop:
                             "retired_payload_path": str(retired_override_path),
                             "reason": (
                                 "The installed mastering policy predates "
-                                "bounded final-source-tail allocation and "
-                                "context-calibrated production pause gates"
+                                "affix-aware identity matching and dialogue-"
+                                "audio-confirmed production pause gates"
                             ),
                             "retained_safe_override_count": len(
                                 retained_overrides
@@ -1307,7 +2243,7 @@ class DubMasteringLoop:
                     "mastering_policy_rebase",
                     (
                         "Retiring older mastering choices and rerendering the "
-                        "approved baseline under score policy v6; safe prepared-"
+                        "approved baseline under score policy v8; safe prepared-"
                         f"variant overrides retained: {len(retained_overrides)}"
                     ),
                     retired_override_path=str(retired_override_path),
@@ -1357,6 +2293,10 @@ class DubMasteringLoop:
 
         for round_number in range(max_rounds + 1):
             direct_report = read_json(report_path)
+            protected_entity_phrases = self._configure_protected_entity_phrases(
+                direct_report,
+                job_root=job_root,
+            )
             audio_path = Path(
                 str((direct_report.get("outputs") or {}).get("final_mix") or "")
             )
@@ -1371,12 +2311,38 @@ class DubMasteringLoop:
                 locale=job.target_language,
                 mastering_root=mastering_root,
                 round_number=round_number,
+                phrase_list=protected_entity_phrases,
             )
             normalized = normalize_azure_stt(
                 raw,
                 raw_reference=str(raw_path),
                 provider=str(getattr(self.stt_backend, "provider", "azure-speech")),
             )
+            # The target-locale transcript measures the whole isiZulu dub.
+            # A second, unbiased en-ZA pass is authoritative for protected
+            # English code switches and catches First/fast, Five/fever and
+            # police/policy failures that zu-ZA STT can incorrectly approve.
+            stt_target = getattr(self.stt_backend, "fast", self.stt_backend)
+            previous_phrase_list = tuple(
+                getattr(stt_target, "phrase_list", ()) or ()
+            )
+            try:
+                if hasattr(stt_target, "phrase_list"):
+                    object.__setattr__(stt_target, "phrase_list", ())
+                english_raw, english_raw_path, english_cache_reused = (
+                    self._transcribe_cached(
+                        audio_path=stt_input_path,
+                        locale="en-ZA",
+                        mastering_root=mastering_root,
+                        round_number=round_number,
+                        phrase_list=(),
+                    )
+                )
+            finally:
+                if hasattr(stt_target, "phrase_list"):
+                    object.__setattr__(
+                        stt_target, "phrase_list", previous_phrase_list
+                    )
             audit = analyze_mastered_dub(
                 job_id=job.job_id,
                 direct_dub_report=direct_report,
@@ -1385,6 +2351,38 @@ class DubMasteringLoop:
                 round_number=round_number,
                 thresholds=thresholds,
             )
+            english_entity_qa = apply_english_entity_pronunciation_gate(
+                audit,
+                protected_entities=protected_entity_phrases,
+                raw_english_stt=english_raw,
+                raw_response_path=english_raw_path,
+            )
+            english_entity_qa["cache_reused"] = english_cache_reused
+            self._apply_ai_local_timeline_reviews(
+                audit=audit,
+                direct_report=direct_report,
+                cache_root=mastering_root / "ai_qa_cache",
+            )
+            ai_qa_records = [
+                consumption_record(
+                    operation="post_tts_local_timeline_qa",
+                    scope=(
+                        f"round_{round_number:02d}:"
+                        f"{str(block.get('block_id') or '')}"
+                    ),
+                    metadata=(block.get("qa_ai_review") or {}).get("metadata") or {},
+                )
+                for block in audit.get("blocks") or []
+                if isinstance(block, Mapping)
+                and isinstance(block.get("qa_ai_review"), Mapping)
+                and (block.get("qa_ai_review") or {}).get("metadata")
+            ]
+            if ai_qa_records:
+                update_ai_consumption_report(
+                    job_root=job_root,
+                    records=ai_qa_records,
+                    video_duration_seconds=float(job.source_duration or 0.0),
+                )
             round_root = mastering_root / f"round_{round_number:02d}"
             round_root.mkdir(parents=True, exist_ok=True)
             audit["azure_stt"]["raw_response_path"] = str(raw_path)
@@ -1393,6 +2391,9 @@ class DubMasteringLoop:
             audit["azure_stt"]["input_bytes"] = stt_input_path.stat().st_size
             audit["azure_stt"]["source_mix_bytes"] = audio_path.stat().st_size
             audit["azure_stt"]["mono_16k_prepared"] = stt_input_prepared
+            audit["azure_stt"]["protected_entity_phrases"] = list(
+                protected_entity_phrases
+            )
             audit["azure_stt"]["request_duration_seconds"] = getattr(
                 self.stt_backend,
                 "request_duration_seconds",
@@ -1407,6 +2408,13 @@ class DubMasteringLoop:
                     "aggregate_word_error_rate": audit["aggregate_word_error_rate"],
                     "failed_block_count": audit["failed_block_count"],
                     "production_blocker_count": audit["production_blocker_count"],
+                    "local_information_order_failure_count": audit.get(
+                        "local_information_order_failure_count", 0
+                    ),
+                    "qa_ai": dict(audit.get("qa_ai") or {}),
+                    "english_code_switch_qa": dict(
+                        audit.get("english_code_switch_qa") or {}
+                    ),
                     "quality_dimensions": audit["quality_dimensions"],
                     "audit_path": str(round_root / "audit.json"),
                     "audio_sha256": audit["audio"]["sha256"],
@@ -1420,7 +2428,8 @@ class DubMasteringLoop:
                     f"{audit['production_score']:.1f}/100; "
                     f"WER {audit['aggregate_word_error_rate']:.3f}; "
                     f"{audit['production_blocker_count']} production blocker(s); "
-                    f"{audit['failed_block_count']} warning block(s)"
+                    f"{audit['failed_block_count']} warning block(s); "
+                    f"AI local reviews {int((audit.get('qa_ai') or {}).get('reviewed_count') or 0)}"
                 ),
                 **rounds[-1],
             )
@@ -1553,6 +2562,7 @@ class DubMasteringLoop:
             "tools": [
                 "Azure Speech word-level transcription",
                 "word-error and protected-entity audit",
+                "timestamp-localized semantic drift prefilter and AI review",
                 "pause and local-tempo analysis",
                 "same-speaker tempo continuity",
                 "cross-speaker collision analysis",
@@ -1578,13 +2588,119 @@ class DubMasteringLoop:
         return final
 
 
+def build_post_tts_quality_gate(
+    mastering_report: Mapping[str, Any],
+    *,
+    report_path: Path,
+    grammar_gate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Combine acoustic/STT evidence with the independent grammar gate."""
+
+    rounds = [
+        dict(value)
+        for value in mastering_report.get("rounds") or []
+        if isinstance(value, Mapping)
+    ]
+    best_round_number = int(mastering_report.get("best_round") or 0)
+    best_round = next(
+        (
+            value
+            for value in rounds
+            if int(value.get("round") or 0) == best_round_number
+        ),
+        rounds[-1] if rounds else {},
+    )
+    blocker_count = int(best_round.get("production_blocker_count") or 0)
+    grammar_blocker_count = (
+        int(grammar_gate.get("blocking_issue_count") or 0)
+        if grammar_gate is not None
+        else 0
+    )
+    # Explicit user direction: contextual grammar QA should only flag issues,
+    # never terminate the process -- it no longer contributes to whether
+    # publication is authorized. Its issue count/state are still surfaced
+    # below (grammar_blocker_count, grammar_quality_gate, reasons) purely for
+    # visibility/human review, same as any other flagged-but-not-blocking
+    # signal.
+    grammar_flagged = bool(
+        grammar_gate is not None
+        and not (
+            grammar_gate.get("state") == "passed"
+            and grammar_gate.get("publication_authorized") is True
+            and grammar_blocker_count == 0
+        )
+    )
+    production_ready = bool(best_round.get("production_ready"))
+    authorized = bool(
+        mastering_report.get("state") == "production_ready"
+        and production_ready
+        and blocker_count == 0
+    )
+    reasons: list[str] = []
+    if not rounds:
+        reasons.append("missing_stt_qa_round")
+    if mastering_report.get("state") != "production_ready":
+        reasons.append("production_threshold_not_reached")
+    if not production_ready and rounds:
+        reasons.append("best_round_not_production_ready")
+    if blocker_count:
+        reasons.append("production_blockers_present")
+    if grammar_flagged:
+        reasons.append("contextual_grammar_qa_flagged")
+
+    return {
+        "schema_version": POST_TTS_QUALITY_GATE_SCHEMA_VERSION,
+        "generated_at": _utcnow(),
+        "job_id": str(mastering_report.get("job_id") or ""),
+        "state": "passed" if authorized else "failed",
+        "publication_authorized": authorized,
+        "reasons": reasons,
+        "mastering_report_path": str(report_path),
+        "mastering_report_sha256": (
+            checksum(report_path) if report_path.is_file() else None
+        ),
+        "best_round": best_round_number,
+        "best_production_score": float(
+            mastering_report.get("best_production_score") or 0.0
+        ),
+        "aggregate_word_error_rate": float(
+            best_round.get("aggregate_word_error_rate") or 0.0
+        ),
+        "production_blocker_count": blocker_count + grammar_blocker_count,
+        "acoustic_production_blocker_count": blocker_count,
+        "grammar_blocker_count": grammar_blocker_count,
+        "grammar_quality_gate": (
+            {
+                "state": grammar_gate.get("state"),
+                "publication_authorized": grammar_gate.get(
+                    "publication_authorized"
+                ),
+                "blocking_issue_count": grammar_blocker_count,
+                "warning_issue_count": int(
+                    grammar_gate.get("warning_issue_count") or 0
+                ),
+                "translation_sha256": grammar_gate.get("translation_sha256"),
+                "run_directory": grammar_gate.get("run_directory"),
+            }
+            if grammar_gate is not None
+            else None
+        ),
+        "quality_dimensions": dict(best_round.get("quality_dimensions") or {}),
+        "thresholds": dict(mastering_report.get("thresholds") or {}),
+        "stopped_reason": mastering_report.get("stopped_reason"),
+    }
+
+
 __all__ = [
     "DUB_MASTERING_POLICY_VERSION",
     "DUB_MASTERING_ROUND_SCHEMA_VERSION",
     "DUB_MASTERING_SCHEMA_VERSION",
+    "POST_TTS_QUALITY_GATE_SCHEMA_VERSION",
     "DubMasteringLoop",
     "DubMasteringThresholds",
     "analyze_mastered_dub",
+    "apply_english_entity_pronunciation_gate",
+    "build_post_tts_quality_gate",
     "build_mastering_override_plan",
     "word_error_rate",
 ]

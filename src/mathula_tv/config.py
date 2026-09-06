@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -98,6 +99,19 @@ class Settings:
     hook_gpt_effort: str = "low"
     editorial_gpt_effort: str = "high"
     max_ai_calls_per_job: int = 20
+    # New, unvalidated fast path (see azure_tts_sdk.py): grouped bookmark synthesis
+    # of speech islands via the Speech SDK instead of one REST call per island.
+    # Defaults off (unlike other native-dub timing features) because it touches
+    # real Azure billing/audio quality and has not yet been validated on a real job.
+    enable_sdk_group_synthesis: bool = False
+    # Phase 14: synthesize a whole multi-sentence speaker turn in ONE bookmarked
+    # Speech SDK call and speed-fit it as one unit, instead of fitting each
+    # sentence in the turn independently -- fixes a confirmed real defect where
+    # a turn's last sentence drifts audibly past the true mouth-close (see
+    # native_dub.py's _synthesize_speaker_turns_with_bookmarks). Independent of
+    # enable_sdk_group_synthesis (a different, still-unvalidated mechanism for a
+    # different granularity) so each can be rolled out/validated separately.
+    enable_turn_group_synthesis: bool = False
 
     def safe_snapshot(self) -> dict:
         legacy_keys = {
@@ -122,11 +136,76 @@ class Settings:
         }
 
 
+def _resolve_windows_safe_path(default: Path, raw_value: str | None, *, platform_name: str | None = None) -> Path:
+    """Resolve a configured path without silently accepting a stale value from the wrong platform.
+
+    A common migration failure is carrying a Linux value such as
+    ``/home/user/mathula-tv/working`` into a Windows ``.env``.  ``pathlib`` on
+    Windows interprets that as a root-relative path on the current drive, e.g.
+    ``C:\\home\\user\\...``, which silently sends job artifacts, commission
+    context, or politics context to the wrong (nonexistent) tree.  On Windows,
+    reject POSIX/root-relative values that do not name a drive or UNC share
+    and fall back to ``default`` instead.
+
+    The reverse migration failure is just as real -- a shared ``.env`` carrying
+    a Windows value such as ``C:\\mathula-tv\\working`` onto a Linux/remote
+    server.  ``pathlib.PosixPath`` never treats backslashes as separators, so
+    the whole drive-letter string becomes one literal path component; worse,
+    if anything upstream (a shell, a ``.env`` loader) has already eaten the
+    backslashes as unrecognised escapes, the result silently mangles into
+    something like ``C:mathula-tvworking`` -- confirmed as a real production
+    failure (job submission wrote ffprobe input paths under a nonexistent
+    ``C:mathula-tvworking/jobs/...`` tree on a Linux box). On any non-Windows
+    platform, reject a drive-letter or UNC value the same way and fall back to
+    ``default``.
+    """
+
+    platform_name = platform_name or os.name
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return default
+
+    if platform_name == "nt":
+        normalized = raw.replace("\\", "/")
+        has_drive = len(normalized) >= 3 and normalized[0].isalpha() and normalized[1:3] == ":/"
+        is_unc = raw.startswith("\\\\") or normalized.startswith("//")
+        is_root_relative = normalized.startswith("/") and not is_unc
+        if is_root_relative and not has_drive:
+            warnings.warn(
+                "Ignoring non-Windows path %r on Windows; using default %s" % (raw, default),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return default
+    else:
+        normalized = raw.replace("\\", "/")
+        has_drive = len(normalized) >= 3 and normalized[0].isalpha() and normalized[1:3] == ":/"
+        is_unc = raw.startswith("\\\\") or normalized.startswith("//")
+        if has_drive or is_unc:
+            warnings.warn(
+                "Ignoring Windows-style path %r on a non-Windows platform; using default %s" % (raw, default),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return default
+
+    return Path(raw)
+
+
+def _resolve_work_dir(root: Path, raw_value: str | None = None, *, platform_name: str | None = None) -> Path:
+    return _resolve_windows_safe_path(root / "working", raw_value, platform_name=platform_name)
+
+
 def load_settings(project_root: Path | None = None) -> Settings:
     root = project_root or Path(__file__).resolve().parents[2]
     if load_dotenv:
         load_dotenv(root / ".env", override=False)
-    work = Path(os.getenv("MATHULA_TV_WORK_DIR", str(root / "working")))
+    work = _resolve_work_dir(root, os.getenv("MATHULA_TV_WORK_DIR"))
+    commission_default = (
+        Path("/home/mokgethwa/commission-ai/working/case_state/master_case_state.json")
+        if os.name != "nt"
+        else work / "context/commission_master_case_state.json"
+    )
     voices = tuple(
         item.strip()
         for item in os.getenv("MATHULA_TV_AZURE_TTS_VOICES", "zu-ZA-ThandoNeural,zu-ZA-ThembaNeural").split(",")
@@ -136,8 +215,12 @@ def load_settings(project_root: Path | None = None) -> Settings:
         work_dir=work,
         gcs_bucket=os.getenv("MATHULA_TV_GCS_BUCKET", ""),
         gcs_prefix=os.getenv("MATHULA_TV_GCS_PREFIX", "mathula-tv").strip("/"),
-        commission_master_case_path=Path(os.getenv("COMMISSION_MASTER_CASE_PATH", "/home/mokgethwa/commission-ai/working/case_state/master_case_state.json")),
-        politics_context_path=Path(os.getenv("POLITICS_CONTEXT_PATH", str(work / "context/politics_context.json"))),
+        commission_master_case_path=_resolve_windows_safe_path(
+            commission_default, os.getenv("COMMISSION_MASTER_CASE_PATH")
+        ),
+        politics_context_path=_resolve_windows_safe_path(
+            work / "context/politics_context.json", os.getenv("POLITICS_CONTEXT_PATH")
+        ),
         azure_speech_endpoint=os.getenv("AZURE_SPEECH_ENDPOINT", ""),
         azure_speech_region=os.getenv("AZURE_SPEECH_REGION", ""),
         azure_speech_locale=os.getenv("AZURE_SPEECH_LOCALE", "en-ZA"),
@@ -222,6 +305,8 @@ def load_settings(project_root: Path | None = None) -> Settings:
         max_job_runtime_seconds=int(os.getenv("MATHULA_TV_MAX_JOB_RUNTIME_SECONDS", "14400")),
         max_artifact_download_bytes=int(os.getenv("MATHULA_TV_MAX_ARTIFACT_DOWNLOAD_BYTES", str(2 * 1024 * 1024 * 1024))),
         pyannote_enabled=os.getenv("MATHULA_TV_ENABLE_PYANNOTE_DIAGNOSTIC", "0") == "1",
+        enable_sdk_group_synthesis=os.getenv("MATHULA_TV_ENABLE_SDK_GROUP_SYNTHESIS", "0") == "1",
+        enable_turn_group_synthesis=os.getenv("MATHULA_TV_ENABLE_TURN_GROUP_SYNTHESIS", "0") == "1",
         max_clean_unit_wer=float(os.getenv("MATHULA_TV_MAX_CLEAN_UNIT_WER", "0.35")),
         max_openvoice_wer_degradation=float(os.getenv("MATHULA_TV_MAX_OPENVOICE_WER_DEGRADATION", "0.10")),
         max_final_mix_wer_degradation=float(os.getenv("MATHULA_TV_MAX_FINAL_MIX_WER_DEGRADATION", "0.15")),

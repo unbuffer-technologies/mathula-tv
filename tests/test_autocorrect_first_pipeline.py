@@ -1,12 +1,16 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from mathula_tv.atomic_io import atomic_write_json
 from mathula_tv.autocorrect_stage import (
+    AutocorrectStageConfig,
     AutocorrectionReviewRequired,
     require_authoritative_transcript,
+    run_autocorrection_first,
 )
+import mathula_tv.autocorrect_stage as autocorrect_stage
 from mathula_tv.config import Settings
 from mathula_tv.media import checksum
 from mathula_tv.production_pipeline import ProductionDubbingPipeline
@@ -133,3 +137,117 @@ def test_units_record_authoritative_autocorrected_transcript_identity(tmp_path):
     assert "malanga ward" not in units["units"][0]["source_text"].casefold()
     assert units["source_transcript_sha256"] == identity["sha256"]
     assert units["source_autocorrection_state_sha256"] == identity["state_sha256"]
+
+
+def test_ai_stt_ranking_runs_before_authoritative_render(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = transcript()
+    source["autocorrect"] = {
+        "schema_version": "mathula-autocorrect-state-v1",
+        "overlays": [],
+    }
+    job = SimpleNamespace(job_id="job-ai-stt")
+    applied = {}
+
+    class FakeStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_ensure(_store, *, paths, **_kwargs):
+        atomic_write_json(paths.snapshot, source)
+
+    def fake_apply(_store, **kwargs):
+        applied.update(kwargs)
+        return {
+            "decision_count": 1,
+            "auto_applied_count": 1,
+            "suggested_count": 0,
+            "dismissed_count": 0,
+            "review_count": 0,
+        }
+
+    monkeypatch.setattr(autocorrect_stage, "Store", FakeStore)
+    monkeypatch.setattr(autocorrect_stage, "ensure_job", fake_ensure)
+    monkeypatch.setattr(
+        autocorrect_stage, "detect_candidates", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        autocorrect_stage,
+        "build_ai_request",
+        lambda *_args, **_kwargs: {
+            "schema_version": "mathula-autocorrect-ai-request-v1",
+            "request_sha256": "request-hash",
+            "spans": [{"correction_id": "correction-1"}],
+        },
+    )
+    monkeypatch.setattr(autocorrect_stage, "apply_ai_advice", fake_apply)
+    monkeypatch.setattr(
+        autocorrect_stage,
+        "render_effective_transcript",
+        lambda *_args, **_kwargs: {
+            "effective_sha256": "effective-hash",
+            "active_count": 1,
+            "review_count": 0,
+            "corrections": [],
+        },
+    )
+    monkeypatch.setattr(
+        autocorrect_stage,
+        "run_name_research_autocorrection",
+        lambda **kwargs: {
+            "transcript": kwargs["transcript"],
+            "artifact": {
+                "status": "no_candidates",
+                "candidate_count": 0,
+                "accepted_count": 0,
+                "applied_count": 0,
+                "unresolved_count": 0,
+            },
+        },
+    )
+
+    result = run_autocorrection_first(
+        work_dir=tmp_path,
+        job=job,
+        reconciled_transcript=source,
+        config=AutocorrectStageConfig(
+            database_url="postgresql://unused",
+            schema="test",
+            hints_path=None,
+            registry_path=None,
+            user_id=None,
+            project_id="mathula-tv",
+            fuzzy_threshold=0.68,
+            max_candidates=4,
+            low_confidence_threshold=0.72,
+            auto_confirmation_threshold=2,
+        ),
+        ai_ranker=lambda _request: (
+            {
+                "correction-1": {
+                    "correction_id": "correction-1",
+                    "decision": "ACCEPT_CANDIDATE",
+                    "candidate_id": "entity:madlanga",
+                    "confidence": 0.98,
+                    "reason": "Known name in context",
+                    "question": "",
+                }
+            },
+            {"provider": "azure-openai-gpt"},
+        ),
+    )
+
+    assert applied["auto_apply_confidence"] == 0.92
+    assert applied["minimum_candidate_score"] == 0.75
+    assert result["ai_stt_autocorrect_status"] == "completed"
+    assert result["ai_stt_auto_applied_count"] == 1
+    assert result["ready_for_language_ai"] is True
+    assert (
+        tmp_path
+        / "jobs/job-ai-stt/analysis/autocorrection_ai_response.json"
+    ).is_file()

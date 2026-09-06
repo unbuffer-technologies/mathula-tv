@@ -36,12 +36,14 @@ def _block(
     rate: int = 0,
     stretch: float = 1.0,
     selected_variant_id: str = "natural",
+    source_text: str = "",
 ) -> dict:
     return {
         "block_id": block_id,
         "start_ms": start_ms,
         "end_ms": end_ms,
         "speaker_id": speaker_id,
+        "source_text": source_text,
         "translated_text": text,
         "tts_text": text,
         "protected_entities": [],
@@ -105,6 +107,178 @@ def test_perfect_render_reaches_production_score(tmp_path: Path) -> None:
     assert audit["production_ready"] is True
     assert audit["production_score"] == 100
     assert audit["aggregate_word_error_rate"] == 0
+
+
+def test_qa_blocks_large_local_name_timing_drift_even_when_stt_is_perfect(
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "final_mix.wav"
+    audio.write_bytes(b"audio")
+    source = (
+        "WhatsApp communications extracted from the phone of the alleged leader "
+        "of the Big Five cartel, Jothan Mswazi Msibi."
+    )
+    delivered = (
+        "Imiyalezo ye-WhatsApp ocingweni lukaJothan Mswazi Msibi, "
+        "umholi osolwayo we-Big Five cartel."
+    )
+    report = {
+        "blocks": [
+            _block(
+                "block_0001_variant_natural",
+                start_ms=0,
+                end_ms=7500,
+                text=delivered,
+                source_text=source,
+            )
+        ]
+    }
+    normalized = {
+        "provider": "fake-azure",
+        "phrases": [{"text": delivered}],
+        "words": [
+            _word(word, index * 0.45, (index + 1) * 0.45)
+            for index, word in enumerate(delivered.split())
+        ],
+    }
+
+    audit = analyze_mastered_dub(
+        job_id="job-local-order",
+        direct_dub_report=report,
+        normalized_stt=normalized,
+        audio_path=audio,
+        round_number=0,
+    )
+
+    block = audit["blocks"][0]
+    assert "local_information_order_drift" in block["production_blockers"]
+    assert block["local_information_order_anomalies"][0]["anchor"] == (
+        "Jothan Mswazi Msibi"
+    )
+    assert audit["local_information_order_failure_count"] == 1
+    assert audit["quality_dimensions"]["local_semantic_alignment"] == 0
+    assert audit["production_ready"] is False
+
+
+def test_qa_uses_nearest_repeated_name_for_local_order_check(tmp_path: Path) -> None:
+    audio = tmp_path / "final_mix.wav"
+    audio.write_bytes(b"audio")
+    source = (
+        "The report first summarized the evidence and all related proceedings "
+        "before returning at the end to Vusimuzi Cat Matlala."
+    )
+    delivered = (
+        "Ubufakazi bukaVusimuzi Cat Matlala buchaziwe ekuqaleni. "
+        "Umbiko uqhubeka uchaze zonke izigameko nemininingwane yophenyo, "
+        "bese ekugcineni ubuyela kuVusimuzi Cat Matlala."
+    )
+    report = {
+        "blocks": [
+            _block(
+                "block_0001_variant_natural",
+                start_ms=0,
+                end_ms=9000,
+                text=delivered,
+                source_text=source,
+            )
+        ]
+    }
+    normalized = {
+        "provider": "fake-azure",
+        "phrases": [{"text": delivered}],
+        "words": [
+            _word(word, index * 0.3, (index + 1) * 0.3)
+            for index, word in enumerate(delivered.split())
+        ],
+    }
+
+    audit = analyze_mastered_dub(
+        job_id="job-repeated-name",
+        direct_dub_report=report,
+        normalized_stt=normalized,
+        audio_path=audio,
+        round_number=0,
+    )
+
+    block = audit["blocks"][0]
+    assert block["local_information_order_anomalies"] == []
+    assert "local_information_order_drift" not in block["production_blockers"]
+
+
+def test_qa_ai_reviews_only_prefiltered_local_timeline_anomalies() -> None:
+    calls: list[dict] = []
+
+    class Reviewer:
+        def review_semantic_fit(self, payload: dict) -> SimpleNamespace:
+            calls.append(payload)
+            return SimpleNamespace(
+                data={
+                    "accepted": False,
+                    "reason_codes": ["local_information_order_drift"],
+                }
+            )
+
+    loop = DubMasteringLoop(
+        stt_backend=SimpleNamespace(),
+        renderer=SimpleNamespace(),
+        qa_review_provider_factory=Reviewer,
+    )
+    audit = {
+        "blocks": [
+            {
+                "block_id": "block_0001",
+                "source_text": "The report named Jothan Mswazi Msibi at the end.",
+                "expected_spoken_text": "UJothan Mswazi Msibi ubalulwe embikweni.",
+                "expected_tts_text": "UJothan Mswazi Msibi ubalulwe embikweni.",
+                "transcribed_text": "UJothan Mswazi Msibi ubalulwe embikweni.",
+                "recognized_word_timeline": [
+                    {"text": "UJothan", "start": 0.1, "end": 0.5}
+                ],
+                "local_information_order_anomalies": [
+                    {
+                        "anchor": "Jothan Mswazi Msibi",
+                        "source_relative_position": 0.70,
+                        "target_relative_position": 0.00,
+                    }
+                ],
+                "reason_codes": ["local_information_order_drift"],
+                "production_blockers": ["local_information_order_drift"],
+                "start_ms": 0,
+                "end_ms": 4000,
+            }
+        ]
+    }
+    direct_report = {
+        "blocks": [
+            {
+                "block_id": "block_0001_variant_compact",
+                "variants": [
+                    {
+                        "variant_id": "natural",
+                        "spoken_text": "UJothan Mswazi Msibi ubalulwe embikweni.",
+                    }
+                ],
+                "required_facts": [],
+                "protected_entities": [],
+            }
+        ]
+    }
+
+    loop._apply_ai_local_timeline_reviews(  # noqa: SLF001
+        audit=audit,
+        direct_report=direct_report,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["post_tts_timeline_evidence"]["recognized_words"][0][
+        "text"
+    ] == "UJothan"
+    assert audit["qa_ai"]["reviewed_count"] == 1
+    assert audit["qa_ai"]["rejected_count"] == 1
+    assert audit["blocks"][0]["qa_ai_review"]["status"] == "rejected"
+    assert "qa_ai_local_timeline_rejection" in audit["blocks"][0][
+        "production_blockers"
+    ]
 
 
 def test_audit_detects_false_pause_and_artificial_same_speaker_tempo_jump(
@@ -200,6 +374,33 @@ def test_repair_plan_selects_one_change_per_five_block_window() -> None:
     assert plan["new_overrides"][0]["block_id"] == "block_0002"
     assert plan["new_overrides"][0]["variant_id"] == "concise"
     assert plan["five_block_neighbourhood_control"] is True
+
+
+def test_protected_entity_failure_does_not_swap_semantic_variant() -> None:
+    audit = {
+        "round": 0,
+        "blocks": [
+            {
+                "block_id": "block_0001",
+                "block_index": 0,
+                "production_gate_passed": False,
+                "production_blockers": ["protected_entity_not_recognized"],
+                "selected_variant_id": "concise",
+                "available_variant_ids": ["natural", "concise", "compact"],
+                "available_variants": [],
+                "word_error_rate": 0.05,
+                "maximum_internal_pause_ms": 0,
+                "same_speaker_tempo_jump": 0,
+                "post_synthesis_time_stretch_ratio": 1.0,
+                "cross_speaker_overlap_ms": 0,
+            }
+        ],
+    }
+
+    plan = build_mastering_override_plan(job_id="job", audit=audit)
+
+    assert plan["new_override_count"] == 0
+    assert plan["new_overrides"] == []
 
 
 def test_direct_renderer_accepts_only_approved_mastering_variant() -> None:
@@ -341,4 +542,6 @@ def test_audit_only_loop_transcribes_final_output_and_reuses_stt_cache(
     assert first["schema_version"] == DUB_MASTERING_SCHEMA_VERSION
     assert first["state"] == "production_ready"
     assert second["rounds"][0]["stt_cache_reused"] is True
-    assert backend.calls == 1
+    # One target-locale transcription plus one unbiased en-ZA entity gate;
+    # the second loop invocation reuses both cached responses.
+    assert backend.calls == 2

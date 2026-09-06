@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .ai_provider import create_production_ai_provider
-from .atomic_io import read_json
+from .foundry_grok import create_foundry_grok_provider
+from .atomic_io import atomic_write_json, read_json
 from .azure_stt import AzureFastTranscriptionBackend, derive_endpoint
 from .azure_tts import AzureTTSBackend, AzureTTSHTTPBoundary
+from .azure_tts_sdk import AzureSpeechSDKLiveBoundary
 from .colab_package import publish_colab_package
 from .compatibility import (
     CompatibilityThresholds,
@@ -22,6 +24,7 @@ from .compatibility import (
 from .config import load_settings
 from .diarization import run_pyannote
 from .logging_utils import configure_logging, redact
+from .media import checksum
 from .models import PRODUCTION_STATES, utcnow
 from .orchestrator import Orchestrator
 from .youtube_ingestion import (
@@ -50,6 +53,9 @@ EXTERNAL_COMMANDS = {
     "queue-voice-conversion",
     "reconcile-voice-conversion",
     "dub-azure",
+    "native-translate",
+    "native-qa",
+    "native-dub",
     "optimize-dub",
     "edit-tiktok",
 }
@@ -92,6 +98,12 @@ def create_translation_backend(provider: str | None = None, model: str | None = 
         raise ValueError(
             "v13.18.54 is GPT-only; use v13.18.51 or older for Claude"
         )
+    if selected in {"manual-chatgpt", "manual", "chatgpt-manual", "manual-gpt"}:
+        environment = dict(os.environ)
+        environment["MATHULA_TV_AI_PROVIDER"] = "manual-chatgpt"
+        if model:
+            environment["MATHULA_TV_MANUAL_AI_MODEL"] = model
+        return create_production_ai_provider(environment)
     if selected in {"azure-openai-gpt", "azure-openai", "gpt"}:
         environment = dict(os.environ)
         environment["MATHULA_TV_AI_PROVIDER"] = "azure-openai-gpt"
@@ -100,6 +112,34 @@ def create_translation_backend(provider: str | None = None, model: str | None = 
             environment["AZURE_AI_DEPLOYMENT"] = model
         return create_production_ai_provider(environment)
     raise ValueError(f"Unsupported AI provider: {selected}; no fallback is configured")
+
+
+def create_native_grok_backend(
+    model: str | None = None,
+    *,
+    progress: Callable[[str], None] | None = None,
+):
+    environment = dict(os.environ)
+    if model:
+        environment["AZURE_FOUNDRY_GROK_DEPLOYMENT"] = model
+    return create_foundry_grok_provider(environment, progress=progress)
+
+
+def _print_native_progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _print_referent_audit_summary(summary: Mapping[str, Any] | None) -> None:
+    if not summary:
+        return
+    unresolved = summary.get("unresolved_group_ids") or []
+    print(
+        f"Referent audit: {int(summary.get('groups_checked') or 0)} group(s) checked, "
+        f"{int(summary.get('groups_flagged') or 0)} flagged, "
+        f"{int(summary.get('repairs_applied') or 0)} repaired"
+        + (f", {len(unresolved)} unresolved" if unresolved else "")
+        + "."
+    )
 
 
 def create_tts_backend(settings) -> AzureTTSBackend:
@@ -122,6 +162,29 @@ def create_tts_backend(settings) -> AzureTTSBackend:
         timeout_seconds=settings.azure_tts_timeout_seconds,
         max_retries=settings.azure_tts_max_retries,
         ssml_bounds=bounds,
+    )
+
+
+def create_sdk_boundary(settings) -> AzureSpeechSDKLiveBoundary:
+    """Construct the Speech SDK boundary for grouped bookmark synthesis.
+
+    Reuses the exact same AZURE_SPEECH_REGION/AZURE_SPEECH_KEY credentials and TTS
+    audio format already configured for the REST path (see create_tts_backend) --
+    no separate credential plumbing. Only called when enable_sdk_group_synthesis is
+    on, so the lazy Speech SDK import (see azure_tts_sdk.build_speech_config) is
+    never triggered for callers who never opt into this path.
+    """
+    key = os.getenv("AZURE_SPEECH_KEY", "")
+    if not key:
+        raise ValueError("AZURE_SPEECH_KEY is missing")
+    if not settings.azure_speech_region:
+        raise ValueError("AZURE_SPEECH_REGION is missing")
+    return AzureSpeechSDKLiveBoundary(
+        region=settings.azure_speech_region,
+        subscription_key=key,
+        sample_rate=settings.azure_tts_sample_rate,
+        channels=settings.azure_tts_channels,
+        sample_width=settings.azure_tts_sample_width,
     )
 
 
@@ -503,6 +566,11 @@ def _print_dub_azure_result(
         if isinstance(publication.get("translation"), dict)
         else {}
     )
+    post_tts_qa = (
+        result.get("post_tts_qa")
+        if isinstance(result.get("post_tts_qa"), dict)
+        else {}
+    )
 
     if not output:
         outputs = result.get("outputs") if isinstance(result.get("outputs"), dict) else {}
@@ -557,6 +625,25 @@ def _print_dub_azure_result(
         print("Hook edit: disabled (hook card retained)")
     print(f"Translation: {translation_state}")
     print(f"Publication render: {reuse_state}")
+    if post_tts_qa:
+        qa_state = str(post_tts_qa.get("state") or "not reported").strip()
+        if qa_state.casefold() == "disabled":
+            qa_state = "disabled"
+        elif post_tts_qa.get("publication_authorized") is True:
+            qa_state = "passed"
+        elif post_tts_qa.get("publication_authorized") is False:
+            qa_state = "failed"
+        qa_parts = [qa_state]
+        score = post_tts_qa.get("best_production_score")
+        if isinstance(score, (int, float)) and not isinstance(score, bool):
+            qa_parts.append(f"score {float(score):.2f}/100")
+        wer = post_tts_qa.get("aggregate_word_error_rate")
+        if isinstance(wer, (int, float)) and not isinstance(wer, bool):
+            qa_parts.append(f"WER {float(wer):.3f}")
+        blockers = post_tts_qa.get("production_blocker_count")
+        if isinstance(blockers, int) and not isinstance(blockers, bool):
+            qa_parts.append(f"{blockers} blocker(s)")
+        print(f"Post-TTS QA: {' · '.join(qa_parts)}")
 
 
 def _translation_progress_callback():
@@ -606,9 +693,28 @@ def parser() -> argparse.ArgumentParser:
     submit.add_argument("--target-language", default="zu-ZA")
     submit.add_argument("--force", action="store_true")
 
+    job_commands = {}
     for name in ("process", "transcribe", "diarize", "retry", "validate", "inspect"):
-        _add_job_command(commands, name)
-    _add_job_command(commands, "resume-autocorrect-research")
+        job_commands[name] = _add_job_command(commands, name)
+    job_commands["process"].add_argument(
+        "--ai-provider",
+        choices=("azure-openai-gpt", "manual-chatgpt"),
+        default=None,
+        help=(
+            "AI provider for analysis/autocorrect research. manual-chatgpt "
+            "exports resumable request JSON instead of calling Azure AI."
+        ),
+    )
+    resume_autocorrect = _add_job_command(commands, "resume-autocorrect-research")
+    resume_autocorrect.add_argument(
+        "--ai-provider",
+        choices=("azure-openai-gpt", "manual-chatgpt"),
+        default=None,
+        help=(
+            "AI provider for resumed entity inventory/web research. "
+            "manual-chatgpt exports resumable request JSON."
+        ),
+    )
     _add_job_command(commands, "repair-speaker-turns")
     status = _add_job_command(commands, "status")
     status.add_argument(
@@ -622,10 +728,372 @@ def parser() -> argparse.ArgumentParser:
     migration.add_argument("--allow-legacy-review-reset", action="store_true")
     _add_job_command(commands, "prepare-source-derivatives")
     _add_job_command(commands, "build-dubbing-units")
+    native_web = _add_job_command(commands, "native-web-override")
+    native_web.add_argument("override_json", type=Path)
+
+    native_translate = _add_job_command(commands, "native-translate")
+    native_translate.add_argument("--model", default=None, help="Foundry Grok deployment name")
+    native_translate.add_argument(
+        "--pass",
+        dest="native_pass",
+        choices=("all", "1", "2"),
+        default="all",
+        help="Run both native AI passes or only one pass",
+    )
+    native_translate.add_argument(
+        "--rolling-syllable",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Use causal rolling translation: two locked prior isiZulu segments, one source "
+            "lookahead, and duration-derived isiZulu syllable budgets before Azure TTS."
+        ),
+    )
+    native_translate.add_argument(
+        "--temporal-mask",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Compose fixed four-block English/Zulu semantic windows, target slightly-long isiZulu by syllables, "
+            "Azure-measure at rate 0, and treat >+12%% final acceleration as warning-only."
+        ),
+    )
+    native_translate.add_argument(
+        "--temporal-mask-batch-size",
+        type=int,
+        default=4,
+        help="Compatibility hint; temporal-mask composition now uses fixed four-block semantic windows (default 4).",
+    )
+    native_translate.add_argument(
+        "--temporal-mask-candidates",
+        type=int,
+        default=5,
+        help=(
+            "Ceiling on the natural-to-concise compaction ladder per window (1-8): Grok always "
+            "starts from candidate 'a' (natural, no length target) and compacts further only as "
+            "needed, stopping itself once a further candidate would repeat or damage one -- this is "
+            "a maximum, not a count it must fill. Every candidate returned is measured against real "
+            "Azure synthesis to pick the best fit (default 5)."
+        ),
+    )
+    native_translate.add_argument(
+        "--temporal-mask-residual-rounds",
+        type=int,
+        default=0,
+        help="Compatibility option; Python temporal-mask residual rounds are disabled (always 0).",
+    )
+    native_translate.add_argument(
+        "--temporal-mask-tts-workers",
+        type=int,
+        default=6,
+        help="Compatibility option; Azure TTS is not called by temporal-mask Pass 2 (timing is deferred to native-dub).",
+    )
+
+    native_translate.add_argument(
+        "--rolling-syllable-batch-size",
+        type=int,
+        default=8,
+        help=(
+            "Maximum sequential segments per Grok rolling-syllable request (default 8). "
+            "The model processes them in order inside one call."
+        ),
+    )
+    native_translate.add_argument(
+        "--rolling-syllables-per-second",
+        type=float,
+        default=5.3,
+        help="Azure isiZulu content-rate calibration used for syllable planning (default 5.3 syllables/s).",
+    )
+    native_translate.add_argument(
+        "--rolling-azure-overhead-ms",
+        type=int,
+        default=900,
+        help="Fixed per-utterance Azure TTS duration overhead used by the affine syllable model (default 900 ms).",
+    )
+    native_translate.add_argument(
+        "--rolling-syllable-tolerance-percent",
+        type=int,
+        default=12,
+        help="Preferred +/- syllable planning range around the duration-derived target (default 12%%).",
+    )
+    native_translate.add_argument(
+        "--audit-referents",
+        dest="audit_referents",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run an independent post-Pass-2 audit call to verify every name, role/title, "
+            "number, and negation survives translation, and repair confirmed issues "
+            "(default: enabled). The inline Pass-2 self-QA runs in the same call as the "
+            "translation and cannot reliably catch a referent it is already confident about."
+        ),
+    )
+    native_translate.add_argument(
+        "--referent-audit-batch-size",
+        type=int,
+        default=12,
+        help="Groups per referent-audit/repair provider call (default 12).",
+    )
+    native_translate.add_argument(
+        "--max-referent-repair-rounds",
+        type=int,
+        default=1,
+        help="Bounded repair rounds for groups the referent audit flags (default 1).",
+    )
+    native_translate.add_argument(
+        "--referent-audit-workers",
+        type=int,
+        default=4,
+        help=(
+            "Concurrent audit/repair provider calls (default 4). Unlike Pass 2's "
+            "temporal-mask windows, every referent-audit batch is fully independent "
+            "of every other, so this is safe to raise for a faster audit -- bounded "
+            "only to stay a good citizen of the same rate-limited Foundry endpoint "
+            "Pass 2 also calls."
+        ),
+    )
+    native_translate.add_argument(
+        "--candidate-pool",
+        action="store_true",
+        help=(
+            "Build the full candidate-pool translation artifact (glossary + Grok "
+            "translation + QA check/repair + Azure TTS measurement + discourse-segment "
+            "timing rebalance) and write it to pass2_candidate_pool.json ONLY -- never "
+            "touches pass2_natural_translation.json. Requires pass 1 to already be "
+            "complete. Mutually exclusive with --rolling-syllable/--temporal-mask."
+        ),
+    )
+    native_translate.add_argument(
+        # Mirrors native_dub.DEFAULT_CANDIDATE_POOL_WORKERS -- kept a literal since
+        # this module lazily imports native_dub inside command dispatch, not at
+        # parser-construction time.
+        "--candidate-pool-workers", type=int, default=4,
+        help="Concurrent Grok/QA provider calls for --candidate-pool (default 4).",
+    )
+    native_translate.add_argument(
+        "--candidate-pool-tts-workers", type=int, default=6,
+        help="Concurrent Azure TTS measurement calls for --candidate-pool (default 6).",
+    )
+    native_translate.add_argument(
+        "--commit",
+        action="store_true",
+        help=(
+            "After building (or reusing) the candidate pool, commit its selected winners "
+            "into pass2_natural_translation.json -- the SAME temporal_mask_groups shape "
+            "the --temporal-mask path writes, so native-qa/native-dub work unchanged. "
+            "Only used with --candidate-pool; refuses to commit an incomplete pool."
+        ),
+    )
+    native_translate.add_argument(
+        "--skip-turn-rebalance",
+        action="store_true",
+        help=(
+            "Diagnostic only (--candidate-pool): skip Phase 13's speaker-turn window "
+            "reallocation entirely, so every sentence's required_speed_percent reflects its own "
+            "raw natural-translation timing. Isolates the concise/compact compaction mechanism "
+            "for independent tuning."
+        ),
+    )
+    native_translate.add_argument(
+        "--skip-turn-block-translation",
+        action="store_true",
+        help=(
+            "Diagnostic only (--candidate-pool): skip Phase 16's whole-turn-block translation "
+            "entirely and fall back to the older, proven per-sentence translation for EVERY "
+            "sentence -- real A/B comparison against a job's own baseline."
+        ),
+    )
+    native_translate.add_argument(
+        "--skip-pronunciation-research",
+        action="store_true",
+        help=(
+            "Diagnostic only (--candidate-pool): skip Phase 17's web-search-backed pronunciation "
+            "research entirely (real Azure Responses API call, real cost) -- entities keep "
+            "whatever pronunciation the hand-curated dictionaries already give them."
+        ),
+    )
+    native_translate.add_argument(
+        "--skip-pronunciation-round-trip",
+        action="store_true",
+        help=(
+            "Diagnostic only (--candidate-pool): skip Phase 18's automated TTS+STT round-trip "
+            "verification of pronunciation research corrections (real Azure TTS/STT calls, real "
+            "cost) even when Speech credentials are configured -- corrections are applied on the "
+            "research call's own confidence alone, exactly like before Phase 18 existed."
+        ),
+    )
+    native_translate.add_argument(
+        "--json",
+        "--json-output",
+        dest="json_output",
+        action="store_true",
+        help="Print the complete native translation artifact instead of the concise summary",
+    )
+
+    native_qa = _add_job_command(commands, "native-qa")
+    native_qa.add_argument("--model", default=None, help="Foundry Grok deployment used for back-translation QA")
+    native_qa.add_argument(
+        "--batch-size",
+        type=int,
+        default=15,
+        help="Sentences per back-translation QA batch (default 15)",
+    )
+    native_qa.add_argument(
+        "--repair",
+        dest="repair",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Automatically repair sentences the back-translation audit flags, then re-verify "
+            "the fix and mutate the canonical Pass-2 translation in place (default: enabled). "
+            "--no-repair restores the old flag-only behavior."
+        ),
+    )
+    native_qa.add_argument(
+        "--max-qa-repair-rounds",
+        type=int,
+        default=1,
+        help="Bounded repair rounds for sentences the back-translation audit flags (default 1).",
+    )
+    native_qa.add_argument(
+        "--direct-adequacy",
+        dest="direct_adequacy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Also judge each sentence directly (source vs. target, no back-translation "
+            "step) as a genuinely independent second check -- catches drift a same-model "
+            "back-translation round-trip can self-consistently miss, at the cost of "
+            "roughly doubling this command's Grok calls (default: enabled). "
+            "--no-direct-adequacy restores the back-translation-only behavior."
+        ),
+    )
+    native_qa.add_argument(
+        "--qa-audit-workers",
+        type=int,
+        default=4,
+        help=(
+            "Parallel workers for the back-translation/direct-adequacy audit batches "
+            "(default 4). Batches are fully independent -- each is its own provider "
+            "call over a distinct slice of sentences -- so this is a pure throughput knob."
+        ),
+    )
+    native_qa.add_argument(
+        "--json",
+        "--json-output",
+        dest="json_output",
+        action="store_true",
+        help="Print the complete back-translation QA artifact instead of the concise summary",
+    )
+
+    native_dub = _add_job_command(commands, "native-dub")
+    native_dub.add_argument("--model", default=None, help="Foundry Grok deployment used for native editorial hook and optional timing repair")
+    native_dub.add_argument("--voice-map", type=Path)
+    native_dub.add_argument(
+        "--hook-edit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use the production AI-selected opening cut. --no-hook-edit keeps "
+            "the full native dub but still renders the persistent footer hook overlay."
+        ),
+    )
+    native_dub.add_argument(
+        "--hook-overlay",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Render the footer hook title-card overlay and run its expensive publication "
+            "encode (a full libx264 re-encode of the whole video, unrelated to --hook-edit's "
+            "opening cut). --no-hook-overlay skips it entirely, producing just the plain "
+            "dubbed master -- untouched source video, dubbed audio, no title cards, no "
+            "editorial/Grok hook call -- for fast, cheap iteration on audio timing alone. "
+            "Combine with --lite to also cap CPU during iteration."
+        ),
+    )
+    native_dub.add_argument("--repair-threshold-ms", type=int, default=0, help="Deprecated hard-sync compatibility option; native hard sync repairs any true overflow")
+    native_dub.add_argument("--max-join-gap-ms", type=int, default=0, help="Same-speaker grouping gap. Hard-sync native mode never consumes a positive source gap by default")
+    native_dub.add_argument("--max-phrase-source-ms", type=int, default=45000)
+    native_dub.add_argument(
+        "--preferred-raw-speed-percent",
+        type=int,
+        default=6,
+        help=(
+            "Soft Pass-2/raw-TTS target: generate speech this much longer than the source "
+            "mouth window so final sync uses a modest speed-up (0-12; default 6)"
+        ),
+    )
+    native_dub.add_argument(
+        "--max-natural-speed-percent",
+        type=int,
+        default=12,
+        help=(
+            "Red console quality-warning threshold for pitch-preserving post-TTS speed-up. "
+            "Higher required speed is allowed and non-fatal (0-15; default 12)."
+        ),
+    )
+    native_dub.add_argument(
+        "--mouth-close-lag-tolerance-ms",
+        type=int,
+        default=40,
+        help=(
+            "Maximum final audio-vs-mouth-close error in milliseconds before wording recast "
+            "is required (0-80; default 40)"
+        ),
+    )
+    native_dub.add_argument(
+        "--protected-gap-overflow",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Allow bounded use of existing post-articulation source silence when exact mouth-close "
+            "would require excessive speed; never moves the next source onset"
+        ),
+    )
+    native_dub.add_argument(
+        "--max-protected-gap-overflow-ms",
+        type=int,
+        default=400,
+        help="Maximum post-mouth-close source gap Mathula may occupy (0-1000 ms; default 400)",
+    )
+    native_dub.add_argument(
+        "--min-protected-pause-ms",
+        type=int,
+        default=120,
+        help="Minimum existing pause preserved before the next source onset (0-2000 ms; default 120)",
+    )
+    native_dub.add_argument(
+        "--lite",
+        action="store_true",
+        help=(
+            "Cap ffmpeg's own encode threads at half the machine's logical CPU count and "
+            "lower the ffmpeg subprocess's OS scheduling priority, so a background render "
+            "doesn't peg every core on your machine. An approximation, not a literal "
+            "enforced percentage ceiling -- see render_native_dub's docstring."
+        ),
+    )
+    native_dub.add_argument(
+        "--json",
+        "--json-output",
+        dest="json_output",
+        action="store_true",
+        help="Print the complete native dub result instead of the concise summary",
+    )
+
     translate = _add_job_command(commands, "translate")
     translate.add_argument("--provider", default=None)
     translate.add_argument("--model", default=None)
     translate.add_argument("--batch-size", type=int, default=None)
+    translate.add_argument(
+        "--parallelism",
+        type=int,
+        choices=range(1, 5),
+        default=None,
+        help=(
+            "Concurrent translation chunks after the first validated continuity "
+            "seed (default: 2; use 1 for fully serial translation)"
+        ),
+    )
     translate.add_argument("--context-units", type=int, default=None)
     translate.add_argument("--request-timeout-seconds", type=float, default=None)
     translate.add_argument("--batch-max-retries", type=int, default=None)
@@ -649,6 +1117,9 @@ def parser() -> argparse.ArgumentParser:
     repair_translation = _add_job_command(commands, "repair-translation")
     repair_translation.add_argument("--provider", default=None)
     repair_translation.add_argument("--model", default=None)
+    manual_ai = _add_job_command(commands, "manual-ai")
+    manual_ai.add_argument("action", choices=("pending", "install"))
+    manual_ai.add_argument("response_json", nargs="?", type=Path)
     _add_job_command(commands, "prepare-dubbing")
     _add_job_command(commands, "validate-azure-voices")
     _add_job_command(commands, "calibrate-azure-sources")
@@ -697,6 +1168,15 @@ def parser() -> argparse.ArgumentParser:
     dub_azure = _add_job_command(commands, "dub-azure")
     dub_azure.add_argument("--min-confidence", type=float, default=0.70)
     dub_azure.add_argument("--voice-map", type=Path)
+    dub_azure.add_argument(
+        "--ai-provider",
+        choices=("azure-openai-gpt", "manual-chatgpt"),
+        default=None,
+        help=(
+            "AI provider for grammar/timing/publication calls. manual-chatgpt "
+            "exports resumable request JSON instead of calling Azure OpenAI."
+        ),
+    )
     dub_azure.add_argument("--timeline-panel-host", default="127.0.0.1")
     dub_azure.add_argument("--timeline-panel-port", type=int, default=8765)
     dub_azure.add_argument(
@@ -755,6 +1235,46 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     dub_azure.add_argument(
+        "--qa-stt",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv(
+            "MATHULA_TV_POST_TTS_QA_ENABLED", "1"
+        ).strip().casefold()
+        not in {"0", "false", "no", "off"},
+        help=(
+            "Transcribe and score the rendered dub before publication; "
+            "publication fails closed when production thresholds are not met"
+        ),
+    )
+    dub_azure.add_argument(
+        "--qa-stt-max-rounds",
+        type=int,
+        default=int(os.getenv("MATHULA_TV_POST_TTS_QA_MAX_ROUNDS", "1")),
+        help="Maximum approved-variant repair rounds after the initial STT audit",
+    )
+    dub_azure.add_argument(
+        "--qa-minimum-production-score",
+        type=float,
+        default=float(
+            os.getenv(
+                "MATHULA_TV_POST_TTS_QA_MINIMUM_PRODUCTION_SCORE",
+                "82",
+            )
+        ),
+        help="Minimum post-TTS production quality score",
+    )
+    dub_azure.add_argument(
+        "--qa-maximum-aggregate-wer",
+        type=float,
+        default=float(
+            os.getenv(
+                "MATHULA_TV_POST_TTS_QA_MAXIMUM_AGGREGATE_WER",
+                "0.40",
+            )
+        ),
+        help="Maximum delivery-aware aggregate word error rate",
+    )
+    dub_azure.add_argument(
         "--json",
         "--json-output",
         dest="json_output",
@@ -767,6 +1287,12 @@ def parser() -> argparse.ArgumentParser:
     optimize_dub.add_argument("--audit-only", action="store_true")
     optimize_dub.add_argument("--min-confidence", type=float, default=0.70)
     optimize_dub.add_argument("--voice-map", type=Path)
+    optimize_dub.add_argument(
+        "--ai-provider",
+        choices=("azure-openai-gpt", "manual-chatgpt"),
+        default=None,
+        help="AI provider for grammar/timing/mastering calls.",
+    )
     optimize_dub.add_argument("--minimum-production-score", type=float, default=82.0)
     optimize_dub.add_argument("--maximum-aggregate-wer", type=float, default=0.40)
     optimize_dub.add_argument(
@@ -845,6 +1371,18 @@ def parser() -> argparse.ArgumentParser:
     entities_list.add_argument("--domain")
     entities_list.add_argument("--type")
     entities_list.add_argument("--query")
+
+    entities_audit = entities_subcommands.add_parser("audit-pronunciations")
+    entities_audit.add_argument("--registry", default="config/entity_registry.json")
+    entities_audit.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("working/pronunciation_audits/current"),
+    )
+    entities_audit.add_argument("--force", action="store_true")
+    entities_audit.add_argument("--live-operation", action="store_true")
+    entities_audit.add_argument("--rate-percent", type=int, default=5)
+    entities_audit.add_argument("--atempo-ratio", type=float, default=1.03)
     
     # Intelligibility audit commands
     audit_intelligibility = _add_job_command(commands, "audit-intelligibility")
@@ -961,13 +1499,31 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "submit":
             if is_youtube_url(args.video):
                 maximum_minutes = float(getattr(settings, "max_source_duration_minutes", 240))
+                print("[submit] Reading YouTube metadata...", file=sys.stderr, flush=True)
                 with download_youtube_video(
                     args.video,
                     max_duration_seconds=maximum_minutes * 60.0,
                 ) as download:
+                    print(
+                        f"[submit] Download complete: {download.path.name} "
+                        f"({download.path.stat().st_size / (1024 * 1024):.1f} MiB)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    print(
+                        "[submit] Preparing Mathula job and source audio...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     job = app.submit(download.path, args.target_language, args.force)
+                    print(
+                        f"[submit] Job prepared: {job.job_id}; saving YouTube provenance...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     record_youtube_submission(app, job, download)
             else:
+                print("[submit] Preparing Mathula job and source audio...", file=sys.stderr, flush=True)
                 job = app.submit(Path(args.video), args.target_language, args.force)
             print(job.job_id)
             return 0
@@ -1015,6 +1571,56 @@ def main(argv: list[str] | None = None) -> int:
                     }
                     for e in entities
                 ], indent=2))
+                return 0
+            elif args.entities_command == "audit-pronunciations":
+                if not args.live_operation:
+                    raise ValueError(
+                        "entities audit-pronunciations calls Azure TTS/STT and "
+                        "requires --live-operation"
+                    )
+                from .entity_pronunciation_audit import (
+                    EntityPronunciationAuditOptions,
+                    audit_entity_pronunciations,
+                )
+                from .direct_azure_dub import create_direct_azure_backend
+
+                def pronunciation_progress(event: dict[str, Any]) -> None:
+                    state = "PASS" if event["passed"] else "FAIL"
+                    print(
+                        f"[entity-pronunciation] {event['current']}/{event['total']} "
+                        f"{state} {event['entity_id']} {event['voice']}: "
+                        f"{str(event['recognized_text'])[:180]}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+                report = audit_entity_pronunciations(
+                    registry_path=Path(args.registry),
+                    output_dir=args.output_dir,
+                    tts_backend=create_direct_azure_backend(
+                        settings,
+                        max_rate_percent=max(5, args.rate_percent),
+                    ),
+                    stt_backend=create_speech_backend(settings),
+                    options=EntityPronunciationAuditOptions(
+                        voices=tuple(settings.azure_tts_voices),
+                        rate_percent=args.rate_percent,
+                        atempo_ratio=args.atempo_ratio,
+                        force=args.force,
+                    ),
+                    progress=pronunciation_progress,
+                )
+                print(
+                    json.dumps(
+                        {
+                            key: value
+                            for key, value in report.items()
+                            if key != "observations"
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
                 return 0
         if args.command == "publish-colab-package":
             if not args.live_operation:
@@ -1094,10 +1700,456 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         job = app.jobs.load(args.job_id)
+
+        # A CLI provider selector takes precedence over a stale shell value.
+        # When manual mode is active, keep every request for this invocation
+        # inside the current job so translation, grammar, timing and publication
+        # calls can all resume from the same deterministic handoff directory.
+        from .manual_ai import is_manual_ai_provider, manual_ai_root_for_job
+
+        explicit_ai_provider = (
+            getattr(args, "provider", None)
+            or getattr(args, "ai_provider", None)
+        )
+        if explicit_ai_provider is not None:
+            if is_manual_ai_provider(explicit_ai_provider):
+                os.environ["MATHULA_TV_AI_PROVIDER"] = "manual-chatgpt"
+            elif str(explicit_ai_provider).strip().casefold() in {
+                "azure-openai-gpt", "azure-openai", "gpt"
+            }:
+                os.environ["MATHULA_TV_AI_PROVIDER"] = "azure-openai-gpt"
+        if is_manual_ai_provider(os.getenv("MATHULA_TV_AI_PROVIDER")):
+            os.environ.setdefault(
+                "MATHULA_TV_MANUAL_AI_DIR",
+                str(manual_ai_root_for_job(settings.work_dir, job.job_id)),
+            )
+
         _require_operation_authorization(args, settings)
         dry = _dry_run(args, job)
         if dry is not None:
             print(json.dumps(dry, indent=2))
+            return 0
+
+        if args.command == "native-web-override":
+            from .native_dub import install_manual_web_overrides
+
+            result = install_manual_web_overrides(
+                app.jobs.job_dir(job.job_id),
+                args.override_json.resolve(),
+            )
+            job.media["native_manual_web_overrides"] = str(
+                app.jobs.job_dir(job.job_id) / "native_dub" / "manual_web_overrides.json"
+            )
+            app.jobs.save(job)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "native-translate":
+            from .native_dub import run_native_pass1, run_native_pass2, run_native_translation
+
+            if bool(args.candidate_pool):
+                from .native_dub import build_candidate_pool, commit_candidate_pool
+
+                if args.rolling_syllable or args.temporal_mask:
+                    raise ValueError(
+                        "--candidate-pool cannot be combined with --rolling-syllable or --temporal-mask"
+                    )
+                if args.native_pass == "1":
+                    raise ValueError(
+                        "--candidate-pool requires pass 1 to already be complete; omit --pass 1"
+                    )
+                if not 1 <= int(args.candidate_pool_workers) <= 12:
+                    raise ValueError("--candidate-pool-workers must be between 1 and 12")
+                if not 1 <= int(args.candidate_pool_tts_workers) <= 12:
+                    raise ValueError("--candidate-pool-tts-workers must be between 1 and 12")
+                progress = _print_native_progress if args.live_operation else None
+                provider = create_native_grok_backend(args.model, progress=progress)
+                job_root = app.jobs.job_dir(job.job_id)
+                tts_backend = create_tts_backend(settings)
+                pronunciation_stt_backend = None
+                if not bool(args.skip_pronunciation_round_trip):
+                    try:
+                        pronunciation_stt_backend = create_speech_backend(settings)
+                    except Exception as exc:  # noqa: BLE001 - optional enhancement, never a hard requirement
+                        _print_native_progress(
+                            f"[native pronunciation] Speech credentials unavailable ({exc}); "
+                            "skipping Phase 18's TTS+STT round-trip verification."
+                        )
+                result = build_candidate_pool(
+                    job_root=job_root,
+                    provider=provider,
+                    tts=tts_backend,
+                    stt_backend=pronunciation_stt_backend,
+                    skip_pronunciation_round_trip=bool(args.skip_pronunciation_round_trip),
+                    candidate_pool_workers=int(args.candidate_pool_workers),
+                    candidate_pool_tts_workers=int(args.candidate_pool_tts_workers),
+                    force=args.force,
+                    skip_turn_rebalance=bool(args.skip_turn_rebalance),
+                    skip_turn_block_translation=bool(args.skip_turn_block_translation),
+                    skip_pronunciation_research=bool(args.skip_pronunciation_research),
+                    progress=progress,
+                )
+                job.media["native_candidate_pool"] = str(
+                    job_root / "native_dub" / "pass2_candidate_pool.json"
+                )
+
+                commit_result = None
+                if bool(args.commit):
+                    commit_result = commit_candidate_pool(
+                        job_root=job_root, force=args.force, progress=progress,
+                    )
+                    job.media["native_translation"] = str(
+                        job_root / "native_dub" / "pass2_natural_translation.json"
+                    )
+                    if "native_pass2" not in job.completed_stages:
+                        job.completed_stages.append("native_pass2")
+
+                app.jobs.save(job)
+                if args.json_output:
+                    print(json.dumps({"candidate_pool": result, "committed": commit_result}, ensure_ascii=False, indent=2))
+                else:
+                    records = result.get("candidate_pool") or []
+                    selected = sum(1 for r in records if r.get("selected_candidate_id"))
+                    review = sum(1 for r in records if r.get("requires_review"))
+                    usage = result.get("usage") or {}
+                    print(
+                        f"Candidate pool complete: {selected}/{len(records)} sentence(s) have a "
+                        f"selected winner, {review} flagged requires_review."
+                    )
+                    print(
+                        f"Grok tokens: in={int(usage.get('input_tokens') or 0):,}, "
+                        f"out={int(usage.get('output_tokens') or 0):,}."
+                    )
+                    print(f"Saved: {job_root / 'native_dub' / 'pass2_candidate_pool.json'}")
+                    if commit_result is not None:
+                        mask_count = int((commit_result.get("summary") or {}).get("mask_count") or 0)
+                        print(
+                            f"Committed {mask_count} sentence(s) to pass2_natural_translation.json -- "
+                            "run native-dub to render."
+                        )
+                return 0
+
+            if args.rolling_syllable and args.temporal_mask:
+                raise ValueError("Choose either --rolling-syllable or --temporal-mask, not both")
+            if not 1 <= int(args.temporal_mask_batch_size) <= 12:
+                raise ValueError("--temporal-mask-batch-size must be between 1 and 12")
+            if args.temporal_mask and not (1 <= int(args.temporal_mask_candidates) <= 8):
+                raise ValueError(
+                    "--temporal-mask-candidates must be between 1 and 8; it is a ceiling on the "
+                    "natural-to-concise compaction ladder Grok may return per window, not an exact "
+                    "count it must fill"
+                )
+            if args.temporal_mask and int(args.temporal_mask_residual_rounds) != 0:
+                raise ValueError("--temporal-mask-residual-rounds must be 0; temporal-mask revisions now occur inside one Grok call per window")
+            if not 1 <= int(args.temporal_mask_tts_workers) <= 12:
+                raise ValueError("--temporal-mask-tts-workers must be between 1 and 12")
+            if not 1 <= int(args.rolling_syllable_batch_size) <= 16:
+                raise ValueError("--rolling-syllable-batch-size must be between 1 and 16")
+            if not 2.0 <= float(args.rolling_syllables_per_second) <= 8.0:
+                raise ValueError("--rolling-syllables-per-second must be between 2.0 and 8.0")
+            if not 0 <= int(args.rolling_azure_overhead_ms) <= 2000:
+                raise ValueError("--rolling-azure-overhead-ms must be between 0 and 2000")
+            if not 5 <= int(args.rolling_syllable_tolerance_percent) <= 30:
+                raise ValueError("--rolling-syllable-tolerance-percent must be between 5 and 30")
+            if not 1 <= int(args.referent_audit_batch_size) <= 24:
+                raise ValueError("--referent-audit-batch-size must be between 1 and 24")
+            if not 0 <= int(args.max_referent_repair_rounds) <= 3:
+                raise ValueError("--max-referent-repair-rounds must be between 0 and 3")
+            if not 1 <= int(args.referent_audit_workers) <= 12:
+                raise ValueError("--referent-audit-workers must be between 1 and 12")
+            progress = _print_native_progress if args.live_operation else None
+            provider = create_native_grok_backend(args.model, progress=progress)
+            job_root = app.jobs.job_dir(job.job_id)
+            temporal_tts = (
+                create_tts_backend(settings)
+                if bool(args.temporal_mask) and args.native_pass != "1"
+                else None
+            )
+            if args.native_pass == "1":
+                result = run_native_pass1(
+                    job_root=job_root, provider=provider, force=args.force, progress=progress
+                )
+            elif args.native_pass == "2":
+                result = run_native_pass2(
+                    job_root=job_root,
+                    provider=provider,
+                    force=args.force,
+                    progress=progress,
+                    audit_referents=bool(args.audit_referents),
+                    referent_audit_batch_size=int(args.referent_audit_batch_size),
+                    max_referent_repair_rounds=int(args.max_referent_repair_rounds),
+                    referent_audit_workers=int(args.referent_audit_workers),
+                    rolling_syllable=bool(args.rolling_syllable),
+                    rolling_syllable_batch_size=int(args.rolling_syllable_batch_size),
+                    temporal_mask=bool(args.temporal_mask),
+                    temporal_mask_batch_size=int(args.temporal_mask_batch_size),
+                    temporal_mask_candidates=int(args.temporal_mask_candidates),
+                    temporal_mask_residual_rounds=int(args.temporal_mask_residual_rounds),
+                    temporal_mask_tts_workers=int(args.temporal_mask_tts_workers),
+                    job=job,
+                    tts=temporal_tts,
+                    content_syllables_per_second=float(args.rolling_syllables_per_second),
+                    azure_utterance_overhead_ms=int(args.rolling_azure_overhead_ms),
+                    syllable_tolerance_percent=int(args.rolling_syllable_tolerance_percent),
+                )
+            else:
+                result = run_native_translation(
+                    job_root=job_root,
+                    provider=provider,
+                    force=args.force,
+                    progress=progress,
+                    audit_referents=bool(args.audit_referents),
+                    referent_audit_batch_size=int(args.referent_audit_batch_size),
+                    max_referent_repair_rounds=int(args.max_referent_repair_rounds),
+                    referent_audit_workers=int(args.referent_audit_workers),
+                    rolling_syllable=bool(args.rolling_syllable),
+                    rolling_syllable_batch_size=int(args.rolling_syllable_batch_size),
+                    temporal_mask=bool(args.temporal_mask),
+                    temporal_mask_batch_size=int(args.temporal_mask_batch_size),
+                    temporal_mask_candidates=int(args.temporal_mask_candidates),
+                    temporal_mask_residual_rounds=int(args.temporal_mask_residual_rounds),
+                    temporal_mask_tts_workers=int(args.temporal_mask_tts_workers),
+                    job=job,
+                    tts=temporal_tts,
+                    content_syllables_per_second=float(args.rolling_syllables_per_second),
+                    azure_utterance_overhead_ms=int(args.rolling_azure_overhead_ms),
+                    syllable_tolerance_percent=int(args.rolling_syllable_tolerance_percent),
+                )
+            job.providers["native_dub_ai"] = "azure-foundry-grok"
+            job.providers["native_dub_model"] = provider.config.deployment
+            if bool(args.temporal_mask):
+                job.providers["native_dub_tts"] = "azure-speech-rate-0-temporal-mask-measurement"
+            job.media["native_dub_root"] = str(job_root / "native_dub")
+            job.media["native_translation"] = str(job_root / "native_dub" / "pass2_natural_translation.json")
+            if args.native_pass in ("1", "all") and "native_pass1" not in job.completed_stages:
+                job.completed_stages.append("native_pass1")
+            if args.native_pass in ("2", "all") and "native_pass2" not in job.completed_stages:
+                job.completed_stages.append("native_pass2")
+            app.jobs.save(job)
+            if args.json_output:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                native_root = job_root / "native_dub"
+                if args.native_pass == "1":
+                    usage = result.get("usage") or {}
+                    print(
+                        f"Native Pass 1 complete: {len(result.get('segments') or [])} segment(s), "
+                        f"{len(result.get('corrections') or [])} STT correction(s)."
+                    )
+                    print(
+                        f"Grok: {result.get('model') or provider.config.deployment}; "
+                        f"tokens in={int(usage.get('input_tokens') or 0):,}, "
+                        f"out={int(usage.get('output_tokens') or 0):,}."
+                    )
+                    print(f"Saved: {native_root / 'pass1_restored_transcript.json'}")
+                elif args.native_pass == "2":
+                    usage = result.get("usage") or {}
+                    if result.get("temporal_mask_mode"):
+                        summary = result.get("summary") or {}
+                        print(
+                            f"Native Pass 2 complete: {int(summary.get('mask_count') or 0)} temporal mask(s) committed from "
+                            f"{int(summary.get('source_segment_count') or 0)} source segment(s); "
+                            f"residual calls={int(summary.get('residual_calls') or 0)}, "
+                            f"speculative rollback masks={int(summary.get('rollback_mask_count') or 0)}."
+                        )
+                        undersized = int(summary.get("undersized_syllable_count") or 0)
+                        oversized = int(summary.get("oversized_syllable_count") or 0)
+                        if undersized or oversized:
+                            print(
+                                f"Syllable budget: {undersized} undersized (kept, normal speed), "
+                                f"{oversized} oversized (kept, native-dub will rush and warn)."
+                            )
+                    elif result.get("rolling_syllable_mode"):
+                        summary = result.get("syllable_summary") or {}
+                        print(
+                            f"Native Pass 2 complete: {len(result.get('translations') or [])} rolling-context isiZulu segment(s); "
+                            f"syllable-fit={int(summary.get('fit_count') or 0)}/{int(summary.get('segment_count') or 0)}, "
+                            f"refinement calls={int(summary.get('refinement_calls') or 0)}."
+                        )
+                    else:
+                        print(
+                            f"Native Pass 2 complete: {len(result.get('translations') or [])} natural isiZulu segment(s), "
+                            "1 translation per segment with soft raw-duration intent."
+                        )
+                    cached_tokens = int(usage.get("cached_input_tokens") or 0)
+                    cache_note = f", cached={cached_tokens:,}" if cached_tokens else ""
+                    print(
+                        f"Grok: {result.get('model') or provider.config.deployment}; "
+                        f"tokens in={int(usage.get('input_tokens') or 0):,}{cache_note}, "
+                        f"out={int(usage.get('output_tokens') or 0):,}."
+                    )
+                    print(f"Saved: {native_root / 'pass2_natural_translation.json'}")
+                    _print_referent_audit_summary(result.get("referent_audit_summary"))
+                else:
+                    print(
+                        f"Native translation complete: {int(result.get('pass1_corrections') or 0)} STT correction(s), "
+                        f"{int(result.get('pass2_segments') or 0)} natural isiZulu segment(s)."
+                    )
+                    print(f"Pass 1: {result.get('pass1_path')}")
+                    print(f"Pass 2: {result.get('pass2_path')}")
+                    _print_referent_audit_summary(result.get("referent_audit_summary"))
+            return 0
+
+        if args.command == "native-qa":
+            from .native_dub import run_native_qa_back_translation
+
+            if not 1 <= int(args.batch_size) <= 40:
+                raise ValueError("--batch-size must be between 1 and 40")
+            if not 1 <= int(args.qa_audit_workers) <= 12:
+                raise ValueError("--qa-audit-workers must be between 1 and 12")
+            progress = _print_native_progress if args.live_operation else None
+            provider = create_native_grok_backend(args.model, progress=progress)
+            result = run_native_qa_back_translation(
+                job_root=app.jobs.job_dir(job.job_id),
+                provider=provider,
+                force=args.force,
+                batch_size=int(args.batch_size),
+                repair=bool(args.repair),
+                max_repair_rounds=int(args.max_qa_repair_rounds),
+                direct_adequacy=bool(args.direct_adequacy),
+                qa_audit_workers=int(args.qa_audit_workers),
+                progress=progress,
+            )
+            job.review_readiness = (
+                "needs_translation_review" if result.get("requires_review") else job.review_readiness
+            )
+            job.updated_at = utcnow()
+            app.jobs.save(job)
+            if args.json_output:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                repairs_applied = len(result.get("repairs") or [])
+                accepted_minor = int(result.get("accepted_minor_count") or 0)
+                print(
+                    f"Native QA back-translation complete: {repairs_applied} repair(s) applied, "
+                    f"{int(result.get('flagged_count') or 0)}/"
+                    f"{int(result.get('sentence_count') or 0)} sentence(s) still flagged for review"
+                    + (f" ({accepted_minor} minor finding(s) accepted without repair)." if accepted_minor else ".")
+                )
+                print(f"Grok: {result.get('model')}; tokens in={int((result.get('usage') or {}).get('input_tokens') or 0):,}, "
+                      f"out={int((result.get('usage') or {}).get('output_tokens') or 0):,}.")
+                for item in (result.get("flagged") or [])[:10]:
+                    print(
+                        f"  {item['ref']} [{item.get('severity', '?')}/{item.get('category', '?')}]: "
+                        f"{item.get('discrepancy_summary') or 'no verdict returned'}"
+                    )
+                print(f"Saved: {app.jobs.job_dir(job.job_id) / 'native_dub' / 'qa_back_translation.json'}")
+            return 0
+
+        if args.command == "native-dub":
+            from .native_dub import render_native_dub
+
+            if args.repair_threshold_ms < 0:
+                raise ValueError("--repair-threshold-ms must not be negative")
+            if args.max_join_gap_ms < 0:
+                raise ValueError("--max-join-gap-ms must not be negative")
+            if args.max_phrase_source_ms <= 0:
+                raise ValueError("--max-phrase-source-ms must be positive")
+            if not 0 <= args.preferred_raw_speed_percent <= 12:
+                raise ValueError("--preferred-raw-speed-percent must be between 0 and 12")
+            if not 0 <= args.max_natural_speed_percent <= 15:
+                raise ValueError("--max-natural-speed-percent must be between 0 and 15")
+            if args.preferred_raw_speed_percent > args.max_natural_speed_percent:
+                raise ValueError("--preferred-raw-speed-percent cannot exceed the configured rush warning threshold")
+            if not 0 <= args.mouth_close_lag_tolerance_ms <= 80:
+                raise ValueError("--mouth-close-lag-tolerance-ms must be between 0 and 80")
+            if not 0 <= args.max_protected_gap_overflow_ms <= 1000:
+                raise ValueError("--max-protected-gap-overflow-ms must be between 0 and 1000")
+            if not 0 <= args.min_protected_pause_ms <= 2000:
+                raise ValueError("--min-protected-pause-ms must be between 0 and 2000")
+            progress = _print_native_progress if args.live_operation else None
+            provider = create_native_grok_backend(args.model, progress=progress)
+            sdk_group_synthesis_enabled = bool(getattr(settings, "enable_sdk_group_synthesis", False))
+            turn_group_synthesis_enabled = bool(getattr(settings, "enable_turn_group_synthesis", False))
+            needs_sdk_boundary = sdk_group_synthesis_enabled or turn_group_synthesis_enabled
+            result = render_native_dub(
+                job=job,
+                job_root=app.jobs.job_dir(job.job_id),
+                tts=create_tts_backend(settings),
+                timing_repair_provider=provider,
+                editorial_provider=provider,
+                force=args.force,
+                apply_opening_cut=args.hook_edit,
+                render_hook_overlay=bool(args.hook_overlay),
+                voice_map_path=(args.voice_map.resolve() if args.voice_map else None),
+                max_join_gap_ms=args.max_join_gap_ms,
+                max_phrase_source_ms=args.max_phrase_source_ms,
+                repair_threshold_ms=args.repair_threshold_ms,
+                preferred_raw_speed_percent=args.preferred_raw_speed_percent,
+                max_natural_speed_percent=args.max_natural_speed_percent,
+                mouth_close_lag_tolerance_ms=args.mouth_close_lag_tolerance_ms,
+                protected_gap_overflow=args.protected_gap_overflow,
+                max_protected_gap_overflow_ms=args.max_protected_gap_overflow_ms,
+                min_protected_pause_ms=args.min_protected_pause_ms,
+                enable_sdk_group_synthesis=sdk_group_synthesis_enabled,
+                enable_turn_group_synthesis=turn_group_synthesis_enabled,
+                sdk_boundary=(create_sdk_boundary(settings) if needs_sdk_boundary else None),
+                lite=bool(args.lite),
+                progress=progress,
+            )
+            job.providers["native_dub_ai"] = "azure-foundry-grok"
+            job.providers["native_dub_model"] = provider.config.deployment
+            job.providers["native_dub_tts"] = "azure-speech-rate-0-plus-bounded-hard-sync-atempo"
+            job.media["native_dub_master"] = str(app.jobs.job_dir(job.job_id) / "native_dub" / "native_dubbed.mp4")
+            job.media["native_dub_video"] = str(result["output_video"])
+            job.media["native_dub_hook_manifest"] = str(app.jobs.job_dir(job.job_id) / "native_dub" / "tiktok_edit_manifest.json")
+            job.media["native_dub_timing_plan"] = str(app.jobs.job_dir(job.job_id) / "native_dub" / "timing_plan.json")
+            if "native_dub" not in job.completed_stages:
+                job.completed_stages.append("native_dub")
+            overlaps = ((result.get("dialogue") or {}).get("overlaps")) or []
+            if any(overlap.get("human_review_required") for overlap in overlaps) or result.get(
+                "timing_quality_review_required"
+            ):
+                job.review_readiness = "needs_timing_review"
+            else:
+                job.review_readiness = "review_ready"
+            job.state = "review_ready"
+            job.updated_at = utcnow()
+            app.jobs.save(job)
+            if args.json_output:
+                print(json.dumps({
+                    "schema_version": result["schema_version"],
+                    "output_video": result["output_video"],
+                    "phrase_group_count": result["phrase_group_count"],
+                    "timing_repair_count": len(result["timing_repairs"]),
+                    "video_retimed": result["video_retimed"],
+                    "tts_rate_percent": result["tts_rate_percent"],
+                    "preferred_raw_speed_percent": result.get("preferred_raw_speed_percent", 0),
+                    "max_natural_speed_percent": result.get("max_natural_speed_percent", 0),
+                    "mouth_close_target_tolerance_ms": result.get("mouth_close_target_tolerance_ms", 0),
+                    "timing_policy": result.get("timing_policy"),
+                    "hook_overlay_enabled": result.get("hook_overlay_enabled", False),
+                    "hook_edit_enabled": result.get("hook_edit_enabled", False),
+                    "native_master_video": result.get("native_master_video"),
+                    "timing_quality_review_required": result.get("timing_quality_review_required", False),
+                    "timing_quality_flags": result.get("timing_quality_flags", []),
+                }, ensure_ascii=False, indent=2))
+            else:
+                print(
+                    f"Native dub complete: {int(result.get('phrase_group_count') or 0)} phrase group(s), "
+                    f"{len(result.get('timing_repairs') or [])} timing repair(s), "
+                    f"TTS baseline rate {int(result.get('tts_rate_percent') or 0):+d}%, "
+                    f"raw target +{int(result.get('preferred_raw_speed_percent') or 0)}%, "
+                    f"speed cap +{int(result.get('max_natural_speed_percent') or 0)}%, "
+                    f"mouth-close tolerance {int(result.get('mouth_close_target_tolerance_ms') or 0)} ms."
+                )
+                print(
+                    "Video retimed: " + ("yes" if result.get("video_retimed") else "no")
+                    + "; hook overlay: " + ("yes" if result.get("hook_overlay_enabled") else "no")
+                    + "; opening hook edit: " + ("yes" if result.get("hook_edit_enabled") else "no")
+                )
+                if result.get("native_master_video"):
+                    print(f"Native master: {result['native_master_video']}")
+                if result.get("timing_quality_review_required"):
+                    flags = result.get("timing_quality_flags") or []
+                    worst = max(flags, key=lambda item: item.get("natural_overrun_ms", 0), default=None)
+                    print(
+                        f"NEEDS TIMING REVIEW: {len(flags)} unit(s) exceeded the timing-quality threshold"
+                        + (f" (worst: {worst['group_id']} at {worst['natural_overrun_ms']} ms / "
+                           f"{worst['raw_speed_percent']:.1f}%)" if worst else "")
+                        + "."
+                    )
+                print(f"Final output: {result['output_video']}")
             return 0
 
         # Lightweight test settings may omit provider fields; production always
@@ -1137,10 +2189,41 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(production.build_units(job, force=args.force), ensure_ascii=False, indent=2))
         elif args.command == "prepare-dubbing":
             print(json.dumps(production.prepare_dubbing(job, force=args.force), ensure_ascii=False, indent=2))
+        elif args.command == "manual-ai":
+            from .manual_ai import (
+                install_manual_response,
+                manual_ai_root_for_job,
+                pending_manual_requests,
+            )
+
+            manual_root = manual_ai_root_for_job(settings.work_dir, job.job_id)
+            if args.action == "pending":
+                print(
+                    json.dumps(
+                        {
+                            "job_id": job.job_id,
+                            "manual_ai_dir": str(manual_root),
+                            "pending": pending_manual_requests(manual_root),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                if args.response_json is None:
+                    raise ValueError("manual-ai install requires response_json")
+                result = install_manual_response(
+                    manual_root, args.response_json.resolve()
+                )
+                print(json.dumps(result, ensure_ascii=False, indent=2))
         elif args.command == "translate":
             provider_name = (
                 args.provider
-                or "azure-openai-gpt"
+                or (
+                    "manual-chatgpt"
+                    if is_manual_ai_provider(os.getenv("MATHULA_TV_AI_PROVIDER"))
+                    else "azure-openai-gpt"
+                )
             )
             provider = create_translation_backend(
                 provider_name,
@@ -1157,6 +2240,7 @@ def main(argv: list[str] | None = None) -> int:
                 request_timeout_seconds=args.request_timeout_seconds,
                 batch_max_retries=args.batch_max_retries,
                 max_provider_calls=args.max_provider_calls,
+                parallelism=args.parallelism,
                 restart_batches=args.restart_batches,
                 progress=(
                     None if args.no_progress else _translation_progress_callback()
@@ -1187,10 +2271,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "repair-translation":
             provider_name = (
                 args.provider
-                or "azure-openai-gpt"
+                or (
+                    "manual-chatgpt"
+                    if is_manual_ai_provider(os.getenv("MATHULA_TV_AI_PROVIDER"))
+                    else "azure-openai-gpt"
+                )
             )
-            if provider_name not in {"azure-openai-gpt", "azure-openai", "gpt"}:
-                raise ValueError("Timing repair requires Azure OpenAI GPT in v13.18.54")
+            if provider_name not in {
+                "azure-openai-gpt", "azure-openai", "gpt",
+                "manual-chatgpt", "manual", "chatgpt-manual", "manual-gpt",
+            }:
+                raise ValueError(
+                    "Timing repair requires Azure OpenAI GPT or manual-chatgpt"
+                )
             provider = create_translation_backend(
                 provider_name,
                 args.model
@@ -1494,33 +2587,269 @@ def main(argv: list[str] | None = None) -> int:
                     payload["elapsed_seconds"] = progress_elapsed["seconds"]
                 _print_direct_dub_progress(payload)
 
+            from .grammar_quality import (
+                GrammarQualityGateError,
+                ensure_job_grammar_quality,
+            )
+
+            if args.progress:
+                progress_callback(
+                    {
+                        "stage": "grammar-editor",
+                        "message": (
+                            "Running or reusing the full-context grammar editor "
+                            "and independent grammar QA"
+                        ),
+                    }
+                )
+            grammar_gate_path = (
+                settings.work_dir
+                / "jobs"
+                / job.job_id
+                / "translation"
+                / "grammar_quality_gate.json"
+            )
+            grammar_provider = create_production_ai_provider()
+            try:
+                grammar_gate = ensure_job_grammar_quality(
+                    job_root=settings.work_dir / "jobs" / job.job_id,
+                    job_id=job.job_id,
+                    target_locale=job.target_language,
+                    provider=grammar_provider,
+                    pronunciation_dictionary=production._pronunciation_dictionary(job),
+                )
+            except GrammarQualityGateError as exc:
+                job.human_review_flags = list(
+                    dict.fromkeys(
+                        [*job.human_review_flags, "contextual_grammar_qa_failed"]
+                    )
+                )
+                job.last_error = {
+                    "stage": "contextual_grammar_qa",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "retryable": True,
+                    "gate_path": str(grammar_gate_path),
+                }
+                app.jobs.save(job)
+                raise
+            grammar_provider_name = str(
+                getattr(grammar_provider, "provider", "azure-openai-gpt")
+            )
+            job.providers["grammar_editor"] = grammar_provider_name
+            job.providers["grammar_qa"] = f"{grammar_provider_name}-independent-pass"
+            if grammar_gate.get("translation_changed") is True:
+                job.media["translation_multivariant_sha256"] = str(
+                    grammar_gate["translation_sha256"]
+                )
+                job.media["translation_sha256"] = str(
+                    grammar_gate["dubbing_sha256"]
+                )
+            job.media["grammar_quality_gate"] = str(grammar_gate_path)
+            job.media["grammar_quality_gate_sha256"] = checksum(grammar_gate_path)
+            job.human_review_flags = [
+                value
+                for value in job.human_review_flags
+                if value != "contextual_grammar_qa_failed"
+            ]
+            if "contextual_grammar_qa" not in job.completed_stages:
+                job.completed_stages.append("contextual_grammar_qa")
+            if (
+                isinstance(job.last_error, Mapping)
+                and job.last_error.get("stage") == "contextual_grammar_qa"
+            ):
+                job.last_error = None
+            app.jobs.save(job)
+            if args.progress:
+                progress_callback(
+                    {
+                        "stage": "grammar-qa",
+                        "status": "completed",
+                        "message": (
+                            "Contextual grammar QA passed; synthesis is authorized"
+                        ),
+                    }
+                )
+
+            direct_options = DirectDubOptions(
+                timing_mode=args.timing_mode,
+                semantic_fit_max_attempts=args.semantic_fit_max_attempts,
+                semantic_fit_tolerance_ms=args.semantic_fit_tolerance_ms,
+                max_azure_rate_percent=min(
+                    10,
+                    azure_tts_backend.ssml_bounds.rate_max_percent,
+                ),
+                min_voice_family_confidence=args.min_confidence,
+                # The publication pass immediately follows and performs the
+                # single required CFR H.264 encode. Keep the intermediate
+                # clean master as a fast video-copy remux.
+                clean_master_video_mode=os.getenv(
+                    "MATHULA_TV_CLEAN_MASTER_VIDEO_MODE",
+                    "stream_copy",
+                ).strip().lower(),
+                finalization_ai_rounds=int(
+                    os.getenv("MATHULA_TV_FINALIZATION_AI_ROUNDS", "2")
+                ),
+            )
             result = renderer.render(
                 job,
                 voice_map_path=args.voice_map,
-                options=DirectDubOptions(
-                    timing_mode=args.timing_mode,
-                    semantic_fit_max_attempts=args.semantic_fit_max_attempts,
-                    semantic_fit_tolerance_ms=args.semantic_fit_tolerance_ms,
-                    max_azure_rate_percent=min(
-                        10,
-                        azure_tts_backend.ssml_bounds.rate_max_percent,
-                    ),
-                    min_voice_family_confidence=args.min_confidence,
-                    # The publication pass immediately follows and performs the
-                    # single required CFR H.264 encode. Keep the intermediate
-                    # clean master as a fast video-copy remux.
-                    clean_master_video_mode=os.getenv(
-                        "MATHULA_TV_CLEAN_MASTER_VIDEO_MODE",
-                        "stream_copy",
-                    ).strip().lower(),
-                    finalization_ai_rounds=int(
-                        os.getenv("MATHULA_TV_FINALIZATION_AI_ROUNDS", "2")
-                    ),
+                options=direct_options,
+                force=(
+                    args.force
+                    or grammar_gate.get("translation_changed") is True
                 ),
-                force=args.force,
                 refresh_voice_analysis=args.refresh_voice_analysis,
                 progress_callback=(progress_callback if args.progress else None),
             )
+            if grammar_gate.get("translation_changed") is True:
+                grammar_gate = {
+                    **grammar_gate,
+                    "translation_changed": False,
+                    "rendered_translation_sha256": grammar_gate.get(
+                        "translation_sha256"
+                    ),
+                    "rendered_at": utcnow(),
+                }
+                atomic_write_json(grammar_gate_path, grammar_gate)
+                job.media["grammar_quality_gate_sha256"] = checksum(
+                    grammar_gate_path
+                )
+                app.jobs.save(job)
+
+            post_tts_qa: dict[str, Any]
+            if args.qa_stt:
+                from .dub_mastering import (
+                    DubMasteringLoop,
+                    DubMasteringThresholds,
+                    build_post_tts_quality_gate,
+                )
+                qa_elapsed_base = progress_elapsed["seconds"]
+                qa_started_at = time.monotonic()
+
+                def qa_progress(event: dict[str, Any]) -> None:
+                    payload = dict(event)
+                    payload["elapsed_seconds"] = (
+                        qa_elapsed_base
+                        + max(0.0, time.monotonic() - qa_started_at)
+                    )
+                    progress_callback(payload)
+
+                qa_loop = DubMasteringLoop(
+                    stt_backend=create_speech_backend(settings),
+                    renderer=renderer,
+                    qa_review_provider_factory=create_production_ai_provider,
+                    progress_callback=(qa_progress if args.progress else None),
+                )
+                qa_result = qa_loop.run(
+                    job,
+                    options=direct_options,
+                    max_rounds=args.qa_stt_max_rounds,
+                    audit_only=False,
+                    thresholds=DubMasteringThresholds(
+                        minimum_production_score=(
+                            args.qa_minimum_production_score
+                        ),
+                        maximum_aggregate_wer=(
+                            args.qa_maximum_aggregate_wer
+                        ),
+                    ),
+                    voice_map_path=args.voice_map,
+                )
+                mastering_report_path = (
+                    settings.work_dir
+                    / "jobs"
+                    / job.job_id
+                    / "direct_dub"
+                    / "mastering"
+                    / "report.json"
+                )
+                gate_path = mastering_report_path.with_name(
+                    "post_tts_quality_gate.json"
+                )
+                post_tts_qa = build_post_tts_quality_gate(
+                    qa_result,
+                    report_path=mastering_report_path,
+                    grammar_gate=grammar_gate,
+                )
+                atomic_write_json(gate_path, post_tts_qa)
+                direct_report_path = (
+                    settings.work_dir
+                    / "jobs"
+                    / job.job_id
+                    / "direct_dub"
+                    / "report.json"
+                )
+                direct_report = read_json(direct_report_path)
+                direct_report["post_tts_qa"] = {
+                    **post_tts_qa,
+                    "gate_path": str(gate_path),
+                }
+                atomic_write_json(direct_report_path, direct_report)
+                job.providers["post_tts_qa"] = "azure-speech"
+                job.media["post_tts_qa_report"] = str(mastering_report_path)
+                job.media["post_tts_qa_report_sha256"] = checksum(
+                    mastering_report_path
+                )
+                job.media["post_tts_qa_gate"] = str(gate_path)
+                job.media["post_tts_qa_gate_sha256"] = checksum(gate_path)
+                if post_tts_qa["publication_authorized"]:
+                    if "post_tts_stt_qa" not in job.completed_stages:
+                        job.completed_stages.append("post_tts_stt_qa")
+                    job.human_review_flags = [
+                        value
+                        for value in job.human_review_flags
+                        if value != "post_tts_stt_qa_failed"
+                    ]
+                    if (
+                        isinstance(job.last_error, Mapping)
+                        and job.last_error.get("stage") == "post_tts_stt_qa"
+                    ):
+                        job.last_error = None
+                else:
+                    job.human_review_flags = list(
+                        dict.fromkeys(
+                            [
+                                *job.human_review_flags,
+                                "post_tts_stt_qa_failed",
+                            ]
+                        )
+                    )
+                    job.last_error = {
+                        "stage": "post_tts_stt_qa",
+                        "error_type": "ProductionQualityGateFailed",
+                        "message": (
+                            "Rendered dub did not pass the post-TTS Azure STT "
+                            "production quality gate"
+                        ),
+                        "retryable": True,
+                        "report_path": str(mastering_report_path),
+                        "gate_path": str(gate_path),
+                    }
+                app.jobs.save(job)
+                if not post_tts_qa["publication_authorized"]:
+                    raise RuntimeError(
+                        "Post-TTS Azure STT production QA failed: "
+                        f"score {post_tts_qa['best_production_score']:.1f}/100, "
+                        f"WER {post_tts_qa['aggregate_word_error_rate']:.3f}, "
+                        f"{post_tts_qa['production_blocker_count']} blocker(s); "
+                        f"publication stopped. Review {gate_path}"
+                    )
+                # Mastering may have selected another already-approved variant
+                # and rerendered the mix. Reload the authoritative dub report.
+                result = read_json(
+                    settings.work_dir
+                    / "jobs"
+                    / job.job_id
+                    / "direct_dub"
+                    / "report.json"
+                )
+            else:
+                post_tts_qa = {
+                    "state": "disabled",
+                    "publication_authorized": True,
+                    "reason": "explicit_no_qa_stt",
+                }
             from .tiktok_editor import edit_tiktok_job
 
             publication_message = (
@@ -1609,7 +2938,11 @@ def main(argv: list[str] | None = None) -> int:
             final_report = read_json(
                 settings.work_dir / "jobs" / job.job_id / "direct_dub" / "report.json"
             )
-            result = {**final_report, "tiktok_edit": tiktok_edit}
+            result = {
+                **final_report,
+                "post_tts_qa": post_tts_qa,
+                "tiktok_edit": tiktok_edit,
+            }
             if args.progress:
                 _print_direct_dub_phase_summary(phase_timing.finish())
                 phase_timing_reported = True
@@ -1620,7 +2953,60 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "optimize-dub":
             from .direct_azure_dub import DirectAzureDubRenderer, DirectDubOptions
-            from .dub_mastering import DubMasteringLoop, DubMasteringThresholds
+            from .dub_mastering import (
+                DubMasteringLoop,
+                DubMasteringThresholds,
+                build_post_tts_quality_gate,
+            )
+            from .grammar_quality import (
+                GrammarQualityGateError,
+                ensure_job_grammar_quality,
+            )
+
+            grammar_gate_path = (
+                settings.work_dir
+                / "jobs"
+                / job.job_id
+                / "translation"
+                / "grammar_quality_gate.json"
+            )
+            grammar_provider = create_production_ai_provider()
+            try:
+                grammar_gate = ensure_job_grammar_quality(
+                    job_root=settings.work_dir / "jobs" / job.job_id,
+                    job_id=job.job_id,
+                    target_locale=job.target_language,
+                    provider=grammar_provider,
+                    pronunciation_dictionary=production._pronunciation_dictionary(job),
+                )
+            except GrammarQualityGateError as exc:
+                job.human_review_flags = list(
+                    dict.fromkeys(
+                        [*job.human_review_flags, "contextual_grammar_qa_failed"]
+                    )
+                )
+                job.last_error = {
+                    "stage": "contextual_grammar_qa",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "retryable": True,
+                    "gate_path": str(grammar_gate_path),
+                }
+                app.jobs.save(job)
+                raise
+            if grammar_gate.get("translation_changed") is True:
+                job.media["translation_multivariant_sha256"] = str(
+                    grammar_gate["translation_sha256"]
+                )
+                job.media["translation_sha256"] = str(
+                    grammar_gate["dubbing_sha256"]
+                )
+                app.jobs.save(job)
+            if grammar_gate.get("translation_changed") is True:
+                raise RuntimeError(
+                    "The grammar editor changed the translation; run dub-azure to "
+                    "rerender it before mastering"
+                )
 
             azure_tts_backend = create_tts_backend(settings)
             stt_backend = create_speech_backend(settings)
@@ -1644,6 +3030,7 @@ def main(argv: list[str] | None = None) -> int:
             loop = DubMasteringLoop(
                 stt_backend=stt_backend,
                 renderer=renderer,
+                qa_review_provider_factory=create_production_ai_provider,
                 progress_callback=(mastering_progress if args.progress else None),
             )
             result = loop.run(
@@ -1670,6 +3057,30 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 voice_map_path=args.voice_map,
             )
+            mastering_report_path = (
+                settings.work_dir
+                / "jobs"
+                / job.job_id
+                / "direct_dub"
+                / "mastering"
+                / "report.json"
+            )
+            gate_path = mastering_report_path.with_name("post_tts_quality_gate.json")
+            quality_gate = build_post_tts_quality_gate(
+                result,
+                report_path=mastering_report_path,
+                grammar_gate=grammar_gate,
+            )
+            atomic_write_json(gate_path, quality_gate)
+            direct_report_path = mastering_report_path.parent.parent / "report.json"
+            if direct_report_path.is_file():
+                direct_report = read_json(direct_report_path)
+                direct_report["post_tts_qa"] = {
+                    **quality_gate,
+                    "gate_path": str(gate_path),
+                }
+                atomic_write_json(direct_report_path, direct_report)
+            result = {**result, "post_tts_qa": quality_gate}
             if args.json_output:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             else:
@@ -1795,10 +3206,11 @@ def main(argv: list[str] | None = None) -> int:
                 "completed",
                 "no_name_candidates",
                 "no_research_candidates",
-            }:
+            } and not args.force:
                 raise ValueError(
                     "Autocorrect research is already complete; this command "
-                    "resumes only failed or incomplete research"
+                    "resumes only failed or incomplete research unless --force "
+                    "is supplied to rebuild and reapply cached evidence"
                 )
             previous_state = _reset_for_autocorrect_research(job)
             app.jobs.save(job)
@@ -1839,7 +3251,6 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"Existing diarization artifacts invalid: {exc}")
                     print("Running fresh Pyannote inference")
                     result = run_pyannote(Path(job.objects["local_audio"]), settings.pyannote_model)
-                    from .atomic_io import atomic_write_json
                     atomic_write_json(pyannote_path, result)
                     print("Optional Pyannote diagnostic ready; Azure speaker labels remain authoritative")
             elif azure_path.is_file():
@@ -1854,13 +3265,11 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"Azure diarization invalid: {exc}")
                     print("Running fresh Pyannote inference")
                     result = run_pyannote(Path(job.objects["local_audio"]), settings.pyannote_model)
-                    from .atomic_io import atomic_write_json
                     atomic_write_json(pyannote_path, result)
                     print("Optional Pyannote diagnostic ready; Azure speaker labels remain authoritative")
             else:
                 # No existing artifacts - run Pyannote
                 result = run_pyannote(Path(job.objects["local_audio"]), settings.pyannote_model)
-                from .atomic_io import atomic_write_json
                 atomic_write_json(pyannote_path, result)
                 print("Optional Pyannote diagnostic ready; Azure speaker labels remain authoritative")
             

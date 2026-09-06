@@ -429,8 +429,13 @@ def render_review_mp4(
     if mode == "stream_copy":
         command = [*base, "-c:v", "copy", *audio_options, str(temporary)]
     else:
-        preset = os.getenv("MATHULA_TV_FINAL_VIDEO_PRESET", "medium").strip() or "medium"
-        crf = os.getenv("MATHULA_TV_FINAL_VIDEO_CRF", "17").strip() or "17"
+        # TikTok re-encodes every upload to its own delivery bitrate/codec profile,
+        # so a locally slow, high-fidelity encode buys nothing that survives the
+        # platform's own transcode -- a much faster preset (still solid quality)
+        # gets the same effective outcome for a fraction of the CPU time. Override
+        # via MATHULA_TV_FINAL_VIDEO_PRESET/_CRF if a specific job needs otherwise.
+        preset = os.getenv("MATHULA_TV_FINAL_VIDEO_PRESET", "veryfast").strip() or "veryfast"
+        crf = os.getenv("MATHULA_TV_FINAL_VIDEO_CRF", "20").strip() or "20"
         keyint = max(12, round(float(target_rate) * 2.0))
         keyint_min = max(6, round(float(target_rate)))
         video_filter = (

@@ -360,6 +360,90 @@ def _context_unit(unit: Mapping[str, Any], *, translate: bool) -> dict[str, Any]
     }
 
 
+def build_single_handoff_batch_request(
+    request: Mapping[str, Any],
+    *,
+    context_spine_tokens: int = 4500,
+    max_output_tokens: int = 100000,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Build one compact translation handoff containing every source unit.
+
+    This is intentionally separate from normal semantic chunk planning. It is
+    used by the explicit manual-chatgpt provider so the operator can upload one
+    request and install one response for the complete translation pass. The
+    active units are already present at the top level, so context_units is kept
+    empty to avoid duplicating the full transcript in the handoff.
+    """
+    source_units = list(request.get("units") or [])
+    if not source_units:
+        raise ValueError("translation request contains no units")
+    if context_spine_tokens < 1000:
+        raise ValueError("context_spine_tokens must be at least 1000")
+    if max_output_tokens <= 0:
+        raise ValueError("max_output_tokens must be positive")
+
+    estimated_source = sum(estimate_unit_tokens(item) for item in source_units)
+    unit_count = len(source_units)
+    estimated_output = 3500 + int(estimated_source * 5.0) + unit_count * 180
+    output_limit = min(max_output_tokens, max(12000, estimated_output))
+    spine = build_context_spine(request, token_budget=context_spine_tokens)
+    chunk_range = ChunkRange(
+        start=0,
+        stop=unit_count,
+        estimated_tokens=estimated_source,
+    )
+
+    dynamic = {
+        key: value
+        for key, value in request.items()
+        if key
+        not in {
+            "units",
+            "request_sha256",
+            "translation_batch",
+            "global_context",
+            "global_protected_spans",
+        }
+    }
+    dynamic["units"] = [dict(item) for item in source_units]
+    dynamic["translation_batch"] = {
+        "schema_version": SEMANTIC_BATCH_SCHEMA_VERSION,
+        **chunk_range.to_dict(source_units, 1, 1),
+        "full_request_sha256": normalise_space(request.get("request_sha256")),
+        "context_spine_sha256": spine["context_spine_sha256"],
+        "context_radius_units": 0,
+        "context_units": [],
+        "prior_translated_context": [],
+        "prior_global_terminology": [],
+        "max_output_tokens": output_limit,
+        "manual_single_handoff": True,
+        "instructions": [
+            "Translate every top-level unit and return each unit exactly once.",
+            "This manual handoff contains the complete active translation batch.",
+            "Use the cached context spine only for global context and terminology.",
+            "Do not return context-only units.",
+        ],
+    }
+    dynamic["request_sha256"] = sha256_json(dynamic)
+
+    chunk_dict = chunk_range.to_dict(source_units, 1, 1)
+    plan = {
+        "schema_version": CHUNK_PLAN_SCHEMA_VERSION,
+        "full_request_sha256": normalise_space(request.get("request_sha256")),
+        "mode": "manual_single_handoff",
+        "target_tokens": estimated_source,
+        "hard_tokens": estimated_source,
+        "context_units": 0,
+        "context_spine_tokens": context_spine_tokens,
+        "max_units": unit_count,
+        "chunk_count": 1,
+        "chunks": [chunk_dict],
+        "context_spine": spine,
+    }
+    plan["plan_sha256"] = sha256_json(plan)
+    return [dynamic], plan
+
+
 def build_semantic_batch_requests(
     request: Mapping[str, Any],
     *,
@@ -458,6 +542,7 @@ __all__ = [
     "adaptive_context_spine_tokens",
     "build_context_spine",
     "build_semantic_batch_requests",
+    "build_single_handoff_batch_request",
     "estimate_text_tokens",
     "estimate_unit_tokens",
     "plan_semantic_ranges",

@@ -52,6 +52,27 @@ def test_common_fused_zulu_honorific_forms_are_expanded_for_tts() -> None:
     )
 
 
+def test_associative_lika_prefixed_honorific_is_expanded_for_tts() -> None:
+    # Confirmed real defect: "Ubusekhaya likaMnu. Lincoln." synthesized with an
+    # ~880ms mid-utterance silent gap (Azure treating the abbreviation's period
+    # as a real sentence boundary) because the "lika-" associative prefix
+    # ("of Mr. ...") wasn't in the fused-prefix alternation -- only bare "ka-"
+    # was. A sibling sentence using bare "kaMnu." already expanded correctly,
+    # which is what exposed the gap.
+    result = _dictionary().apply("Ubusekhaya likaMnu. Lincoln.")
+
+    # "Lincoln" -> "Linken" is a separate, later-added pronunciation
+    # correction (real en-ZA STT round-trip confirmed bare "Lincoln" was
+    # misread as "Lingon" by this voice) that necessarily also fires on this
+    # same input -- this test's own real subject is the "lika-" associative
+    # prefix expansion, asserted via the first substitution below.
+    assert result.tts_text == "Ubusekhaya likaMnumzane Linken."
+    assert [(item.before, item.after) for item in result.substitutions] == [
+        ("likaMnu.", "likaMnumzane"),
+        ("Lincoln", "Linken"),
+    ]
+
+
 def test_honorific_expansion_is_tts_only_in_target_text() -> None:
     source = "Ngakho sikhulumile noMnu. Adams."
     target = build_target_text(

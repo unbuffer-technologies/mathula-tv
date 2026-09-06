@@ -1894,10 +1894,29 @@ def apply_ai_advice(
     *,
     job_id: str,
     advice: dict[str, dict[str, Any]],
-) -> None:
-    """Store AI advice without auto-applying any new suggestion."""
+    auto_apply_confidence: float | None = None,
+    minimum_candidate_score: float = 0.75,
+) -> dict[str, int]:
+    """Store constrained AI advice and optionally apply only strong matches.
+
+    The model can select only a candidate already supplied by the deterministic
+    detector.  Existing callers retain advice-only behavior by leaving
+    ``auto_apply_confidence`` unset.
+    """
+
+    if auto_apply_confidence is not None and not 0 <= auto_apply_confidence <= 1:
+        raise AutocorrectError("AI auto-apply confidence must be between 0 and 1")
+    if not 0 <= minimum_candidate_score <= 1:
+        raise AutocorrectError("minimum candidate score must be between 0 and 1")
 
     now = utc_now()
+    summary = {
+        "decision_count": 0,
+        "auto_applied_count": 0,
+        "suggested_count": 0,
+        "dismissed_count": 0,
+        "review_count": 0,
+    }
     with store.transaction() as db:
         for correction_id, decision in advice.items():
             row = db.execute(
@@ -1930,14 +1949,33 @@ def apply_ai_advice(
             status = row["status"]
             replacement = row["replacement_text"]
             entity_id = row["entity_id"]
+            event_action = "ai_advice"
             if decision["decision"] == "ACCEPT_CANDIDATE":
                 replacement = selected["replacement_text"]
                 entity_id = selected.get("entity_id")
-                status = "suggested"
+                candidate_score = float(selected.get("score") or 0)
+                strong_acceptance = bool(
+                    auto_apply_confidence is not None
+                    and float(decision["confidence"])
+                    >= auto_apply_confidence
+                    and candidate_score >= minimum_candidate_score
+                    and normalize(str(row["heard_text"]))
+                    != normalize(str(replacement))
+                )
+                if strong_acceptance:
+                    status = "auto_applied"
+                    event_action = "ai_autocorrect_applied"
+                    summary["auto_applied_count"] += 1
+                else:
+                    status = "suggested"
+                    summary["suggested_count"] += 1
             elif decision["decision"] == "KEEP_AZURE":
                 status = "dismissed"
+                summary["dismissed_count"] += 1
             elif decision["decision"] == "ASK_USER":
                 status = "needs_review"
+                summary["review_count"] += 1
+            summary["decision_count"] += 1
             reason = (
                 f"{row['reason']} | AI: {decision['reason']}"
                 if decision["reason"]
@@ -1965,15 +2003,17 @@ def apply_ai_advice(
                 INSERT INTO events(
                     job_id, correction_id, action, actor_id,
                     payload_json, created_at
-                ) VALUES (?, ?, 'ai_advice', 'ai', ?, ?)
+                ) VALUES (?, ?, ?, 'ai', ?, ?)
                 """,
                 (
                     job_id,
                     correction_id,
+                    event_action,
                     json.dumps(decision, sort_keys=True),
                     now,
                 ),
             )
+    return summary
 
 
 def _row_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -2966,4 +3006,3 @@ def moderate_public_term(
             (term_id,),
         ).fetchone()
         return dict(updated)
-

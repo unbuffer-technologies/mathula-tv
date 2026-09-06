@@ -3,7 +3,13 @@
 
 from __future__ import annotations
 
-from huggingface_hub import snapshot_download
+try:
+    from huggingface_hub import snapshot_download
+except ImportError as exc:
+    raise SystemExit(
+        "Missing huggingface_hub. Install Mathula voice dependencies with: "
+        "python -m pip install -e \".[speaker-recognition]\" --no-build-isolation"
+    ) from exc
 
 from mathula_tv.known_speakers import (
     SPEECHBRAIN_MODEL_ID,

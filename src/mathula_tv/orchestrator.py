@@ -12,6 +12,7 @@ from .config import Settings
 from .domain_classifier import classify
 from .diarization import select_authoritative
 from .gcs_store import GCSStore
+from .local_store import LocalStore
 from .job_store import JobStore
 from .media import checksum, prepare_source_derivatives, probe, render_video
 from .models import JobManifest
@@ -25,7 +26,11 @@ from .webm_ingestion import file_sha256, normalize_webm_to_mp4, validate_support
 
 class Orchestrator:
     def __init__(self, settings: Settings, gcs: GCSStore | None = None):
-        self.settings, self.jobs, self.gcs = settings, JobStore(settings.work_dir), gcs
+        self.settings = settings
+        self.jobs = JobStore(settings.work_dir)
+        # Local disk is authoritative for normal server/desktop operation.
+        # An explicitly supplied GCSStore is still used by Colab/remote workflows.
+        self.gcs = gcs if gcs is not None else LocalStore(settings.work_dir)
 
     # Mathula WebM ingestion wrapper v2
     def _submit_canonical_video(self, source: Path, target_language: str = "zu-ZA", force: bool = False):

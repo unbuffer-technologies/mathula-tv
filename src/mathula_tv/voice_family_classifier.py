@@ -247,6 +247,22 @@ def _load_model() -> ECAPA_gender:
     if _model_cache is not None:
         return _model_cache
 
+    # PyTorchModelHubMixin loads this repository from model.safetensors.
+    # huggingface_hub treats safetensors as an optional dependency and some
+    # versions otherwise fail later with the misleading NameError
+    # ``name 'safetensors' is not defined``.  Fail here with an actionable
+    # Mathula error before touching the model cache.
+    try:
+        import safetensors  # noqa: F401
+        from safetensors.torch import load_model as _load_safetensor_model  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing safetensors runtime required by the pinned voice-family model. "
+            "Install Mathula voice dependencies with "
+            "`python -m pip install -e \".[speaker-recognition]\" --no-build-isolation` "
+            "or run `python -m pip install \"safetensors>=0.8,<1\"`."
+        ) from exc
+
     try:
         model = ECAPA_gender.from_pretrained(
             VOICE_GENDER_MODEL_ID,

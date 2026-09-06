@@ -301,7 +301,65 @@ _ENGAGEMENT_WEIGHTS = {
 _TITLE_CARD_MAX_CHARACTERS = 90
 _PROVIDER_HOOK_MAX_CHARACTERS = 160
 
-_FONT_PATH = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+# Optional explicit title-card font override.  Never assume a Linux font path:
+# native-dub also runs on Windows.  Tests and callers may monkeypatch this value.
+_font_override = str(os.getenv("MATHULA_TV_BOLD_FONT") or "").strip()
+_FONT_PATH: Path | None = Path(_font_override).expanduser() if _font_override else None
+
+
+def _bold_font_candidates() -> list[Path]:
+    """Return platform-aware bold sans-serif candidates without bundling fonts."""
+
+    candidates: list[Path] = []
+    if _FONT_PATH is not None:
+        candidates.append(Path(_FONT_PATH))
+
+    # Windows: prefer fonts available on a standard desktop installation.
+    windir = str(os.getenv("WINDIR") or os.getenv("SystemRoot") or "").strip()
+    if windir:
+        fonts = Path(windir) / "Fonts"
+        candidates.extend(
+            [
+                fonts / "segoeuib.ttf",  # Segoe UI Bold
+                fonts / "arialbd.ttf",   # Arial Bold
+                fonts / "calibrib.ttf",  # Calibri Bold (older Windows)
+            ]
+        )
+
+    # Common Linux fallbacks retained for server/Colab operation.
+    candidates.extend(
+        [
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
+            Path("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"),
+        ]
+    )
+    return candidates
+
+
+def _resolve_bold_font_path() -> Path | None:
+    for candidate in _bold_font_candidates():
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _load_title_font(size: int) -> ImageFont.ImageFont:
+    path = _resolve_bold_font_path()
+    if path is not None:
+        try:
+            return ImageFont.truetype(str(path), size)
+        except (OSError, ValueError):
+            pass
+    # Last-resort fallback must keep publication rendering alive rather than
+    # failing just because a preferred system font is unavailable.
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:  # Pillow versions whose load_default has no size argument.
+        return ImageFont.load_default()
 
 
 # Acronyms that are sufficiently familiar to ordinary South African news viewers
@@ -3414,11 +3472,16 @@ def render_tiktok_hook_edit(
     runner: Callable[..., Any] = subprocess.run,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     popen_factory: Callable[..., Any] = subprocess.Popen,
+    cpu_threads: int | None = None,
 ) -> dict[str, Any]:
-    """Render the hook card, optionally cutting to the selected opening anchor."""
+    """Render the hook card, optionally cutting to the selected opening anchor.
 
-    if not _FONT_PATH.is_file():
-        raise FileNotFoundError(_FONT_PATH)
+    ``cpu_threads``, when set, caps the libx264 encode's own thread count
+    (via ffmpeg's encoder-scoped ``-threads`` option) -- used by native-dub's
+    ``--lite`` mode so this, the most CPU-heavy step in that pipeline ("the
+    publication encode"), doesn't peg every core on the user's machine.
+    """
+
     selected_cut_seconds = float(selection["cut_start_seconds"])
     if selected_cut_seconds < 0:
         raise ValueError("TikTok edit cut cannot be negative")
@@ -3497,9 +3560,13 @@ def render_tiktok_hook_edit(
         "-c:v",
         "libx264",
         "-preset",
-        os.getenv("MATHULA_TV_FINAL_VIDEO_PRESET", "medium"),
+        # TikTok re-encodes every upload to its own delivery profile, so a slow,
+        # high-fidelity local encode buys nothing that survives the platform's own
+        # transcode. Override via MATHULA_TV_FINAL_VIDEO_PRESET/_CRF if a specific
+        # job needs otherwise (see the matching default in rendering.py).
+        os.getenv("MATHULA_TV_FINAL_VIDEO_PRESET", "veryfast"),
         "-crf",
-        os.getenv("MATHULA_TV_FINAL_VIDEO_CRF", "17"),
+        os.getenv("MATHULA_TV_FINAL_VIDEO_CRF", "20"),
         "-profile:v",
         "high",
         "-level:v",
@@ -3522,6 +3589,9 @@ def render_tiktok_hook_edit(
         "+faststart",
         str(temporary),
     ]
+    if cpu_threads:
+        codec_index = command.index("libx264")
+        command[codec_index + 1:codec_index + 1] = ["-threads", str(int(cpu_threads))]
     # Keep this as one FFmpeg invocation. Appending the retired legacy
     # command here creates a second filtergraph whose [audio] output is never
     # mapped, causing FFmpeg to fail with an unconnected aresample output.
@@ -4035,7 +4105,7 @@ def _render_title_panel(
     maximum_text_height = bottom - top - (vertical_padding * 2)
     selected_layout: tuple[ImageFont.FreeTypeFont, list[str], int, int] | None = None
     for font_size in range(maximum_font_size, minimum_font_size - 1, -1):
-        font = ImageFont.truetype(str(_FONT_PATH), font_size)
+        font = _load_title_font(font_size)
         lines = _wrap_title_lines(
             draw=draw,
             value=title,
@@ -4055,7 +4125,7 @@ def _render_title_panel(
     truncated = selected_layout is None
     if selected_layout is None:
         font_size = minimum_font_size
-        font = ImageFont.truetype(str(_FONT_PATH), font_size)
+        font = _load_title_font(font_size)
         lines = _wrap_title_lines(
             draw=draw,
             value=title,
@@ -4074,7 +4144,7 @@ def _render_title_panel(
         line_height = round(font_size * 1.18)
     else:
         font, lines, line_spacing, line_height = selected_layout
-        font_size = font.size
+        font_size = int(getattr(font, "size", font_size))
     text_height = line_height * len(lines) + line_spacing * (len(lines) - 1)
     text_top = top + (bottom - top - text_height) // 2
     for index, line in enumerate(lines):

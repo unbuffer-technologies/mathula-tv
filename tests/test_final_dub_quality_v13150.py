@@ -75,8 +75,10 @@ def test_final_master_regenerates_cfr_and_uses_high_quality_encoding(
 
     command = commands[0]
     assert command[command.index("-c:v") + 1] == "libx264"
-    assert command[command.index("-preset") + 1] == "medium"
-    assert command[command.index("-crf") + 1] == "17"
+    # TikTok re-encodes every upload regardless, so the default favors a much
+    # faster local encode over one optimized for standalone fidelity.
+    assert command[command.index("-preset") + 1] == "veryfast"
+    assert command[command.index("-crf") + 1] == "20"
     assert command[command.index("-b:a") + 1] == "256k"
     assert "fps=fps=30000/1001:round=near" in command[command.index("-vf") + 1]
     assert command[command.index("-fps_mode") + 1] == "cfr"

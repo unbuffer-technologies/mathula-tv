@@ -4,9 +4,11 @@ import importlib.util
 import json
 import os
 import shutil
+import re
 import subprocess
 import sys
 import tempfile
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -168,6 +170,42 @@ def _run(command: Sequence[str], *, purpose: str) -> subprocess.CompletedProcess
     return result
 
 
+def _run_live(command: Sequence[str], *, purpose: str) -> None:
+    """Run yt-dlp while forwarding progress to the user's console.
+
+    Download progress must not disappear into ``capture_output``: long YouTube
+    downloads otherwise make ``mathula-tv submit`` look hung.  ``--newline``
+    is supplied by the caller so yt-dlp emits line-delimited progress even
+    though its stdout is connected to a pipe rather than a TTY.  We retain a
+    bounded tail only so failures still include useful diagnostics.
+    """
+
+    process = subprocess.Popen(
+        list(command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    tail: deque[str] = deque(maxlen=80)
+    assert process.stdout is not None
+    try:
+        for raw_line in process.stdout:
+            line = raw_line.rstrip("\r\n")
+            if not line:
+                continue
+            tail.append(line)
+            print(line, file=sys.stderr, flush=True)
+    finally:
+        process.stdout.close()
+    returncode = process.wait()
+    if returncode != 0:
+        detail = "\n".join(tail).strip() or "unknown yt-dlp error"
+        raise YouTubeIngestionError(f"YouTube {purpose} failed: {detail[-4000:]}")
+
+
 def _read_metadata(url: str) -> dict[str, Any]:
     result = _run(
         [
@@ -225,41 +263,85 @@ def _validate_metadata(
     return video_id, title, duration, webpage_url
 
 
+def _is_supported_download(path: Path) -> bool:
+    return (
+        path.is_file()
+        and path.stat().st_size > 0
+        and path.suffix.lower() in {".mp4", ".webm"}
+    )
+
+
+def _resolve_downloaded_media(directory: Path, reported_paths: Sequence[Path]) -> Path:
+    """Resolve yt-dlp's actual media path defensively.
+
+    yt-dlp's ``after_move:filepath`` output has had edge cases where the reported
+    filename does not match the file left on disk.  The temporary directory is
+    dedicated to one submission, so when the reported path is stale we can safely
+    inspect the directory and choose the completed media file instead.
+    """
+
+    directory = directory.resolve()
+
+    for candidate in reversed(list(reported_paths)):
+        resolved = candidate.expanduser().resolve()
+        try:
+            resolved.relative_to(directory)
+        except ValueError:
+            continue
+        if _is_supported_download(resolved):
+            return resolved
+
+    actual = [path.resolve() for path in directory.iterdir() if _is_supported_download(path)]
+    if not actual:
+        reported = str(reported_paths[-1]) if reported_paths else "<none>"
+        observed = ", ".join(sorted(path.name for path in directory.iterdir())) or "<empty>"
+        raise YouTubeIngestionError(
+            "Downloaded YouTube media is missing or empty: "
+            f"reported={reported}; observed={observed}"
+        )
+
+    # Prefer the deterministic final filename (source-<id>.mp4) over any
+    # intermediate format fragments such as source-<id>.f137.mp4.
+    fragment_pattern = re.compile(r"\.f\d+\.", re.IGNORECASE)
+    actual.sort(
+        key=lambda path: (
+            0 if path.name.lower().startswith("source-") else 1,
+            0 if not fragment_pattern.search(path.name) else 1,
+            0 if path.suffix.lower() == ".mp4" else 1,
+            -path.stat().st_size,
+            path.name.lower(),
+        )
+    )
+    return actual[0]
+
+
 def _download(url: str, directory: Path) -> Path:
-    output_template = str(directory / "%(title).180B [%(id)s].%(ext)s")
-    result = _run(
+    # Keep the temporary filename independent of the YouTube title.  This avoids
+    # Windows filename sanitization/path-length differences and makes the final
+    # output predictable enough to recover from stale after_move paths.
+    output_template = str(directory / "source-%(id)s.%(ext)s")
+    _run_live(
         [
             *_yt_dlp_command(),
             "--no-playlist",
             "--no-warnings",
+            "--windows-filenames",
+            "--newline",
+            "--progress",
             "--format",
             YOUTUBE_FORMAT_SELECTOR,
             "--merge-output-format",
             "mp4",
             "--output",
             output_template,
-            "--print",
-            "after_move:filepath",
             url,
         ],
         purpose="download",
     )
-    candidates = [Path(line.strip()) for line in result.stdout.splitlines() if line.strip()]
-    if not candidates:
-        raise YouTubeIngestionError("yt-dlp did not report the downloaded media path")
-    downloaded = candidates[-1].expanduser().resolve()
-    directory = directory.resolve()
-    try:
-        downloaded.relative_to(directory)
-    except ValueError as exc:
-        raise YouTubeIngestionError("yt-dlp reported a path outside its temporary directory") from exc
-    if not downloaded.is_file() or downloaded.stat().st_size == 0:
-        raise YouTubeIngestionError(f"Downloaded YouTube media is missing or empty: {downloaded}")
-    if downloaded.suffix.lower() not in {".mp4", ".webm"}:
-        raise YouTubeIngestionError(
-            f"yt-dlp produced unsupported media: {downloaded.suffix or '<none>'}"
-        )
-    return downloaded
+    # Do not depend on --print after_move:filepath.  The temp directory belongs
+    # to this one submission and the deterministic source-<id> filename plus
+    # defensive directory scan is more reliable on Windows.
+    return _resolve_downloaded_media(directory, ())
 
 
 @contextmanager

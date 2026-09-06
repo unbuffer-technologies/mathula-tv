@@ -34,9 +34,11 @@ from .pronunciation import PronunciationDictionary, with_default_organisation_in
 REQUEST_SCHEMA_VERSION = "mathula.translation.request.v1"
 RESPONSE_SCHEMA_VERSION = "mathula.translation.multivariant.v1"
 INSTALLED_SCHEMA_VERSION = "mathula.translation.multivariant.installed.v1"
-PROMPT_VERSION = "mathula-multivariant-translation-prompt-v3-compression-floor"
+PROMPT_VERSION = (
+    "mathula-multivariant-translation-prompt-v6-natural-code-switch-grammar"
+)
 VALIDATION_CONTRACT_VERSION = (
-    "mathula-multivariant-validation-v7-contextual-identity-ledger"
+    "mathula-multivariant-validation-v8-local-anchor-progression"
 )
 BATCH_REQUEST_SCHEMA_VERSION = "mathula.translation.batch-request.v1"
 VARIANT_IDS = ("natural", "concise", "compact")
@@ -49,6 +51,10 @@ _LANGUAGE_SUFFIXES = {
     "zu-ZA": "zu",
     "nso-ZA": "nso",
 }
+
+_PROPER_NAME_TOKEN_RE = re.compile(r"\b[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’.-]*\b")
+_WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’.-]*")
+_MAX_LOCAL_ANCHOR_DRIFT = 0.30
 
 SYSTEM_PROMPT = r"""You are the translation engine for Mathula TV.
 
@@ -88,13 +94,28 @@ institution name in every unit. Names of people, brands, acronyms, numbers, and
 quoted code-switching remain strict unit-level content. Never infer a
 protected term from a substring inside another word. For example, "Ando" must
 not be inferred from "Thohoyandou" and "Levy Ndou" must never become "Levy
-Ando".
+Ando". Integrate retained English names with grammatical target-language
+morphology. In isiZulu, do not produce doubled determiners such as "I-The
+Hawks". When this plural organisation is the subject, use the reviewed
+code-switch construction "Ama-Hawks athi"; isiZulu has no equivalent definite
+article here, ``ama-`` supplies the plural noun class, and ``athi`` supplies its
+agreement.
 
 Preserve claims, attribution, uncertainty, negation, quotations, names,
 institutions, numbers, dates, currencies, percentages, locations, and the
 direction of every argument. Do not add facts. Do not move content between
 speakers or units. Optional details may be omitted only when the omission does
 not distort the speaker's essential meaning.
+
+Within each timing unit, preserve the source's local information progression
+where target-language grammar permits. In particular, do not move a person's
+name, organisation, number, or quoted term from the end of a source clause to
+its beginning. Keep these anchors at approximately the same relative position
+in all three variants so local mouth timing remains aligned, not merely the unit
+endpoint. When the first natural construction would move an anchor by more than
+roughly one third of the clause, rephrase the surrounding isiZulu clause so the
+anchor stays late or early with the source; grammatical naturalness does not
+justify a large timing jump.
 
 Return spoken_text only. Do not return SSML, phonemes, pronunciation respelling,
 tts_text, Markdown, commentary, or reasoning. Mathula TV derives TTS text and
@@ -472,9 +493,13 @@ def _binding_spans(
         if not isinstance(match, Mapping):
             continue
         text = str(
-            match.get("display_text")
+            # The authoritative, autocorrected source surface controls how
+            # explicit the reference is. A surname or acronym must remain a
+            # surname or acronym; expanding it to the registry's full display
+            # name changes referential information and local timing.
+            match.get("matched_source_text")
+            or match.get("display_text")
             or match.get("canonical_text")
-            or match.get("matched_source_text")
             or ""
         ).strip()
         if text and text not in result:
@@ -1644,6 +1669,79 @@ def _normalise_space(value: str) -> str:
     return " ".join(value.split())
 
 
+def _proper_name_local_anchors(text: str) -> list[tuple[str, tuple[str, ...], float]]:
+    """Return stable multiword name anchors and their relative source positions.
+
+    Three or more title-cased words are deliberately required. This catches
+    full personal and institutional names while avoiding ordinary sentence
+    openings. Quotation marks inside a name (for example a nickname) do not
+    break the anchor.
+    """
+
+    matches = list(_PROPER_NAME_TOKEN_RE.finditer(text))
+    runs: list[list[re.Match[str]]] = []
+    current: list[re.Match[str]] = []
+    for match in matches:
+        if current:
+            gap = text[current[-1].end() : match.start()]
+            if re.fullmatch(r"[\s\"'“”‘’]*", gap) is None:
+                if len(current) >= 3:
+                    runs.append(current)
+                current = []
+        current.append(match)
+    if len(current) >= 3:
+        runs.append(current)
+
+    anchors: list[tuple[str, tuple[str, ...], float]] = []
+    text_length = max(1, len(text))
+    for run in runs:
+        words = tuple(match.group(0) for match in run)
+        anchors.append((" ".join(words), words, run[0].start() / text_length))
+    return anchors
+
+
+def _target_anchor_relative_position(
+    text: str,
+    anchor_words: Sequence[str],
+) -> float | None:
+    """Locate a source name in translated speech, allowing a Zulu noun prefix."""
+
+    target_words = list(_WORD_TOKEN_RE.finditer(text))
+    if not anchor_words or len(target_words) < len(anchor_words):
+        return None
+    folded_anchor = [word.casefold() for word in anchor_words]
+    grammatical_prefixes = {
+        "a", "e", "i", "o", "u", "ka", "ku", "kwa", "kuka", "laka",
+        "luka", "na", "ne", "no", "nga", "ngo", "ngu", "se", "si",
+    }
+    for index in range(len(target_words) - len(anchor_words) + 1):
+        candidate = [
+            match.group(0).casefold()
+            for match in target_words[index : index + len(anchor_words)]
+        ]
+        first = candidate[0]
+        first_anchor = folded_anchor[0]
+        first_matches = first == first_anchor
+        if not first_matches and first.endswith(first_anchor):
+            first_matches = first[: -len(first_anchor)] in grammatical_prefixes
+        if first_matches and candidate[1:] == folded_anchor[1:]:
+            return target_words[index].start() / max(1, len(text))
+    return None
+
+
+def _local_anchor_drift(
+    source_text: str,
+    spoken_text: str,
+) -> tuple[str, float, float] | None:
+    for label, words, source_position in _proper_name_local_anchors(source_text):
+        target_position = _target_anchor_relative_position(spoken_text, words)
+        if target_position is None:
+            continue
+        if abs(target_position - source_position) > _MAX_LOCAL_ANCHOR_DRIFT:
+            return label, source_position, target_position
+    return None
+
+
 def _span_pattern(span: str) -> re.Pattern[str]:
     escaped = re.escape(span.strip())
     # Match only at the start of a lexical token, optionally after a small
@@ -2588,6 +2686,14 @@ def validate_multivariant_response(
             if require_all_meanings_preserved and not bool(variant["meaning_preserved"]):
                 raise MultivariantTranslationError(
                     f"Unit {unit_id} variant {variant_id} does not preserve required meaning"
+                )
+            anchor_drift = _local_anchor_drift(source_text, spoken)
+            if anchor_drift is not None:
+                anchor, source_position, target_position = anchor_drift
+                raise MultivariantTranslationError(
+                    f"Unit {unit_id} variant {variant_id} moves local named anchor "
+                    f"{anchor!r} from relative position {source_position:.2f} to "
+                    f"{target_position:.2f}; preserve its local source progression"
                 )
             invalid_omissions: list[str] = []
             for raw_detail in variant.get("omitted_optional_details", []):

@@ -468,11 +468,122 @@ def test_hook_edit_preserves_translation_and_keeps_remainder(
     assert "atrim=start=19.840000" in video_filter
     assert "fps=fps=25/1:round=near" in video_filter
     assert "overlay=0:0" in video_filter
-    assert command[command.index("-preset") + 1] == "medium"
-    assert command[command.index("-crf") + 1] == "17"
+    # TikTok re-encodes every upload regardless, so the default favors a much
+    # faster local encode over one optimized for standalone fidelity.
+    assert command[command.index("-preset") + 1] == "veryfast"
+    assert command[command.index("-crf") + 1] == "20"
     assert command[command.index("-b:a") + 1] == "256k"
     assert result["render_version"] == tiktok_editor.TIKTOK_EDIT_RENDER_VERSION
     assert output.read_bytes() == b"edited"
+
+
+def test_hook_edit_cpu_threads_caps_the_libx264_encode(tmp_path, monkeypatch) -> None:
+    """native-dub's --lite mode threads a cpu_threads cap through to this, the
+    most CPU-heavy step in that pipeline -- confirms it lands as ffmpeg's own
+    encoder-scoped ``-threads`` option, immediately after the codec name.
+    """
+    master = tmp_path / "master.mp4"
+    translation = tmp_path / "translation.json"
+    output = tmp_path / "edited.mp4"
+    manifest = tmp_path / "edit.json"
+    hook = tmp_path / "hook.txt"
+    master.write_bytes(b"master")
+    translation.write_text('{"segments": [{"translated_text": "akuguquki"}]}')
+    source_info = {
+        "duration": 120.0,
+        "streams": [
+            {"codec_type": "video", "width": 1920, "height": 1080},
+            {"codec_type": "audio"},
+        ],
+    }
+    rendered_info = {
+        "duration": 100.16,
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "profile": "Main", "pix_fmt": "yuv420p", "avg_frame_rate": "25/1"},
+            {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000"},
+        ],
+    }
+    monkeypatch.setattr(tiktok_editor, "probe", lambda path: source_info if path == master else rendered_info)
+    monkeypatch.setattr(tiktok_editor, "_FONT_PATH", tmp_path / "font.ttf")
+    tiktok_editor._FONT_PATH.write_bytes(b"font")
+
+    def fake_title_panel(*, output_path, title, width, height):
+        output_path.write_bytes(b"panel")
+        return {
+            "rendered_text": title, "line_count": 1, "font_size": 48, "minimum_font_size": 35,
+            "maximum_font_size": 84, "fit_action": "unchanged", "truncated": False,
+            "panel_bounds": [88, 852, 1832, 1068],
+        }
+
+    monkeypatch.setattr(tiktok_editor, "_render_title_panel", fake_title_panel)
+    commands = []
+
+    def fake_runner(command, check=True, **kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"edited")
+        return SimpleNamespace(returncode=0)
+
+    tiktok_editor.render_tiktok_hook_edit(
+        master_video=master, output_path=output, manifest_path=manifest, hook_text_path=hook,
+        selection={"selected_block_id": "block_0002", "cut_start_seconds": 19.84, "hook_text": "I-EFF ayihlehli!"},
+        translation_path=translation, title_text="Isihloko esigqamile #ZuluTikTok #IsiZulu",
+        runner=fake_runner, cpu_threads=4,
+    )
+    command = commands[0]
+    codec_index = command.index("libx264")
+    assert command[codec_index + 1] == "-threads"
+    assert command[codec_index + 2] == "4"
+
+
+def test_hook_edit_without_cpu_threads_never_adds_the_flag(tmp_path, monkeypatch) -> None:
+    master = tmp_path / "master.mp4"
+    translation = tmp_path / "translation.json"
+    output = tmp_path / "edited.mp4"
+    manifest = tmp_path / "edit.json"
+    hook = tmp_path / "hook.txt"
+    master.write_bytes(b"master")
+    translation.write_text('{"segments": [{"translated_text": "akuguquki"}]}')
+    source_info = {
+        "duration": 120.0,
+        "streams": [
+            {"codec_type": "video", "width": 1920, "height": 1080},
+            {"codec_type": "audio"},
+        ],
+    }
+    rendered_info = {
+        "duration": 100.16,
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "profile": "Main", "pix_fmt": "yuv420p", "avg_frame_rate": "25/1"},
+            {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000"},
+        ],
+    }
+    monkeypatch.setattr(tiktok_editor, "probe", lambda path: source_info if path == master else rendered_info)
+    monkeypatch.setattr(tiktok_editor, "_FONT_PATH", tmp_path / "font.ttf")
+    tiktok_editor._FONT_PATH.write_bytes(b"font")
+
+    def fake_title_panel(*, output_path, title, width, height):
+        output_path.write_bytes(b"panel")
+        return {
+            "rendered_text": title, "line_count": 1, "font_size": 48, "minimum_font_size": 35,
+            "maximum_font_size": 84, "fit_action": "unchanged", "truncated": False,
+            "panel_bounds": [88, 852, 1832, 1068],
+        }
+
+    monkeypatch.setattr(tiktok_editor, "_render_title_panel", fake_title_panel)
+    commands = []
+
+    def fake_runner(command, check=True, **kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"edited")
+        return SimpleNamespace(returncode=0)
+
+    tiktok_editor.render_tiktok_hook_edit(
+        master_video=master, output_path=output, manifest_path=manifest, hook_text_path=hook,
+        selection={"selected_block_id": "block_0002", "cut_start_seconds": 19.84, "hook_text": "I-EFF ayihlehli!"},
+        translation_path=translation, title_text="Isihloko esigqamile #ZuluTikTok #IsiZulu",
+        runner=fake_runner,
+    )
+    assert "-threads" not in commands[0]
 
 
 def test_caption_card_removes_all_hashtags() -> None:
