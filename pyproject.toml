@@ -46,7 +46,12 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # Autshumato English-isiZulu lexicon (see zulu_lexicon.py) and its licence.
-mathula_tv.data = ["*.txt"]
+# Quoted as a single literal key -- an unquoted "mathula_tv.data" is parsed by
+# TOML as a nested table (mathula_tv -> data), not this literal dotted key,
+# which newer setuptools rejects as "must be array" (confirmed on Python 3.14
+# / setuptools's stricter pyproject.toml validation; older setuptools was
+# lenient about the same malformed shape).
+"mathula_tv.data" = ["*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
