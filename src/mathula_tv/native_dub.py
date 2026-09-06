@@ -3871,6 +3871,17 @@ _TEMPORAL_NUMBER_PATTERN = re.compile(
     r"(?<!\w)(?:R|\$)?\d+(?:(?:,\d{3})+|(?:\.\d+))?(?:%|st|nd|rd|th)?(?!\w)"
 )
 _TEMPORAL_ACRONYM_PATTERN = re.compile(r"\b[A-Z]{2,}(?:-[A-Z]{2,})*\b")
+# English ordinal suffixes ("4th", "1st", "23rd") are an English-specific reading
+# convention, not part of the underlying value -- a correct isiZulu ordinal date
+# ("ngomhlaka-4") never reproduces "th" verbatim. Real bug found 2026-09-07 (job
+# fb3d08b63fed4d90922b08f7e325b906): a genuinely correct, literal-preserving turn-
+# block translation containing "wake up on the 4th" -> "...ngomhlaka-4..." was
+# spuriously rejected because the checker demanded the literal substring "4th"
+# survive in the Zulu output. Stripped ONLY for the count-matching literal (see
+# "match_literal" below) -- "literal" itself (with the suffix) is kept unchanged
+# for display/blocking-classification, since an ordinal date must stay high-
+# stakes even though its bare digits alone would look like an exempt 1-9 count.
+_ORDINAL_NUMBER_SUFFIX = re.compile(r"(?:st|nd|rd|th)$", re.IGNORECASE)
 
 
 def _temporal_literal_context(text: str, start: int, end: int, *, radius: int = 88) -> str:
@@ -3905,9 +3916,11 @@ def _temporal_mask_source_occurrence_requirements(source_text: str) -> list[dict
                 "source_context": _temporal_literal_context(source, match.start(), match.end()),
             })
         for literal, occurrences in by_literal.items():
+            match_literal = _ORDINAL_NUMBER_SUFFIX.sub("", literal) if kind == "number" else literal
             requirements.append({
                 "kind": kind,
                 "literal": literal,
+                "match_literal": match_literal,
                 "required_count": len(occurrences),
                 "source_occurrences": occurrences,
             })
@@ -3938,8 +3951,8 @@ def _temporal_mask_semantic_guard_details(source_text: str, spoken_text: str) ->
     target_acronyms = Counter(match.group(0) for match in _TEMPORAL_ACRONYM_PATTERN.finditer(target))
     details: list[dict[str, Any]] = []
     for requirement in source_requirements:
-        literal = str(requirement["literal"])
-        observed = int((target_numbers if requirement["kind"] == "number" else target_acronyms)[literal])
+        match_literal = str(requirement.get("match_literal", requirement["literal"]))
+        observed = int((target_numbers if requirement["kind"] == "number" else target_acronyms)[match_literal])
         required = int(requirement["required_count"])
         if observed >= required:
             continue
@@ -3947,7 +3960,10 @@ def _temporal_mask_semantic_guard_details(source_text: str, spoken_text: str) ->
             **requirement,
             "observed_count": observed,
             "missing_count": required - observed,
-            "blocking": _is_high_stakes_numeric_literal(str(requirement["kind"]), literal),
+            # The DISPLAY literal (with any ordinal suffix), never match_literal --
+            # an ordinal date's bare digits alone would look like an exempt 1-9
+            # count, but a date must stay high-stakes regardless.
+            "blocking": _is_high_stakes_numeric_literal(str(requirement["kind"]), str(requirement["literal"])),
         })
     return details
 
@@ -12004,9 +12020,9 @@ def _sentence_preserves_required_literals(*, source_text: str, candidate_text: s
     still appear in the candidate's English text.
     """
     for requirement in _temporal_mask_source_occurrence_requirements(source_text):
-        literal = str(requirement["literal"])
+        match_literal = str(requirement.get("match_literal", requirement["literal"]))
         required_count = int(requirement["required_count"])
-        if candidate_text.count(literal) < required_count:
+        if candidate_text.count(match_literal) < required_count:
             return False
     return True
 
