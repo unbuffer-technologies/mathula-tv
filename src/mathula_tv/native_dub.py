@@ -413,6 +413,18 @@ CONFIRMED_TRANSLATION_PITFALLS: tuple[str, ...] = (
     "which is mispronounced beyond recognition). Keep \"General\" as an unmodified English "
     "code-switch, glued with the ordinary isiZulu prefix (\"uGeneral\", \"kuGeneral\"), exactly "
     "like \"Advocate\" and \"Mr.\"/\"Mnu.\" elsewhere in this transcript.",
+    "An English attributive date in bare \"Month Day\" word order with no ordinal suffix (e.g. "
+    "\"the November 1 elections\", modifying a following noun) must NOT be translated by "
+    "literally mirroring that English word order into a Zulu-spelled month followed by a bare "
+    "trailing digit (e.g. \"...lwangoNovemba 1\") -- isiZulu does not read a bare digit naturally "
+    "in that position. Restructure the date using isiZulu's own native day-before-month "
+    "construction instead: \"umhla\"/\"ngomhla\"/\"mhla\" (the day) followed by the day rendered "
+    "as an ordinal agreeing with \"umhla\" (e.g. \"wokuqala\" for the 1st, \"wesibili\" for the "
+    "2nd) and then \"ku-\"/\"ka-\" plus the month name -- the SAME construction this transcript "
+    "already produces correctly elsewhere for an ordinal-suffixed English date (\"wake up on the "
+    "4th\" -> \"ngomhlaka-4\"). Restructure the surrounding clause's grammar as needed (for "
+    "example as a relative clause modifying the noun the date describes) rather than forcing the "
+    "date phrase to sit in the original English attributive position unchanged.",
 )
 DEFAULT_ROLLING_SYLLABLE_BATCH_SIZE = 8
 DEFAULT_ZULU_CONTENT_SYLLABLES_PER_SECOND = 5.3
