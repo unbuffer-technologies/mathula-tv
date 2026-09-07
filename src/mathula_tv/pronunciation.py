@@ -894,10 +894,18 @@ def _zulu_date_ordinal_day(day: int) -> str:
 # Azure STT round-trips every candidate to the correct digit regardless and
 # cannot distinguish accent quality) confirmed "faif" recovers a natural
 # English "five" ("fayf" also worked equally well; "faif" was kept as the
-# more standard-looking English digraph). Only digit 5 needed a respelling --
-# every other single digit already sounded correct.
+# more standard-looking English digraph).
+#
+# Real user-reported production defect (job fb3d08b63fed4d90922b08f7e325b906,
+# 2026-09-07): "1" was ALSO still broken, discovered while diagnosing a
+# separate "November 1" bare-day-number defect (see _ZU_MONTH_BARE_DAY
+# below) -- plain "1" and spelled-out "one" both round-tripped via real
+# Azure STT as "ON", not "1"/"one". Confirms this exact mechanism's "1"
+# entry was never actually fixed alongside "5" -- it silently affects every
+# year ending in 1 too (2001/2011/2021/2031), not just this one bare-day
+# case. "wani" round-tripped cleanly as "1" on the same real voice.
 _ZU_YEAR_ONES = {
-    1: "one", 2: "two", 3: "three", 4: "four", 5: "faif",
+    1: "wani", 2: "two", 3: "three", 4: "four", 5: "faif",
     6: "six", 7: "seven", 8: "eight", 9: "nine",
 }
 _ZU_YEAR_TEENS = {
@@ -961,10 +969,56 @@ def _zulu_native_date_tts(match: re.Match[str]) -> str:
 # unrelated bare-reference-number mechanism under apply()'s greedy
 # leftmost/longest selection (this match starts earlier, at the month, than
 # a bare-number match starting at the year digits alone).
+# Reuses _GLUED_PREFIX_LOOKBEHIND (defined near the top of this file for the
+# exact same "short Zulu prefix glued directly onto a capitalized token, no
+# space" shape already proven for code-switched proper nouns, e.g.
+# "uBrown Mogotsi") rather than enumerating specific prefix forms one at a
+# time -- real production text glues arbitrary concord prefixes onto a month
+# name depending on grammatical agreement (e.g. "lwangoNovemba", class-11
+# "lwa-" + the already-recognized "ngo-" month alias), and a fixed prefix
+# list would need a new entry for every noun class this could ever agree
+# with. See _ZU_MONTH_BARE_DAY below for the real defect this fixes.
+_ZU_MONTH_START_BOUNDARY = rf"(?:(?<!\w)|{_GLUED_PREFIX_LOOKBEHIND})"
 _ZU_MONTH_YEAR_ONLY = re.compile(
-    rf"(?<!\w)(?P<month>{_ZU_MONTH_PATTERN})(?P<year>\s*,?\s*(?:19|20)[0-9]{{2}})(?!\w)",
+    rf"{_ZU_MONTH_START_BOUNDARY}(?P<month>{_ZU_MONTH_PATTERN})(?P<year>\s*,?\s*(?:19|20)[0-9]{{2}})(?!\w)",
     re.IGNORECASE | re.UNICODE,
 )
+# A bare day-of-month number with no ordinal suffix, immediately following a
+# month name -- e.g. "Novemba 1" (mirroring English "November 1" word order,
+# as opposed to the day-before-month "mhla ka-3 Mashi" order _ZU_CALENDAR_DATE
+# already handles). The digit-count cap (1-2 digits, 1-31) means this can
+# never collide with a 4-digit year match above; `(?!\w)` excludes an
+# ordinal-suffixed form like "1st"/"4th", which is a separate, already-solved
+# concern (the turn-block literal-preservation check, not TTS pronunciation).
+#
+# Real user-reported production defect (job fb3d08b63fed4d90922b08f7e325b906,
+# 2026-09-07): the committed Zulu translation of "ahead of the November 1
+# local government elections" reads a bare "1" with no date-reading treatment
+# at all, and Azure's own raw number reading came out sounding like "on", not
+# "1" -- confirmed via real TTS+STT round trip (see the _ZU_YEAR_ONES[1] fix
+# above, found via the same investigation).
+_ZU_MONTH_BARE_DAY = re.compile(
+    rf"{_ZU_MONTH_START_BOUNDARY}(?P<month>{_ZU_MONTH_PATTERN})(?P<sep>\s*,?\s*)(?P<day>[1-9]|[12][0-9]|3[01])(?!\w)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _zulu_cardinal_day_words(value: int) -> str:
+    """Render 1-31 as a plain English cardinal number word ("1" -> the same
+    respelled "wani" _ZU_YEAR_ONES already uses, "21" -> "twenty-wani") --
+    NOT the year-specific "oh one" two-digit grouping _zulu_two_digit_year_words
+    uses for a lone units digit. A day-of-month is read as an ordinary
+    cardinal number, never split into two-digit groups the way a year is.
+    """
+    if value < 10:
+        return _ZU_YEAR_ONES[value]
+    if value < 20:
+        return _ZU_YEAR_TEENS[value]
+    tens, ones = divmod(value, 10)
+    word = _ZU_YEAR_TENS[tens]
+    if ones:
+        word += f"-{_ZU_YEAR_ONES[ones]}"
+    return word
 # A year with no day or month attached, referenced via the Zulu possessive
 # "ka-" glue -- e.g. "ka-2024" ("of 2024"), a real, common standalone way of
 # naming a year in isiZulu (also seen as "ngonyaka ka-2024", "the year of
@@ -1052,6 +1106,36 @@ def _zulu_dynamic_date_candidates(
                     notes=(
                         "Application-controlled English year-style reading "
                         "for a month-only year with no day attached",
+                        ZU_NATIVE_YEAR_PRONUNCIATION_VERSION,
+                        "Approved/display digits remain immutable",
+                    ),
+                ),
+            )
+        )
+    for match in _ZU_MONTH_BARE_DAY.finditer(text):
+        # A month+year already covered by a full calendar-date match or a
+        # month-year-only match above must not also get a second, overlapping
+        # candidate here (defensive -- the digit-count cap already prevents a
+        # 4-digit year from ever matching this pattern in the first place).
+        if any(start <= match.start() < end for start, end in consumed):
+            continue
+        before = match.group(0)
+        after = match.group("month") + match.group("sep") + _zulu_cardinal_day_words(int(match.group("day")))
+        candidates.append(
+            (
+                match.start(),
+                match.end(),
+                PronunciationEntry(
+                    display_text=before,
+                    spoken_text=before,
+                    tts_text=after,
+                    language=language,
+                    source="application_default",
+                    confidence=1.0,
+                    kind="date",
+                    notes=(
+                        "Application-controlled English cardinal reading "
+                        "for a bare day-of-month with no ordinal suffix",
                         ZU_NATIVE_YEAR_PRONUNCIATION_VERSION,
                         "Approved/display digits remain immutable",
                     ),
@@ -1756,11 +1840,27 @@ def with_web_researched_organisation_pronunciations(
         # no Speech credentials were configured) defaults to True so every
         # cached artifact from before this feature existed keeps working.
         round_trip_verified = raw_item.get("round_trip_verified", True) is not False
+        # Phase 24: a self-supervised guess (native_dub.py's
+        # _request_self_supervised_pronunciation_candidates, used when web
+        # research found no pronunciation evidence at all -- a real,
+        # confirmed limitation for local/lesser-known names, not a bug) has
+        # no pronunciation_urls by construction. An EXPLICIT, CONFIRMED
+        # round-trip pass is real, direct acoustic evidence -- arguably
+        # stronger than a URL, since it tests the actual claim rather than
+        # inferring it from text -- so it is accepted as an alternative
+        # evidence source. Gated on the round-trip having ACTUALLY run and
+        # ACTUALLY passed (not just "verification never ran," which defaults
+        # true above for backward compatibility) so an unverified guess can
+        # never slip through this path.
+        has_confirmed_round_trip = (
+            raw_item.get("round_trip_verified") is True
+            and raw_item.get("round_trip_candidate_score") is not None
+        )
         if (
             pronunciation_tts_text
             and pronunciation_confidence >= 0.9
             and pronunciation_mode in {"initialism", "acronym", "word_name"}
-            and pronunciation_urls
+            and (pronunciation_urls or has_confirmed_round_trip)
             and round_trip_verified
         ):
             kind = {
@@ -1780,7 +1880,10 @@ def with_web_researched_organisation_pronunciations(
                     confidence=pronunciation_confidence,
                     kind=kind,
                     notes=(
-                        "Web-grounded target-locale entity pronunciation",
+                        "Self-supervised, round-trip-verified entity pronunciation "
+                        "(no web evidence available)"
+                        if str(raw_item.get("correction_mode") or "") == "self_supervised_no_evidence"
+                        else "Web-grounded target-locale entity pronunciation",
                         ZU_WEB_RESEARCHED_ORGANISATION_PRONUNCIATION_VERSION,
                         f"pronunciation_mode={pronunciation_mode}",
                         *(

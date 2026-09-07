@@ -179,6 +179,7 @@ def test_date_normalizer_is_isolated_from_other_locales_and_month_mentions() -> 
             "ngasekupheleni kuka-twenty twenty-four, mhlawumbe ekuqaleni "
             "kuka-twenty twenty-faif",
         ),
+        ("ngonyaka ka-2001", "ngonyaka ka-twenty oh wani"),
     ),
 )
 def test_bare_year_with_no_day_gets_a_natural_english_year_reading(
@@ -198,6 +199,53 @@ def test_a_year_shaped_number_with_no_month_or_ka_context_keeps_its_reference_re
     # mechanism (same as before this fix, out of its scope).
     result = _dictionary().apply("Icala elingu-2024 alikaqedwa.")
     assert "twenty twenty-four" not in result.tts_text
+
+
+# Real user-reported production defect (job fb3d08b63fed4d90922b08f7e325b906):
+# a bare day-of-month number with no ordinal suffix, in English "Month <day>"
+# word order (as opposed to the day-before-month "mhla ka-3 Mashi" order
+# _ZU_CALENDAR_DATE already handles), was left as a raw digit and Azure's own
+# number reading came out sounding like "on" rather than "1". Calibrated live
+# via real Azure zu-ZA-ThembaNeural synthesis + zu-ZA STT round-trip -- "wani"
+# recovered a clean "1", matching the same fix already applied to
+# _ZU_YEAR_ONES[1] for the bare-year case.
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    (
+        ("ahead of Novemba 1", "ahead of Novemba wani"),
+        # The real committed text: a Zulu class-11 relative concord ("lwa-")
+        # glued directly onto the already-recognized "ngo-" month alias with
+        # no space -- confirmed this only works because _ZU_MONTH_BARE_DAY
+        # reuses _GLUED_PREFIX_LOOKBEHIND rather than a fixed prefix list.
+        (
+            "lohulumeni basekhaya lwangoNovemba 1.",
+            "lohulumeni basekhaya lwangoNovemba wani.",
+        ),
+        ("kwenzeka ngoDisemba 21", "kwenzeka ngoDisemba twenty-wani"),
+        ("kwenzeka ngoDisemba 15", "kwenzeka ngoDisemba fifteen"),
+    ),
+)
+def test_bare_day_of_month_with_no_ordinal_suffix_gets_a_natural_cardinal_reading(
+    source: str, expected: str,
+) -> None:
+    result = _dictionary().apply(source)
+    assert result.spoken_text == source
+    assert result.tts_text == expected
+
+
+def test_a_full_calendar_date_is_unaffected_by_the_bare_day_mechanism() -> None:
+    # The day-before-month, day+month+year case (_ZU_CALENDAR_DATE) must not
+    # also get a second, overlapping bare-day candidate.
+    result = _dictionary().apply("Sihlehlisele umhla ka-3 Mashi 2026.")
+    assert result.tts_text == "Sihlehlisele umhla wesithathu kuNdasa 2026."
+
+
+def test_an_ordinal_suffixed_day_is_not_touched_by_the_bare_day_mechanism() -> None:
+    # "1st"/"4th" has a trailing word character right after the digit, so the
+    # (?!\w) boundary excludes it -- this is a different, already-solved
+    # concern (the turn-block literal-preservation check), not TTS reading.
+    result = _dictionary().apply("ngesikhathi sikaNovemba 1st.")
+    assert "wani" not in result.tts_text
 
 
 def test_a_full_day_month_year_date_still_leaves_its_own_year_digits_raw() -> None:

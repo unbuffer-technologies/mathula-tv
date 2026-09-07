@@ -8404,7 +8404,23 @@ def _apply_native_pronunciation_research_to_job_cache(
     base = with_default_organisation_initialisms(
         PronunciationDictionary(dictionary_version="v1", language="zu-ZA", job_id=str(job_root))
     )
-    dictionary = with_web_researched_organisation_pronunciations(base, research)
+    # Phase 24: self_supervised_corrections is shaped identically to
+    # accepted_corrections (same fields with_web_researched_organisation_
+    # pronunciations reads) -- merged into one list here so that function
+    # needs no knowledge of which source a record came from, only whether it
+    # carries real web evidence or a confirmed round-trip pass (see its own
+    # relaxed evidence gate).
+    merged_research: Mapping[str, Any] | None = research
+    if isinstance(research, Mapping):
+        self_supervised = research.get("self_supervised_corrections") or ()
+        if self_supervised:
+            merged_research = {
+                **research,
+                "accepted_corrections": [
+                    *(research.get("accepted_corrections") or ()), *self_supervised,
+                ],
+            }
+    dictionary = with_web_researched_organisation_pronunciations(base, merged_research)
     _NATIVE_DUB_PRONUNCIATION_DICTIONARY_BY_JOB[str(job_root)] = dictionary
     return dictionary
 
@@ -10193,6 +10209,124 @@ pronunciation_language, and pronunciation_ipa when grounded. Never propose an id
 change. Never research, add, or merge an entity not present in candidate_entities."""
 
 
+# --- Phase 24: self-supervised pronunciation fallback for entities with no
+# web evidence ----------------------------------------------------------------
+# Real user-reported production defect (job fb3d08b63fed4d90922b08f7e325b906,
+# 2026-09-07): "Godfrey Gidi" (a local EFF mayoral candidate) was correctly
+# sent to the web-research pipeline above (confirmed by direct inspection of
+# context_ledger.json -- entity #2 of 7, no candidate-selection bug) but came
+# back with no accepted correction, because a local municipal candidate has no
+# indexed web audio of himself speaking his own name -- a fundamental limit of
+# web search, not a defect any code fix to that mechanism can close. Per the
+# user's explicit instruction ("not patching, make the system flexible enough
+# to handle such issues automatically"), this closes the gap generally: for
+# ANY entity that ends up with no accepted correction, generate a couple of
+# phonetic respelling candidates from the model's own linguistic knowledge
+# (no web search tool -- this is a pronunciation guess, not an identity
+# lookup, so it's cheap and shares none of the web-search rate-limit risk)
+# and empirically verify each one with the EXACT SAME real TTS+STT round-trip
+# judge Phase 18 already built (_measure_pronunciation_round_trip) -- adopting
+# a candidate only if it measurably beats the raw spelling. No new judge is
+# invented, only a new candidate source feeding the one already proven.
+NATIVE_PRONUNCIATION_SELF_SUPERVISED_PROMPT_VERSION = "native-pronunciation-self-supervised-v1"
+NATIVE_PRONUNCIATION_SELF_SUPERVISED_SYSTEM_PROMPT = r"""You are Mathula TV's pronunciation-
+respelling assistant for isiZulu (zu-ZA) narration. The input is a bounded list of entities: names
+or organisation/institution names that appear, UNCHANGED, inside an isiZulu broadcast translation
+-- code-switched English-origin (or other non-Zulu) terms, never translated. Web search already
+tried and failed to find direct pronunciation evidence for each one (no indexed audio of the
+person/entity actually speaking, common for local or lesser-known names) -- you are now asked for
+your own best phonetic guess, using ordinary linguistic knowledge of how this name is most likely
+pronounced by its own language/culture of origin, NOT web search.
+
+For each entity, propose 0, 1, or 2 DISTINCT short, plain-text phonetic respellings -- hidden text
+fed only to a zu-ZA neural voice, never shown to a viewer and never changing the visible/canonical
+spelling. Each respelling should nudge the voice toward a natural pronunciation of the name using
+Zulu-friendly spelling conventions (for example doubling a vowel for a full, clearly-articulated
+syllable, or spelling a name the way an English speaker's name-sound would be written out
+phonetically) -- never a wildly different-sounding invention. Returning zero respellings ("no
+confident guess") is a fully valid, encouraged answer when you are not confident -- a missed
+respelling costs nothing (the entity simply keeps its plain spelling), while a bad invented one
+could make things worse.
+
+Return one strict JSON object: schema_version, candidates. Each candidates[] item: entity_id (copy
+exactly from the input), respellings (0-2 short plain-text strings, most-likely-correct first).
+Never invent, merge, or research an entity not present in the input. Never propose a change to the
+visible spelling itself."""
+
+_SELF_SUPERVISED_PRONUNCIATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["schema_version", "candidates"],
+    "properties": {
+        "schema_version": {"const": "mathula-pronunciation-self-supervised-v1"},
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["entity_id", "respellings"],
+                "properties": {
+                    "entity_id": {"type": "string", "minLength": 1},
+                    "respellings": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+def _request_self_supervised_pronunciation_candidates(
+    *, provider: FoundryGrokProvider, entities: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, list[str]], dict[str, int]]:
+    """One batched, tool-free (no web search) request for phonetic respelling
+    guesses on entities the web-research pass could not resolve. Identity
+    mismatch (an entity_id in the response not present in the request) is
+    silently dropped rather than fatal -- this is an advisory candidate
+    source; the real safety gate is the round-trip verification that follows,
+    not this request's own fidelity.
+    """
+    if not entities:
+        return {}, {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+    requested_ids = {str(item.get("entity_id") or "") for item in entities}
+    response = provider.complete_json(
+        operation="native_pronunciation_self_supervised",
+        system_prompt=NATIVE_PRONUNCIATION_SELF_SUPERVISED_SYSTEM_PROMPT,
+        payload={
+            "candidates": [
+                {
+                    "entity_id": str(item.get("entity_id") or ""),
+                    "name": str(item.get("representative_text") or item.get("canonical_name_hint") or ""),
+                    "entity_type": str(item.get("entity_type") or "other_name"),
+                }
+                for item in entities
+            ],
+        },
+        schema=_SELF_SUPERVISED_PRONUNCIATION_SCHEMA,
+    )
+    usage = {
+        "input_tokens": int(response.input_tokens),
+        "output_tokens": int(response.output_tokens),
+        "attempts": int(response.attempts),
+    }
+    by_entity: dict[str, list[str]] = {}
+    for item in response.data.get("candidates") or ():
+        if not isinstance(item, Mapping):
+            continue
+        entity_id = str(item.get("entity_id") or "")
+        if entity_id not in requested_ids:
+            continue
+        respellings = [
+            str(value).strip() for value in item.get("respellings") or () if str(value).strip()
+        ]
+        if respellings:
+            by_entity[entity_id] = respellings[:2]
+    return by_entity, usage
+
+
 def _native_pronunciation_candidate_id(name: str) -> str:
     """Stable, run-independent match key -- confirmed via direct read of
     autocorrect_research.py's _candidate_key/_resolve_candidate to be the exact
@@ -10498,6 +10632,7 @@ def _ensure_native_pronunciation_research(
     tts: AzureTTSBackend | None = None,
     stt_backend: AzureFastTranscriptionBackend | None = None,
     skip_round_trip_verification: bool = False,
+    grok_provider: FoundryGrokProvider | None = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Research pronunciation for this job's code-switched proper nouns via a
     real web-search call, cached the same way _ensure_zulu_glossary is
@@ -10585,6 +10720,7 @@ def _ensure_native_pronunciation_research(
             "source_hash": source_hash, "status": "empty" if not cache_hit_accepted else "completed",
             "candidate_count": len(all_candidates),
             "accepted_corrections": cache_hit_accepted, "rejected_corrections": [],
+            "self_supervised_corrections": [],
             "usage": usage_totals, "completed_at": utcnow(),
         }
         atomic_write_json(paths.pronunciation_research, artifact)
@@ -10597,6 +10733,7 @@ def _ensure_native_pronunciation_research(
     )
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    self_supervised: list[dict[str, Any]] = []
     status = "completed"
     provider = None
     try:
@@ -10655,6 +10792,76 @@ def _ensure_native_pronunciation_research(
                         "accepted corrections kept unverified.",
                     )
 
+        # Phase 24: self-supervised fallback for any candidate that STILL has
+        # no correction after real web research -- covers every drop reason
+        # uniformly (no web evidence found, validation rejection, or a batch
+        # that failed outright), since in every one of those cases the entity
+        # currently gets zero pronunciation help. Only runs when round-trip
+        # verification is actually possible (tts/stt_backend configured) --
+        # an unverified guess is exactly the "invented phonetic spelling"
+        # risk the web-research prompt itself is told never to take, so this
+        # mechanism must not either.
+        accepted_ids = {str(item.get("entity_id") or "") for item in accepted}
+        unresolved = [c for c in candidates if str(c.get("entity_id") or "") not in accepted_ids]
+        if (
+            unresolved and grok_provider is not None and not skip_round_trip_verification
+            and tts is not None and stt_backend is not None
+        ):
+            voices = tuple(dict.fromkeys(str(v).strip() for v in (tts.configured_voices or ()) if str(v).strip()))
+            if voices:
+                try:
+                    guesses, guess_usage = _request_self_supervised_pronunciation_candidates(
+                        provider=grok_provider, entities=unresolved,
+                    )
+                    usage_totals["input_tokens"] += guess_usage["input_tokens"]
+                    usage_totals["output_tokens"] += guess_usage["output_tokens"]
+                    usage_totals["attempts"] += guess_usage["attempts"]
+                except Exception as exc:  # noqa: BLE001 - a guess failure must never fail research
+                    guesses = {}
+                    _emit_red_warning(
+                        progress,
+                        f"[native pronunciation] Self-supervised respelling request failed ({exc}); "
+                        f"{len(unresolved)} entity/entities keep their default/plain pronunciation.",
+                    )
+                for entity in unresolved:
+                    entity_id = str(entity.get("entity_id") or "")
+                    canonical_text = str(entity.get("representative_text") or "").strip()
+                    respellings = guesses.get(entity_id) or []
+                    if not canonical_text or not respellings:
+                        continue
+                    best_candidate: str | None = None
+                    best_result: dict[str, Any] | None = None
+                    for respelling in respellings:
+                        result = _measure_pronunciation_round_trip(
+                            tts=tts, stt_backend=stt_backend, job_root=job_root,
+                            entity_id=f"{entity_id}_guess", canonical_text=canonical_text,
+                            pronunciation_tts_text=respelling, voices=voices, progress=progress,
+                        )
+                        if result["verified"] and (
+                            best_result is None
+                            or (result["candidate_best_score"] or 0) > (best_result["candidate_best_score"] or 0)
+                        ):
+                            best_candidate, best_result = respelling, result
+                    _emit_progress(
+                        progress,
+                        f"[native pronunciation] Self-supervised guess for '{canonical_text}': "
+                        f"{len(respellings)} candidate(s) tried, "
+                        f"{'adopted ' + repr(best_candidate) if best_candidate else 'none verified'}.",
+                    )
+                    if best_candidate and best_result:
+                        self_supervised.append({
+                            "entity_id": entity_id,
+                            "canonical_text": canonical_text,
+                            "entity_type": str(entity.get("entity_type") or "other_name"),
+                            "pronunciation_mode": "word_name",
+                            "pronunciation_tts_text": best_candidate,
+                            "pronunciation_confidence": 0.9,
+                            "correction_mode": "self_supervised_no_evidence",
+                            "round_trip_verified": True,
+                            "round_trip_raw_score": best_result["raw_best_score"],
+                            "round_trip_candidate_score": best_result["candidate_best_score"],
+                        })
+
         # Write-through: persist every NEWLY researched correction into the
         # project-level cache (keyed by its own representative_text, the
         # same key used to check the cache above) so the next job -- e.g. a
@@ -10662,9 +10869,15 @@ def _ensure_native_pronunciation_research(
         # re-discover it. Cached regardless of round_trip_verified: a
         # correctly-rejected suggestion is just as worth remembering as an
         # accepted one, since re-researching it again would only rediscover
-        # the same rejection at the same real cost.
-        if accepted:
-            for record in accepted:
+        # the same rejection at the same real cost. Self-supervised guesses
+        # are cached the same way -- a future job's cache hit lands in
+        # cache_hit_accepted regardless of original provenance, which is
+        # fine: the relaxed round-trip-evidence gate in
+        # with_web_researched_organisation_pronunciations checks the
+        # confirmed round-trip fields, not which list a record arrived
+        # through.
+        if accepted or self_supervised:
+            for record in (*accepted, *self_supervised):
                 key = str(record.get("representative_text") or record.get("canonical_text") or "").casefold().strip()
                 if key:
                     project_cache[key] = dict(record)
@@ -10675,6 +10888,7 @@ def _ensure_native_pronunciation_research(
         "schema_version": NATIVE_PRONUNCIATION_RESEARCH_PROMPT_VERSION,
         "source_hash": source_hash, "status": status, "candidate_count": len(all_candidates),
         "accepted_corrections": accepted, "rejected_corrections": rejected,
+        "self_supervised_corrections": self_supervised,
         "usage": usage_totals, "completed_at": utcnow(),
     }
     atomic_write_json(paths.pronunciation_research, artifact)
@@ -12753,6 +12967,7 @@ def build_candidate_pool(
             job_root=job_root, context_ledger=context_ledger, glossary=glossary,
             force=force, progress=progress, tts=tts, stt_backend=stt_backend,
             skip_round_trip_verification=skip_pronunciation_round_trip,
+            grok_provider=provider,
         )
     else:
         _emit_progress(progress, "[native candidate pool] Pronunciation research skipped (diagnostic mode).")
