@@ -19,7 +19,7 @@ from .tts_ssml import CharacterPart, SSMLPart, TextPart
 PRONUNCIATION_DICTIONARY_SCHEMA_VERSION = "pronunciation-dictionary-v1"
 PRONUNCIATION_ENTRY_SCHEMA_VERSION = "pronunciation-entry-v1"
 ZU_CODE_SWITCH_PRONUNCIATION_VERSION = "mathula-zu-code-switch-v2-coloured-v13.18.20"
-ZU_NATIVE_DATE_PRONUNCIATION_VERSION = "mathula-zu-native-calendar-date-v1-v13.18.22"
+ZU_NATIVE_DATE_PRONUNCIATION_VERSION = "mathula-zu-native-calendar-date-v2-loanword-month-v13.19.29"
 ZU_NATIVE_YEAR_PRONUNCIATION_VERSION = "mathula-zu-native-year-reading-v3-faif-v13.19.28"
 ZU_NATIVE_HONORIFIC_PRONUNCIATION_VERSION = "mathula-zu-native-honorific-flow-v1-v13.18.23"
 ZU_CONTEXTUAL_NAME_PREFIX_VERSION = "mathula-zu-contextual-name-prefix-v1-v13.18.42"
@@ -577,6 +577,34 @@ def _zulu_month_aliases() -> dict[str, str]:
 _ZU_MONTH_BY_ALIAS = _zulu_month_aliases()
 
 
+def _zulu_month_loanword_aliases() -> dict[str, str]:
+    """Same alias-matching surface as _ZU_MONTH_BY_ALIAS, but mapping to the
+    established English-borrowed isiZulu month name (_ZU_CALENDAR_MONTHS'
+    aliases[1], e.g. "Novemba") instead of the traditional/canonical name
+    (aliases[2]/the tuple's own first element, e.g. "Lwezi").
+
+    Real user feedback, 2026-09-07: "probably only 10% of people who
+    understand zulu know what 'lwamhla lu-1 kuLwezi' means, let's only use
+    the borrowed english words" -- confirms this session's own earlier,
+    separately-established finding that June/August/December/March's
+    borrowed forms (Juni/Agasti/Disemba/Mashi) are the real, everyday isiZulu
+    vocabulary, not the traditional calendar names. _zulu_native_date_tts
+    previously normalized an already-correct loanword month spelling (e.g.
+    someone wrote "Mashi") to the obscure traditional name ("Ndasa") in its
+    TTS output -- exactly backwards from what real speakers use.
+    """
+    result: dict[str, str] = {}
+    for _canonical, aliases in _ZU_CALENDAR_MONTHS:
+        loanword = aliases[1]
+        for alias in aliases:
+            for prefix in ("", "ku", "u", "ngo", "ngo-"):
+                result[f"{prefix}{alias}".casefold()] = loanword
+    return result
+
+
+_ZU_MONTH_LOANWORD_BY_ALIAS = _zulu_month_loanword_aliases()
+
+
 def _zulu_month_english_code_switch_aliases() -> dict[str, str]:
     """Same alias-matching surface as _ZU_MONTH_BY_ALIAS (every prefix
     variant of every month spelling), but mapping to the REBUILT form with
@@ -987,7 +1015,7 @@ def _zulu_year_tts(year: int) -> str:
 
 def _zulu_native_date_tts(match: re.Match[str]) -> str:
     day = int(match.group("day"))
-    month = _ZU_MONTH_BY_ALIAS[match.group("month").casefold()]
+    month = _ZU_MONTH_LOANWORD_BY_ALIAS[match.group("month").casefold()]
     prefix = str(match.group("prefix") or "").strip().casefold()
     year = str(match.group("year") or "")
     if prefix.startswith("ngumhla"):

@@ -424,7 +424,12 @@ CONFIRMED_TRANSLATION_PITFALLS: tuple[str, ...] = (
     "already produces correctly elsewhere for an ordinal-suffixed English date (\"wake up on the "
     "4th\" -> \"ngomhlaka-4\"). Restructure the surrounding clause's grammar as needed (for "
     "example as a relative clause modifying the noun the date describes) rather than forcing the "
-    "date phrase to sit in the original English attributive position unchanged.",
+    "date phrase to sit in the original English attributive position unchanged. ALWAYS use the "
+    "established English-borrowed isiZulu month name in this construction (e.g. \"Novemba\", "
+    "\"Mashi\", \"Disemba\") -- NEVER the old traditional/calendar month name (e.g. \"Lwezi\", "
+    "\"Ndasa\", \"Zibandlela\"), which most real isiZulu speakers today do not recognize. Real "
+    "user feedback: \"probably only 10% of people who understand zulu know what 'lwamhla lu-1 "
+    "kuLwezi' means, let's only use the borrowed english words.\"",
 )
 DEFAULT_ROLLING_SYLLABLE_BATCH_SIZE = 8
 DEFAULT_ZULU_CONTENT_SYLLABLES_PER_SECOND = 5.3
