@@ -408,6 +408,24 @@ _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS = {
     # but give the voice a calibrated South African-English approximation instead
     # of letting it infer isiZulu phonetics for the English social descriptor.
     "coloured": ("Khalad", "english_code_switch", ("colored",)),
+    # Real person (EFF Mbombela mayoral candidate, job
+    # fb3d08b63fed4d90922b08f7e325b906). Unmodified, ThembaNeural's real
+    # zu-ZA STT round-trip badly mangled the surname (heard variously as
+    # "keet"/"kithi"/"kade" across repeated real attempts -- genuine call-to-
+    # call TTS/STT variance for this name, confirmed directly: the RAW
+    # spelling itself scored a clean 1.0 on one real round-trip and badly
+    # mangled on others, too noisy for the automated round-trip verifier to
+    # settle on its own). The correct pronunciation was found directly from
+    # this job's own source audio: Pass 1's raw (pre-spelling-correction)
+    # ASR transcript already read "Godrej Gade" for this exact name, before
+    # a later autocorrect step normalised it to the tidier "Godfrey Gidi" --
+    # real, job-specific audio evidence, not a guess. The self-supervised
+    # pronunciation pipeline (native_dub.py's raw_asr_hint mechanism)
+    # correctly proposed this exact respelling from that evidence on its
+    # own; a human confirmed it by ear once automated round-trip scoring
+    # proved too noisy to settle the case unattended. This is a TTS-only
+    # alias and never changes captions.
+    "Godfrey Gidi": ("Godrej Gade", "personal_name", ()),
 }
 _SUPPORTED_SA_LANGUAGE_LOCALES = {
     "nr-za",  # isiNdebele

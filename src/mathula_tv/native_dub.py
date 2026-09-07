@@ -10526,6 +10526,7 @@ def _measure_pronunciation_round_trip(
     pronunciation_tts_text: str,
     voices: Sequence[str],
     progress: Callable[[str], None] | None = None,
+    repeats_per_voice: int = 2,
 ) -> dict[str, Any]:
     """Real TTS+STT round trip for one accepted correction, across every
     configured voice -- which specific voice this entity's speaker will get
@@ -10534,6 +10535,22 @@ def _measure_pronunciation_round_trip(
     Justice College/Lee Segeels Ncube/Brown Mogotsi. A synthesis/STT failure
     for one voice is skipped, not fatal -- the verdict uses whichever voices
     actually produced a result.
+
+    Real, confirmed finding, job fb3d08b63fed4d90922b08f7e325b906: Azure
+    neural TTS is not deterministic even for identical input text -- the
+    SAME raw spelling ("Godfrey Gidi") round-tripped a clean 1.0 on one real
+    call and badly mangled on others, purely from synthesis variance, not
+    from anything about the text itself. A single sample per voice can
+    therefore give a misleadingly confident (or misleadingly bad) verdict.
+    repeats_per_voice (default 2, so 4 real Azure calls per voice: 2 raw + 2
+    candidate) takes the MEAN score across repeats for each voice first --
+    a robust per-voice estimate that averages out this real synthesis
+    noise -- THEN the max across voices, preserving the original "does at
+    least one configured voice do well" semantics for genuine per-voice
+    differences (which are real, not noise, and should not be averaged
+    away). raw_best_score/candidate_best_score keep their established field
+    names for API compatibility; their value is now this more robust
+    mean-then-max estimate rather than a single raw sample.
     """
     audio_dir = native_dub_paths(job_root).root / "pronunciation_round_trip"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -10541,17 +10558,22 @@ def _measure_pronunciation_round_trip(
     for voice in voices:
         raw_text = _PRONUNCIATION_ROUND_TRIP_CARRIER_TEMPLATE.format(name=canonical_text)
         candidate_text = _PRONUNCIATION_ROUND_TRIP_CARRIER_TEMPLATE.format(name=pronunciation_tts_text)
+        raw_samples: list[tuple[float, str]] = []
+        candidate_samples: list[tuple[float, str]] = []
         try:
-            raw_score, raw_transcript = _synthesize_and_score_round_trip(
-                tts=tts, stt_backend=stt_backend, output_path=audio_dir / f"{entity_id}_{voice}_raw.wav",
-                turn_id=f"pron_verify_{entity_id}_{voice}_raw", voice=voice, text=raw_text,
-                canonical_text=canonical_text,
-            )
-            candidate_score, candidate_transcript = _synthesize_and_score_round_trip(
-                tts=tts, stt_backend=stt_backend, output_path=audio_dir / f"{entity_id}_{voice}_candidate.wav",
-                turn_id=f"pron_verify_{entity_id}_{voice}_candidate", voice=voice, text=candidate_text,
-                canonical_text=canonical_text,
-            )
+            for repeat in range(max(1, repeats_per_voice)):
+                raw_samples.append(_synthesize_and_score_round_trip(
+                    tts=tts, stt_backend=stt_backend,
+                    output_path=audio_dir / f"{entity_id}_{voice}_raw_{repeat}.wav",
+                    turn_id=f"pron_verify_{entity_id}_{voice}_raw_{repeat}", voice=voice, text=raw_text,
+                    canonical_text=canonical_text,
+                ))
+                candidate_samples.append(_synthesize_and_score_round_trip(
+                    tts=tts, stt_backend=stt_backend,
+                    output_path=audio_dir / f"{entity_id}_{voice}_candidate_{repeat}.wav",
+                    turn_id=f"pron_verify_{entity_id}_{voice}_candidate_{repeat}", voice=voice, text=candidate_text,
+                    canonical_text=canonical_text,
+                ))
         except Exception as exc:  # noqa: BLE001 - one voice's failure must never block the others
             _emit_progress(
                 progress,
@@ -10559,9 +10581,13 @@ def _measure_pronunciation_round_trip(
                 f"({exc}); skipping that voice.",
             )
             continue
+        raw_mean = sum(score for score, _ in raw_samples) / len(raw_samples)
+        candidate_mean = sum(score for score, _ in candidate_samples) / len(candidate_samples)
         per_voice.append({
-            "voice": voice, "raw_score": raw_score, "raw_transcript": raw_transcript,
-            "candidate_score": candidate_score, "candidate_transcript": candidate_transcript,
+            "voice": voice, "raw_score": raw_mean, "raw_transcript": raw_samples[-1][1],
+            "candidate_score": candidate_mean, "candidate_transcript": candidate_samples[-1][1],
+            "raw_sample_scores": [score for score, _ in raw_samples],
+            "candidate_sample_scores": [score for score, _ in candidate_samples],
         })
     if not per_voice:
         return {"verified": None, "raw_best_score": None, "candidate_best_score": None, "per_voice": []}

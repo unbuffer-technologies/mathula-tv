@@ -651,59 +651,65 @@ def _fake_normalize_for_self_supervised(monkeypatch):
 def test_self_supervised_fallback_adopts_a_verified_respelling_for_an_unresolved_entity(
     tmp_path, monkeypatch, _fake_normalize_for_self_supervised,
 ):
+    # NOTE: uses a fictional entity name ("Thabo Ndlovu"), not the real
+    # "Godfrey Gidi" incident this mechanism was built to fix -- "Godfrey Gidi"
+    # is now itself a hardcoded, reviewed dictionary entry, so using it here
+    # would make `_ensure_native_pronunciation_research`'s own "already
+    # hardcoded, skip research" check correctly bypass this test's whole
+    # exercised code path before it ever ran.
     job_root = _job_root(tmp_path)
-    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Godfrey Gidi")})
+    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Thabo Ndlovu")})
     monkeypatch.setattr(
         "mathula_tv.native_dub.AzureResponsesWebResearchProvider.from_environment", lambda: backend,
     )
-    grok = _FakeGrokProvider({"Godfrey Gidi": ["Godfri Giidi", "Godfree Gidi"]})
+    grok = _FakeGrokProvider({"Thabo Ndlovu": ["Thabo Ndloovu", "Thabo Ndlavu"]})
     tts = _FakeRoundTripTts()
     stt = _FakeRoundTripStt({
-        "Kukhulunywa ngoGodfrey Gidi kulesi sigaba.": "kukhulunywa ngo godrich gardee kulesi sigaba",
-        "Kukhulunywa ngoGodfri Giidi kulesi sigaba.": "kukhulunywa ngo godfrey gidi kulesi sigaba",
-        "Kukhulunywa ngoGodfree Gidi kulesi sigaba.": "kukhulunywa ngo godfrey kithi kulesi sigaba",
+        "Kukhulunywa ngoThabo Ndlovu kulesi sigaba.": "kukhulunywa ngo tabo ndlobu kulesi sigaba",
+        "Kukhulunywa ngoThabo Ndloovu kulesi sigaba.": "kukhulunywa ngo thabo ndlovu kulesi sigaba",
+        "Kukhulunywa ngoThabo Ndlavu kulesi sigaba.": "kukhulunywa ngo thabo ndlela kulesi sigaba",
     })
     _wire_tts_stt_pair(tts, stt)
 
     artifact, usage = _ensure_native_pronunciation_research(
-        job_root=job_root, context_ledger=_context_ledger("Godfrey Gidi"), glossary=_glossary(),
+        job_root=job_root, context_ledger=_context_ledger("Thabo Ndlovu"), glossary=_glossary(),
         progress=None, tts=tts, stt_backend=stt, grok_provider=grok,
     )
 
     assert grok.calls == 1
     assert len(artifact["self_supervised_corrections"]) == 1
     record = artifact["self_supervised_corrections"][0]
-    assert record["canonical_text"] == "Godfrey Gidi"
-    assert record["pronunciation_tts_text"] == "Godfri Giidi"
+    assert record["canonical_text"] == "Thabo Ndlovu"
+    assert record["pronunciation_tts_text"] == "Thabo Ndloovu"
     assert record["correction_mode"] == "self_supervised_no_evidence"
     assert record["round_trip_verified"] is True
     assert usage["input_tokens"] >= 15
 
     # Flows into a working substitution via the existing consumption path.
     _apply_native_pronunciation_research_to_job_cache(job_root, artifact)
-    result = _native_dub_tts_ready_text("Godfrey Gidi wathi.", job_root=job_root)
-    assert "Godfri Giidi" in result
+    result = _native_dub_tts_ready_text("Thabo Ndlovu wathi.", job_root=job_root)
+    assert "Thabo Ndloovu" in result
 
 
 def test_self_supervised_fallback_skips_when_no_respelling_beats_the_raw_spelling(
     tmp_path, monkeypatch, _fake_normalize_for_self_supervised,
 ):
     job_root = _job_root(tmp_path)
-    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Godfrey Gidi")})
+    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Thabo Ndlovu")})
     monkeypatch.setattr(
         "mathula_tv.native_dub.AzureResponsesWebResearchProvider.from_environment", lambda: backend,
     )
-    grok = _FakeGrokProvider({"Godfrey Gidi": ["Godfree Gidi"]})
+    grok = _FakeGrokProvider({"Thabo Ndlovu": ["Thabo Ndlavu"]})
     tts = _FakeRoundTripTts()
     # Both raw and candidate recover equally poorly -- no real improvement.
     stt = _FakeRoundTripStt({
-        "Kukhulunywa ngoGodfrey Gidi kulesi sigaba.": "kukhulunywa ngo x y kulesi sigaba",
-        "Kukhulunywa ngoGodfree Gidi kulesi sigaba.": "kukhulunywa ngo a b kulesi sigaba",
+        "Kukhulunywa ngoThabo Ndlovu kulesi sigaba.": "kukhulunywa ngo x y kulesi sigaba",
+        "Kukhulunywa ngoThabo Ndlavu kulesi sigaba.": "kukhulunywa ngo a b kulesi sigaba",
     })
     _wire_tts_stt_pair(tts, stt)
 
     artifact, _ = _ensure_native_pronunciation_research(
-        job_root=job_root, context_ledger=_context_ledger("Godfrey Gidi"), glossary=_glossary(),
+        job_root=job_root, context_ledger=_context_ledger("Thabo Ndlovu"), glossary=_glossary(),
         progress=None, tts=tts, stt_backend=stt, grok_provider=grok,
     )
 
@@ -712,7 +718,7 @@ def test_self_supervised_fallback_skips_when_no_respelling_beats_the_raw_spellin
 
 def test_self_supervised_fallback_never_runs_without_a_grok_provider(tmp_path, monkeypatch):
     job_root = _job_root(tmp_path)
-    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Godfrey Gidi")})
+    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Thabo Ndlovu")})
     monkeypatch.setattr(
         "mathula_tv.native_dub.AzureResponsesWebResearchProvider.from_environment", lambda: backend,
     )
@@ -720,7 +726,7 @@ def test_self_supervised_fallback_never_runs_without_a_grok_provider(tmp_path, m
     stt = _FakeRoundTripStt({})
 
     artifact, _ = _ensure_native_pronunciation_research(
-        job_root=job_root, context_ledger=_context_ledger("Godfrey Gidi"), glossary=_glossary(),
+        job_root=job_root, context_ledger=_context_ledger("Thabo Ndlovu"), glossary=_glossary(),
         progress=None, tts=tts, stt_backend=stt,  # no grok_provider
     )
 
@@ -730,7 +736,7 @@ def test_self_supervised_fallback_never_runs_without_a_grok_provider(tmp_path, m
 
 def test_self_supervised_fallback_never_runs_without_tts_or_stt(tmp_path, monkeypatch):
     job_root = _job_root(tmp_path)
-    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Godfrey Gidi")})
+    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Thabo Ndlovu")})
     monkeypatch.setattr(
         "mathula_tv.native_dub.AzureResponsesWebResearchProvider.from_environment", lambda: backend,
     )
@@ -740,7 +746,7 @@ def test_self_supervised_fallback_never_runs_without_tts_or_stt(tmp_path, monkey
             raise AssertionError("must not be called without tts/stt_backend to verify against")
 
     artifact, _ = _ensure_native_pronunciation_research(
-        job_root=job_root, context_ledger=_context_ledger("Godfrey Gidi"), glossary=_glossary(),
+        job_root=job_root, context_ledger=_context_ledger("Thabo Ndlovu"), glossary=_glossary(),
         progress=None, grok_provider=_ShouldNeverBeCalled(),  # no tts/stt_backend
     )
 
@@ -829,53 +835,56 @@ def test_find_raw_asr_hint_returns_none_when_no_correction_mentions_the_entity()
 def test_self_supervised_fallback_passes_the_real_raw_asr_hint_to_the_request(
     tmp_path, monkeypatch, _fake_normalize_for_self_supervised,
 ):
+    # Fictional entity ("Thabo Ndlovu") for the same reason as the tests
+    # above -- "Godfrey Gidi" is now a hardcoded dictionary entry and would
+    # be skipped before reaching this code path.
     job_root = _job_root(tmp_path)
-    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Godfrey Gidi")})
+    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Thabo Ndlovu")})
     monkeypatch.setattr(
         "mathula_tv.native_dub.AzureResponsesWebResearchProvider.from_environment", lambda: backend,
     )
-    grok = _FakeGrokProvider({"Godfrey Gidi": ["Godfri Giidi"]})
+    grok = _FakeGrokProvider({"Thabo Ndlovu": ["Thabo Ndloovu"]})
     tts = _FakeRoundTripTts()
     stt = _FakeRoundTripStt({
-        "Kukhulunywa ngoGodfrey Gidi kulesi sigaba.": "kukhulunywa ngo godrich gardee kulesi sigaba",
-        "Kukhulunywa ngoGodfri Giidi kulesi sigaba.": "kukhulunywa ngo godfrey gidi kulesi sigaba",
+        "Kukhulunywa ngoThabo Ndlovu kulesi sigaba.": "kukhulunywa ngo tabo ndlobu kulesi sigaba",
+        "Kukhulunywa ngoThabo Ndloovu kulesi sigaba.": "kukhulunywa ngo thabo ndlovu kulesi sigaba",
     })
     _wire_tts_stt_pair(tts, stt)
     pass1_corrections = [_pass1_correction(
-        "the mayoral candidate, Godrej Gade, to address.",
-        "the mayoral candidate, Godfrey Gidi, to address.",
+        "the mayoral candidate, Tabo Ndlobu, to address.",
+        "the mayoral candidate, Thabo Ndlovu, to address.",
     )]
 
     _ensure_native_pronunciation_research(
-        job_root=job_root, context_ledger=_context_ledger("Godfrey Gidi"), glossary=_glossary(),
+        job_root=job_root, context_ledger=_context_ledger("Thabo Ndlovu"), glossary=_glossary(),
         progress=None, tts=tts, stt_backend=stt, grok_provider=grok,
         pass1_corrections=pass1_corrections,
     )
 
     assert grok.calls == 1
     sent = grok.last_payload["candidates"][0]
-    assert sent["name"] == "Godfrey Gidi"
-    assert "Godrej Gade" in sent["raw_asr_hint"]
+    assert sent["name"] == "Thabo Ndlovu"
+    assert "Tabo Ndlobu" in sent["raw_asr_hint"]
 
 
 def test_self_supervised_fallback_omits_raw_asr_hint_when_none_found(
     tmp_path, monkeypatch, _fake_normalize_for_self_supervised,
 ):
     job_root = _job_root(tmp_path)
-    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Godfrey Gidi")})
+    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Thabo Ndlovu")})
     monkeypatch.setattr(
         "mathula_tv.native_dub.AzureResponsesWebResearchProvider.from_environment", lambda: backend,
     )
-    grok = _FakeGrokProvider({"Godfrey Gidi": ["Godfri Giidi"]})
+    grok = _FakeGrokProvider({"Thabo Ndlovu": ["Thabo Ndloovu"]})
     tts = _FakeRoundTripTts()
     stt = _FakeRoundTripStt({
-        "Kukhulunywa ngoGodfrey Gidi kulesi sigaba.": "kukhulunywa ngo godrich gardee kulesi sigaba",
-        "Kukhulunywa ngoGodfri Giidi kulesi sigaba.": "kukhulunywa ngo godfrey gidi kulesi sigaba",
+        "Kukhulunywa ngoThabo Ndlovu kulesi sigaba.": "kukhulunywa ngo tabo ndlobu kulesi sigaba",
+        "Kukhulunywa ngoThabo Ndloovu kulesi sigaba.": "kukhulunywa ngo thabo ndlovu kulesi sigaba",
     })
     _wire_tts_stt_pair(tts, stt)
 
     _ensure_native_pronunciation_research(
-        job_root=job_root, context_ledger=_context_ledger("Godfrey Gidi"), glossary=_glossary(),
+        job_root=job_root, context_ledger=_context_ledger("Thabo Ndlovu"), glossary=_glossary(),
         progress=None, tts=tts, stt_backend=stt, grok_provider=grok,
         pass1_corrections=(),  # no corrections recorded for this job
     )
