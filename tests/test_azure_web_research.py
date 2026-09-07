@@ -181,6 +181,57 @@ def test_auto_falls_back_to_preview_tool_after_http_400() -> None:
     ]
 
 
+def test_a_rate_limit_gets_one_extra_wait_and_retry_beyond_max_retries() -> None:
+    # max_retries=1 normally means zero retries at all (see `config()` above and
+    # the real production incident documented on AzureWebResearchConfig.max_retries).
+    # A 429 is the one exception: it gets exactly one extra wait-and-retry, real
+    # ceiling still respected below.
+    session = Session(
+        [
+            Response(429, {"error": {"message": "rate_limit_exceeded"}}),
+            Response(200, successful_envelope()),
+        ]
+    )
+    sleeps: list[float] = []
+    provider = AzureResponsesWebResearchProvider(
+        config(), session=session, sleep=sleeps.append
+    )
+
+    result = provider.research_json(
+        system_prompt="Return JSON.", payload={}, output_schema=SCHEMA
+    )
+
+    assert result.data["corrections"][0]["canonical_text"] == "Kganyago"
+    assert sleeps == [30.0]
+    assert len(session.calls) == 2
+    assert session.calls[0][1]["json"]["tools"] == session.calls[1][1]["json"]["tools"]
+
+
+def test_a_rate_limit_extra_retry_is_used_at_most_once_per_tool() -> None:
+    # Two consecutive 429s for the same tool: one extra retry is used, then the
+    # normal (already-exhausted, max_retries=1) budget ends this tool's attempts
+    # and moves on to the fallback tool -- never a second extra wait for one tool.
+    session = Session(
+        [
+            Response(429, {"error": {"message": "rate_limit_exceeded"}}),
+            Response(429, {"error": {"message": "rate_limit_exceeded"}}),
+            Response(200, successful_envelope()),
+        ]
+    )
+    sleeps: list[float] = []
+    provider = AzureResponsesWebResearchProvider(
+        config(), session=session, sleep=sleeps.append
+    )
+
+    result = provider.research_json(
+        system_prompt="Return JSON.", payload={}, output_schema=SCHEMA
+    )
+
+    assert result.metadata.web_search_tool == "web_search_preview"
+    assert sleeps == [30.0]
+    assert len(session.calls) == 3
+
+
 def test_failure_exposes_safe_azure_error_body() -> None:
     session = Session(
         [

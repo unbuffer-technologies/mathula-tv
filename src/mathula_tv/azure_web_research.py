@@ -54,6 +54,15 @@ class AzureWebResearchConfig:
     max_retries: int = 1
     max_output_tokens: int = 0
     web_search_tool: str = "auto"
+    # Separate from max_retries, deliberately: a 429 is the one failure mode where
+    # waiting is virtually guaranteed to help (Azure's per-minute rate window) and
+    # costs nothing but wall-clock time -- unlike the max_retries incident above,
+    # this never repeats a request without first waiting, so it cannot reproduce
+    # that incident's "silently re-run the full paid search" cost profile. Exactly
+    # one extra wait-and-retry per tool_type, never compounding across tools or
+    # across a job's many separate research calls -- still a hard, small ceiling,
+    # not an unbounded retry budget for this failure mode either.
+    rate_limit_backoff_seconds: float = 30.0
 
     @classmethod
     def from_environment(
@@ -113,6 +122,9 @@ class AzureWebResearchConfig:
                 env.get("MATHULA_TV_AUTOCORRECT_RESEARCH_MAX_OUTPUT_TOKENS", "0")
             ),
             web_search_tool=tool,
+            rate_limit_backoff_seconds=float(
+                env.get("MATHULA_TV_AUTOCORRECT_RESEARCH_RATE_LIMIT_BACKOFF_SECONDS", "30")
+            ),
         )
 
     @property
@@ -1179,7 +1191,10 @@ class AzureResponsesWebResearchProvider:
 
         for tool_type in _tool_sequence(self.config.web_search_tool):
             received_successful_http = False
-            for attempt in range(1, max(1, self.config.max_retries) + 1):
+            rate_limit_extra_attempt_used = False
+            attempt = 0
+            while True:
+                attempt += 1
                 request_attempts += 1
                 body = self._body(
                     system_prompt=system_prompt,
@@ -1287,6 +1302,20 @@ class AzureResponsesWebResearchProvider:
                     if attempt < self.config.max_retries:
                         delay = min(2 ** (attempt - 1), 10)
                         self._emit("request_retry_scheduled", delay_seconds=delay)
+                        self.sleep(delay)
+                        continue
+                    # A 429 specifically gets exactly one extra wait-and-retry beyond
+                    # the normal (deliberately tight) max_retries budget: unlike other
+                    # failure modes, waiting out Azure's per-minute rate window is
+                    # near-certain to help and costs nothing but wall-clock time until
+                    # the retry actually fires -- it never re-runs the paid search
+                    # without first waiting, so it can't reproduce the max_retries
+                    # incident's cost profile. Bounded to once per tool_type, never
+                    # compounding across tools or across a job's other research calls.
+                    if status == 429 and not rate_limit_extra_attempt_used:
+                        rate_limit_extra_attempt_used = True
+                        delay = self.config.rate_limit_backoff_seconds
+                        self._emit("request_retry_scheduled", delay_seconds=delay, reason="rate_limited")
                         self.sleep(delay)
                         continue
                     break
