@@ -631,7 +631,15 @@ _ZU_MONTH_PATTERN = "|".join(
     re.escape(value) for value in sorted(_ZU_MONTH_BY_ALIAS, key=lambda item: (-len(item), item))
 )
 _ZU_CALENDAR_DATE = re.compile(
-    rf"(?<!\w)"
+    # Real production case (job fb3d08b63fed4d90922b08f7e325b906, 2026-09-07):
+    # a Zulu class-11 relative concord ("lwa-") glued directly onto "mhla"
+    # with no space ("lwamhla lu-1 kuLwezi") -- the plain `(?<!\w)` boundary
+    # rejects this outright, since "mhla" doesn't start at a real word
+    # boundary. Reuses _GLUED_PREFIX_LOOKBEHIND (already proven for the same
+    # shape on code-switched proper nouns and _ZU_MONTH_BARE_DAY) so this
+    # falls through to the raw/unhandled bare-digit reading instead of the
+    # intended native construction whenever grammar glues a prefix on.
+    rf"(?:(?<!\w)|{_GLUED_PREFIX_LOOKBEHIND})"
     rf"(?P<prefix>"
     rf"(?:(?:ngumhla|ngomhla|umhla|mhla)\s+)"
     rf"(?:(?:ka|ziyi|zingama|zi|lu)\s*-?\s*)?"

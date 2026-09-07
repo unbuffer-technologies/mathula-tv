@@ -272,3 +272,21 @@ def test_a_full_day_month_year_date_still_leaves_its_own_year_digits_raw() -> No
 def test_a_five_digit_reference_number_is_unaffected_by_the_year_exclusion() -> None:
     result = _dictionary().apply("Icala elingu-30245 alikaqedwa.")
     assert "twenty twenty-four" not in result.tts_text
+
+
+# Real production defect (job fb3d08b63fed4d90922b08f7e325b906, 2026-09-07):
+# a Zulu class-11 relative concord ("lwa-") glued directly onto "mhla" with
+# no space ("lwamhla lu-1 kuLwezi") was rejected outright by the plain
+# `(?<!\w)` boundary, so the whole date fell through untouched -- including
+# the traditional month name "Lwezi" the loanword fix above was supposed to
+# eliminate. _ZU_CALENDAR_DATE now reuses _GLUED_PREFIX_LOOKBEHIND (already
+# proven for the same shape on code-switched proper nouns and
+# _ZU_MONTH_BARE_DAY) so a glued concord no longer hides the date from this
+# mechanism.
+def test_a_glued_concord_prefix_on_mhla_still_gets_the_native_construction() -> None:
+    result = _dictionary().apply(
+        "ngaphambi kokhetho lohulumeni basekhaya lwamhla lu-1 kuLwezi."
+    )
+    assert result.tts_text == (
+        "ngaphambi kokhetho lohulumeni basekhaya lwamhla lulunye kuNovemba."
+    )
