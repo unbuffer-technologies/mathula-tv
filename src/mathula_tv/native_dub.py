@@ -12431,6 +12431,68 @@ def _filter_safe_shortened_candidates(
     ]
 
 
+def _resync_turn_rush_aggregates(
+    *,
+    groups: Sequence[Mapping[str, Any]],
+    winners: Mapping[str, Mapping[str, Any]],
+    geometries: Mapping[str, Mapping[str, Any]],
+    preferred_raw_speed_percent: int,
+    measurement_audio_root: Path,
+) -> dict[str, dict[str, Any]]:
+    """Re-apply the turn's real, stitched aggregate required_speed_percent/
+    speed_fit_mode/fit to every member of every multi-member, all-normal
+    speaker turn, using whatever the CURRENT winners are.
+
+    _rebalance_speaker_turns already does this once, but later stages
+    (_trim_by_fact_priority, _compress_protected_content_last_resort) can
+    each independently shorten ONE member's own content afterward -- a real
+    duration change that makes the earlier aggregate stale for the WHOLE
+    turn, not just that one member. Real user feedback, 2026-09-07: "why are
+    we aggregating segments rushes, the turn is suppose to be the unit" --
+    confirmed as a real gap by direct inspection of a real job's committed
+    output, where one turn-block-translation member (fact-priority-trimmed)
+    ended up with a different reported number than its own turn partner,
+    even though Phase 14 still renders them as one shared-speed-factor unit.
+
+    Never touches window/effective_start_ms/effective_source_end_ms (Phase
+    13's own concern, untouched by anything after it runs) -- purely a
+    rush-number reporting resync, reusing the exact same _score_speaker_turn
+    formula _rebalance_speaker_turns itself uses.
+    """
+    groups_by_id = {str(g["group_id"]): g for g in groups}
+    turns = _build_speaker_turns(groups)
+    updated_winners = dict(winners)
+    for index, turn in enumerate(turns):
+        member_ids = turn["member_group_ids"]
+        if len(member_ids) < 2:
+            continue
+        if any(_classify_discourse_unit_kind(groups_by_id[gid]) == "bridge" for gid in member_ids):
+            continue
+        member_winners = {gid: updated_winners[gid] for gid in member_ids if gid in updated_winners}
+        member_geometries = {gid: geometries[gid] for gid in member_ids if gid in geometries}
+        if len(member_winners) < len(member_ids) or len(member_geometries) < len(member_ids):
+            continue
+        next_start = (
+            int(turns[index + 1]["start_ms"]) if index + 1 < len(turns)
+            else int(turn["source_end_ms"])
+        )
+        turn_geometry = _speaker_turn_geometry(
+            turn, groups_by_id=groups_by_id, next_source_start_ms=next_start,
+            preferred_raw_speed_percent=preferred_raw_speed_percent,
+        )
+        _score, info = _score_speaker_turn(
+            turn=turn, turn_geometry=turn_geometry, member_winners=member_winners,
+            member_geometries=member_geometries, measurement_audio_root=measurement_audio_root,
+        )
+        for group_id in member_ids:
+            winner = dict(updated_winners[group_id])
+            winner["required_speed_percent"] = round(info["required_speed_percent"], 3)
+            winner["speed_fit_mode"] = info["speed_fit_mode"]
+            winner["fit"] = bool(info["fits"])
+            updated_winners[group_id] = winner
+    return updated_winners
+
+
 def _trim_by_fact_priority(
     *,
     groups: Sequence[Mapping[str, Any]],
@@ -13252,6 +13314,19 @@ def build_candidate_pool(
         voice_assignments=voice_assignments, measurement_audio_root=measurement_audio_root,
         force=force, candidate_pool_tts_workers=candidate_pool_tts_workers,
         glossary=glossary, context_ledger=context_ledger, progress=progress,
+    )
+    _merge_updated_winners(winners)
+
+    # Either compaction stage above can independently shorten one member of a
+    # multi-member turn without the other members changing at all -- re-sync
+    # the turn's real aggregate one final time so every member reports the
+    # SAME honest number that Phase 14 will actually render as one shared
+    # speed factor, rather than a stale pre-trim aggregate on some members
+    # and a fresh post-trim individual number on whichever one got trimmed.
+    winners = _resync_turn_rush_aggregates(
+        groups=block_groups, winners=winners, geometries=geometries,
+        preferred_raw_speed_percent=int(preferred_raw_speed_percent),
+        measurement_audio_root=measurement_audio_root,
     )
     _merge_updated_winners(winners)
 
