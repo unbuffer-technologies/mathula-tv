@@ -12200,6 +12200,24 @@ def _rebalance_speaker_turns(
             continue
         member_ids = turn["member_group_ids"]
         geometry = turn_geometry_by_index[index]
+        # Phase 14 only ever turn-finalizes (one continuous synthesis, ONE
+        # shared speed factor for the whole turn) a multi-member turn whose
+        # members are ALL "normal" -- any bridge member excludes the whole
+        # turn from that path, falling back to today's per-sentence
+        # independent rendering. Reporting must match: for an all-normal
+        # turn, every member's own individually-split required_speed_percent
+        # is fiction (real user feedback, 2026-09-07: "why are we
+        # aggregating segments rushes, the turn is suppose to be the unit")
+        # -- only the turn's real, stitched aggregate corresponds to what
+        # gets rendered. A bridge-containing turn is genuinely rendered
+        # per-sentence, so ITS members' own individual numbers stay honest.
+        # block_groups themselves never carry a "discourse_unit_kind" key (it
+        # only gets attached to the candidate-pool record later, in
+        # build_candidate_pool) -- classify directly instead of assuming it's
+        # already there.
+        has_bridge_member = any(
+            _classify_discourse_unit_kind(groups_by_id[gid]) == "bridge" for gid in member_ids
+        )
 
         def _score_state(
             member_winners: Mapping[str, Mapping[str, Any]],
@@ -12216,6 +12234,19 @@ def _rebalance_speaker_turns(
             continue  # a member has no winner at all -- shouldn't happen, but nothing to rebalance against
         baseline_geometries = {gid: geometries[gid] for gid in member_ids}
         baseline_score, baseline_info = _score_state(baseline_winners, baseline_geometries)
+
+        if not has_bridge_member:
+            # The aggregate is invariant under window reallocation (same
+            # stitched duration_ms, same turn-level target window) -- set it
+            # now, once, so it's correct even for a turn that never triggers
+            # reallocation below (the early-continue "already fits" case).
+            for group_id in member_ids:
+                winner = dict(updated_winners[group_id])
+                winner["required_speed_percent"] = round(baseline_info["required_speed_percent"], 3)
+                winner["speed_fit_mode"] = baseline_info["speed_fit_mode"]
+                winner["fit"] = bool(baseline_info["fits"])
+                updated_winners[group_id] = winner
+            baseline_winners = {gid: updated_winners[gid] for gid in member_ids}
 
         if (
             baseline_info["fits"]
@@ -12273,33 +12304,41 @@ def _rebalance_speaker_turns(
         if reallocated_score < baseline_score:
             for group_id in member_ids:
                 winner = dict(baseline_winners[group_id])
-                # Confirmed real gap found on job 33cd7b46...: measured_ms never
-                # changes (no re-synthesis), but required_speed_percent/
-                # speed_fit_mode/direction/fit were computed against the OLD
-                # per-sentence window and, unlike Phase 10's re-synthesized
-                # boundary-shift winners, were never refreshed -- leaving a
-                # stale, misleadingly-high number on a sentence that actually
-                # measures fine against its new, larger effective window.
-                # Recomputed here from the same unchanged measured_ms against
-                # the already-computed reallocated_geometries -- free, no new
-                # measurement, mirrors _measure_temporal_candidate's own
-                # required_speed_percent/speed_fit_mode/direction/fit shape.
                 member_geometry = reallocated_geometries[group_id]
-                measured_ms = max(1, int(winner.get("measured_ms") or 0))
-                late_tolerance_ms = int(member_geometry["mouth_close_late_tolerance_ms"])
-                speed_fit_target_ms = int(member_geometry["source_window_ms"]) + late_tolerance_ms
-                direction = _timing_recast_direction(
-                    measured_ms, int(member_geometry["source_window_ms"]),
-                    max_speed_percent=DEFAULT_MAX_NATURAL_SPEED_PERCENT,
-                    mouth_close_early_tolerance_ms=int(member_geometry["mouth_close_early_tolerance_ms"]),
-                    mouth_close_late_tolerance_ms=late_tolerance_ms,
-                )
-                winner["required_speed_percent"] = round(
-                    _temporal_required_rush_percent(measured_ms, speed_fit_target_ms), 3,
-                )
-                winner["speed_fit_mode"] = _speed_fit_mode_label(late_tolerance_ms)
-                winner["direction"] = direction
-                winner["fit"] = bool(direction is None)
+                if has_bridge_member:
+                    # Confirmed real gap found on job 33cd7b46...: measured_ms
+                    # never changes (no re-synthesis), but required_speed_percent/
+                    # speed_fit_mode/direction/fit were computed against the OLD
+                    # per-sentence window and, unlike Phase 10's re-synthesized
+                    # boundary-shift winners, were never refreshed -- leaving a
+                    # stale, misleadingly-high number on a sentence that actually
+                    # measures fine against its new, larger effective window.
+                    # Recomputed here from the same unchanged measured_ms against
+                    # the already-computed reallocated_geometries -- free, no new
+                    # measurement. Only done for a bridge-containing turn, which
+                    # Phase 14 renders per-sentence -- these individual numbers
+                    # are the real, honest truth for that case (see the
+                    # has_bridge_member aggregate write-back above for the
+                    # opposite, all-normal case).
+                    measured_ms = max(1, int(winner.get("measured_ms") or 0))
+                    late_tolerance_ms = int(member_geometry["mouth_close_late_tolerance_ms"])
+                    speed_fit_target_ms = int(member_geometry["source_window_ms"]) + late_tolerance_ms
+                    direction = _timing_recast_direction(
+                        measured_ms, int(member_geometry["source_window_ms"]),
+                        max_speed_percent=DEFAULT_MAX_NATURAL_SPEED_PERCENT,
+                        mouth_close_early_tolerance_ms=int(member_geometry["mouth_close_early_tolerance_ms"]),
+                        mouth_close_late_tolerance_ms=late_tolerance_ms,
+                    )
+                    winner["required_speed_percent"] = round(
+                        _temporal_required_rush_percent(measured_ms, speed_fit_target_ms), 3,
+                    )
+                    winner["speed_fit_mode"] = _speed_fit_mode_label(late_tolerance_ms)
+                    winner["direction"] = direction
+                    winner["fit"] = bool(direction is None)
+                # else: required_speed_percent/speed_fit_mode/fit already hold
+                # the turn's real aggregate (set above, before this reallocation
+                # branch even ran) -- invariant under window reallocation, so
+                # nothing to recompute here for an all-normal turn.
                 winner["effective_start_ms"] = int(reallocated_groups_by_id[group_id]["start_ms"])
                 winner["effective_source_end_ms"] = int(reallocated_groups_by_id[group_id]["source_end_ms"])
                 updated_winners[group_id] = winner
