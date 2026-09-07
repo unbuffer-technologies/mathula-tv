@@ -779,3 +779,106 @@ def test_self_supervised_request_with_no_entities_never_calls_the_provider():
     )
     assert by_entity == {}
     assert usage == {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+
+
+# --- raw ASR hint: real audio-grounded evidence beats a spelling-only guess --------
+# Real finding, same session: the raw (pre-correction) Pass-1 ASR transcript for
+# job fb3d08b63fed4d90922b08f7e325b906 literally read "Godrej Gade" where the
+# corrected transcript reads "Godfrey Gidi" -- direct user feedback: "the English
+# audio has correct pronunciation of 'Gardee', can't learn phonetics from
+# [spelling] there." Pass 1's own corrections record already carries this for
+# free; it just wasn't being read.
+
+
+def _pass1_correction(original: str, corrected: str, *, reason_code: str = "name_or_entity") -> dict:
+    return {
+        "segment_id": "seg-00001", "reason_code": reason_code,
+        "original_text": original, "corrected_text": corrected,
+    }
+
+
+def test_find_raw_asr_hint_locates_the_real_pre_correction_wording():
+    from mathula_tv.native_dub import _find_raw_asr_hint_for_entity
+
+    corrections = [_pass1_correction(
+        "the party's mayoral candidate, Godrej Gade, to address.",
+        "the party's mayoral candidate, Godfrey Gidi, to address.",
+    )]
+    assert _find_raw_asr_hint_for_entity("Godfrey Gidi", corrections) == (
+        "the party's mayoral candidate, Godrej Gade, to address."
+    )
+
+
+def test_find_raw_asr_hint_ignores_a_non_name_correction():
+    from mathula_tv.native_dub import _find_raw_asr_hint_for_entity
+
+    corrections = [_pass1_correction(
+        "Godfrey Gidi was their too.", "Godfrey Gidi was there too.",
+        reason_code="grammar",
+    )]
+    assert _find_raw_asr_hint_for_entity("Godfrey Gidi", corrections) is None
+
+
+def test_find_raw_asr_hint_returns_none_when_no_correction_mentions_the_entity():
+    from mathula_tv.native_dub import _find_raw_asr_hint_for_entity
+
+    corrections = [_pass1_correction("Cyril Ramaphosa spoke.", "Cyril Ramaphosa spoke.")]
+    assert _find_raw_asr_hint_for_entity("Godfrey Gidi", corrections) is None
+
+
+def test_self_supervised_fallback_passes_the_real_raw_asr_hint_to_the_request(
+    tmp_path, monkeypatch, _fake_normalize_for_self_supervised,
+):
+    job_root = _job_root(tmp_path)
+    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Godfrey Gidi")})
+    monkeypatch.setattr(
+        "mathula_tv.native_dub.AzureResponsesWebResearchProvider.from_environment", lambda: backend,
+    )
+    grok = _FakeGrokProvider({"Godfrey Gidi": ["Godfri Giidi"]})
+    tts = _FakeRoundTripTts()
+    stt = _FakeRoundTripStt({
+        "Kukhulunywa ngoGodfrey Gidi kulesi sigaba.": "kukhulunywa ngo godrich gardee kulesi sigaba",
+        "Kukhulunywa ngoGodfri Giidi kulesi sigaba.": "kukhulunywa ngo godfrey gidi kulesi sigaba",
+    })
+    _wire_tts_stt_pair(tts, stt)
+    pass1_corrections = [_pass1_correction(
+        "the mayoral candidate, Godrej Gade, to address.",
+        "the mayoral candidate, Godfrey Gidi, to address.",
+    )]
+
+    _ensure_native_pronunciation_research(
+        job_root=job_root, context_ledger=_context_ledger("Godfrey Gidi"), glossary=_glossary(),
+        progress=None, tts=tts, stt_backend=stt, grok_provider=grok,
+        pass1_corrections=pass1_corrections,
+    )
+
+    assert grok.calls == 1
+    sent = grok.last_payload["candidates"][0]
+    assert sent["name"] == "Godfrey Gidi"
+    assert "Godrej Gade" in sent["raw_asr_hint"]
+
+
+def test_self_supervised_fallback_omits_raw_asr_hint_when_none_found(
+    tmp_path, monkeypatch, _fake_normalize_for_self_supervised,
+):
+    job_root = _job_root(tmp_path)
+    backend = _FakeResearchBackend(unresolved={_native_pronunciation_candidate_id("Godfrey Gidi")})
+    monkeypatch.setattr(
+        "mathula_tv.native_dub.AzureResponsesWebResearchProvider.from_environment", lambda: backend,
+    )
+    grok = _FakeGrokProvider({"Godfrey Gidi": ["Godfri Giidi"]})
+    tts = _FakeRoundTripTts()
+    stt = _FakeRoundTripStt({
+        "Kukhulunywa ngoGodfrey Gidi kulesi sigaba.": "kukhulunywa ngo godrich gardee kulesi sigaba",
+        "Kukhulunywa ngoGodfri Giidi kulesi sigaba.": "kukhulunywa ngo godfrey gidi kulesi sigaba",
+    })
+    _wire_tts_stt_pair(tts, stt)
+
+    _ensure_native_pronunciation_research(
+        job_root=job_root, context_ledger=_context_ledger("Godfrey Gidi"), glossary=_glossary(),
+        progress=None, tts=tts, stt_backend=stt, grok_provider=grok,
+        pass1_corrections=(),  # no corrections recorded for this job
+    )
+
+    sent = grok.last_payload["candidates"][0]
+    assert "raw_asr_hint" not in sent

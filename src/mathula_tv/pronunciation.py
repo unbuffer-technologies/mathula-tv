@@ -557,6 +557,30 @@ def _zulu_month_aliases() -> dict[str, str]:
 
 
 _ZU_MONTH_BY_ALIAS = _zulu_month_aliases()
+
+
+def _zulu_month_english_code_switch_aliases() -> dict[str, str]:
+    """Same alias-matching surface as _ZU_MONTH_BY_ALIAS (every prefix
+    variant of every month spelling), but mapping to the REBUILT form with
+    the month itself code-switched to plain English -- e.g. "ngoNovemba" ->
+    "ngoNovember" -- keeping whatever Zulu grammatical prefix (locative
+    "ngo-", associative "ku-"/"u-") was already glued on, since that is
+    sentence grammar, not part of the date itself. Real user feedback,
+    2026-09-07: "most native speakers in South Africa code switch dates to
+    english instead of the native pronunciation" -- confirmed live for the
+    "November" case (see _ZU_MONTH_BARE_DAY below); used generally here on
+    that direction, not individually re-verified for all 12 months.
+    """
+    result: dict[str, str] = {}
+    for canonical, aliases in _ZU_CALENDAR_MONTHS:
+        english_name = aliases[0]
+        for alias in aliases:
+            for prefix in ("", "ku", "u", "ngo", "ngo-"):
+                result[f"{prefix}{alias}".casefold()] = f"{prefix}{english_name}"
+    return result
+
+
+_ZU_MONTH_ENGLISH_CODE_SWITCH_BY_ALIAS = _zulu_month_english_code_switch_aliases()
 _ZU_MONTH_PATTERN = "|".join(
     re.escape(value) for value in sorted(_ZU_MONTH_BY_ALIAS, key=lambda item: (-len(item), item))
 )
@@ -995,30 +1019,52 @@ _ZU_MONTH_YEAR_ONLY = re.compile(
 # 2026-09-07): the committed Zulu translation of "ahead of the November 1
 # local government elections" reads a bare "1" with no date-reading treatment
 # at all, and Azure's own raw number reading came out sounding like "on", not
-# "1" -- confirmed via real TTS+STT round trip (see the _ZU_YEAR_ONES[1] fix
-# above, found via the same investigation).
+# "1". First fixed as a Zulu-month + Zulu-phonetic-cardinal hybrid
+# ("Novemba wani") -- confirmed working via real TTS+STT round trip -- but
+# real user feedback redirected this: "we should be code switching to
+# 'November first'... most native speakers in South Africa code switch dates
+# to english instead of the native pronunciation." Re-verified live: plain
+# "November first" (full English spelling, English ordinal) round-trips
+# cleanly; the SAME day-number in a Zulu-spelled-month sentence ("Novemba
+# first") mispronounces the ordinal as "fast" -- the month's own spelling
+# measurably affects how the following word gets read, not just the digit
+# itself. See _ZU_MONTH_ENGLISH_CODE_SWITCH_BY_ALIAS above and
+# _english_ordinal_day_word below.
 _ZU_MONTH_BARE_DAY = re.compile(
     rf"{_ZU_MONTH_START_BOUNDARY}(?P<month>{_ZU_MONTH_PATTERN})(?P<sep>\s*,?\s*)(?P<day>[1-9]|[12][0-9]|3[01])(?!\w)",
     re.IGNORECASE | re.UNICODE,
 )
 
+_ZU_ENGLISH_ORDINAL_ONES = {
+    1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth",
+    6: "sixth", 7: "seventh", 8: "eighth", 9: "ninth",
+}
+_ZU_ENGLISH_ORDINAL_TEENS = {
+    10: "tenth", 11: "eleventh", 12: "twelfth", 13: "thirteenth", 14: "fourteenth",
+    15: "fifteenth", 16: "sixteenth", 17: "seventeenth", 18: "eighteenth", 19: "nineteenth",
+}
+_ZU_ENGLISH_ORDINAL_TENS = {
+    2: "twentieth", 3: "thirtieth",
+}
 
-def _zulu_cardinal_day_words(value: int) -> str:
-    """Render 1-31 as a plain English cardinal number word ("1" -> the same
-    respelled "wani" _ZU_YEAR_ONES already uses, "21" -> "twenty-wani") --
-    NOT the year-specific "oh one" two-digit grouping _zulu_two_digit_year_words
-    uses for a lone units digit. A day-of-month is read as an ordinary
-    cardinal number, never split into two-digit groups the way a year is.
+
+def _english_ordinal_day_word(value: int) -> str:
+    """Render 1-31 as a plain English ordinal word ("1" -> "first", "21" ->
+    "twenty-first") -- only "1" (the real reported case) has been directly
+    live-verified round-tripping cleanly after an English month name; the
+    rest follow standard English ordinal formation and are shipped on the
+    same "code switch dates to English" direction the user confirmed
+    generally applies for South African isiZulu speech, not individually
+    re-verified for every day.
     """
     if value < 10:
-        return _ZU_YEAR_ONES[value]
+        return _ZU_ENGLISH_ORDINAL_ONES[value]
     if value < 20:
-        return _ZU_YEAR_TEENS[value]
+        return _ZU_ENGLISH_ORDINAL_TEENS[value]
     tens, ones = divmod(value, 10)
-    word = _ZU_YEAR_TENS[tens]
-    if ones:
-        word += f"-{_ZU_YEAR_ONES[ones]}"
-    return word
+    if not ones:
+        return _ZU_ENGLISH_ORDINAL_TENS[tens]
+    return f"{_ZU_YEAR_TENS[tens]}-{_ZU_ENGLISH_ORDINAL_ONES[ones]}"
 # A year with no day or month attached, referenced via the Zulu possessive
 # "ka-" glue -- e.g. "ka-2024" ("of 2024"), a real, common standalone way of
 # naming a year in isiZulu (also seen as "ngonyaka ka-2024", "the year of
@@ -1120,7 +1166,10 @@ def _zulu_dynamic_date_candidates(
         if any(start <= match.start() < end for start, end in consumed):
             continue
         before = match.group(0)
-        after = match.group("month") + match.group("sep") + _zulu_cardinal_day_words(int(match.group("day")))
+        english_month = _ZU_MONTH_ENGLISH_CODE_SWITCH_BY_ALIAS.get(
+            match.group("month").casefold(), match.group("month"),
+        )
+        after = english_month + match.group("sep") + _english_ordinal_day_word(int(match.group("day")))
         candidates.append(
             (
                 match.start(),
@@ -1134,7 +1183,7 @@ def _zulu_dynamic_date_candidates(
                     confidence=1.0,
                     kind="date",
                     notes=(
-                        "Application-controlled English cardinal reading "
+                        "Application-controlled English code-switch reading "
                         "for a bare day-of-month with no ordinal suffix",
                         ZU_NATIVE_YEAR_PRONUNCIATION_VERSION,
                         "Approved/display digits remain immutable",

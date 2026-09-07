@@ -10234,9 +10234,19 @@ respelling assistant for isiZulu (zu-ZA) narration. The input is a bounded list 
 or organisation/institution names that appear, UNCHANGED, inside an isiZulu broadcast translation
 -- code-switched English-origin (or other non-Zulu) terms, never translated. Web search already
 tried and failed to find direct pronunciation evidence for each one (no indexed audio of the
-person/entity actually speaking, common for local or lesser-known names) -- you are now asked for
-your own best phonetic guess, using ordinary linguistic knowledge of how this name is most likely
-pronounced by its own language/culture of origin, NOT web search.
+person/entity actually speaking, common for local or lesser-known names).
+
+When an entity carries a raw_asr_hint, treat it as the single strongest evidence available: it is
+the ORIGINAL, unedited speech-to-text transcription of this exact same moment in this job's own
+source audio, BEFORE spelling correction -- literally what the real automatic transcription engine
+heard when it listened to the actual person say this name, before a later spelling-correction step
+normalised it to the tidier canonical_text. It is not a guess and not a web source; it is a direct,
+job-specific phonetic clue to how the name actually sounds -- e.g. a canonical_text of "Godfrey
+Gidi" with a raw_asr_hint mentioning "Godrej Gade" is telling you the real audio sounds much closer
+to "Godrej Gade" than to a standard English reading of "Godfrey Gidi". Build your respelling to
+match what raw_asr_hint suggests the name actually sounds like, not the possibly-more-conventional
+canonical spelling. When no raw_asr_hint is given, fall back to ordinary linguistic knowledge of how
+the name is most likely pronounced by its own language/culture of origin -- NOT web search.
 
 For each entity, propose 0, 1, or 2 DISTINCT short, plain-text phonetic respellings -- hidden text
 fed only to a zu-ZA neural voice, never shown to a viewer and never changing the visible/canonical
@@ -10279,8 +10289,41 @@ _SELF_SUPERVISED_PRONUNCIATION_SCHEMA = {
 }
 
 
+def _find_raw_asr_hint_for_entity(
+    entity_name: str, pass1_corrections: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """Real, already-computed, free evidence for how a name actually sounds:
+    Pass 1's own whole-transcript restoration (run_native_pass1) records
+    every name/entity spelling correction it made, keeping BOTH the original
+    (raw ASR, i.e. what real speech-to-text heard directly from the actual
+    audio) and corrected (canonical) text side by side. Real confirmed case,
+    job fb3d08b63fed4d90922b08f7e325b906: the canonical "Godfrey Gidi" was
+    originally transcribed as "Godrej Gade" -- much closer to the name's real
+    sound than the tidied-up canonical spelling, per direct user feedback
+    ("the English audio has correct pronunciation of 'Gardee', can't learn
+    phonetics from [spelling] there"). Returns the whole original_text (not
+    an isolated span -- the model is given both full sentences and can find
+    the relevant part itself, avoiding a fragile word-diff alignment here).
+    """
+    name = entity_name.casefold().strip()
+    if not name:
+        return None
+    for correction in pass1_corrections:
+        if not isinstance(correction, Mapping):
+            continue
+        if str(correction.get("reason_code") or "") != "name_or_entity":
+            continue
+        corrected = str(correction.get("corrected_text") or "")
+        if name in corrected.casefold():
+            original = str(correction.get("original_text") or "").strip()
+            if original:
+                return original
+    return None
+
+
 def _request_self_supervised_pronunciation_candidates(
     *, provider: FoundryGrokProvider, entities: Sequence[Mapping[str, Any]],
+    pass1_corrections: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[dict[str, list[str]], dict[str, int]]:
     """One batched, tool-free (no web search) request for phonetic respelling
     guesses on entities the web-research pass could not resolve. Identity
@@ -10292,19 +10335,23 @@ def _request_self_supervised_pronunciation_candidates(
     if not entities:
         return {}, {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
     requested_ids = {str(item.get("entity_id") or "") for item in entities}
+
+    def _payload_item(item: Mapping[str, Any]) -> dict[str, Any]:
+        name = str(item.get("representative_text") or item.get("canonical_name_hint") or "")
+        built = {
+            "entity_id": str(item.get("entity_id") or ""),
+            "name": name,
+            "entity_type": str(item.get("entity_type") or "other_name"),
+        }
+        hint = _find_raw_asr_hint_for_entity(name, pass1_corrections)
+        if hint:
+            built["raw_asr_hint"] = hint
+        return built
+
     response = provider.complete_json(
         operation="native_pronunciation_self_supervised",
         system_prompt=NATIVE_PRONUNCIATION_SELF_SUPERVISED_SYSTEM_PROMPT,
-        payload={
-            "candidates": [
-                {
-                    "entity_id": str(item.get("entity_id") or ""),
-                    "name": str(item.get("representative_text") or item.get("canonical_name_hint") or ""),
-                    "entity_type": str(item.get("entity_type") or "other_name"),
-                }
-                for item in entities
-            ],
-        },
+        payload={"candidates": [_payload_item(item) for item in entities]},
         schema=_SELF_SUPERVISED_PRONUNCIATION_SCHEMA,
     )
     usage = {
@@ -10633,6 +10680,7 @@ def _ensure_native_pronunciation_research(
     stt_backend: AzureFastTranscriptionBackend | None = None,
     skip_round_trip_verification: bool = False,
     grok_provider: FoundryGrokProvider | None = None,
+    pass1_corrections: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Research pronunciation for this job's code-switched proper nouns via a
     real web-search call, cached the same way _ensure_zulu_glossary is
@@ -10811,7 +10859,7 @@ def _ensure_native_pronunciation_research(
             if voices:
                 try:
                     guesses, guess_usage = _request_self_supervised_pronunciation_candidates(
-                        provider=grok_provider, entities=unresolved,
+                        provider=grok_provider, entities=unresolved, pass1_corrections=pass1_corrections,
                     )
                     usage_totals["input_tokens"] += guess_usage["input_tokens"]
                     usage_totals["output_tokens"] += guess_usage["output_tokens"]
@@ -12967,7 +13015,7 @@ def build_candidate_pool(
             job_root=job_root, context_ledger=context_ledger, glossary=glossary,
             force=force, progress=progress, tts=tts, stt_backend=stt_backend,
             skip_round_trip_verification=skip_pronunciation_round_trip,
-            grok_provider=provider,
+            grok_provider=provider, pass1_corrections=pass1.get("corrections") or (),
         )
     else:
         _emit_progress(progress, "[native candidate pool] Pronunciation research skipped (diagnostic mode).")

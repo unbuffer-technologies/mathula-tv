@@ -209,23 +209,35 @@ def test_a_year_shaped_number_with_no_month_or_ka_context_keeps_its_reference_re
 # via real Azure zu-ZA-ThembaNeural synthesis + zu-ZA STT round-trip -- "wani"
 # recovered a clean "1", matching the same fix already applied to
 # _ZU_YEAR_ONES[1] for the bare-year case.
+#
+# Redirected by real user feedback, same session: "we should be code
+# switching to 'November first'... most native speakers in South Africa
+# code switch dates to english instead of the native pronunciation." Live
+# re-verification confirmed the month's own spelling matters, not just the
+# digit -- "November first" (English month + English ordinal) round-trips
+# cleanly, while "Novemba first" (Zulu month + English ordinal) mispronounces
+# "first" as "fast". Only "November"/"1" was directly re-verified after this
+# redirect (the real reported case); other months follow the same code-
+# switch direction without individual live re-verification.
 @pytest.mark.parametrize(
     ("source", "expected"),
     (
-        ("ahead of Novemba 1", "ahead of Novemba wani"),
+        ("ahead of Novemba 1", "ahead of November first"),
         # The real committed text: a Zulu class-11 relative concord ("lwa-")
         # glued directly onto the already-recognized "ngo-" month alias with
         # no space -- confirmed this only works because _ZU_MONTH_BARE_DAY
         # reuses _GLUED_PREFIX_LOOKBEHIND rather than a fixed prefix list.
+        # The concord prefix itself stays in Zulu (sentence grammar, not
+        # part of the date) -- only the month/day lexical content switches.
         (
             "lohulumeni basekhaya lwangoNovemba 1.",
-            "lohulumeni basekhaya lwangoNovemba wani.",
+            "lohulumeni basekhaya lwangoNovember first.",
         ),
-        ("kwenzeka ngoDisemba 21", "kwenzeka ngoDisemba twenty-wani"),
-        ("kwenzeka ngoDisemba 15", "kwenzeka ngoDisemba fifteen"),
+        ("kwenzeka ngoDisemba 21", "kwenzeka ngoDecember twenty-first"),
+        ("kwenzeka ngoDisemba 15", "kwenzeka ngoDecember fifteenth"),
     ),
 )
-def test_bare_day_of_month_with_no_ordinal_suffix_gets_a_natural_cardinal_reading(
+def test_bare_day_of_month_with_no_ordinal_suffix_gets_a_natural_english_code_switch_reading(
     source: str, expected: str,
 ) -> None:
     result = _dictionary().apply(source)
@@ -245,7 +257,7 @@ def test_an_ordinal_suffixed_day_is_not_touched_by_the_bare_day_mechanism() -> N
     # (?!\w) boundary excludes it -- this is a different, already-solved
     # concern (the turn-block literal-preservation check), not TTS reading.
     result = _dictionary().apply("ngesikhathi sikaNovemba 1st.")
-    assert "wani" not in result.tts_text
+    assert "first" not in result.tts_text
 
 
 def test_a_full_day_month_year_date_still_leaves_its_own_year_digits_raw() -> None:
