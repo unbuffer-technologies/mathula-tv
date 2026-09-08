@@ -12719,7 +12719,7 @@ def _trim_by_fact_priority(
     force: bool,
     candidate_pool_tts_workers: int,
     progress: Callable[[str], None] | None = None,
-) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, int], list[str]]:
     """The sole remaining compaction mechanism: for any block still measuring
     above DEFAULT_MAX_NATURAL_SPEED_PERCENT after turn rebalancing (i.e.
     audibly rushed -- the SAME +12% quality-warning bar render-time atempo
@@ -12784,6 +12784,14 @@ def _trim_by_fact_priority(
     literal-safety, is left untouched -- it falls through to the existing,
     unmodified Phase 14 render-time atempo compression exactly as it already
     does today.
+
+    Returns (winners, usage_totals, triggered_group_ids) -- the third value
+    is every block this function actually had a real ladder to try (whether
+    or not a candidate ended up promoted), so a later, DELIBERATELY more
+    destructive stage (_compress_protected_content_last_resort) can tell
+    "this block already proved nothing safe gets it under budget" apart from
+    "this block was never given a real shot" -- see that function's own
+    trigger for why the distinction matters.
     """
     groups_by_id = {str(g["group_id"]): g for g in groups}
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
@@ -12795,7 +12803,7 @@ def _trim_by_fact_priority(
         and groups_by_id.get(gid, {}).get("shortened_candidates")
     ]
     if not triggered_group_ids:
-        return updated_winners, usage_totals
+        return updated_winners, usage_totals, []
 
     _emit_progress(
         progress,
@@ -12825,7 +12833,7 @@ def _trim_by_fact_priority(
 
     if not candidates_by_group:
         _emit_progress(progress, "[native candidate pool] No safe shortened candidates were available.")
-        return updated_winners, usage_totals
+        return updated_winners, usage_totals, triggered_group_ids
 
     measured_group_ids = list(candidates_by_group)
     raw_measured = _measure_temporal_batch(
@@ -12888,7 +12896,7 @@ def _trim_by_fact_priority(
                 progress, f"[native candidate pool] Fact-priority trim for {gid} did not improve on the original.",
             )
 
-    return updated_winners, usage_totals
+    return updated_winners, usage_totals, triggered_group_ids
 
 
 # --- Last-resort protected-content compression -----------------------------------
@@ -13080,21 +13088,43 @@ def _compress_protected_content_last_resort(
     candidate_pool_tts_workers: int,
     glossary: Mapping[str, Any],
     context_ledger: Mapping[str, Any] | None = None,
+    ladder_exhausted_group_ids: Sequence[str] = (),
     progress: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
-    """The FINAL fallback, only for a block whose current winner (after the
-    entire, unmodified _trim_by_fact_priority ladder above) still does not
-    fit AND is still genuinely, audibly over-budget -- ``fit`` is False AND
-    required_speed_percent is still above
-    _PROTECTED_CONTENT_LAST_RESORT_TRIGGER_PERCENT (25%, deliberately higher
-    than the routine 12% "fits naturally" bar -- see that constant's own
-    comment for the real, confirmed reason). One batched Grok call covers
-    every such block in the whole job at once (same batching discipline as
-    every other compaction mechanism in this file). Deliberately does NOT
-    run _filter_safe_shortened_candidates/_sentence_preserves_required_
-    literals on the result -- omitting a literal is exactly what step 5 of
-    PROTECTED_CONTENT_LAST_RESORT_SYSTEM_PROMPT may legitimately do; that
-    check exists to protect Tier 1's different, absolute guarantee.
+    """The FINAL fallback, for a block whose current winner still does not
+    fit its immutable time budget. Real user direction, 2026-09-08: "the
+    only thing worthy of protecting is the time frame and the story...no
+    class should stop that" -- Tier 1's HARD RULE (never drop a name/number/
+    date/quote/attribution/claim-denial) is deliberately narrow and stays
+    intact there, but it was never meant to be the SYSTEM's last word: this
+    tier exists specifically so a fixed category never permanently blocks
+    fitting the time frame once every safe option has genuinely been tried.
+
+    Two different populations reach ``not fit`` here, and they need two
+    different bars, not one flat threshold:
+    - A block in ``ladder_exhausted_group_ids`` (passed through from
+      _trim_by_fact_priority) already had a REAL ladder of safe cuts and
+      used the best one available -- it has already, concretely, proven
+      that nothing safe gets it under budget. For this population, ANY
+      remaining overrun (``not fit``, no percentage floor) is enough to
+      trigger this tier: the "story" is already being told as tightly as
+      Tier 1 allows, and the time frame is still the thing that must give.
+    - A block NOT in that set never had a real ladder to try (every clause
+      it ranked was rank 1 -- "nothing safe to drop" -- or turn-rebalancing
+      alone already left it close to fitting). For this population, keep
+      requiring _PROTECTED_CONTENT_LAST_RESORT_TRIGGER_PERCENT (25%,
+      deliberately higher than the routine 10% "fits naturally" bar -- see
+      that constant's own comment for the real, confirmed bug this guards
+      against: ordinary turn-rebalancing residual of 12-16%, with nothing
+      ever tried against it, wrongly triggering this destructive tier).
+
+    One batched Grok call covers every triggered block in the whole job at
+    once (same batching discipline as every other compaction mechanism in
+    this file). Deliberately does NOT run _filter_safe_shortened_candidates/
+    _sentence_preserves_required_literals on the result -- omitting a
+    literal is exactly what step 5 of PROTECTED_CONTENT_LAST_RESORT_SYSTEM_
+    PROMPT may legitimately do; that check exists to protect Tier 1's
+    different, absolute guarantee.
 
     Never worse than the winner passed in: promoted only if the compressed
     candidate measures strictly better than the current winner, exactly like
@@ -13105,11 +13135,15 @@ def _compress_protected_content_last_resort(
     groups_by_id = {str(g["group_id"]): g for g in groups}
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
     updated_winners = dict(winners)
+    ladder_exhausted_set = set(ladder_exhausted_group_ids)
 
     triggered_group_ids = [
         gid for gid, winner in updated_winners.items()
         if not winner.get("fit")
-        and float(winner.get("required_speed_percent") or 0.0) > _PROTECTED_CONTENT_LAST_RESORT_TRIGGER_PERCENT
+        and (
+            gid in ladder_exhausted_set
+            or float(winner.get("required_speed_percent") or 0.0) > _PROTECTED_CONTENT_LAST_RESORT_TRIGGER_PERCENT
+        )
     ]
     if not triggered_group_ids:
         return updated_winners, usage_totals
@@ -13529,7 +13563,7 @@ def build_candidate_pool(
     else:
         _emit_progress(progress, "[native candidate pool] Turn rebalancing skipped (diagnostic mode).")
 
-    winners, trim_usage = _trim_by_fact_priority(
+    winners, trim_usage, fact_priority_ladder_exhausted_group_ids = _trim_by_fact_priority(
         groups=block_groups, winners=winners, tts=tts, geometries=geometries,
         voice_assignments=voice_assignments, measurement_audio_root=measurement_audio_root,
         force=force, candidate_pool_tts_workers=candidate_pool_tts_workers, progress=progress,
@@ -13540,7 +13574,8 @@ def build_candidate_pool(
         provider=provider, groups=block_groups, winners=winners, tts=tts, geometries=geometries,
         voice_assignments=voice_assignments, measurement_audio_root=measurement_audio_root,
         force=force, candidate_pool_tts_workers=candidate_pool_tts_workers,
-        glossary=glossary, context_ledger=context_ledger, progress=progress,
+        glossary=glossary, context_ledger=context_ledger,
+        ladder_exhausted_group_ids=fact_priority_ladder_exhausted_group_ids, progress=progress,
     )
     _merge_updated_winners(winners)
 
