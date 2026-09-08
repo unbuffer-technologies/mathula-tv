@@ -130,7 +130,7 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v1-upfront-terminology-register"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v2-transediting-retell"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v3-clause-ranked-droppable"
 TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v23-whole-window-single-segment"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
@@ -1200,8 +1200,29 @@ unit, translate every reference to that person consistently rather than reproduc
 register shift as if it changed who is being talked about. Only render two distinct grammatical
 persons in isiZulu when context_ledger actually supports two different people being involved.
 
-Return every requested unit_id exactly once, each with its own zulu_text. No tools or web search.
-Return JSON only."""
+For EACH unit, also return clauses: an explicit breakdown of the unit's own English content into
+its real clause units. This is a required, structural step, not an optional one -- enumerate and
+rank every clause even when you conclude none of them are actually safe to cut. Give each clause a
+short id (c1, c2, ...), its own English text (the clauses together must cover the unit's full
+content, in order, with nothing left out), and a rank: 1 for the MOST essential (never cut),
+increasing for progressively more droppable. A clause stating a name, number, date, direct
+quotation, attribution, or a claim/denial's own core proposition almost always ranks among the
+most essential. A clause of hesitation, self-correction, purely scene-setting/descriptive framing
+(e.g. a weather or mood aside before the real news, a formulaic opener), or restated framing that
+adds no new fact ranks more droppable. Epistemic hedges ("maybe", "I think", "allegedly",
+"possibly") are NOT droppable filler and must always rank essential.
+
+Once ranked, return shortened_candidates: 0 to 4 complete alternative isiZulu renderings of the
+WHOLE unit, each naming which clause_id(s) it dropped (dropped_clause_ids -- may be empty for a
+restructure-only candidate that keeps every clause but reworks the wording more tightly), ordered
+lightest-cut-first. Every candidate must still be a complete, natural, grammatical sentence, never
+a fragment, and every fact/name/number/date/negation kept in it must remain exactly as accurate as
+the full version -- only clauses that genuinely don't serve the sentence's real point may be
+dropped. Return an empty shortened_candidates list only when every clause in this unit is
+genuinely essential; do not return a candidate that is identical to zulu_text.
+
+Return every requested unit_id exactly once, each with its own zulu_text, clauses, and
+shortened_candidates. No tools or web search. Return JSON only."""
 
 
 TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT = r"""Mathula TV is a social-media broadcast product: naturalness
@@ -11036,10 +11057,42 @@ def _candidate_translate_schema(expected_unit_ids: Sequence[str]) -> dict[str, A
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["unit_id", "zulu_text"],
+                    "required": ["unit_id", "zulu_text", "clauses", "shortened_candidates"],
                     "properties": {
                         "unit_id": {"type": "string", "enum": requested_ids},
                         "zulu_text": {"type": "string", "minLength": 1},
+                        "clauses": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 16,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["clause_id", "english_text", "rank"],
+                                "properties": {
+                                    "clause_id": {"type": "string", "minLength": 1, "maxLength": 8},
+                                    "english_text": {"type": "string", "minLength": 1},
+                                    "rank": {"type": "integer", "minimum": 1},
+                                },
+                            },
+                        },
+                        "shortened_candidates": {
+                            "type": "array",
+                            "maxItems": _MAX_SHORTENED_CANDIDATES_PER_SEGMENT,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["dropped_clause_ids", "isizulu_text"],
+                                "properties": {
+                                    "dropped_clause_ids": {
+                                        "type": "array",
+                                        "minItems": 0,
+                                        "items": {"type": "string"},
+                                    },
+                                    "isizulu_text": {"type": "string", "minLength": 1},
+                                },
+                            },
+                        },
                     },
                 },
             },
@@ -11053,7 +11106,7 @@ def _request_candidate_translation_batch(
     units: Sequence[Mapping[str, Any]],
     glossary: Mapping[str, Any],
     context_ledger: Mapping[str, Any] | None = None,
-) -> tuple[dict[str, str], dict[str, int]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
     """units: [{"unit_id", "english_text", "preceding_english"?, "reference_vocabulary"?}, ...].
     "preceding_english" is optional per-unit, real grounding (not a described
     pattern) for a sentence whose correct translation depends on the
@@ -11063,6 +11116,22 @@ def _request_candidate_translation_batch(
     supplementary, never authoritative; see CANDIDATE_TRANSLATE_SYSTEM_PROMPT's
     own rules for how both may be used. Identity mismatch is fatal: this feeds
     a deterministic downstream pipeline, not a best-effort audit.
+
+    Returns {unit_id: {"zulu_text": str, "shortened_candidates": [...]}}.
+    Real gap found on job fb3d08b63fed4d90922b08f7e325b906, 2026-09-07: this
+    was the ONLY translation path with no droppable-content mechanism at
+    all (unlike TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT's clauses/
+    shortened_candidates) -- so any sentence that fell back here (a failed
+    turn-block merge, or --skip-turn-block-translation) permanently lost
+    its chance at _trim_by_fact_priority, regardless of how obviously
+    droppable its content was (e.g. "Despite the cold and wet weather," a
+    pure scene-setting clause). Now mirrors that same mechanism per-unit,
+    canonicalized via the same _canonicalize_segment_clauses/
+    _canonicalize_shortened_candidates already proven for it -- a
+    malformed/missing clauses shape degrades this ONE unit's
+    shortened_candidates to empty (never fatal to the whole batch), since a
+    unit's own droppable-content offer is exactly as optional here as it
+    already is for a turn-block segment.
     """
     expected_ids = [str(item["unit_id"]) for item in units]
     response = provider.complete_json(
@@ -11109,7 +11178,7 @@ def _request_candidate_translation_batch(
     )
     returned = list(response.data.get("translations") or [])
     expected_set = set(expected_ids)
-    by_id: dict[str, str] = {}
+    by_id: dict[str, dict[str, Any]] = {}
     duplicate_ids: list[str] = []
     unknown_ids: list[str] = []
     for item in returned:
@@ -11120,7 +11189,17 @@ def _request_candidate_translation_batch(
         if unit_id not in expected_set:
             unknown_ids.append(unit_id)
             continue
-        by_id[unit_id] = str(item.get("zulu_text") or "").strip()
+        zulu_text = str(item.get("zulu_text") or "").strip()
+        clauses = _canonicalize_segment_clauses(item.get("clauses"))
+        shortened_candidates = (
+            _canonicalize_shortened_candidates(
+                item.get("shortened_candidates"), isizulu_text=zulu_text,
+                clause_ids=[c["clause_id"] for c in clauses],
+            )
+            if clauses is not None and zulu_text
+            else []
+        )
+        by_id[unit_id] = {"zulu_text": zulu_text, "shortened_candidates": shortened_candidates}
 
     missing_ids = [unit_id for unit_id in expected_ids if unit_id not in by_id]
     if duplicate_ids or unknown_ids or missing_ids:
@@ -11697,7 +11776,10 @@ def _translate_turn_blocks_via_grok(
             continue
         for gid in member_ids:
             if gid in fallback_candidates:
-                block_groups.append(_build_turn_block_group(group_id=gid, members=[groups_by_id[gid]]))
+                block_groups.append(_build_turn_block_group(
+                    group_id=gid, members=[groups_by_id[gid]],
+                    shortened_candidates=fallback_candidates[gid].get("shortened_candidates") or [],
+                ))
                 candidate_by_block_group_id[gid] = fallback_candidates[gid]
 
     return block_groups, candidate_by_block_group_id, usage_totals
@@ -11774,7 +11856,8 @@ def _translate_natural_via_grok(
             by_id, usage = future.result()
             for key in usage_totals:
                 usage_totals[key] += usage.get(key, 0)
-            for group_id, zulu_text in by_id.items():
+            for group_id, result in by_id.items():
+                zulu_text = str(result.get("zulu_text") or "")
                 if not zulu_text:
                     continue
                 candidate_by_group[group_id] = {
@@ -11782,6 +11865,7 @@ def _translate_natural_via_grok(
                     "variant_id": "natural",
                     "translator": "grok",
                     "spoken_text": zulu_text,
+                    "shortened_candidates": list(result.get("shortened_candidates") or []),
                 }
             completed += 1
             _emit_progress(
@@ -13215,11 +13299,23 @@ def build_candidate_pool(
             return existing
 
     if skip_turn_block_translation:
-        block_groups = groups
         grok_candidate_by_group, grok_usage = _translate_natural_via_grok(
             provider=provider, groups=groups, natural_english_by_group=natural_english_by_group,
             glossary=glossary, context_ledger=context_ledger, workers=candidate_pool_workers, progress=progress,
         )
+        # A copy, not a mutation of the caller's own group dicts -- carries
+        # shortened_candidates through to _trim_by_fact_priority exactly like
+        # _build_turn_block_group already does for the primary path, so this
+        # diagnostic flag doesn't also silently disable fact-priority trim.
+        block_groups = [
+            {
+                **group,
+                "shortened_candidates": list(
+                    grok_candidate_by_group.get(str(group["group_id"]), {}).get("shortened_candidates") or []
+                ),
+            }
+            for group in groups
+        ]
     else:
         block_groups, grok_candidate_by_group, grok_usage = _translate_turn_blocks_via_grok(
             provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english_by_group,
