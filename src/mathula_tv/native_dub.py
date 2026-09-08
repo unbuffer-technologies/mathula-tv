@@ -11298,11 +11298,15 @@ def _request_candidate_translation_batch(
             ],
         },
         schema=_candidate_translate_schema(expected_ids),
-        # Same per-item headroom fix as the QA back-translation call -- confirmed
-        # real 2026-08-30 that 260/item truncates a dense 15-unit batch under
-        # gpt-5.6-sol-1.
+        # 450/unit was calibrated when each unit's response was just a bare
+        # zulu_text; confirmed real 2026-09-08 that it truncates even a
+        # 2-unit batch (finish_reason "length" at exactly the 1200 floor)
+        # now that every unit also carries a full clauses/shortened_candidates
+        # ladder (added 2026-09-07, see this function's own docstring) --
+        # match the sibling turn-block-translate call's per-item budget
+        # (700/unit), which already handles the identical response shape.
         max_output_tokens=min(
-            max(1200, 450 * len(units)),
+            max(1600, 700 * len(units)),
             int(getattr(provider.config, "max_output_tokens", 8192)),
         ),
     )
