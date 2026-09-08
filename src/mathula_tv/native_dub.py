@@ -131,7 +131,7 @@ ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v7-code-switch-shortened-candidate"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v30-per-item-enumeration-clauses"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v31-droppable-parallel-list-items"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1677,7 +1677,7 @@ candidate's REAL spoken duration and picks whichever one actually fits: the code
 objective, measured fact, not something your own stylistic preference should gate. Skip this only
 when no such modern-concept-noun alternative genuinely applies to this segment.
 
-HARD RULE, with exactly ONE narrow, deliberate exception below: dropped_clause_ids must NEVER
+HARD RULE, with exactly TWO narrow, deliberate exceptions below: dropped_clause_ids must NEVER
 include a clause carrying a number, a date, a direct quotation, an attribution (who said or did
 something), or the CORE PROPOSITION of any claim or denial -- who claimed or denied what, and (for
 a denial) whether it was true -- these clauses stay permanently ranked among the most essential,
@@ -1688,7 +1688,7 @@ apart. A PERSON'S OWN NAME, and any ORGANISATION THAT IS ITSELF PART OF WHAT IS 
 (an accused party, a body under investigation, an organisation a claim is actually about), are
 protected the exact same unconditional way.
 
-THE ONE EXCEPTION: a name that is PURELY INCIDENTAL CREDENTIAL OR AFFILIATION CONTEXT -- identifying
+THE FIRST EXCEPTION: a name that is PURELY INCIDENTAL CREDENTIAL OR AFFILIATION CONTEXT -- identifying
 WHERE someone works, studied, or is otherwise affiliated, when that institution itself plays no role
 in the claims/allegations being reported and is never itself the subject of the report -- is NOT
 automatically protected merely for being a name. Rank it exactly like any other scene-setting or
@@ -1703,6 +1703,19 @@ name that is itself a claim's subject, an accused party, a witness, a protagonis
 under investigation or discussion (e.g. IDAC, NPA, or any body whose conduct is being reported on
 stays fully protected) -- when there is real doubt about whether a name is purely incidental, keep
 it protected.
+
+THE SECOND EXCEPTION: a single item within a LONGER PARALLEL LIST of three or more comparable claims,
+promises, or achievements (e.g. one bullet in a party's multi-point manifesto, one item in a list of
+stated priorities or accomplishments) is NOT automatically protected merely because it names a
+specific action or promise -- rank it like any other content under GOAL-RELEVANCE/VIRALITY (see the
+GRANULARITY and VIRALITY guidance above), and it may be dropped, ONE OR SEVERAL such items at a time
+if genuinely needed to fit, PROVIDED the list's own general point still comes through with what
+remains. This is different from a load-bearing, singular claim/denial (e.g. "Lincoln told the witness
+Mogotsi was close to the minister, which is a lie") where the ENTIRE point of the segment IS that one
+claim -- an item never qualifies for this exception when it is itself the segment's own
+communicative_goal rather than one illustrative example among several. When there is real doubt about
+whether an item is a genuinely comparable, illustrative list member versus the segment's actual point,
+keep it protected.
 
 Return every requested window_id exactly once, with exactly one segment covering its whole sentence
 range as described above. No tools or web search. Return JSON only."""
