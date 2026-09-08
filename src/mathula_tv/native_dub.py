@@ -142,7 +142,18 @@ NATIVE_VOICE_RESOLUTION_SCHEMA_VERSION = "mathula-native-voice-resolution-v2-leg
 # Production timing defaults.  Raw TTS deliberately aims slightly long so the final
 # operation is a small pitch-preserving acceleration rather than a slow-down.
 DEFAULT_PREFERRED_RAW_SPEED_PERCENT = 6
-DEFAULT_MAX_NATURAL_SPEED_PERCENT = 12
+# Real user direction, 2026-09-08: "The rush should always be less than 10%"
+# -- lowered from 12. This single shared constant already drives every
+# rush-related decision in this file (turn-envelope "fits" checks,
+# _trim_by_fact_priority's trigger, render-time rush warnings), so this one
+# change tightens the target everywhere consistently, without needing a
+# separate edit per mechanism. _PROTECTED_CONTENT_LAST_RESORT_TRIGGER_PERCENT
+# (the separate, deliberately-higher bar gating the more destructive
+# protected-content-compression fallback) is NOT lowered to match -- it was
+# specifically calibrated from a real, confirmed bug where a much smaller gap
+# let normal turn-rebalancing residual (12-16%) wrongly trigger that
+# destructive mechanism; revisit only with the same kind of real evidence.
+DEFAULT_MAX_NATURAL_SPEED_PERCENT = 10
 MOUTH_CLOSE_TARGET_TOLERANCE_MS = 40
 MOUTH_CLOSE_HARD_TOLERANCE_MS = 80
 # A residual "too short" gap this small (roughly a fraction of one syllable) cannot be
