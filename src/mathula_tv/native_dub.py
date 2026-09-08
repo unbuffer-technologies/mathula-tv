@@ -130,8 +130,8 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v6-register-reasoning-trace"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v26-register-reasoning-trace"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v7-code-switch-shortened-candidate"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v27-code-switch-shortened-candidate"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1275,6 +1275,15 @@ the full version -- only clauses that genuinely don't serve the sentence's real 
 dropped. Return an empty shortened_candidates list only when every clause in this unit is
 genuinely essential; do not return a candidate that is identical to zulu_text.
 
+If zulu_text used a formal/native rendering for a modern concept noun that also has a shorter,
+equally correct code-switched form (see the register guidance above, e.g. "ukucwasa ngokobuhlanga"
+vs "i-racism"), include ONE shortened_candidates entry (dropped_clause_ids may be empty) that
+applies that code-switch instead -- do this REGARDLESS of your own register judgment call above,
+since a later stage measures every candidate's REAL spoken duration and picks whichever one
+actually fits this unit's real timing budget: the code-switch's fit is an objective, measured
+fact, not something your own stylistic preference should gate. Skip this only when no such
+modern-concept-noun alternative genuinely applies to this unit.
+
 Return every requested unit_id exactly once, each with its own zulu_text, register_notes, clauses,
 and shortened_candidates. No tools or web search. Return JSON only."""
 
@@ -1626,6 +1635,15 @@ change is the grammar/sentence-shape carrying them. Offer this whenever restruct
 read more naturally, independent of whether the segment fits its timing budget -- unlike the ladder
 above (which exists to reclaim time), this exists to reclaim clarity, and a later, purely mechanical
 step decides on its own whether the result also happens to measure shorter.
+
+CODE-SWITCH CANDIDATE, another distinct kind of shortened_candidates entry, dropped_clause_ids left
+EMPTY: if isizulu_text used a formal/native rendering for a modern concept noun that also has a
+shorter, equally correct code-switched form (see the register guidance above, e.g. "ukucwasa
+ngokobuhlanga" vs "i-racism"), add ONE candidate applying that code-switch instead -- do this
+REGARDLESS of your own register judgment call above, since the later mechanical step measures every
+candidate's REAL spoken duration and picks whichever one actually fits: the code-switch's fit is an
+objective, measured fact, not something your own stylistic preference should gate. Skip this only
+when no such modern-concept-noun alternative genuinely applies to this segment.
 
 HARD RULE, with exactly ONE narrow, deliberate exception below: dropped_clause_ids must NEVER
 include a clause carrying a number, a date, a direct quotation, an attribution (who said or did
