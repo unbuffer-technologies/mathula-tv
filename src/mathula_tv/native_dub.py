@@ -11356,7 +11356,9 @@ def _request_candidate_translation_batch(
             if clauses is not None and zulu_text
             else []
         )
-        by_id[unit_id] = {"zulu_text": zulu_text, "shortened_candidates": shortened_candidates}
+        by_id[unit_id] = {
+            "zulu_text": zulu_text, "clauses": clauses, "shortened_candidates": shortened_candidates,
+        }
 
     missing_ids = [unit_id for unit_id in expected_ids if unit_id not in by_id]
     if duplicate_ids or unknown_ids or missing_ids:
@@ -11686,6 +11688,7 @@ def _build_turn_block_group(
     group_id: str,
     members: Sequence[Mapping[str, Any]],
     shortened_candidates: Sequence[Mapping[str, Any]] = (),
+    clauses: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build one committed block-group dict from a contiguous run of raw,
     per-sentence groups (`members`, in order). Mirrors _speaker_turn_geometry's
@@ -11700,6 +11703,18 @@ def _build_turn_block_group(
     _trim_by_fact_priority can find it later without any separate lookup.
     Each entry is ``{"dropped_clause_ids": [...], "isizulu_text": "..."}``
     (see _canonicalize_shortened_candidates).
+
+    ``clauses`` (the same ranked breakdown that produced shortened_candidates,
+    see _canonicalize_segment_clauses) is carried alongside for the same
+    reason. Real confirmed bug (job fb3d08b63fed4d90922b08f7e325b906,
+    2026-09-09): this parameter did not exist until _filter_safe_shortened_
+    candidates grew a clauses-aware mode to stop rejecting a candidate for
+    dropping a literal that lives ONLY inside a clause it deliberately
+    dropped -- without this field actually reaching the group dict
+    _trim_by_fact_priority reads, that fix's own precondition
+    (``clauses is not None``) was never true, so it silently never took
+    effect. Every call site must now pass the same clauses the shortened_
+    candidates it's also passing came from.
     """
     member_ids = [str(member["group_id"]) for member in members]
     segment_ids: list[str] = []
@@ -11718,6 +11733,7 @@ def _build_turn_block_group(
         "source_segments": source_segments,
         "source_text": " ".join(str(member["source_text"]) for member in members),
         "shortened_candidates": list(shortened_candidates),
+        "clauses": list(clauses) if clauses else None,
     }
 
 
@@ -11926,6 +11942,7 @@ def _translate_turn_blocks_via_grok(
             block_groups.append(_build_turn_block_group(
                 group_id=block_group_id, members=members,
                 shortened_candidates=segment.get("shortened_candidates") or [],
+                clauses=segment.get("clauses"),
             ))
             candidate_by_block_group_id[block_group_id] = {
                 "candidate_id": "grok_natural", "variant_id": "natural", "translator": "grok",
@@ -11937,6 +11954,7 @@ def _translate_turn_blocks_via_grok(
                 block_groups.append(_build_turn_block_group(
                     group_id=gid, members=[groups_by_id[gid]],
                     shortened_candidates=fallback_candidates[gid].get("shortened_candidates") or [],
+                    clauses=fallback_candidates[gid].get("clauses"),
                 ))
                 candidate_by_block_group_id[gid] = fallback_candidates[gid]
 
@@ -12023,6 +12041,7 @@ def _translate_natural_via_grok(
                     "variant_id": "natural",
                     "translator": "grok",
                     "spoken_text": zulu_text,
+                    "clauses": result.get("clauses"),
                     "shortened_candidates": list(result.get("shortened_candidates") or []),
                 }
             completed += 1
@@ -13551,15 +13570,17 @@ def build_candidate_pool(
             glossary=glossary, context_ledger=context_ledger, workers=candidate_pool_workers, progress=progress,
         )
         # A copy, not a mutation of the caller's own group dicts -- carries
-        # shortened_candidates through to _trim_by_fact_priority exactly like
-        # _build_turn_block_group already does for the primary path, so this
-        # diagnostic flag doesn't also silently disable fact-priority trim.
+        # shortened_candidates/clauses through to _trim_by_fact_priority
+        # exactly like _build_turn_block_group already does for the primary
+        # path, so this diagnostic flag doesn't also silently disable
+        # fact-priority trim's own clause-scoped literal-safety check.
         block_groups = [
             {
                 **group,
                 "shortened_candidates": list(
                     grok_candidate_by_group.get(str(group["group_id"]), {}).get("shortened_candidates") or []
                 ),
+                "clauses": grok_candidate_by_group.get(str(group["group_id"]), {}).get("clauses"),
             }
             for group in groups
         ]
