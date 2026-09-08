@@ -402,11 +402,15 @@ CONFIRMED_TRANSLATION_PITFALLS: tuple[str, ...] = (
     "action must use isiZulu PAST tense concords throughout, never a present/future \"[SC]ya "
     "ku-[verb]\" construction -- that shape reads as ongoing/future (\"goes to open\"/\"will go "
     "to open\"), not completed past.",
-    "Every word in the spoken text must be genuine isiZulu -- never leave an English word "
-    "code-switched/hybridized into the output, even when uncertain of the right isiZulu term "
-    "(English loanwords ARE sometimes legitimate, but only as fully-nativized forms with proper "
-    "isiZulu affixes, never a bare English word dropped in as-is). If genuinely uncertain, "
-    "choose the closest well-formed isiZulu paraphrase rather than reverting to English.",
+    "Do not drop a BARE, un-integrated English word into the output merely because you are "
+    "UNCERTAIN of the correct isiZulu term -- that is a lazy fallback, not a real translation "
+    "choice; if genuinely uncertain, choose the closest well-formed isiZulu paraphrase instead of "
+    "reverting to English. This is a DIFFERENT situation from the deliberate, register-driven "
+    "code-switch described elsewhere in this prompt (a modern political/social/institutional "
+    "concept noun like \"racism\"/\"corruption\"/\"democracy\" that real contemporary isiZulu "
+    "broadcast speech itself code-switches, glued with a proper isiZulu prefix, e.g. \"i-racism\") "
+    "-- that IS a real, confident, correct choice, never mere uncertainty, and this rule does not "
+    "forbid it.",
     "For English \"[X] was [verb]-ed\" where X is the target being acted upon (e.g. \"his house "
     "was raided\"), the isiZulu verb MUST use the passive extension \"-(i)wa\" so X remains the "
     "grammatical subject undergoing the action -- a bare active-voice verb silently reverses "
