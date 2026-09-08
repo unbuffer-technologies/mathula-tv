@@ -131,7 +131,7 @@ ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v7-code-switch-shortened-candidate"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v28-virality-ranked-enumeration"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v29-reporter-signoff-lowest-rank"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1544,6 +1544,12 @@ the other three as how you recognize it in practice:
 Common, safe LOW-RANK SHAPES that non-goal-serving content tends to take -- do not wait for them to be
 the only content left:
 
+- REPORTER SIGN-OFF: a reporter's closing self-identification at the end of a package -- their own
+  name, outlet, and location (e.g. "Ofentse Setimo, SABC News, eMalahleni.") -- carries zero story
+  content and typically duplicates an on-screen graphic the viewer already sees. This is the FIRST
+  thing to consider dropping whenever a segment needs to shrink, ranking lower than every other
+  LOW-RANK SHAPE below and lower than any content clause, including a generic category-naming one --
+  it never competes with story content for droppability, it is simply the cheapest cut available.
 - FORMULAIC GREETING OR OPENER: a pleasantry with zero factual content. Worked example: "...usejoyina
   manje ukuze asinikeze umbiko obanzi... Sawubona ekuseni, Ayanda." -- the greeting clause ranks
   lowest; dropping it leaves "...usejoyina manje ukuze asinikeze umbiko obanzi ngalokho iKhomishana
