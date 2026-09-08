@@ -12649,28 +12649,82 @@ def _zulu_morphology_known_proper_nouns(*, glossary: Mapping[str, Any], source_t
     return tokens
 
 
+def _shortened_candidate_required_source_text(
+    *, source_text: str, clauses: Sequence[Mapping[str, Any]] | None, dropped_clause_ids: Sequence[str],
+) -> str:
+    """The real target text a literal-preservation check should hold a
+    shortened candidate to: the combined English of every clause it did NOT
+    declare dropped -- never the whole segment's original source_text
+    unconditionally.
+
+    Real confirmed bug (job fb3d08b63fed4d90922b08f7e325b906, 2026-09-09):
+    checking every candidate against the full source_text meant a candidate
+    that dropped the reporter sign-off ("Ofentse Setimo, SABC News,
+    eMalahleni.") -- exactly the FIRST thing this file's own ranking
+    guidance tells the model to drop -- was silently rejected outright,
+    because "SABC" (an acronym) lives only in that one clause and the full
+    source_text still "required" it. A literal that lives ONLY inside a
+    clause the model explicitly, deliberately ranked as droppable (and
+    which already survived the generation prompt's own HARD RULE gate) was
+    never an accidental omission -- accidental omission is the ONLY failure
+    mode this safety net exists to catch (see _filter_safe_shortened_
+    candidates' own docstring). Falls back to the full source_text when the
+    group carries no clause breakdown at all (should not normally happen
+    alongside real shortened_candidates, but conservative-safe if it ever
+    does).
+    """
+    if not clauses:
+        return str(source_text or "")
+    dropped = {str(value) for value in dropped_clause_ids}
+    surviving = [
+        str(clause.get("english_text") or "")
+        for clause in clauses
+        if str(clause.get("clause_id") or "") not in dropped
+    ]
+    return " ".join(surviving)
+
+
 def _filter_safe_shortened_candidates(
-    *, candidates: Sequence[Mapping[str, Any]], source_text: str,
+    *,
+    candidates: Sequence[Mapping[str, Any]],
+    source_text: str,
+    clauses: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """The deterministic safety net behind the model's own restraint: keep
     only candidates whose isizulu_text still preserves every required
-    literal (name/number/acronym) the TRUE source_text demands -- reusing
-    the same _sentence_preserves_required_literals check every other
-    fidelity gate in this file relies on. A candidate that fails is silently
-    discarded, regardless of how the model itself worded it; this is the
-    hard floor for the classes prompt-level guidance alone cannot
-    mechanically guarantee (a hallucinated or careless omission is still
-    possible even with the prompt's explicit hard rule). Order (lightest cut
-    first) is preserved. This is Tier 1's own floor -- the separate, later
-    last-resort protected-content mechanism deliberately does NOT apply this
-    check, since omitting a literal is exactly what it may be asked to do.
+    literal (name/number/acronym) demanded by that candidate's OWN surviving
+    content -- reusing the same _sentence_preserves_required_literals check
+    every other fidelity gate in this file relies on. A candidate that fails
+    is silently discarded, regardless of how the model itself worded it;
+    this is the hard floor for the classes prompt-level guidance alone
+    cannot mechanically guarantee (a hallucinated or careless omission is
+    still possible even with the prompt's explicit hard rule). Order
+    (lightest cut first) is preserved. This is Tier 1's own floor -- the
+    separate, later last-resort protected-content mechanism deliberately
+    does NOT apply this check, since omitting a literal is exactly what it
+    may be asked to do.
+
+    When ``clauses`` is supplied, each candidate is checked against
+    _shortened_candidate_required_source_text (its own surviving clauses
+    only) rather than the whole segment's source_text -- see that
+    function's own docstring for the real bug this fixes. Omitting
+    ``clauses`` preserves the original, whole-segment-source behavior.
     """
-    return [
-        candidate for candidate in candidates
-        if _sentence_preserves_required_literals(
-            source_text=source_text, candidate_text=str(candidate.get("isizulu_text") or ""),
+    safe: list[dict[str, Any]] = []
+    for candidate in candidates:
+        required_source = (
+            _shortened_candidate_required_source_text(
+                source_text=source_text, clauses=clauses,
+                dropped_clause_ids=candidate.get("dropped_clause_ids") or (),
+            )
+            if clauses is not None
+            else source_text
         )
-    ]
+        if _sentence_preserves_required_literals(
+            source_text=required_source, candidate_text=str(candidate.get("isizulu_text") or ""),
+        ):
+            safe.append(candidate)
+    return safe
 
 
 def _resync_turn_rush_aggregates(
@@ -12845,6 +12899,7 @@ def _trim_by_fact_priority(
         source_text = str(group["source_text"])
         safe_candidates = _filter_safe_shortened_candidates(
             candidates=group.get("shortened_candidates") or [], source_text=source_text,
+            clauses=group.get("clauses"),
         )
         if not safe_candidates:
             continue

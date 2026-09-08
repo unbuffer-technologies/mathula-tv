@@ -262,6 +262,43 @@ def test_filter_safe_shortened_candidates_keeps_order_of_survivors():
     assert safe == candidates
 
 
+def test_filter_safe_shortened_candidates_permits_dropping_a_literal_inside_a_dropped_clause():
+    # Real confirmed bug (job fb3d08b63fed4d90922b08f7e325b906, 2026-09-09):
+    # a candidate that drops the reporter sign-off clause ("SABC News") was
+    # rejected outright because the WHOLE segment's source_text still
+    # "required" the acronym SABC -- even though dropping that exact clause
+    # is the FIRST thing this file's own ranking guidance tells the model to
+    # do. When clauses is supplied, a literal that lives only inside a
+    # clause the candidate deliberately dropped is no longer required.
+    source_text = "A report on the story. Ofentse Setimo, SABC News, eMalahleni."
+    clauses = [
+        {"clause_id": "c1", "english_text": "A report on the story.", "rank": 1},
+        {"clause_id": "c2", "english_text": "Ofentse Setimo, SABC News, eMalahleni.", "rank": 5},
+    ]
+    candidates = [
+        {"dropped_clause_ids": ["c2"], "isizulu_text": "Umbiko ngendaba."},  # drops SABC deliberately
+    ]
+    safe = _filter_safe_shortened_candidates(candidates=candidates, source_text=source_text, clauses=clauses)
+    assert safe == candidates
+
+
+def test_filter_safe_shortened_candidates_still_rejects_a_missing_literal_from_a_surviving_clause():
+    # The other half of the same fix: a literal that belongs to a clause the
+    # candidate did NOT drop must still be required -- this isn't a blanket
+    # relaxation, only a scoping fix.
+    source_text = "The report cites 24 documents. Ofentse Setimo, SABC News, eMalahleni."
+    clauses = [
+        {"clause_id": "c1", "english_text": "The report cites 24 documents.", "rank": 1},
+        {"clause_id": "c2", "english_text": "Ofentse Setimo, SABC News, eMalahleni.", "rank": 5},
+    ]
+    candidates = [
+        # Drops the sign-off (fine) but ALSO silently lost the "24" that c1 (kept) still owns.
+        {"dropped_clause_ids": ["c2"], "isizulu_text": "Umbiko ukhomba amadokhumenti amaningi."},
+    ]
+    safe = _filter_safe_shortened_candidates(candidates=candidates, source_text=source_text, clauses=clauses)
+    assert safe == []
+
+
 # --- _trim_by_fact_priority: orchestration ----------------------------------------------
 
 
