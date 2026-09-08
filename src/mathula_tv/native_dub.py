@@ -131,7 +131,7 @@ ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v7-code-switch-shortened-candidate"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v27-code-switch-shortened-candidate"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v28-virality-ranked-enumeration"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1590,6 +1590,22 @@ the only content left:
   supporting-cast role (introducing the witness to Mogotsi), not about the minister or the claim
   against him, so it ranks lowest of all -- lower than the qualifying clause, which at least concerns
   the claim's truth value directly.
+
+VIRALITY WITHIN AN ENUMERATED SET, a supplementary tie-breaker for a list of parallel items (a list of
+stated priorities, achievements, allegations, or categories) that GOAL-RELEVANCE/FACT-PRIORITY alone
+don't fully order: Mathula TV is a social-media broadcast product (see the opening framing above) --
+within ONE enumerated set, rank each item by how attention-grabbing/shareable it would be to that
+audience, not by the order the speaker listed them in. A specific, vivid, or charged claim (a concrete
+alleged wrongdoing, a striking figure, a named scandal) ranks MORE essential than a generic category
+name covering similar territory, even when the generic one came first. Worked example, from real
+content this pipeline has translated: a list of stated priorities naming "jobs and agriculture" is a
+generic category-naming item; "racism on farms" in the same list is a specific, vivid, charged claim --
+under virality, "jobs and agriculture" ranks MORE droppable than "racism on farms", even though it was
+listed first. This heuristic informs but never overrides GOAL-RELEVANCE/FACT-PRIORITY: it only orders
+otherwise-similar parallel items within one enumerated set, never pulls a clause out of its enumeration
+to compete with unrelated clauses, and never demotes a genuine FACT-PRIORITY item (a name, number,
+date, quotation, or a claim/denial's own core proposition) below a merely-vivid one that lacks that
+status.
 
 SHARED-REFERENT ECONOMY, a wording choice within how you WRITE isizulu_text (not a separate clause to
 rank): when the same literal (a year, a name) is repeated across an enumerated list purely because
