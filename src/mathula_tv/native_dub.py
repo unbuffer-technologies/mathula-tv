@@ -130,8 +130,8 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v1-upfront-terminology-register"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v5-code-switch-syllable-tiebreak"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v25-code-switch-syllable-tiebreak"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v6-register-reasoning-trace"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v26-register-reasoning-trace"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1158,6 +1158,14 @@ equally authentic option also helps this sentence fit its real broadcast time wi
 register. This tie-breaker never overrides genuine precision or authenticity; it only decides a
 close call between two options that are already both natural and correct.
 
+You must ALSO always return register_notes: a short (one sentence, or an empty string when it
+genuinely doesn't apply) explicit note on whether this unit contains a modern political/social/
+institutional concept noun as described above, and if so, which form you actually chose (code-
+switched or native) and why. Do this even when your answer is "no such concept noun here" --
+writing this note is how you actually engage with the register question above on every unit,
+rather than defaulting to the native form out of habit. This field is never read back to you; it
+exists only to make you commit to a real, considered answer while you translate this specific unit.
+
 CRITICAL LIMIT on substitution, confirmed by a real test failure: a substituted word must preserve
 the EXACT precise real-world implication of the original, especially for a verb describing a
 legally or evidentially significant act. "Intercepted" (implies something was tampered with or
@@ -1251,8 +1259,8 @@ the full version -- only clauses that genuinely don't serve the sentence's real 
 dropped. Return an empty shortened_candidates list only when every clause in this unit is
 genuinely essential; do not return a candidate that is identical to zulu_text.
 
-Return every requested unit_id exactly once, each with its own zulu_text, clauses, and
-shortened_candidates. No tools or web search. Return JSON only."""
+Return every requested unit_id exactly once, each with its own zulu_text, register_notes, clauses,
+and shortened_candidates. No tools or web search. Return JSON only."""
 
 
 TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT = r"""Mathula TV is a social-media broadcast product: naturalness
@@ -1300,6 +1308,15 @@ e.g. "i-racism" (about 3 syllables) against "ukucwasa ngokobuhlanga" (about 9) -
 equally authentic option also helps this window fit its real broadcast time budget, not just its
 register. This tie-breaker never overrides genuine precision or authenticity; it only decides a
 close call between two options that are already both natural and correct.
+
+Each segment must ALSO always return register_notes: a short (one sentence, or an empty string
+when it genuinely doesn't apply) explicit note on whether this segment contains a modern political/
+social/institutional concept noun as described above, and if so, which form you actually chose
+(code-switched or native) and why. Do this even when your answer is "no such concept noun here" --
+writing this note is how you actually engage with the register question above on every segment,
+rather than defaulting to the native form out of habit. This field is never read back to you; it
+exists only to make you commit to a real, considered answer while you translate this specific
+segment.
 
 CRITICAL LIMIT on substitution, confirmed by a real test failure: a substituted word must preserve the
 EXACT precise real-world implication of the original, especially for a verb describing a legally or
@@ -11106,10 +11123,11 @@ def _candidate_translate_schema(expected_unit_ids: Sequence[str]) -> dict[str, A
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["unit_id", "zulu_text", "clauses", "shortened_candidates"],
+                    "required": ["unit_id", "zulu_text", "register_notes", "clauses", "shortened_candidates"],
                     "properties": {
                         "unit_id": {"type": "string", "enum": requested_ids},
                         "zulu_text": {"type": "string", "minLength": 1},
+                        "register_notes": {"type": "string"},
                         "clauses": {
                             "type": "array",
                             "minItems": 1,
@@ -11296,13 +11314,14 @@ def _turn_block_translate_schema(expected_window_ids: Sequence[str]) -> dict[str
                                 "type": "object",
                                 "additionalProperties": False,
                                 "required": [
-                                    "start_index", "end_index", "communicative_goal", "clauses",
-                                    "isizulu_text", "shortened_candidates",
+                                    "start_index", "end_index", "communicative_goal", "register_notes",
+                                    "clauses", "isizulu_text", "shortened_candidates",
                                 ],
                                 "properties": {
                                     "start_index": {"type": "integer", "minimum": 1},
                                     "end_index": {"type": "integer", "minimum": 1},
                                     "communicative_goal": {"type": "string", "minLength": 1},
+                                    "register_notes": {"type": "string"},
                                     "clauses": {
                                         "type": "array",
                                         "minItems": 1,
