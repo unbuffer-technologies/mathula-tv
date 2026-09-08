@@ -1026,10 +1026,18 @@ def parser() -> argparse.ArgumentParser:
     native_dub.add_argument(
         "--max-natural-speed-percent",
         type=int,
-        default=12,
+        # Must be kept in sync manually with native_dub.DEFAULT_MAX_NATURAL_
+        # SPEED_PERCENT -- native_dub is deliberately lazy-imported throughout
+        # this file (see the per-command imports below) rather than at module
+        # top level, so this default can't just reference that constant
+        # directly without undoing that. Real gap found 2026-09-08: this
+        # literal silently drifted from the constant (12 vs the constant's
+        # since-lowered 10) and a real render kept warning at the stale 12%
+        # bar even after the shared constant changed everywhere else.
+        default=10,
         help=(
             "Red console quality-warning threshold for pitch-preserving post-TTS speed-up. "
-            "Higher required speed is allowed and non-fatal (0-15; default 12)."
+            "Higher required speed is allowed and non-fatal (0-15; default 10)."
         ),
     )
     native_dub.add_argument(
