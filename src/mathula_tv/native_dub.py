@@ -128,7 +128,7 @@ TEMPORAL_MASK_TRANSLATION_SCHEMA_VERSION = "mathula-native-natural-translation-v
 TEMPORAL_MASK_PROMPT_VERSION = "native-temporal-mask-window-v10-phase-a-no-self-check"
 CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
-ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v1-upfront-terminology-register"
+ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v6-register-reasoning-trace"
 TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v26-register-reasoning-trace"
@@ -1119,6 +1119,18 @@ register describes the isiZulu register the ENTIRE translation should hold: form
 Nkz./formal titles vs. first names), and default tense/mood conventions for reporting testimony.
 This is deliberately global, not per-sentence -- it exists so every sentence sounds like it came
 from the same broadcast, not a patchwork of independent translation decisions.
+
+IMPORTANT about "formal broadcast register": real contemporary South African isiZulu broadcast
+speech -- even at its most formal -- routinely code-switches a modern political, social, or
+institutional concept noun that entered public discourse primarily through English or Afrikaans
+(e.g. "racism", "corruption", "democracy", "constitution") rather than reaching for a stiffer,
+less-recognized formal native coinage. "Formal register" describes SENTENCE STRUCTURE, address
+form, and tense discipline -- it is NOT a directive to avoid this kind of code-switching, and your
+formality description must not be phrased as one. Every later translation call receives your
+register description as BINDING and applies it consistently across the whole programme, so if it
+reads as "avoid all English/Afrikaans-derived words", it will suppress even a deliberate, correct,
+authentic code-switch decision that a later call would otherwise have made -- do not write it that
+way.
 
 Do not translate anything else. Do not summarize the story. No tools or web search. Return JSON
 only."""
@@ -10205,7 +10217,14 @@ def _ensure_zulu_glossary(
     pass1_sha256 = checksum(paths.pass1)
     if paths.zulu_glossary.is_file() and not force:
         cached = read_json(paths.zulu_glossary)
-        if cached.get("source_pass1_sha256") == pass1_sha256:
+        # Real gap found 2026-09-08: this only ever compared source_pass1_sha256,
+        # so a PROMPT change (e.g. fixing a bad "register" description that then
+        # gets treated as BINDING by every later translation call) silently never
+        # took effect on an unchanged transcript without also passing --force.
+        if (
+            cached.get("source_pass1_sha256") == pass1_sha256
+            and cached.get("prompt_version") == ZULU_GLOSSARY_PROMPT_VERSION
+        ):
             glossary = _normalize_zulu_glossary(cached.get("zulu_terminology_glossary"))
             usage = cached.get("usage") if isinstance(cached.get("usage"), Mapping) else {}
             _emit_progress(progress, "[native glossary] Reusing cached Zulu terminology glossary")
