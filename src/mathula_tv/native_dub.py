@@ -13723,6 +13723,14 @@ def build_candidate_pool(
             "source_end_ms": int(groups_by_id[group_id]["source_end_ms"]),
             "member_group_ids": list(groups_by_id[group_id].get("member_group_ids") or [group_id]),
             "discourse_unit_kind": discourse_unit_kind_by_group[group_id],
+            # Persisted for auditability (2026-09-09) -- previously computed
+            # and used correctly in-memory (it drives shortened_candidates
+            # and _trim_by_fact_priority's clause-scoped literal-safety
+            # check) but silently never written to this artifact, so there
+            # was no way to tell "genuinely nothing droppable" apart from
+            # "no clause breakdown was ever produced" without re-deriving it
+            # from member-merge shape, as this session just had to do.
+            "clauses": groups_by_id[group_id].get("clauses"),
             "shortened_candidates": list(groups_by_id[group_id].get("shortened_candidates") or []),
             "candidates": measured_by_group.get(group_id, []),
             "selected_candidate_id": winners[group_id]["candidate_id"] if group_id in winners else None,
