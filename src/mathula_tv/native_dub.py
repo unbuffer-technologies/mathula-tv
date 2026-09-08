@@ -130,8 +130,8 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v1-upfront-terminology-register"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v4-code-switch-register"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v24-code-switch-register"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v5-code-switch-syllable-tiebreak"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v25-code-switch-syllable-tiebreak"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1150,8 +1150,13 @@ generally (across languages, not isiZulu alone) is borrowed from English and Afr
 own knowledge of real contemporary isiZulu media/broadcast register to judge, sentence by sentence,
 whether the code-switched or the native form sounds more natural for THIS specific concept in THIS
 context -- this is a genuine judgment call, not a fixed list, and does not apply to ordinary
-vocabulary that has always had a
-natural, unremarkable native isiZulu word.
+vocabulary that has always had a natural, unremarkable native isiZulu word. As a concrete tie-
+breaker when you are genuinely unsure either way: the code-switched form should carry a real,
+default advantage whenever it is also the noticeably SHORTER option (fewer spoken syllables) --
+e.g. "i-racism" (about 3 syllables) against "ukucwasa ngokobuhlanga" (about 9) -- since a shorter,
+equally authentic option also helps this sentence fit its real broadcast time window, not just its
+register. This tie-breaker never overrides genuine precision or authenticity; it only decides a
+close call between two options that are already both natural and correct.
 
 CRITICAL LIMIT on substitution, confirmed by a real test failure: a substituted word must preserve
 the EXACT precise real-world implication of the original, especially for a verb describing a
@@ -1288,7 +1293,13 @@ how people actually talk on air, given how much of everyday South African vernac
 knowledge of real contemporary isiZulu media/broadcast register to judge, case by case, whether
 the code-switched or the native form sounds more natural for THIS specific
 concept in THIS window -- a genuine judgment call, not a fixed list, and it does not apply to
-ordinary vocabulary that has always had a natural, unremarkable native isiZulu word.
+ordinary vocabulary that has always had a natural, unremarkable native isiZulu word. As a concrete
+tie-breaker when you are genuinely unsure either way: the code-switched form should carry a real,
+default advantage whenever it is also the noticeably SHORTER option (fewer spoken syllables) --
+e.g. "i-racism" (about 3 syllables) against "ukucwasa ngokobuhlanga" (about 9) -- since a shorter,
+equally authentic option also helps this window fit its real broadcast time budget, not just its
+register. This tie-breaker never overrides genuine precision or authenticity; it only decides a
+close call between two options that are already both natural and correct.
 
 CRITICAL LIMIT on substitution, confirmed by a real test failure: a substituted word must preserve the
 EXACT precise real-world implication of the original, especially for a verb describing a legally or
