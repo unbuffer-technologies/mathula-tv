@@ -131,7 +131,7 @@ ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v7-code-switch-shortened-candidate"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v29-reporter-signoff-lowest-rank"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v30-per-item-enumeration-clauses"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1596,6 +1596,16 @@ the only content left:
   supporting-cast role (introducing the witness to Mogotsi), not about the minister or the claim
   against him, so it ranks lowest of all -- lower than the qualifying clause, which at least concerns
   the claim's truth value directly.
+
+GRANULARITY OF AN ENUMERATED LIST: never enumerate an entire parallel list ("health care, jobs and
+agriculture", "mines providing clinics, creating jobs, and addressing racism on farms") as ONE atomic
+clause -- give EACH item in the list its OWN clause_id, individually ranked. Lumping a whole list
+together as one clause means it can only ever be kept whole or cut whole, which throws away exactly the
+flexibility ranking exists to provide: a real segment often needs to drop TWO OR THREE lower-priority
+list items, not just the single least essential one, to actually fit its time budget. Build the
+shortened_candidates ladder accordingly -- it is entirely normal, and often necessary, for a candidate
+several rungs deep to have dropped multiple items from the SAME enumerated list, provided each
+remaining item still stands as a complete, natural part of the surviving sentence.
 
 VIRALITY WITHIN AN ENUMERATED SET, a supplementary tie-breaker for a list of parallel items (a list of
 stated priorities, achievements, allegations, or categories) that GOAL-RELEVANCE/FACT-PRIORITY alone
