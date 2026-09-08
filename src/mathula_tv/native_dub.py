@@ -130,8 +130,8 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v1-upfront-terminology-register"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v3-clause-ranked-droppable"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v23-whole-window-single-segment"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v4-code-switch-register"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v24-code-switch-register"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1139,6 +1139,20 @@ because the English did. This is about word and clause CHOICE within the unit's 
 content -- it is not permission to add or remove propositions, which the earlier rules already
 forbid.
 
+The opposite substitution direction also applies for a specific, narrower category: a modern
+political, social, or institutional CONCEPT NOUN that entered everyday South African discourse
+primarily through English or Afrikaans (e.g. "racism", "corruption", "democracy", "constitution")
+is often code-switched with an isiZulu prefix in real informal and broadcast speech (e.g.
+"i-racism"), even when a more formal or technical native isiZulu term for the same concept exists
+(e.g. "ukucwasa ngokobuhlanga") -- the formal term is not wrong, but can read as stiffer and less
+authentic than how people actually talk on air, given how much of everyday South African vernacular
+generally (across languages, not isiZulu alone) is borrowed from English and Afrikaans. Use your
+own knowledge of real contemporary isiZulu media/broadcast register to judge, sentence by sentence,
+whether the code-switched or the native form sounds more natural for THIS specific concept in THIS
+context -- this is a genuine judgment call, not a fixed list, and does not apply to ordinary
+vocabulary that has always had a
+natural, unremarkable native isiZulu word.
+
 CRITICAL LIMIT on substitution, confirmed by a real test failure: a substituted word must preserve
 the EXACT precise real-world implication of the original, especially for a verb describing a
 legally or evidentially significant act. "Intercepted" (implies something was tampered with or
@@ -1262,6 +1276,19 @@ present anywhere in a window's original sentences must still appear somewhere in
 window -- content may be restated in a different place within the window, but it may never disappear or
 be duplicated. Epistemic hedges ("maybe", "I think", "allegedly", "possibly") are not filler and must
 survive.
+
+SUBSTITUTION also runs in the opposite direction for a specific, narrower category: a modern
+political, social, or institutional CONCEPT NOUN that entered everyday South African discourse
+primarily through English or Afrikaans (e.g. "racism", "corruption", "democracy", "constitution")
+is often code-switched with an isiZulu prefix in real informal and broadcast speech (e.g.
+"i-racism"), even when a more formal or technical native isiZulu term exists (e.g. "ukucwasa
+ngokobuhlanga") -- the formal term is not wrong, but can read as stiffer and less authentic than
+how people actually talk on air, given how much of everyday South African vernacular generally
+(across languages, not isiZulu alone) is borrowed from English and Afrikaans. Use your own
+knowledge of real contemporary isiZulu media/broadcast register to judge, case by case, whether
+the code-switched or the native form sounds more natural for THIS specific
+concept in THIS window -- a genuine judgment call, not a fixed list, and it does not apply to
+ordinary vocabulary that has always had a natural, unremarkable native isiZulu word.
 
 CRITICAL LIMIT on substitution, confirmed by a real test failure: a substituted word must preserve the
 EXACT precise real-world implication of the original, especially for a verb describing a legally or
