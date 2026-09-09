@@ -130,8 +130,8 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v10-ladder-syllable-target"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v35-ladder-syllable-target"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v11-prefer-shorter-equal-phrasing"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v36-prefer-shorter-equal-phrasing"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1153,7 +1153,12 @@ us"), and restructure an English-mirroring relative or subordinate clause into w
 isiZulu sentence shape says the same precise thing, rather than nesting a relative clause just
 because the English did. This is about word and clause CHOICE within the unit's own existing
 content -- it is not permission to add or remove propositions, which the earlier rules already
-forbid.
+forbid. When two fully natural, equally correct phrasings exist for the same English content, prefer
+whichever is SHORTER in real spoken syllables -- confirmed real case: "identifies X among its
+priorities" rendered, call to call, as either the fuller "X phakathi kwezinto eziseqhulwini" or the
+single compact word "X phambili" ("puts X forward"), both equally correct, the second markedly
+shorter. Treat this as an active habit whenever you already know a shorter, equally authentic option
+exists, not a coin-flip stylistic call.
 
 The opposite substitution direction also applies for a specific, narrower category: a modern
 political, social, or institutional CONCEPT NOUN that entered everyday South African discourse
@@ -1459,6 +1464,20 @@ when the window is already near or over target_syllables, favor DELETION and tig
 and skip ADDITION entirely for this window -- a retelling with zero added scaffolding is a completely
 valid, honest choice on a tight window, not a lesser one. Never delete a proposition just to hit a
 syllable count, and never treat the budget as license to damage meaning in either direction.
+
+TIGHT SUBSTITUTION, made concrete: real evidence from this pipeline's own repeated output on the
+IDENTICAL sentence confirms that when two isiZulu phrasings are both fully natural and equally
+correct, one option is often measurably shorter in real spoken syllables than the other -- and the
+shorter one is never a lesser or less authentic choice. Confirmed real case: "identifies X among its
+priorities" was rendered, call to call, as either the fuller relative construction "ibeka X phakathi
+kwezinto eziseqhulwini" or the single compact word "ibeka X phambili" ("puts X forward" / "prioritizes
+X") -- both fully correct, but the second is markedly shorter and was directly responsible for this
+same segment landing meaningfully closer to its real window on the calls that used it. When you
+genuinely know of two (or more) equally natural, equally correct ways to express the same English
+content, actively prefer whichever is shortest in real spoken syllables -- do not treat this as a
+coin-flip stylistic choice once you already know a shorter, equally authentic option exists; this is
+exactly what the target_syllables budget above is asking you to do, made explicit as its own habit
+rather than left to chance.
 
 You are RETELLING this content, not mirroring the original speaker's own delivery -- confirmed by
 real analysis (2026-09-03) that the English source itself often speeds up noticeably through a
