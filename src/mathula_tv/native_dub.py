@@ -130,8 +130,8 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v8-speaker-seriousness-mode"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v33-cross-sentence-laundry-list"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v9-tighten-ladder-survivors"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v34-tighten-ladder-survivors"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1282,7 +1282,11 @@ lightest-cut-first. Every candidate must still be a complete, natural, grammatic
 a fragment, and every fact/name/number/date/negation kept in it must remain exactly as accurate as
 the full version -- only clauses that genuinely don't serve the sentence's real point may be
 dropped. Return an empty shortened_candidates list only when every clause in this unit is
-genuinely essential; do not return a candidate that is identical to zulu_text.
+genuinely essential; do not return a candidate that is identical to zulu_text. Genuinely re-compose
+the SURVIVING clauses' own wording for economy in every candidate too, not just verbatim reuse minus
+the dropped clause -- a single clause is a coarse unit of savings, and tightening the survivors is
+what makes an intermediate-sized cut possible instead of only "keep everything" or "lose a whole
+clause's worth."
 
 If zulu_text used a formal/native rendering for a modern concept noun that also has a shorter,
 equally correct code-switched form (see the register guidance above, e.g. "ukucwasa ngokobuhlanga"
@@ -1651,7 +1655,17 @@ Zulu restatements built directly from that ranking, each naming exactly which cl
 (dropped_clause_ids) and providing a FRESH, natural, grammatically complete isizulu_text for the
 clauses that remain -- never assembled by literally deleting words from the full isizulu_text and
 leaving the seam unrepaired, and never a candidate identical or near-identical to the full
-isizulu_text. To avoid any ambiguity about direction: rank 1 means MOST ESSENTIAL, and a BIGGER rank
+isizulu_text. "Fresh" means genuinely re-composed for economy, not the full isizulu_text with one
+clause's own sentence lifted out verbatim: apply the SAME concision judgment you already use for the
+full translation (a tighter connective, no restating an already-established referent, no padding)
+to whatever clauses SURVIVE in this rung too, not just to the one being cut. This matters because a
+single dropped clause is a coarse, lumpy unit of savings -- confirmed real case: a segment needing to
+trim only a few real seconds found its single available clause-drop saved far MORE than needed,
+overshooting past a good fit into a new problem (noticeably too short) with nothing in between,
+because the survivors were re-used verbatim instead of being tightened too. Genuinely re-composing
+the survivors' own phrasing at each rung is what makes intermediate savings sizes possible instead of
+only "keep everything" or "lose a whole clause's worth" as the sole two options. To avoid any
+ambiguity about direction: rank 1 means MOST ESSENTIAL, and a BIGGER rank
 NUMBER means MORE droppable (rank 3 is more droppable than rank 2, which is more droppable than rank
 1). Build the ladder starting from the clause with the BIGGEST rank number (the single most
 droppable one): your first candidate drops ONLY that one clause; if a second candidate is warranted,
