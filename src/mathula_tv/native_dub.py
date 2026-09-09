@@ -13077,7 +13077,10 @@ def _trim_by_fact_priority(
             )
         else:
             _emit_progress(
-                progress, f"[native candidate pool] Fact-priority trim for {gid} did not improve on the original.",
+                progress,
+                f"[native candidate pool] Fact-priority trim for {gid} did not improve on the original "
+                f"({baseline_required_speed:.1f}% baseline vs {candidate_required_speed:.1f}% for the best "
+                f"attempt, {candidate.get('candidate_id')}: {candidate.get('spoken_text')!r}).",
             )
 
     return updated_winners, usage_totals, triggered_group_ids
@@ -13416,7 +13419,10 @@ def _compress_protected_content_last_resort(
         else:
             _emit_progress(
                 progress,
-                f"[native candidate pool] Last-resort compression for {gid} did not improve on the original.",
+                f"[native candidate pool] Last-resort compression for {gid} did not improve on the original "
+                f"({baseline_required_speed:.1f}% baseline vs {candidate_required_speed:.1f}% for the attempt, "
+                f"touched: {'; '.join(candidate.get('omitted_items') or []) or 'nothing protected, steps 2-4 sufficed'}"
+                f": {candidate.get('spoken_text')!r}).",
             )
 
     return updated_winners, usage_totals
