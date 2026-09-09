@@ -130,8 +130,8 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v9-tighten-ladder-survivors"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v34-tighten-ladder-survivors"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v10-ladder-syllable-target"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v35-ladder-syllable-target"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1288,6 +1288,13 @@ the dropped clause -- a single clause is a coarse unit of savings, and tightenin
 what makes an intermediate-sized cut possible instead of only "keep everything" or "lose a whole
 clause's worth."
 
+When this unit carries target_syllables/min_syllables/max_syllables (this unit's own real window's
+syllable budget), use that real number to judge each rung instead of guessing blind: stop adding
+deeper rungs once one already lands comfortably within min_syllables..max_syllables, and if even your
+lightest rung (one clause dropped) would land well under min_syllables, re-compose that rung's
+survivors less aggressively rather than cutting hard AND tightening hard at once, so it has a real
+chance of landing inside the budget instead of overshooting the correction into a new problem.
+
 If zulu_text used a formal/native rendering for a modern concept noun that also has a shorter,
 equally correct code-switched form (see the register guidance above, e.g. "ukucwasa ngokobuhlanga"
 vs "i-racism"), include ONE shortened_candidates entry (dropped_clause_ids may be empty) that
@@ -1677,6 +1684,19 @@ still survives in that same candidate. Since real ranking is now required above,
 shortened_candidates list is correct ONLY when literally every clause you enumerated is rank 1 (a
 short, fact-dense segment with nothing below that tier) -- it must never be the answer just because
 ranking felt unnecessary.
+
+Use this window's own target_syllables/min_syllables/max_syllables (the same real budget described
+above for the natural retelling) to judge each rung too, not just the natural translation -- you
+already know roughly how many syllables the full window's content takes and roughly how many the
+window can actually hold, so use that real gap to gauge how deep the ladder genuinely needs to go,
+instead of guessing blind. Estimate each rung's own rough syllable count as you write it: stop adding
+deeper rungs once one already lands comfortably within min_syllables..max_syllables -- a rung that
+already fits the budget makes a much deeper cut unnecessary, and offering one anyway only risks
+losing more content than the window actually required. Conversely, if even your lightest rung (one
+clause dropped) would land WELL under min_syllables, that single clause is already worth more than
+this window needs to shed -- re-compose that rung's surviving clauses less aggressively (closer to
+their natural phrasing) rather than cutting hard AND retelling tightly at the same time, so the rung
+has a real chance of landing inside the budget instead of overshooting the correction entirely.
 
 RESTRUCTURE-ONLY CANDIDATE, a distinct kind of shortened_candidates entry from every rung of the
 ladder above: when a segment's own isizulu_text is CONVOLUTED in construction even though every one
@@ -11568,15 +11588,22 @@ def _request_candidate_translation_batch(
     glossary: Mapping[str, Any],
     context_ledger: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
-    """units: [{"unit_id", "english_text", "preceding_english"?, "reference_vocabulary"?}, ...].
+    """units: [{"unit_id", "english_text", "preceding_english"?, "reference_vocabulary"?,
+    "target_syllables"?, "min_syllables"?, "max_syllables"?}, ...].
     "preceding_english" is optional per-unit, real grounding (not a described
     pattern) for a sentence whose correct translation depends on the
     immediately preceding sentence's content (elliptical denials, anaphora).
     "reference_vocabulary" is an optional {english_word: [isiZulu options]}
     hint from a general-purpose bilingual lexicon (see zulu_lexicon.py) --
-    supplementary, never authoritative; see CANDIDATE_TRANSLATE_SYSTEM_PROMPT's
-    own rules for how both may be used. Identity mismatch is fatal: this feeds
-    a deterministic downstream pipeline, not a best-effort audit.
+    supplementary, never authoritative. "target_syllables"/"min_syllables"/
+    "max_syllables" describe this unit's OWN real window's syllable budget
+    (see _rolling_syllable_budget) -- real user direction, 2026-09-10: give
+    the shortened_candidates ladder here the same syllable guidance the
+    sibling turn-block prompt already gives its own ladder, since a
+    fallback-translated sentence's ladder rungs had no numeric target to
+    judge how deep to cut. See CANDIDATE_TRANSLATE_SYSTEM_PROMPT's own
+    rules for how all of these may be used. Identity mismatch is fatal:
+    this feeds a deterministic downstream pipeline, not a best-effort audit.
 
     Returns {unit_id: {"zulu_text": str, "shortened_candidates": [...]}}.
     Real gap found on job fb3d08b63fed4d90922b08f7e325b906, 2026-09-07: this
@@ -11625,6 +11652,15 @@ def _request_candidate_translation_batch(
                     **(
                         {"reference_vocabulary": dict(item["reference_vocabulary"])}
                         if item.get("reference_vocabulary")
+                        else {}
+                    ),
+                    **(
+                        {
+                            "target_syllables": int(item["target_syllables"]),
+                            "min_syllables": int(item["min_syllables"]),
+                            "max_syllables": int(item["max_syllables"]),
+                        }
+                        if item.get("target_syllables") is not None
                         else {}
                     ),
                 }
@@ -12279,6 +12315,7 @@ def _translate_turn_blocks_via_grok(
             provider=provider, groups=fallback_groups, natural_english_by_group=natural_english_by_group,
             glossary=glossary, context_ledger=context_ledger, workers=workers, progress=progress,
             preceding_english_by_group_id=preceding_english_by_group_id, modes_by_speaker=modes_by_speaker,
+            preferred_raw_speed_percent=preferred_raw_speed_percent,
         )
         for key in usage_totals:
             usage_totals[key] += fallback_usage.get(key, 0)
@@ -12333,6 +12370,7 @@ def _translate_natural_via_grok(
     progress: Callable[[str], None] | None = None,
     preceding_english_by_group_id: Mapping[str, str] | None = None,
     modes_by_speaker: Mapping[str, str] | None = None,
+    preferred_raw_speed_percent: int = DEFAULT_PREFERRED_RAW_SPEED_PERCENT,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
     """Translate each sentence's ONE natural (filler-stripped) English text through
     Grok, in parallel across sentence batches -- no cross-unit dependency (the
@@ -12363,7 +12401,29 @@ def _translate_natural_via_grok(
     group's own speaker_id and sent as every unit's speaker_seriousness_mode;
     a speaker missing from the mapping (or the mapping itself being None)
     defaults to _SPEAKER_SERIOUSNESS_MODE_DEFAULT, the strictest tier.
+
+    Each unit also carries its own target_syllables/min_syllables/
+    max_syllables, computed from ITS OWN real window via the same
+    _rolling_syllable_budget machinery _payload_window already feeds the
+    primary turn-block translation call -- real user direction, 2026-09-10:
+    the shortened_candidates ladder had no syllable guidance at all, unlike
+    the sibling turn-block prompt, which is part of why a fallback-
+    translated sentence's own ladder rungs so often overshot the correction.
     """
+    def _unit_syllable_budget(group: Mapping[str, Any]) -> dict[str, int]:
+        budget = _rolling_syllable_budget(
+            {"start_ms": 0, "end_ms": int(group["source_end_ms"]) - int(group["start_ms"])},
+            preferred_raw_speed_percent=preferred_raw_speed_percent,
+            content_syllables_per_second=DEFAULT_ZULU_CONTENT_SYLLABLES_PER_SECOND,
+            azure_utterance_overhead_ms=DEFAULT_AZURE_UTTERANCE_OVERHEAD_MS,
+            tolerance_percent=DEFAULT_SYLLABLE_TOLERANCE_PERCENT,
+        )
+        return {
+            "target_syllables": int(budget["target_syllables"]),
+            "min_syllables": int(budget["min_syllables"]),
+            "max_syllables": int(budget["max_syllables"]),
+        }
+
     units = [
         {
             "unit_id": str(group["group_id"]),
@@ -12379,6 +12439,7 @@ def _translate_natural_via_grok(
             "reference_vocabulary": zulu_lexicon.relevant_entries(
                 natural_english_by_group[str(group["group_id"])],
             ),
+            **_unit_syllable_budget(group),
         }
         for index, group in enumerate(groups)
     ]
@@ -14419,7 +14480,7 @@ def build_candidate_pool(
         grok_candidate_by_group, grok_usage = _translate_natural_via_grok(
             provider=provider, groups=groups, natural_english_by_group=natural_english_by_group,
             glossary=glossary, context_ledger=context_ledger, workers=candidate_pool_workers, progress=progress,
-            modes_by_speaker=modes_by_speaker,
+            modes_by_speaker=modes_by_speaker, preferred_raw_speed_percent=int(preferred_raw_speed_percent),
         )
         # A copy, not a mutation of the caller's own group dicts -- carries
         # shortened_candidates/clauses through to _trim_by_fact_priority
