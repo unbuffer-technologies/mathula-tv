@@ -59,15 +59,26 @@ class _FakeTurnBlockProvider:
     def __init__(
         self, *, responses: dict[str, list[dict]] | None = None,
         fallback_extra: dict[str, dict] | None = None,
+        raise_for_windows: set[str] | None = None,
     ):
         self.config = SimpleNamespace(max_output_tokens=8192)
         self._responses = responses or {}
         self._fallback_extra = fallback_extra or {}
+        self._raise_for_windows = raise_for_windows or set()
         self.calls: list[str] = []
 
     def complete_json(self, *, operation, system_prompt, payload, schema, max_output_tokens=None):
         self.calls.append(operation)
         if operation == "native_turn_block_translate_batch":
+            if self._raise_for_windows.intersection(w["window_id"] for w in payload["windows"]):
+                # Real failure mode, not hypothetical: complete_json itself
+                # raises AIInvalidStructuredOutput (a PipelineError, not a
+                # ValueError) when a window's real content genuinely exceeds a
+                # schema cap (e.g. an 18-clause merged block against the
+                # 16-clause maxItems limit) and every JSON-only repair attempt
+                # returns the same oversized shape.
+                from mathula_tv.errors import AIInvalidStructuredOutput
+                raise AIInvalidStructuredOutput("simulated schema-exhausted repair failure")
             windows_response = []
             for w in payload["windows"]:
                 window_id = w["window_id"]
@@ -321,6 +332,32 @@ def test_a_window_returning_more_than_one_segment_falls_back():
             {"start_index": 2, "end_index": 2, "isizulu_text": "Ngiyabonga.", "clauses": [_clause("c1", "Thank you.")]},
         ],
     })
+    block_groups, candidate_by_group, _usage = _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+    )
+    assert [b["group_id"] for b in block_groups] == ["p1", "p2"]
+    assert candidate_by_group["p1"]["spoken_text"] == "Fallback Zulu for p1."
+    assert candidate_by_group["p2"]["spoken_text"] == "Fallback Zulu for p2."
+    assert "native_candidate_translate_batch" in provider.calls
+
+
+# Real production crash found on job 57b20602e76a46c08f0f91453e85de0d,
+# 2026-09-09: a genuinely dense 8-sentence merged window produced 18 real
+# clauses, exceeding the schema's maxItems=16 cap on _turn_block_translate_
+# schema's clauses array. complete_json's own exhausted-repair path raises
+# AIInvalidStructuredOutput (a PipelineError), not a ValueError -- but
+# _run_translate_batches' per-future catch was narrowly `except ValueError`,
+# so this escaped uncaught and crashed the entire native-translate process
+# instead of falling back to independent per-sentence translation for just
+# this window's members, as every other structural failure already does.
+def test_a_window_whose_batch_call_raises_falls_back_instead_of_crashing():
+    groups = [
+        _group("p1", "Good morning.", start_ms=0, span_ms=1000),
+        _group("p2", "Thank you.", start_ms=1000, span_ms=1000),
+    ]
+    turns = _build_speaker_turns(groups)
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    provider = _FakeTurnBlockProvider(raise_for_windows={"p1"})
     block_groups, candidate_by_group, _usage = _translate_turn_blocks_via_grok(
         provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
     )

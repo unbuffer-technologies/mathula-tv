@@ -12257,7 +12257,17 @@ def _translate_turn_blocks_via_grok(
                 payload_windows = futures[future]
                 try:
                     result, usage = future.result()
-                except ValueError as exc:
+                except Exception as exc:  # noqa: BLE001 - a window's failure must degrade, never crash the job
+                    # ValueError is this module's own identity-mismatch signal
+                    # (raised after a schema-valid response came back with the
+                    # wrong window_ids); complete_json itself can also raise
+                    # AIInvalidStructuredOutput when a window's real content is
+                    # too dense for the schema (e.g. a genuinely 18-clause
+                    # merged block against the 16-clause cap) and every
+                    # JSON-only repair attempt returns the same oversized shape.
+                    # A narrower except ValueError here once let exactly that
+                    # case crash the whole job instead of falling back to
+                    # independent per-sentence translation for this window.
                     _emit_progress(progress, f"[native candidate pool] Turn block translate batch failed: {exc}")
                     continue
                 for key in usage_totals:
