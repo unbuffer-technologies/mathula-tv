@@ -1521,6 +1521,7 @@ def main(argv: list[str] | None = None) -> int:
                 with download_youtube_video(
                     args.video,
                     max_duration_seconds=maximum_minutes * 60.0,
+                    cookies_file=settings.youtube_cookies_file or None,
                 ) as download:
                     print(
                         f"[submit] Download complete: {download.path.name} "

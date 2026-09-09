@@ -112,6 +112,12 @@ class Settings:
     # enable_sdk_group_synthesis (a different, still-unvalidated mechanism for a
     # different granularity) so each can be rolled out/validated separately.
     enable_turn_group_synthesis: bool = False
+    # Real yt-dlp defect confirmed 2026-09-09: some YouTube videos return
+    # LOGIN_REQUIRED to every player client (independent of the bgutil PO-token
+    # provider, which handles the generic bot-check but not this gate) even
+    # though the video is genuinely public. A real browser cookies.txt is the
+    # only confirmed fix; empty means submit yt-dlp calls without --cookies.
+    youtube_cookies_file: str = ""
 
     def safe_snapshot(self) -> dict:
         legacy_keys = {
@@ -307,6 +313,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
         pyannote_enabled=os.getenv("MATHULA_TV_ENABLE_PYANNOTE_DIAGNOSTIC", "0") == "1",
         enable_sdk_group_synthesis=os.getenv("MATHULA_TV_ENABLE_SDK_GROUP_SYNTHESIS", "0") == "1",
         enable_turn_group_synthesis=os.getenv("MATHULA_TV_ENABLE_TURN_GROUP_SYNTHESIS", "0") == "1",
+        youtube_cookies_file=os.getenv("MATHULA_TV_YOUTUBE_COOKIES_FILE", "").strip(),
         max_clean_unit_wer=float(os.getenv("MATHULA_TV_MAX_CLEAN_UNIT_WER", "0.35")),
         max_openvoice_wer_degradation=float(os.getenv("MATHULA_TV_MAX_OPENVOICE_WER_DEGRADATION", "0.10")),
         max_final_mix_wer_degradation=float(os.getenv("MATHULA_TV_MAX_FINAL_MIX_WER_DEGRADATION", "0.15")),

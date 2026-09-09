@@ -206,7 +206,13 @@ def _run_live(command: Sequence[str], *, purpose: str) -> None:
         raise YouTubeIngestionError(f"YouTube {purpose} failed: {detail[-4000:]}")
 
 
-def _read_metadata(url: str) -> dict[str, Any]:
+def _cookies_args(cookies_file: Path | None) -> list[str]:
+    if cookies_file is None:
+        return []
+    return ["--cookies", str(cookies_file)]
+
+
+def _read_metadata(url: str, *, cookies_file: Path | None = None) -> dict[str, Any]:
     result = _run(
         [
             *_yt_dlp_command(),
@@ -214,6 +220,7 @@ def _read_metadata(url: str) -> dict[str, Any]:
             "--no-warnings",
             "--skip-download",
             "--dump-single-json",
+            *_cookies_args(cookies_file),
             url,
         ],
         purpose="metadata lookup",
@@ -315,7 +322,7 @@ def _resolve_downloaded_media(directory: Path, reported_paths: Sequence[Path]) -
     return actual[0]
 
 
-def _download(url: str, directory: Path) -> Path:
+def _download(url: str, directory: Path, *, cookies_file: Path | None = None) -> Path:
     # Keep the temporary filename independent of the YouTube title.  This avoids
     # Windows filename sanitization/path-length differences and makes the final
     # output predictable enough to recover from stale after_move paths.
@@ -334,6 +341,7 @@ def _download(url: str, directory: Path) -> Path:
             "mp4",
             "--output",
             output_template,
+            *_cookies_args(cookies_file),
             url,
         ],
         purpose="download",
@@ -344,24 +352,35 @@ def _download(url: str, directory: Path) -> Path:
     return _resolve_downloaded_media(directory, ())
 
 
+def _resolve_cookies_file(cookies_file: str | Path | None) -> Path | None:
+    if not cookies_file:
+        return None
+    resolved = Path(cookies_file).expanduser()
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
 @contextmanager
 def download_youtube_video(
     url: str,
     *,
     max_duration_seconds: float | None = None,
+    cookies_file: str | Path | None = None,
 ) -> Iterator[YouTubeDownload]:
     requested_url = str(url).strip()
     if not is_youtube_url(requested_url):
         raise YouTubeIngestionError(f"Not a supported YouTube URL: {requested_url}")
 
-    metadata = _read_metadata(requested_url)
+    resolved_cookies_file = _resolve_cookies_file(cookies_file)
+    metadata = _read_metadata(requested_url, cookies_file=resolved_cookies_file)
     video_id, title, duration, webpage_url = _validate_metadata(
         metadata,
         max_duration_seconds=max_duration_seconds,
     )
 
     with tempfile.TemporaryDirectory(prefix="mathula-youtube-") as temporary_dir:
-        path = _download(webpage_url, Path(temporary_dir))
+        path = _download(webpage_url, Path(temporary_dir), cookies_file=resolved_cookies_file)
         yield YouTubeDownload(
             path=path,
             requested_url=requested_url,

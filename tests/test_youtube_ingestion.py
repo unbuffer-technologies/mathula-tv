@@ -19,7 +19,7 @@ def test_rejects_video_above_configured_duration(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         module,
         "_read_metadata",
-        lambda _url: {
+        lambda _url, **_kwargs: {
             "id": "abc123",
             "title": "Long video",
             "duration": 601,
@@ -41,7 +41,7 @@ def test_download_context_returns_manifest_and_cleans_temp(
     monkeypatch.setattr(
         module,
         "_read_metadata",
-        lambda _url: {
+        lambda _url, **_kwargs: {
             "id": "56Jli3Rr-yU",
             "title": "Madlanga Commission testimony",
             "duration": 560.618,
@@ -52,7 +52,7 @@ def test_download_context_returns_manifest_and_cleans_temp(
         },
     )
 
-    def fake_download(_url: str, directory: Path) -> Path:
+    def fake_download(_url: str, directory: Path, **_kwargs) -> Path:
         path = directory / "Madlanga Commission testimony [56Jli3Rr-yU].mp4"
         path.write_bytes(b"fake-media")
         return path
@@ -78,7 +78,7 @@ def test_rejects_live_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         module,
         "_read_metadata",
-        lambda _url: {
+        lambda _url, **_kwargs: {
             "id": "live123",
             "title": "Live hearing",
             "duration": 300,
