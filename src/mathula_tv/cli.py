@@ -923,6 +923,16 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     native_translate.add_argument(
+        "--skip-speaker-seriousness-mode",
+        action="store_true",
+        help=(
+            "Diagnostic only (--candidate-pool): skip the per-speaker seriousness-mode "
+            "classification (real cost) -- every speaker defaults to 'cross_examination', the "
+            "strictest tier, so the parallel-list-item compaction exception never applies to "
+            "anyone."
+        ),
+    )
+    native_translate.add_argument(
         "--json",
         "--json-output",
         dest="json_output",
@@ -1795,6 +1805,7 @@ def main(argv: list[str] | None = None) -> int:
                     skip_turn_rebalance=bool(args.skip_turn_rebalance),
                     skip_turn_block_translation=bool(args.skip_turn_block_translation),
                     skip_pronunciation_research=bool(args.skip_pronunciation_research),
+                    skip_speaker_seriousness_mode=bool(args.skip_speaker_seriousness_mode),
                     progress=progress,
                 )
                 job.media["native_candidate_pool"] = str(

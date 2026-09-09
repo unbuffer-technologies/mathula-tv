@@ -130,8 +130,8 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v7-code-switch-shortened-candidate"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v31-droppable-parallel-list-items"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v8-speaker-seriousness-mode"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v32-speaker-seriousness-mode"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1266,6 +1266,15 @@ most essential. A clause of hesitation, self-correction, purely scene-setting/de
 adds no new fact ranks more droppable. Epistemic hedges ("maybe", "I think", "allegedly",
 "possibly") are NOT droppable filler and must always rank essential.
 
+The unit also carries speaker_seriousness_mode -- "cross_examination" (a witness/testifier whose
+specific account of past events/chronology is being scrutinized: apply the "almost always essential"
+rule above at its strictest, with no exception), "political_speech" (a politician/official making
+public statements or promises: one specific-sounding promise or figure that is really just ONE
+illustrative example among several comparable ones in this unit's own content may rank lower, unlike
+a genuinely singular, load-bearing claim), or "general_news" (a reporter's own narration or an
+ordinary person's own opinion/experience: apply the ordinary rules above with no extra restriction).
+When genuinely uncertain which case a clause falls into, rank it essential.
+
 Once ranked, return shortened_candidates: 0 to 4 complete alternative isiZulu renderings of the
 WHOLE unit, each naming which clause_id(s) it dropped (dropped_clause_ids -- may be empty for a
 restructure-only candidate that keeps every clause but reworks the wording more tightly), ordered
@@ -1677,6 +1686,16 @@ candidate's REAL spoken duration and picks whichever one actually fits: the code
 objective, measured fact, not something your own stylistic preference should gate. Skip this only
 when no such modern-concept-noun alternative genuinely applies to this segment.
 
+SPEAKER SERIOUSNESS MODE: every window also carries speaker_seriousness_mode, classified once per
+speaker for the whole programme -- "cross_examination" (a witness/testifier whose specific account
+of past events, dates, and chronology is being scrutinized -- every fact may independently matter to
+a later dispute about what really happened), "political_speech" (a politician/official/candidate
+making public statements, promises, or campaign claims -- often dense with specific-sounding facts,
+but characteristically full of aspirational commitments rather than independently verified claims of
+past fact), or "general_news" (a reporter's own narration, a commentator, or an ordinary person's own
+opinion/experience -- not establishing a disputed chronology). This value gates THE SECOND EXCEPTION
+below -- read it before applying that exception.
+
 HARD RULE, with exactly TWO narrow, deliberate exceptions below: dropped_clause_ids must NEVER
 include a clause carrying a number, a date, a direct quotation, an attribution (who said or did
 something), or the CORE PROPOSITION of any claim or denial -- who claimed or denied what, and (for
@@ -1704,18 +1723,22 @@ under investigation or discussion (e.g. IDAC, NPA, or any body whose conduct is 
 stays fully protected) -- when there is real doubt about whether a name is purely incidental, keep
 it protected.
 
-THE SECOND EXCEPTION: a single item within a LONGER PARALLEL LIST of three or more comparable claims,
-promises, or achievements (e.g. one bullet in a party's multi-point manifesto, one item in a list of
-stated priorities or accomplishments) is NOT automatically protected merely because it names a
-specific action or promise -- rank it like any other content under GOAL-RELEVANCE/VIRALITY (see the
-GRANULARITY and VIRALITY guidance above), and it may be dropped, ONE OR SEVERAL such items at a time
-if genuinely needed to fit, PROVIDED the list's own general point still comes through with what
+THE SECOND EXCEPTION -- ONLY WHEN speaker_seriousness_mode is "political_speech" or "general_news",
+NEVER when it is "cross_examination": a single item within a LONGER PARALLEL LIST of three or more
+comparable claims, promises, or achievements (e.g. one bullet in a party's multi-point manifesto, one
+item in a list of stated priorities or accomplishments) is NOT automatically protected merely because
+it names a specific action or promise -- rank it like any other content under GOAL-RELEVANCE/VIRALITY
+(see the GRANULARITY and VIRALITY guidance above), and it may be dropped, ONE OR SEVERAL such items at
+a time if genuinely needed to fit, PROVIDED the list's own general point still comes through with what
 remains. This is different from a load-bearing, singular claim/denial (e.g. "Lincoln told the witness
 Mogotsi was close to the minister, which is a lie") where the ENTIRE point of the segment IS that one
 claim -- an item never qualifies for this exception when it is itself the segment's own
-communicative_goal rather than one illustrative example among several. When there is real doubt about
-whether an item is a genuinely comparable, illustrative list member versus the segment's actual point,
-keep it protected.
+communicative_goal rather than one illustrative example among several. When speaker_seriousness_mode
+is "cross_examination", this exception does not apply at all -- even a seemingly parallel, listed
+allegation stays fully protected, since a witness's own itemized account is exactly the case where one
+"minor" item can independently matter to the real chronology. When there is real doubt about whether
+an item is a genuinely comparable, illustrative list member versus the segment's actual point, keep it
+protected.
 
 Return every requested window_id exactly once, with exactly one segment covering its whole sentence
 range as described above. No tools or web search. Return JSON only."""
@@ -2205,6 +2228,7 @@ class NativeDubPaths:
     zulu_glossary: Path
     english_variants: Path
     pronunciation_research: Path
+    speaker_seriousness_modes: Path
     candidate_pool: Path
     web_overrides: Path
     referent_audit: Path
@@ -2237,6 +2261,7 @@ def native_dub_paths(job_root: Path) -> NativeDubPaths:
         zulu_glossary=root / "zulu_terminology_glossary.json",
         english_variants=root / "english_variant_ladders.json",
         pronunciation_research=root / "pronunciation_research.json",
+        speaker_seriousness_modes=root / "speaker_seriousness_modes.json",
         candidate_pool=root / "pass2_candidate_pool.json",
         web_overrides=root / "manual_web_overrides.json",
         referent_audit=root / "referent_audit.json",
@@ -10885,6 +10910,247 @@ def _save_native_pronunciation_cache(job_root: Path, cache: Mapping[str, Mapping
         pass  # never a hard failure -- losing this cache only costs a future re-research, not correctness
 
 
+# --- Speaker seriousness mode: how aggressively a speaker's content may be compacted ------
+#
+# Real user direction, 2026-09-10: "the system may need to have 3 modes of seriousness:
+# Mode 1: cross examination, where facts and chronology is important. Mode 2: political
+# speech, politicians mention a lot of facts, but they mostly make a lot of empty
+# promises. Mode 3: general news speech, where can have high flexibility with
+# compacting." Confirmed by direct investigation this session: native_phrase_0006/0024
+# (a politician's campaign promises) repeatedly resisted compaction as hard as a
+# witness's sworn testimony would -- because the HARD RULE's "claim/denial core
+# proposition" protection has always applied uniformly, with no notion that a specific
+# policy promise in a manifesto carries different stakes than a witness's specific
+# allegation under cross-examination. Classified once per job, per speaker_id (not
+# per-segment -- a speaker's role rarely changes mid-clip, and this keeps the cost to
+# one small batched call instead of a new per-window classification burden).
+
+SPEAKER_SERIOUSNESS_MODE_PROMPT_VERSION = "native-speaker-seriousness-mode-v1"
+
+SPEAKER_SERIOUSNESS_MODE_SYSTEM_PROMPT = r"""Classify each speaker in this transcript by how much
+compaction risk their content genuinely carries, using a short sample of their own actual lines.
+Return exactly one of three modes per speaker:
+
+- "cross_examination": a witness, testifier, or subject of an investigation/hearing being
+  questioned, or anyone whose specific account of past events, dates, and chronology is being
+  scrutinized for accuracy -- sworn testimony, cross-examination, an interview specifically
+  establishing what happened and when. Every fact this speaker states may independently matter to a
+  later dispute about what really occurred.
+- "political_speech": a politician, party official, or candidate making public statements,
+  promises, policy positions, or campaign claims -- a speech, a manifesto reading, a rally remark, a
+  campaign-trail interview. This speech is often DENSE with specific-sounding facts and figures, but
+  characteristically full of aspirational commitments and promises rather than independently
+  verified claims of past fact -- one promise in a longer list of comparable promises rarely carries
+  the same individual stakes as a witness's specific sworn allegation.
+- "general_news": a reporter's own narration, a general commentator, or an ordinary person
+  interviewed about their own opinion, reaction, or experience in a way that is not specifically
+  establishing a disputed chronology of past events. Default here whenever neither of the above
+  clearly applies.
+
+For each speaker, return mode and a short reasoning (one sentence) citing what in their actual
+sample lines justified that classification. When genuinely uncertain, prefer "cross_examination" --
+the strictest tier -- since under-protecting a witness's testimony is a real risk this
+classification exists to avoid, while over-protecting ordinary content only costs some otherwise-
+available compaction flexibility, never a real error.
+
+Return every requested speaker_id exactly once. No tools or web search. Return JSON only."""
+
+
+def _speaker_seriousness_mode_schema(expected_speaker_ids: Sequence[str]) -> dict[str, Any]:
+    requested_ids = [str(value) for value in expected_speaker_ids]
+    if len(set(requested_ids)) != len(requested_ids):
+        raise ValueError("Speaker seriousness mode schema received duplicate expected speaker IDs")
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["speakers"],
+        "properties": {
+            "speakers": {
+                "type": "array",
+                "minItems": len(requested_ids),
+                "maxItems": len(requested_ids),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["speaker_id", "mode", "reasoning"],
+                    "properties": {
+                        "speaker_id": {"type": "string", "enum": requested_ids},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["cross_examination", "political_speech", "general_news"],
+                        },
+                        "reasoning": {"type": "string", "minLength": 1},
+                    },
+                },
+            },
+        },
+    }
+
+
+_SPEAKER_SERIOUSNESS_MODE_MAX_LINES_PER_SPEAKER = 12
+_SPEAKER_SERIOUSNESS_MODE_DEFAULT = "cross_examination"
+
+
+def _speaker_seriousness_mode_samples(
+    segments: Sequence[Mapping[str, Any]], *, max_lines_per_speaker: int = _SPEAKER_SERIOUSNESS_MODE_MAX_LINES_PER_SPEAKER,
+) -> dict[str, list[str]]:
+    """Group each speaker's own real transcript lines (in order, capped per
+    speaker) -- a plain, deterministic, zero-cost grouping step so the
+    classification call spends its budget on judgment, not extraction.
+    """
+    samples: dict[str, list[str]] = {}
+    for segment in segments:
+        speaker_id = str(segment.get("speaker_id") or "").strip()
+        if not speaker_id:
+            continue
+        text = str(segment.get("restored_text") or segment.get("source_text") or "").strip()
+        if not text:
+            continue
+        bucket = samples.setdefault(speaker_id, [])
+        if len(bucket) < max_lines_per_speaker:
+            bucket.append(text)
+    return samples
+
+
+def _request_speaker_seriousness_mode_batch(
+    *, provider: FoundryGrokProvider, speaker_samples: Mapping[str, Sequence[str]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """speaker_samples: {speaker_id: [line, ...]}. Returns {speaker_id: {"mode",
+    "reasoning"}}. Identity mismatch on speaker_id is fatal (same convention as
+    every other candidate-translate-family function) -- the caller wraps this
+    in a try/except and degrades to the safe default on any failure, exactly
+    like _ensure_native_pronunciation_research's own provider-error handling.
+    """
+    expected_ids = [str(speaker_id) for speaker_id in speaker_samples]
+    response = provider.complete_json(
+        operation="native_speaker_seriousness_mode_batch",
+        system_prompt=SPEAKER_SERIOUSNESS_MODE_SYSTEM_PROMPT,
+        payload={
+            "speakers": [
+                {"speaker_id": str(speaker_id), "sample_lines": list(lines)}
+                for speaker_id, lines in speaker_samples.items()
+            ],
+        },
+        schema=_speaker_seriousness_mode_schema(expected_ids),
+        max_output_tokens=min(max(800, 200 * len(expected_ids)), 8192),
+    )
+    returned = list(response.data.get("speakers") or [])
+    expected_set = set(expected_ids)
+    by_id: dict[str, dict[str, Any]] = {}
+    duplicate_ids: list[str] = []
+    unknown_ids: list[str] = []
+    for item in returned:
+        speaker_id = str(item.get("speaker_id") or "")
+        if speaker_id in by_id:
+            duplicate_ids.append(speaker_id)
+            continue
+        if speaker_id not in expected_set:
+            unknown_ids.append(speaker_id)
+            continue
+        by_id[speaker_id] = {
+            "mode": str(item.get("mode") or _SPEAKER_SERIOUSNESS_MODE_DEFAULT),
+            "reasoning": str(item.get("reasoning") or "").strip(),
+        }
+
+    missing_ids = [speaker_id for speaker_id in expected_ids if speaker_id not in by_id]
+    if duplicate_ids or unknown_ids or missing_ids:
+        details = []
+        if missing_ids:
+            details.append("missing=" + ",".join(missing_ids))
+        if unknown_ids:
+            details.append("unknown=" + ",".join(unknown_ids))
+        if duplicate_ids:
+            details.append("duplicate=" + ",".join(duplicate_ids))
+        raise ValueError("Speaker seriousness mode batch identity mismatch: " + "; ".join(details))
+
+    usage = {
+        "input_tokens": int(response.input_tokens),
+        "output_tokens": int(response.output_tokens),
+        "attempts": int(response.attempts),
+    }
+    return by_id, usage
+
+
+def _ensure_speaker_seriousness_modes(
+    *,
+    job_root: Path,
+    provider: FoundryGrokProvider,
+    segments: Sequence[Mapping[str, Any]],
+    force: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[dict[str, str], dict[str, int]]:
+    """Classify every speaker in this job once (checksum-keyed cache, force
+    bypass, same pattern as _ensure_zulu_glossary/_ensure_native_pronunciation_
+    research). Never a hard failure: any provider error, or a job with no
+    speakers, degrades to _SPEAKER_SERIOUSNESS_MODE_DEFAULT ("cross_examination",
+    the strictest tier) for every speaker -- under-classifying toward stricter
+    is always safe (it only costs some otherwise-available compaction
+    flexibility), so a failure here must never silently unlock MORE
+    compaction than a successful classification would have.
+
+    Returns {speaker_id: mode} -- the reasoning field is written to the
+    cached artifact for auditability but not returned here, since callers
+    only need the mode to gate translation-prompt behavior.
+    """
+    paths = native_dub_paths(job_root)
+    samples = _speaker_seriousness_mode_samples(segments)
+    source_hash = _hash_payload({"samples": samples})
+    usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+
+    if paths.speaker_seriousness_modes.is_file() and not force:
+        cached = read_json(paths.speaker_seriousness_modes)
+        if cached.get("source_hash") == source_hash:
+            _emit_progress(progress, "[native candidate pool] Reusing cached speaker seriousness modes")
+            modes = {str(k): str(v) for k, v in (cached.get("modes") or {}).items()}
+            usage = cached.get("usage") if isinstance(cached.get("usage"), Mapping) else {}
+            for key in usage_totals:
+                usage_totals[key] = int(usage.get(key) or 0)
+            return modes, usage_totals
+
+    if not samples:
+        modes = {}
+        artifact = {
+            "schema_version": SPEAKER_SERIOUSNESS_MODE_PROMPT_VERSION, "source_hash": source_hash,
+            "status": "empty", "modes": modes, "reasoning": {}, "usage": usage_totals, "completed_at": utcnow(),
+        }
+        atomic_write_json(paths.speaker_seriousness_modes, artifact)
+        return modes, usage_totals
+
+    try:
+        by_speaker, usage = _request_speaker_seriousness_mode_batch(provider=provider, speaker_samples=samples)
+    except Exception as exc:
+        _emit_progress(
+            progress,
+            f"[native candidate pool] Speaker seriousness mode classification failed ({exc}) -- "
+            f"defaulting every speaker to '{_SPEAKER_SERIOUSNESS_MODE_DEFAULT}' (the strictest tier).",
+        )
+        modes = {speaker_id: _SPEAKER_SERIOUSNESS_MODE_DEFAULT for speaker_id in samples}
+        artifact = {
+            "schema_version": SPEAKER_SERIOUSNESS_MODE_PROMPT_VERSION, "source_hash": source_hash,
+            "status": "degraded", "modes": modes, "reasoning": {}, "usage": usage_totals, "completed_at": utcnow(),
+        }
+        atomic_write_json(paths.speaker_seriousness_modes, artifact)
+        return modes, usage_totals
+
+    for key in usage_totals:
+        usage_totals[key] += usage.get(key, 0)
+    modes = {speaker_id: entry["mode"] for speaker_id, entry in by_speaker.items()}
+    reasoning = {speaker_id: entry["reasoning"] for speaker_id, entry in by_speaker.items()}
+    for speaker_id, mode in modes.items():
+        _emit_progress(
+            progress,
+            f"[native candidate pool] Speaker {speaker_id} classified as '{mode}': "
+            f"{reasoning.get(speaker_id, '')}",
+        )
+    artifact = {
+        "schema_version": SPEAKER_SERIOUSNESS_MODE_PROMPT_VERSION, "source_hash": source_hash,
+        "status": "completed", "modes": modes, "reasoning": reasoning, "usage": usage_totals,
+        "completed_at": utcnow(),
+    }
+    atomic_write_json(paths.speaker_seriousness_modes, artifact)
+    return modes, usage_totals
+
+
 def _ensure_native_pronunciation_research(
     *,
     job_root: Path,
@@ -11306,6 +11572,9 @@ def _request_candidate_translation_batch(
             "units": [
                 {
                     "unit_id": str(item["unit_id"]), "english_text": str(item["english_text"]),
+                    "speaker_seriousness_mode": str(
+                        item.get("speaker_seriousness_mode") or _SPEAKER_SERIOUSNESS_MODE_DEFAULT
+                    ),
                     **(
                         {"preceding_english": str(item["preceding_english"])}
                         if item.get("preceding_english")
@@ -11466,9 +11735,9 @@ def _request_turn_block_translation_batch(
     context_ledger: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
     """windows: [{"window_id", "members": [{"index", "english_text"}, ...],
-    "preceding_english"?, "recent_turns_digest"?, "speaker_role"?,
-    "reference_vocabulary"?, "target_syllables"?, "min_syllables"?,
-    "max_syllables"?}, ...]. Returns {window_id: raw segments as returned --
+    "speaker_seriousness_mode"?, "preceding_english"?, "recent_turns_digest"?,
+    "speaker_role"?, "reference_vocabulary"?, "target_syllables"?,
+    "min_syllables"?, "max_syllables"?}, ...]. Returns {window_id: raw segments as returned --
     NOT yet checked for exact contiguous tiling, see
     _validate_turn_block_segments}. Identity mismatch on window_id is fatal
     (same convention as every other candidate-translate-family function);
@@ -11490,6 +11759,9 @@ def _request_turn_block_translation_batch(
                         {"index": int(m["index"]), "english_text": str(m["english_text"])}
                         for m in w["members"]
                     ],
+                    "speaker_seriousness_mode": str(
+                        w.get("speaker_seriousness_mode") or _SPEAKER_SERIOUSNESS_MODE_DEFAULT
+                    ),
                     **(
                         {"preceding_english": str(w["preceding_english"])}
                         if w.get("preceding_english") else {}
@@ -11762,6 +12034,7 @@ def _translate_turn_blocks_via_grok(
     natural_english_by_group: Mapping[str, str],
     glossary: Mapping[str, Any],
     context_ledger: Mapping[str, Any] | None = None,
+    modes_by_speaker: Mapping[str, str] | None = None,
     preferred_raw_speed_percent: int = DEFAULT_PREFERRED_RAW_SPEED_PERCENT,
     max_members_per_window: int = _TURN_BLOCK_TRANSLATE_MAX_MEMBERS,
     batch_size: int = DEFAULT_TURN_BLOCK_TRANSLATE_BATCH_SIZE,
@@ -11852,6 +12125,9 @@ def _translate_turn_blocks_via_grok(
             "recent_turns_digest": recent_turns_digest_by_group_id.get(member_ids[0], ""),
             "speaker_role": speaker_role_by_speaker_id.get(
                 str(groups_by_id[member_ids[0]]["speaker_id"]), "",
+            ),
+            "speaker_seriousness_mode": (modes_by_speaker or {}).get(
+                str(groups_by_id[member_ids[0]]["speaker_id"]), _SPEAKER_SERIOUSNESS_MODE_DEFAULT,
             ),
             "reference_vocabulary": zulu_lexicon.relevant_entries(combined_source_text),
             "target_syllables": syllable_budget["target_syllables"],
@@ -11960,7 +12236,7 @@ def _translate_turn_blocks_via_grok(
         fallback_candidates, fallback_usage = _translate_natural_via_grok(
             provider=provider, groups=fallback_groups, natural_english_by_group=natural_english_by_group,
             glossary=glossary, context_ledger=context_ledger, workers=workers, progress=progress,
-            preceding_english_by_group_id=preceding_english_by_group_id,
+            preceding_english_by_group_id=preceding_english_by_group_id, modes_by_speaker=modes_by_speaker,
         )
         for key in usage_totals:
             usage_totals[key] += fallback_usage.get(key, 0)
@@ -12014,6 +12290,7 @@ def _translate_natural_via_grok(
     workers: int = DEFAULT_CANDIDATE_POOL_WORKERS,
     progress: Callable[[str], None] | None = None,
     preceding_english_by_group_id: Mapping[str, str] | None = None,
+    modes_by_speaker: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
     """Translate each sentence's ONE natural (filler-stripped) English text through
     Grok, in parallel across sentence batches -- no cross-unit dependency (the
@@ -12038,11 +12315,20 @@ def _translate_natural_via_grok(
     wrong -- pass `preceding_english_by_group_id` (an explicit, global
     lookup keyed by group_id) to override it for exactly those callers;
     omitting it preserves today's behavior byte-for-byte.
+
+    `modes_by_speaker` (speaker_id -> "cross_examination"/"political_speech"/
+    "general_news", see _ensure_speaker_seriousness_modes) is looked up per
+    group's own speaker_id and sent as every unit's speaker_seriousness_mode;
+    a speaker missing from the mapping (or the mapping itself being None)
+    defaults to _SPEAKER_SERIOUSNESS_MODE_DEFAULT, the strictest tier.
     """
     units = [
         {
             "unit_id": str(group["group_id"]),
             "english_text": natural_english_by_group[str(group["group_id"])],
+            "speaker_seriousness_mode": (modes_by_speaker or {}).get(
+                str(group.get("speaker_id") or ""), _SPEAKER_SERIOUSNESS_MODE_DEFAULT,
+            ),
             "preceding_english": (
                 preceding_english_by_group_id.get(str(group["group_id"]), "")
                 if preceding_english_by_group_id is not None
@@ -13499,6 +13785,7 @@ def build_candidate_pool(
     skip_turn_block_translation: bool = False,
     skip_pronunciation_research: bool = False,
     skip_pronunciation_round_trip: bool = False,
+    skip_speaker_seriousness_mode: bool = False,
     stt_backend: AzureFastTranscriptionBackend | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -13603,6 +13890,15 @@ def build_candidate_pool(
     else:
         _emit_progress(progress, "[native candidate pool] Pronunciation research skipped (diagnostic mode).")
 
+    modes_by_speaker: dict[str, str] = {}
+    speaker_mode_usage = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+    if not skip_speaker_seriousness_mode:
+        modes_by_speaker, speaker_mode_usage = _ensure_speaker_seriousness_modes(
+            job_root=job_root, provider=provider, segments=segments_raw, force=force, progress=progress,
+        )
+    else:
+        _emit_progress(progress, "[native candidate pool] Speaker seriousness mode classification skipped (diagnostic mode).")
+
     # Project-level case-state context (working/case_state/master_case_state.json,
     # see master_case_context.py) is deliberately NOT folded into context_ledger
     # here (removed 2026-09-02, real cost incident): case_state_context could run
@@ -13639,6 +13935,8 @@ def build_candidate_pool(
         "skip_turn_rebalance": bool(skip_turn_rebalance),
         "skip_turn_block_translation": bool(skip_turn_block_translation),
         "skip_pronunciation_research": bool(skip_pronunciation_research),
+        "skip_speaker_seriousness_mode": bool(skip_speaker_seriousness_mode),
+        "speaker_seriousness_mode_prompt_version": SPEAKER_SERIOUSNESS_MODE_PROMPT_VERSION,
         # Deliberately excludes the glossary's own content -- see the plan's
         # Checkpointing section: a corrected glossary entry shouldn't discard
         # translation work. Phase 17's pronunciation research artifact content
@@ -13657,6 +13955,7 @@ def build_candidate_pool(
         grok_candidate_by_group, grok_usage = _translate_natural_via_grok(
             provider=provider, groups=groups, natural_english_by_group=natural_english_by_group,
             glossary=glossary, context_ledger=context_ledger, workers=candidate_pool_workers, progress=progress,
+            modes_by_speaker=modes_by_speaker,
         )
         # A copy, not a mutation of the caller's own group dicts -- carries
         # shortened_candidates/clauses through to _trim_by_fact_priority
@@ -13677,7 +13976,7 @@ def build_candidate_pool(
     else:
         block_groups, grok_candidate_by_group, grok_usage = _translate_turn_blocks_via_grok(
             provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english_by_group,
-            glossary=glossary, context_ledger=context_ledger,
+            glossary=glossary, context_ledger=context_ledger, modes_by_speaker=modes_by_speaker,
             preferred_raw_speed_percent=int(preferred_raw_speed_percent),
             workers=candidate_pool_workers, progress=progress,
         )
@@ -13792,7 +14091,7 @@ def build_candidate_pool(
 
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
     for usage in (
-        context_usage, glossary_usage, pronunciation_research_usage, grok_usage, trim_usage,
+        context_usage, glossary_usage, pronunciation_research_usage, speaker_mode_usage, grok_usage, trim_usage,
         last_resort_usage,
     ):
         for key in usage_totals:
@@ -13831,6 +14130,13 @@ def build_candidate_pool(
             # per-sentence fallback unit never identifies one).
             "communicative_goal": groups_by_id[group_id].get("communicative_goal"),
             "register_notes": groups_by_id[group_id].get("register_notes"),
+            # The seriousness mode actually applied to this block's own
+            # speaker at translation time (see _ensure_speaker_seriousness_
+            # modes) -- persisted so a human reviewing a compaction decision
+            # can see WHY the ranking treated a claim as droppable or not.
+            "speaker_seriousness_mode": modes_by_speaker.get(
+                str(groups_by_id[group_id].get("speaker_id") or ""), _SPEAKER_SERIOUSNESS_MODE_DEFAULT,
+            ),
             "shortened_candidates": list(groups_by_id[group_id].get("shortened_candidates") or []),
             "candidates": measured_by_group.get(group_id, []),
             "selected_candidate_id": winners[group_id]["candidate_id"] if group_id in winners else None,

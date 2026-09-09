@@ -97,6 +97,107 @@ class _FakeTurnBlockProvider:
         raise AssertionError(f"unexpected operation: {operation}")
 
 
+class _PayloadCapturingProvider:
+    """Captures the full payload of every call (not just the operation name,
+    unlike _FakeTurnBlockProvider below) -- used specifically to verify
+    speaker_seriousness_mode actually reaches the request, since that field
+    lives only in the payload, not in any response shape a canned fixture
+    would surface.
+    """
+
+    def __init__(self):
+        self.config = SimpleNamespace(max_output_tokens=8192)
+        self.calls: list[dict] = []
+
+    def complete_json(self, *, operation, system_prompt, payload, schema, max_output_tokens=None):
+        self.calls.append({"operation": operation, "payload": payload})
+        if operation == "native_turn_block_translate_batch":
+            windows_response = [
+                {
+                    "window_id": w["window_id"],
+                    "segments": [{
+                        "start_index": 1, "end_index": len(w["members"]),
+                        "isizulu_text": f"Zulu for {w['window_id']}.",
+                        "clauses": [_clause(f"c{i + 1}", m["english_text"]) for i, m in enumerate(w["members"])],
+                    }],
+                }
+                for w in payload["windows"]
+            ]
+            return SimpleNamespace(data={"windows": windows_response}, model="grok-test",
+                                    input_tokens=10, output_tokens=5, attempts=1)
+        if operation == "native_candidate_translate_batch":
+            translations = [
+                {"unit_id": u["unit_id"], "zulu_text": f"Fallback Zulu for {u['unit_id']}."}
+                for u in payload["units"]
+            ]
+            return SimpleNamespace(data={"translations": translations}, model="grok-test",
+                                    input_tokens=10, output_tokens=5, attempts=1)
+        raise AssertionError(f"unexpected operation: {operation}")
+
+
+def test_speaker_seriousness_mode_reaches_the_turn_block_payload():
+    # Real user direction, 2026-09-10: the three-mode system only works if
+    # the classified mode actually reaches the generation call for the
+    # window's own speaker -- confirmed here rather than assumed.
+    groups = [_group("p1", "We will build houses.", speaker_id="POLITICIAN", start_ms=0, span_ms=2000)]
+    turns = _build_speaker_turns(groups)
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    provider = _PayloadCapturingProvider()
+    _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+        modes_by_speaker={"POLITICIAN": "political_speech"},
+    )
+    turn_block_call = next(c for c in provider.calls if c["operation"] == "native_turn_block_translate_batch")
+    assert turn_block_call["payload"]["windows"][0]["speaker_seriousness_mode"] == "political_speech"
+
+
+def test_speaker_seriousness_mode_defaults_to_the_strictest_tier_when_unclassified():
+    groups = [_group("p1", "Something happened.", speaker_id="UNKNOWN_SPEAKER", start_ms=0, span_ms=2000)]
+    turns = _build_speaker_turns(groups)
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    provider = _PayloadCapturingProvider()
+    _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+        modes_by_speaker={"SOME_OTHER_SPEAKER": "general_news"},
+    )
+    turn_block_call = next(c for c in provider.calls if c["operation"] == "native_turn_block_translate_batch")
+    assert turn_block_call["payload"]["windows"][0]["speaker_seriousness_mode"] == "cross_examination"
+
+
+def test_speaker_seriousness_mode_reaches_the_fallback_payload():
+    # Two members forces the STRUCTURAL fallback path (each unit translated
+    # independently), which is a genuinely different call site than the
+    # turn-block path -- must carry the mode too, not just the primary path.
+    groups = [
+        _group("p1", "We will build houses.", speaker_id="POLITICIAN", start_ms=0, span_ms=1000),
+        _group("p2", "We will scrap all debt.", speaker_id="POLITICIAN", start_ms=1000, span_ms=1000),
+    ]
+    turns = _build_speaker_turns(groups)
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    provider = _PayloadCapturingProvider()
+
+    class _FailingWindowProvider(_PayloadCapturingProvider):
+        def complete_json(self, *, operation, system_prompt, payload, schema, max_output_tokens=None):
+            if operation == "native_turn_block_translate_batch":
+                self.calls.append({"operation": operation, "payload": payload})
+                return SimpleNamespace(data={"windows": []}, model="grok-test",
+                                        input_tokens=10, output_tokens=5, attempts=1)
+            return super().complete_json(
+                operation=operation, system_prompt=system_prompt, payload=payload,
+                schema=schema, max_output_tokens=max_output_tokens,
+            )
+
+    provider = _FailingWindowProvider()
+    _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+        modes_by_speaker={"POLITICIAN": "political_speech"},
+    )
+    fallback_call = next(c for c in provider.calls if c["operation"] == "native_candidate_translate_batch")
+    assert all(
+        unit["speaker_seriousness_mode"] == "political_speech" for unit in fallback_call["payload"]["units"]
+    )
+
+
 def test_a_merge_with_no_sentence_count_reduction_now_stays_merged():
     # The real native_phrase_0024/0025 case that the OLD guard wrongly
     # rejected (5 Zulu sentences is not fewer than 2... well, 2 here): nothing
