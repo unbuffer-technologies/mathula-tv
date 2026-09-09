@@ -337,6 +337,67 @@ def test_filter_safe_shortened_candidates_still_rejects_a_missing_literal_from_a
     assert safe == []
 
 
+def test_filter_safe_shortened_candidates_caps_a_literal_duplicated_by_clause_splitting():
+    # Real confirmed bug (job fb3d08b63fed4d90922b08f7e325b906, 2026-09-10):
+    # "24-hour clinics and hospitals" split into two separate clauses, each
+    # restating "24" to stay a complete, self-contained clause -- even
+    # though the TRUE source only says "24-hour" once, describing both
+    # together. A natural retelling correctly states it once too, but the
+    # naive clause-concatenation check demanded two occurrences and wrongly
+    # rejected an otherwise-correct candidate that only stated it once.
+    source_text = (
+        "The party wants mines to provide 24-hour clinics and hospitals, and address racism on farms. "
+        "Ofentse Setimo, SABC News, eMalahleni."
+    )
+    clauses = [
+        {"clause_id": "c1", "english_text": "The party wants mines to provide 24-hour clinics.", "rank": 1},
+        {"clause_id": "c2", "english_text": "The party wants mines to provide 24-hour hospitals.", "rank": 1},
+        {"clause_id": "c3", "english_text": "The party wants racism on farms to be addressed.", "rank": 2},
+        {"clause_id": "c4", "english_text": "Ofentse Setimo, SABC News, eMalahleni.", "rank": 5},
+    ]
+    candidates = [
+        {
+            "dropped_clause_ids": ["c4"],
+            # States "24" ONCE, covering both clinics and hospitals together --
+            # a correct, natural retelling, not a dropped literal.
+            "isizulu_text": (
+                "Iqembu lifuna izimayini zihlinzeke ngemitholampilo nezibhedlela ezisebenza amahora angu-24, "
+                "kuphinde kubhekwane nokucwasa ngokobuhlanga emapulazini."
+            ),
+        },
+    ]
+    safe = _filter_safe_shortened_candidates(candidates=candidates, source_text=source_text, clauses=clauses)
+    assert safe == candidates
+
+
+def test_filter_safe_shortened_candidates_still_rejects_a_literal_genuinely_dropped_despite_splitting():
+    # The other half: if the candidate drops "24" ENTIRELY (not just states
+    # it once naturally), that's still a real omission -- capping the
+    # requirement at the true source's count (1) must not become "never
+    # required at all."
+    source_text = (
+        "The party wants mines to provide 24-hour clinics and hospitals, and address racism on farms. "
+        "Ofentse Setimo, SABC News, eMalahleni."
+    )
+    clauses = [
+        {"clause_id": "c1", "english_text": "The party wants mines to provide 24-hour clinics.", "rank": 1},
+        {"clause_id": "c2", "english_text": "The party wants mines to provide 24-hour hospitals.", "rank": 1},
+        {"clause_id": "c3", "english_text": "The party wants racism on farms to be addressed.", "rank": 2},
+        {"clause_id": "c4", "english_text": "Ofentse Setimo, SABC News, eMalahleni.", "rank": 5},
+    ]
+    candidates = [
+        {
+            "dropped_clause_ids": ["c4"],
+            "isizulu_text": (
+                "Iqembu lifuna izimayini zihlinzeke ngemitholampilo nezibhedlela, "
+                "kuphinde kubhekwane nokucwasa ngokobuhlanga emapulazini."
+            ),
+        },
+    ]
+    safe = _filter_safe_shortened_candidates(candidates=candidates, source_text=source_text, clauses=clauses)
+    assert safe == []
+
+
 # --- _trim_by_fact_priority: orchestration ----------------------------------------------
 
 

@@ -36,11 +36,12 @@ def _write_real_wav(path: Path, *, ms: int, framerate: int = 16000) -> None:
         handle.writeframes(b"\x00\x01" * nframes)
 
 
-def _group(group_id, *, source_text, shortened_candidates=(), speaker_id="S0", span_ms=10000):
+def _group(group_id, *, source_text, shortened_candidates=(), clauses=None, speaker_id="S0", span_ms=10000):
     return {
         "group_id": group_id, "speaker_id": speaker_id, "start_ms": 0,
         "source_end_ms": span_ms, "source_span_ms": span_ms, "source_text": source_text,
         "segment_ids": [f"{group_id}_seg"], "shortened_candidates": list(shortened_candidates),
+        "clauses": clauses,
     }
 
 
@@ -336,3 +337,35 @@ def test_smoothing_batches_every_triggered_block_into_one_call(tmp_path):
     assert len(provider.calls) == 1  # one batched call, not one per block
     assert updated["g1"]["spoken_text"] == middle1
     assert updated["g2"]["spoken_text"] == middle2
+
+
+def test_smoothing_accepts_a_middle_candidate_that_drops_the_same_clause_shorter_already_dropped(tmp_path):
+    # Real confirmed bug (job fb3d08b63fed4d90922b08f7e325b906, 2026-09-10):
+    # the middle candidate's literal check used the FULL, unsplit
+    # source_text -- so a middle candidate that (like "shorter") correctly
+    # omits the reporter sign-off ("SABC") was wrongly rejected, even though
+    # "shorter" itself was already accepted as safe for the exact same
+    # omission. The middle candidate's check must be scoped the same way.
+    wav = tmp_path / "g1.wav"
+    _write_real_wav(wav, ms=12000)
+    source_text = "A dense sentence about mines. Ofentse Setimo, SABC News, eMalahleni."
+    clauses = [
+        {"clause_id": "c1", "english_text": "A dense sentence about mines.", "rank": 1},
+        {"clause_id": "c2", "english_text": "Ofentse Setimo, SABC News, eMalahleni.", "rank": 5},
+    ]
+    shortened_text = "Umusho omfushane ngezimayini."
+    middle_text = "Umusho ophakathi ngezimayini eziningi."  # also correctly omits the sign-off
+    group = _group(
+        "g1", source_text=source_text, clauses=clauses,
+        shortened_candidates=[{"dropped_clause_ids": ["c2"], "isizulu_text": shortened_text}],
+    )
+    winner = _winner("Umusho omude kakhulu ngezimayini. Ofentse Setimo, SABC News, eMalahleni.", 12000, 20.0, wav, fit=False)
+    tts = _FakeSmoothingTts({shortened_text: 7000, middle_text: 10000})
+    provider = _FakeMiddleCandidateProvider(responses={"g1": middle_text})
+
+    updated, _usage = _smooth_bracketing_candidates(
+        provider=provider, groups=[group], winners={"g1": winner}, tts=tts,
+        geometries={"g1": _geometry()}, voice_assignments=_VOICE_ASSIGNMENTS,
+        measurement_audio_root=tmp_path, force=True, candidate_pool_tts_workers=1,
+    )
+    assert updated["g1"]["spoken_text"] == middle_text

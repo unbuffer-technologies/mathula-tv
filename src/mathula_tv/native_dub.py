@@ -12991,7 +12991,7 @@ def _rebalance_speaker_turns(
 
 
 def _missing_required_literals(
-    *, source_text: str, candidate_text: str,
+    *, source_text: str, candidate_text: str, cap_source_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """The specific requirements from source_text NOT satisfied by
     candidate_text -- the real, itemized reason a literal-preservation
@@ -13017,8 +13017,33 @@ def _missing_required_literals(
     it has its own separate warning path -- but must stay strictly required
     here, unlike a spelled-out number) or to any multi-digit/dated/
     percentage number.
+
+    ``cap_source_text``, when given, caps each literal's required_count at
+    however many times it ALSO appears in this second text -- never more.
+    Real confirmed bug (job fb3d08b63fed4d90922b08f7e325b906, 2026-09-10):
+    ``source_text`` here is often a clause-scoped concatenation (see
+    _shortened_candidate_required_source_text), and splitting one segment
+    into per-item clauses (see the GRANULARITY guidance in the generation
+    prompt) can duplicate a literal that the TRUE original source only
+    stated once -- "24-hour clinics and hospitals" split into a "24-hour
+    clinics" clause and a separate "24-hour hospitals" clause, EACH
+    restating "24" to stay a complete, self-contained clause, even though
+    the real English only says "24-hour" once, describing both together.
+    A natural isiZulu retelling correctly states it once too (the same
+    SHARED-REFERENT ECONOMY behavior this prompt already asks for) -- but
+    the naive clause-concatenation check demanded two occurrences and
+    rejected an otherwise-correct candidate. Passing the TRUE, unsplit
+    source_text as cap_source_text caps the requirement at what was
+    genuinely in the source, regardless of how the clause breakdown split
+    it up for ranking purposes.
     """
     missing: list[dict[str, Any]] = []
+    cap_counts: dict[str, int] | None = None
+    if cap_source_text is not None:
+        cap_counts = {
+            str(req["literal"]): int(req["required_count"])
+            for req in _temporal_mask_source_occurrence_requirements(cap_source_text)
+        }
     for requirement in _temporal_mask_source_occurrence_requirements(source_text):
         if requirement["kind"] == "number" and not _is_high_stakes_numeric_literal(
             requirement["kind"], requirement["literal"],
@@ -13026,19 +13051,27 @@ def _missing_required_literals(
             continue
         match_literal = str(requirement.get("match_literal", requirement["literal"]))
         required_count = int(requirement["required_count"])
+        if cap_counts is not None:
+            required_count = min(required_count, cap_counts.get(str(requirement["literal"]), required_count))
+        if required_count <= 0:
+            continue
         if candidate_text.count(match_literal) < required_count:
-            missing.append(requirement)
+            missing.append({**requirement, "required_count": required_count})
     return missing
 
 
-def _sentence_preserves_required_literals(*, source_text: str, candidate_text: str) -> bool:
+def _sentence_preserves_required_literals(
+    *, source_text: str, candidate_text: str, cap_source_text: str | None = None,
+) -> bool:
     """Free, deterministic check before spending on translation: every
     high-stakes required literal (a name-bearing number/acronym) present
     in the TRUE original source_text must still appear in the candidate's
     text -- see _missing_required_literals for exactly what "high-stakes"
-    excludes and why.
+    excludes and why, and what ``cap_source_text`` guards against.
     """
-    if _missing_required_literals(source_text=source_text, candidate_text=candidate_text):
+    if _missing_required_literals(
+        source_text=source_text, candidate_text=candidate_text, cap_source_text=cap_source_text,
+    ):
         return False
     return True
 
@@ -13152,6 +13185,7 @@ def _filter_safe_shortened_candidates(
         )
         if _sentence_preserves_required_literals(
             source_text=required_source, candidate_text=str(candidate.get("isizulu_text") or ""),
+            cap_source_text=source_text if clauses is not None else None,
         ):
             safe.append(candidate)
     return safe
@@ -13593,6 +13627,7 @@ def _smooth_bracketing_candidates(
     updated_winners = dict(winners)
 
     bracket_candidates: dict[str, dict[str, Any]] = {}
+    bracket_dropped_clause_ids: dict[str, list[str]] = {}
     for gid, winner in updated_winners.items():
         if winner.get("fit"):
             continue
@@ -13613,12 +13648,24 @@ def _smooth_bracketing_candidates(
         )
         if baseline_direction != "compress":
             continue
-        lightest = shortened[0]
+        # Real confirmed bug (2026-09-10): using shortened[0] RAW, without
+        # the same clause-scoped literal-safety filter _trim_by_fact_priority
+        # already applies, could anchor "shorter" on a candidate that isn't
+        # actually safe -- pick the lightest candidate that genuinely passes
+        # that same check, exactly like Tier 1 does, so the bracket itself is
+        # trustworthy before it's used as a reference.
+        safe = _filter_safe_shortened_candidates(
+            candidates=shortened, source_text=str(group["source_text"]), clauses=group.get("clauses"),
+        )
+        if not safe:
+            continue
+        lightest = safe[0]
         bracket_candidates[gid] = {
             "candidate_id": f"{gid}__bracket_probe", "variant_id": "bracket_probe",
             "translator": "grok", "spoken_text": str(lightest["isizulu_text"]),
             "qa_penalty": 0, "qa_record": None, "requires_review": False,
         }
+        bracket_dropped_clause_ids[gid] = list(lightest.get("dropped_clause_ids") or [])
 
     if not bracket_candidates:
         return updated_winners, usage_totals
@@ -13701,12 +13748,28 @@ def _smooth_bracketing_candidates(
         middle_text = middle_by_id.get(gid, "")
         if not middle_text or middle_text == updated_winners[gid]["spoken_text"]:
             continue
-        if not _sentence_preserves_required_literals(
-            source_text=str(groups_by_id[gid]["source_text"]), candidate_text=middle_text,
-        ):
+        group = groups_by_id[gid]
+        source_text = str(group["source_text"])
+        # The middle candidate is explicitly permitted to drop the same
+        # content "shorter" already safely dropped (see the prompt's own
+        # instruction) -- check it against that SAME clause-scoped floor,
+        # not the full, unsplit source_text, for the identical reason
+        # _trim_by_fact_priority's own check is clause-scoped: a literal
+        # that lives only inside a clause already deliberately, safely
+        # dropped was never an accidental omission.
+        required_source = _shortened_candidate_required_source_text(
+            source_text=source_text, clauses=group.get("clauses"),
+            dropped_clause_ids=bracket_dropped_clause_ids.get(gid, []),
+        )
+        missing = _missing_required_literals(
+            source_text=required_source, candidate_text=middle_text, cap_source_text=source_text,
+        )
+        if missing:
+            missing_desc = ", ".join(f"{item['literal']!r}" for item in missing)
             _emit_progress(
                 progress,
-                f"[native candidate pool] Middle candidate for {gid} dropped a required literal -- discarded.",
+                f"[native candidate pool] Middle candidate for {gid} dropped required literal(s) "
+                f"[{missing_desc}] -- discarded: {middle_text!r}.",
             )
             continue
         candidates_by_group[gid] = [{
