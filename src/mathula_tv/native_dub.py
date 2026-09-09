@@ -11358,6 +11358,7 @@ def _request_candidate_translation_batch(
         )
         by_id[unit_id] = {
             "zulu_text": zulu_text, "clauses": clauses, "shortened_candidates": shortened_candidates,
+            "register_notes": str(item.get("register_notes") or "").strip(),
         }
 
     missing_ids = [unit_id for unit_id in expected_ids if unit_id not in by_id]
@@ -11673,6 +11674,7 @@ def _validate_turn_block_segments(
         "start_index": start_index,
         "end_index": end_index,
         "communicative_goal": str(segment.get("communicative_goal") or "").strip(),
+        "register_notes": str(segment.get("register_notes") or "").strip(),
         "clauses": clauses,
         "isizulu_text": isizulu_text,
         "shortened_candidates": _canonicalize_shortened_candidates(
@@ -11689,6 +11691,8 @@ def _build_turn_block_group(
     members: Sequence[Mapping[str, Any]],
     shortened_candidates: Sequence[Mapping[str, Any]] = (),
     clauses: Sequence[Mapping[str, Any]] | None = None,
+    communicative_goal: str | None = None,
+    register_notes: str | None = None,
 ) -> dict[str, Any]:
     """Build one committed block-group dict from a contiguous run of raw,
     per-sentence groups (`members`, in order). Mirrors _speaker_turn_geometry's
@@ -11715,6 +11719,17 @@ def _build_turn_block_group(
     (``clauses is not None``) was never true, so it silently never took
     effect. Every call site must now pass the same clauses the shortened_
     candidates it's also passing came from.
+
+    ``communicative_goal`` and ``register_notes`` are the model's own,
+    already-required-by-schema explanation of its translation/ranking
+    choices (see CANDIDATE_TRANSLATE_SYSTEM_PROMPT/TURN_BLOCK_TRANSLATE_
+    SYSTEM_PROMPT's own reasoning-trace instructions) -- carried through for
+    the same "log the reason behind a decision" purpose as the fallback-
+    reason logging in _translate_turn_blocks_via_grok, per real user
+    direction, 2026-09-09: "isn't there a way to also log what the model is
+    thinking." ``communicative_goal`` only exists in the turn-block schema
+    (a per-sentence fallback unit has no separate goal-identification step);
+    ``register_notes`` exists in both.
     """
     member_ids = [str(member["group_id"]) for member in members]
     segment_ids: list[str] = []
@@ -11734,6 +11749,8 @@ def _build_turn_block_group(
         "source_text": " ".join(str(member["source_text"]) for member in members),
         "shortened_candidates": list(shortened_candidates),
         "clauses": list(clauses) if clauses else None,
+        "communicative_goal": communicative_goal or None,
+        "register_notes": register_notes or None,
     }
 
 
@@ -11894,18 +11911,40 @@ def _translate_turn_blocks_via_grok(
         member_ids = window["member_ids"]
         raw_segments = by_window_id.get(window_id)
         if raw_segments is None:
+            _emit_progress(
+                progress,
+                f"[native candidate pool] Window {window_id} {member_ids}: no response from the "
+                "turn-block translate batch (request/parse failure, see above) -- falling back to "
+                "independent per-sentence translation.",
+            )
             fallback_member_ids.extend(member_ids)
             continue
         validated = _validate_turn_block_segments(member_count=len(member_ids), segments=raw_segments)
         if validated is None:
+            _emit_progress(
+                progress,
+                f"[native candidate pool] Window {window_id} {member_ids}: response failed structural "
+                "validation (not exactly one segment covering the whole window, or a missing/malformed "
+                "clause breakdown) -- falling back to independent per-sentence translation.",
+            )
             fallback_member_ids.extend(member_ids)
             continue
         members = [groups_by_id[gid] for gid in member_ids]
         combined_source_text = " ".join(str(member["source_text"]) for member in members)
         combined_candidate_text = " ".join(segment["isizulu_text"] for segment in validated)
-        if not _sentence_preserves_required_literals(
+        missing = _missing_required_literals(
             source_text=combined_source_text, candidate_text=combined_candidate_text,
-        ):
+        )
+        if missing:
+            missing_desc = ", ".join(
+                f"{item['literal']!r} (needed {item['required_count']}x)" for item in missing
+            )
+            _emit_progress(
+                progress,
+                f"[native candidate pool] Window {window_id} {member_ids}: merged translation dropped "
+                f"required literal(s) [{missing_desc}] -- falling back to independent per-sentence "
+                "translation.",
+            )
             fallback_member_ids.extend(member_ids)
             continue
         validated_segments_by_window_id[window_id] = validated
@@ -11943,6 +11982,8 @@ def _translate_turn_blocks_via_grok(
                 group_id=block_group_id, members=members,
                 shortened_candidates=segment.get("shortened_candidates") or [],
                 clauses=segment.get("clauses"),
+                communicative_goal=segment.get("communicative_goal"),
+                register_notes=segment.get("register_notes"),
             ))
             candidate_by_block_group_id[block_group_id] = {
                 "candidate_id": "grok_natural", "variant_id": "natural", "translator": "grok",
@@ -11955,6 +11996,7 @@ def _translate_turn_blocks_via_grok(
                     group_id=gid, members=[groups_by_id[gid]],
                     shortened_candidates=fallback_candidates[gid].get("shortened_candidates") or [],
                     clauses=fallback_candidates[gid].get("clauses"),
+                    register_notes=fallback_candidates[gid].get("register_notes"),
                 ))
                 candidate_by_block_group_id[gid] = fallback_candidates[gid]
 
@@ -12043,6 +12085,7 @@ def _translate_natural_via_grok(
                     "spoken_text": zulu_text,
                     "clauses": result.get("clauses"),
                     "shortened_candidates": list(result.get("shortened_candidates") or []),
+                    "register_notes": result.get("register_notes") or None,
                 }
             completed += 1
             _emit_progress(
@@ -12619,16 +12662,56 @@ def _rebalance_speaker_turns(
     return updated_winners, updated_geometries
 
 
-def _sentence_preserves_required_literals(*, source_text: str, candidate_text: str) -> bool:
-    """Free, deterministic check before spending on translation: every required
-    literal (number/acronym) present in the TRUE original source_text must
-    still appear in the candidate's English text.
+def _missing_required_literals(
+    *, source_text: str, candidate_text: str,
+) -> list[dict[str, Any]]:
+    """The specific requirements from source_text NOT satisfied by
+    candidate_text -- the real, itemized reason a literal-preservation
+    check fails, used both by _sentence_preserves_required_literals for its
+    pass/fail decision and by callers that want to LOG why a candidate was
+    rejected instead of just counting it.
+
+    Real confirmed false-positive (job fb3d08b63fed4d90922b08f7e325b906,
+    2026-09-09): a genuinely good turn-block merge rendered "November 1" as
+    the natural isiZulu ordinal word "mhla wokuqala kuNovemba" instead of
+    keeping a bare digit -- correctly economizing the repeated "Izakhamuzi"
+    subject across two sentences exactly as it should -- but this check's
+    plain substring search never finds the digit "1" in a word-form
+    rendering, so it silently discarded a BETTER candidate and forced a
+    fallback to two separately-translated, repetitive sentences.
+    _is_high_stakes_numeric_literal already documents this exact case for a
+    different caller ("Numbers worth a hard stop if missing... A bare
+    single digit 1-9 is exactly the range fluent isiZulu commonly renders
+    as a natural number word") -- a bare single-digit NUMBER requirement is
+    now exempt here too, for the same reason. This exemption is narrow and
+    deliberately does NOT extend to acronyms (an acronym is never
+    considered "high-stakes" by that function for an unrelated reason --
+    it has its own separate warning path -- but must stay strictly required
+    here, unlike a spelled-out number) or to any multi-digit/dated/
+    percentage number.
     """
+    missing: list[dict[str, Any]] = []
     for requirement in _temporal_mask_source_occurrence_requirements(source_text):
+        if requirement["kind"] == "number" and not _is_high_stakes_numeric_literal(
+            requirement["kind"], requirement["literal"],
+        ):
+            continue
         match_literal = str(requirement.get("match_literal", requirement["literal"]))
         required_count = int(requirement["required_count"])
         if candidate_text.count(match_literal) < required_count:
-            return False
+            missing.append(requirement)
+    return missing
+
+
+def _sentence_preserves_required_literals(*, source_text: str, candidate_text: str) -> bool:
+    """Free, deterministic check before spending on translation: every
+    high-stakes required literal (a name-bearing number/acronym) present
+    in the TRUE original source_text must still appear in the candidate's
+    text -- see _missing_required_literals for exactly what "high-stakes"
+    excludes and why.
+    """
+    if _missing_required_literals(source_text=source_text, candidate_text=candidate_text):
+        return False
     return True
 
 
@@ -13581,6 +13664,7 @@ def build_candidate_pool(
                     grok_candidate_by_group.get(str(group["group_id"]), {}).get("shortened_candidates") or []
                 ),
                 "clauses": grok_candidate_by_group.get(str(group["group_id"]), {}).get("clauses"),
+                "register_notes": grok_candidate_by_group.get(str(group["group_id"]), {}).get("register_notes"),
             }
             for group in groups
         ]
@@ -13731,6 +13815,16 @@ def build_candidate_pool(
             # "no clause breakdown was ever produced" without re-deriving it
             # from member-merge shape, as this session just had to do.
             "clauses": groups_by_id[group_id].get("clauses"),
+            # The model's own stated reasoning for this block's translation/
+            # ranking choices (2026-09-09, real user direction: "isn't there
+            # a way to also log what the model is thinking") -- both fields
+            # were already required by the generation schema and used to
+            # steer the model's own behavior, but silently discarded rather
+            # than surfaced anywhere inspectable. communicative_goal only
+            # exists for a block that went through the turn-block path (a
+            # per-sentence fallback unit never identifies one).
+            "communicative_goal": groups_by_id[group_id].get("communicative_goal"),
+            "register_notes": groups_by_id[group_id].get("register_notes"),
             "shortened_candidates": list(groups_by_id[group_id].get("shortened_candidates") or []),
             "candidates": measured_by_group.get(group_id, []),
             "selected_candidate_id": winners[group_id]["candidate_id"] if group_id in winners else None,

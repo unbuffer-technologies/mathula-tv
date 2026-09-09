@@ -127,6 +127,33 @@ def test_a_merge_with_no_sentence_count_reduction_now_stays_merged():
     assert provider.calls.count("native_turn_block_translate_batch") == 1  # no retry round exists anymore
 
 
+def test_the_models_own_stated_reasoning_surfaces_on_the_block_group():
+    # Real user direction, 2026-09-09: "isn't there a way to also log what
+    # the model is thinking" -- communicative_goal and register_notes were
+    # already required by the generation schema (steering the model's own
+    # behavior) but silently discarded rather than carried anywhere
+    # inspectable, same class of gap as the clauses-propagation fix above.
+    groups = [_group("p1", "Good morning, everyone.", start_ms=0, span_ms=2000)]
+    turns = _build_speaker_turns(groups)
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    provider = _FakeTurnBlockProvider(responses={
+        "p1": [{
+            "start_index": 1, "end_index": 1,
+            "isizulu_text": "Sanibonani nonke.",
+            "communicative_goal": "Greet the audience warmly before the report begins.",
+            "register_notes": "Used the plural greeting form since the speaker addresses a group.",
+            "clauses": [_clause("c1", "Good morning, everyone.")],
+        }],
+    })
+    block_groups, _candidate_by_group, _usage = _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+    )
+    assert block_groups[0]["communicative_goal"] == "Greet the audience warmly before the report begins."
+    assert block_groups[0]["register_notes"] == (
+        "Used the plural greeting form since the speaker addresses a group."
+    )
+
+
 def test_the_real_train_of_thought_case_merges_with_a_droppable_ladder():
     # native_phrase_0003..0006: a question announced, restated with hedging,
     # answered with evidence, then echoed as an unresolved close -- one real
@@ -268,6 +295,65 @@ def test_a_window_returning_partial_coverage_falls_back():
     assert [b["group_id"] for b in block_groups] == ["p1", "p2"]
     assert candidate_by_group["p1"]["spoken_text"] == "Fallback Zulu for p1."
     assert candidate_by_group["p2"]["spoken_text"] == "Fallback Zulu for p2."
+
+
+def test_falling_back_logs_the_specific_missing_literal_not_just_a_count():
+    # Real user direction, 2026-09-09: "the model need to do better logging
+    # [of the] reasons behind every decision" -- diagnosing why a real merge
+    # fell back used to require a bespoke script; the reason is now
+    # surfaced inline, per window, before the blanket count message.
+    groups = [
+        _group("p1", "The number is 24.", start_ms=0, span_ms=1000),
+        _group("p2", "Confirmed by IDAC.", start_ms=1000, span_ms=1000),
+    ]
+    turns = _build_speaker_turns(groups)
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    provider = _FakeTurnBlockProvider(responses={
+        "p1": [{
+            "start_index": 1, "end_index": 2, "isizulu_text": "Kukhonjiwe.",
+            "clauses": [_clause("c1", "The number is 24."), _clause("c2", "Confirmed by IDAC.")],
+        }],
+    })
+    messages: list[str] = []
+    _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+        progress=messages.append,
+    )
+    reason_lines = [m for m in messages if "dropped required literal" in m]
+    assert len(reason_lines) == 1
+    assert "'24'" in reason_lines[0]
+    assert "'IDAC'" in reason_lines[0]
+    assert "p1" in reason_lines[0]
+
+
+def test_a_bare_ordinal_number_merge_no_longer_falls_back():
+    # The other half of the same real fix: a merge that renders a bare
+    # single-digit number ("1") as a natural isiZulu word instead of a
+    # digit must now be ACCEPTED, not silently discarded -- this is exactly
+    # the real case ("mhla wokuqala kuNovemba" for "November 1") that
+    # motivated the exemption in _missing_required_literals.
+    groups = [
+        _group("p1", "Elections are set for November 1.", start_ms=0, span_ms=3000),
+        _group("p2", "Residents are excited about it.", start_ms=3000, span_ms=2000),
+    ]
+    turns = _build_speaker_turns(groups)
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    merged_text = "Ukhetho luzoba mhla wokuqala kuNovemba, izakhamuzi zijabule ngalokho."
+    provider = _FakeTurnBlockProvider(responses={
+        "p1": [{
+            "start_index": 1, "end_index": 2, "isizulu_text": merged_text,
+            "clauses": [
+                _clause("c1", "Elections are set for November 1."),
+                _clause("c2", "Residents are excited about it."),
+            ],
+        }],
+    })
+    block_groups, candidate_by_group, _usage = _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+    )
+    assert [b["group_id"] for b in block_groups] == ["p1"]
+    assert candidate_by_group["p1"]["spoken_text"] == merged_text
+    assert "native_candidate_translate_batch" not in provider.calls  # never fell back
 
 
 def test_a_literal_dropping_merge_falls_back_to_independent_translation():

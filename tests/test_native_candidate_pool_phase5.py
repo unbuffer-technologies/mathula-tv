@@ -83,7 +83,9 @@ def test_request_candidate_translation_batch_returns_by_unit_id():
     by_id, usage = _request_candidate_translation_batch(
         provider=provider, units=[{"unit_id": "g1", "english_text": "Hello."}], glossary={},
     )
-    assert by_id == {"g1": {"zulu_text": "Sawubona.", "clauses": None, "shortened_candidates": []}}
+    assert by_id == {
+        "g1": {"zulu_text": "Sawubona.", "clauses": None, "shortened_candidates": [], "register_notes": ""},
+    }
     assert usage == {"input_tokens": 20, "output_tokens": 10, "attempts": 1}
 
 
@@ -202,7 +204,7 @@ def test_translate_natural_via_grok_produces_one_candidate_per_sentence():
     assert set(candidate_by_group) == {"g1", "g2"}
     assert candidate_by_group["g1"] == {
         "candidate_id": "grok_natural", "variant_id": "natural", "translator": "grok", "spoken_text": "Sawubona.",
-        "clauses": None, "shortened_candidates": [],
+        "clauses": None, "shortened_candidates": [], "register_notes": None,
     }
     assert usage == {"input_tokens": 20, "output_tokens": 10, "attempts": 1}
 

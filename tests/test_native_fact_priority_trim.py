@@ -56,6 +56,8 @@ from mathula_tv.native_dub import (
     _canonicalize_shortened_candidates,
     _compress_protected_content_last_resort,
     _filter_safe_shortened_candidates,
+    _missing_required_literals,
+    _sentence_preserves_required_literals,
     _timing_candidate_rank,
     _trim_by_fact_priority,
     _validate_turn_block_segments,
@@ -237,6 +239,42 @@ def test_validate_turn_block_segments_defaults_missing_shortened_candidates_to_e
     validated = _validate_turn_block_segments(member_count=1, segments=segments)
     assert validated is not None
     assert validated[0]["shortened_candidates"] == []
+
+
+# --- _missing_required_literals / _sentence_preserves_required_literals -----------------
+
+
+def test_a_bare_single_digit_number_rendered_as_a_natural_word_is_exempt():
+    # Real confirmed false-positive (job fb3d08b63fed4d90922b08f7e325b906,
+    # 2026-09-09): a genuinely good merge rendered "November 1" as the
+    # natural isiZulu ordinal word "mhla wokuqala kuNovemba" -- no digit at
+    # all -- and this check wrongly rejected it, forcing a fallback to two
+    # separately-translated, repetitive sentences. A bare 1-9 number is
+    # exactly the range fluent isiZulu commonly renders as a word instead
+    # of a digit (see _is_high_stakes_numeric_literal's own reasoning).
+    source_text = "The elections are set for November 1."
+    candidate_text = "Ukhetho luzoba mhla wokuqala kuNovemba."  # no digit "1" anywhere
+    assert _missing_required_literals(source_text=source_text, candidate_text=candidate_text) == []
+    assert _sentence_preserves_required_literals(source_text=source_text, candidate_text=candidate_text) is True
+
+
+def test_a_multi_digit_number_is_still_required():
+    source_text = "The report cites 24 documents."
+    candidate_text = "Umbiko ukhomba amadokhumenti amaningi."  # "24" dropped entirely
+    missing = _missing_required_literals(source_text=source_text, candidate_text=candidate_text)
+    assert [item["literal"] for item in missing] == ["24"]
+    assert _sentence_preserves_required_literals(source_text=source_text, candidate_text=candidate_text) is False
+
+
+def test_an_acronym_is_still_required_even_though_bare_digits_are_exempt():
+    # The exemption is scoped to NUMBER literals only -- it must never
+    # extend to an acronym, which stays strictly required regardless of
+    # _is_high_stakes_numeric_literal's own (unrelated) acronym handling.
+    source_text = "The NPA confirmed the case on May 1."
+    candidate_text = "Kwaqinisekiswa icala ngoMeyi wokuqala."  # drops "NPA" entirely
+    missing = _missing_required_literals(source_text=source_text, candidate_text=candidate_text)
+    assert [item["literal"] for item in missing] == ["NPA"]
+    assert _sentence_preserves_required_literals(source_text=source_text, candidate_text=candidate_text) is False
 
 
 # --- _filter_safe_shortened_candidates: the deterministic literal-safety net ------------
