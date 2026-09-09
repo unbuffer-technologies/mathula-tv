@@ -13551,7 +13551,16 @@ def _request_middle_candidate_batch(
             ],
         },
         schema=_sentence_middle_candidate_schema(expected_ids),
-        max_output_tokens=min(max(800, 300 * len(items)), 8192),
+        # Real confirmed truncation (job fb3d08b63fed4d90922b08f7e325b906,
+        # 2026-09-10): 300/item hit finish_reason "length" at exactly the
+        # 900-token cap for a 3-item batch, losing the WHOLE call (every
+        # bracket that run) to a single undersized budget -- the same class
+        # of bug already fixed once for _request_candidate_translation_batch.
+        # A middle_text response has no clauses/shortened_candidates
+        # overhead, but the payload itself is large (each item echoes two
+        # full reference texts back), so match the sibling call's own
+        # already-corrected per-item budget rather than guessing smaller.
+        max_output_tokens=min(max(1600, 700 * len(items)), 8192),
     )
     returned = list(response.data.get("units") or [])
     expected_set = set(expected_ids)
