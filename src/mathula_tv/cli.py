@@ -933,16 +933,6 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     native_translate.add_argument(
-        "--skip-bracket-smoothing",
-        action="store_true",
-        help=(
-            "Diagnostic only (--candidate-pool): skip the bracketing-candidate smoothing call "
-            "(real cost) -- a block whose natural translation overshoots and whose lightest safe "
-            "cut overshoots the correction into an undershoot is left at whichever measures "
-            "better, with no attempt at a middle candidate."
-        ),
-    )
-    native_translate.add_argument(
         "--json",
         "--json-output",
         dest="json_output",
@@ -1816,7 +1806,6 @@ def main(argv: list[str] | None = None) -> int:
                     skip_turn_block_translation=bool(args.skip_turn_block_translation),
                     skip_pronunciation_research=bool(args.skip_pronunciation_research),
                     skip_speaker_seriousness_mode=bool(args.skip_speaker_seriousness_mode),
-                    skip_bracket_smoothing=bool(args.skip_bracket_smoothing),
                     progress=progress,
                 )
                 job.media["native_candidate_pool"] = str(
