@@ -131,7 +131,7 @@ ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v8-speaker-seriousness-mode"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v32-speaker-seriousness-mode"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v33-cross-sentence-laundry-list"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1696,6 +1696,16 @@ past fact), or "general_news" (a reporter's own narration, a commentator, or an 
 opinion/experience -- not establishing a disputed chronology). This value gates THE SECOND EXCEPTION
 below -- read it before applying that exception.
 
+Real user framing about political_speech specifically, worth internalizing: a politician reciting
+several separate, topically UNRELATED grievances or promises in one breath (e.g. social grants and
+municipal bills, THEN municipal debt relief, THEN electricity costs) is frequently "laundry list"
+campaign rhetoric -- deliberately testing which message lands with which listener by covering
+breadth, not building one deeply justified case. The politician is not necessarily committed to
+delivering on every named item; the persuasive function is cumulative volume of grievances named, not
+any single one's individual weight. This is the SAME underlying pattern THE SECOND EXCEPTION already
+handles for one grammatical list -- just spread across multiple sentences instead of one -- see that
+exception's own extension below for how to apply it here.
+
 HARD RULE, with exactly TWO narrow, deliberate exceptions below: dropped_clause_ids must NEVER
 include a clause carrying a number, a date, a direct quotation, an attribution (who said or did
 something), or the CORE PROPOSITION of any claim or denial -- who claimed or denied what, and (for
@@ -1733,10 +1743,28 @@ a time if genuinely needed to fit, PROVIDED the list's own general point still c
 remains. This is different from a load-bearing, singular claim/denial (e.g. "Lincoln told the witness
 Mogotsi was close to the minister, which is a lie") where the ENTIRE point of the segment IS that one
 claim -- an item never qualifies for this exception when it is itself the segment's own
-communicative_goal rather than one illustrative example among several. When speaker_seriousness_mode
-is "cross_examination", this exception does not apply at all -- even a seemingly parallel, listed
-allegation stays fully protected, since a witness's own itemized account is exactly the case where one
-"minor" item can independently matter to the real chronology. When there is real doubt about whether
+communicative_goal rather than one illustrative example among several.
+
+This exception is NOT limited to one grammatical list inside a single sentence -- it also covers a
+"laundry list" of separate promises/grievances spread across SEVERAL sentences in the window, a
+recognized political-communication pattern (see the SPEAKER SERIOUSNESS MODE note above): several
+DIFFERENT, topically unrelated promises stated in sequence, each real and specific-sounding on its
+own, function collectively the same way one grammatical list does -- breadth of appeal, not one
+load-bearing case. Real worked example: "Malema says it is unfair for poor households to receive
+social grants but still face municipal bills they cannot afford. He says if elected, the EFF would
+scrap the outstanding municipal debt of indigent households. Malema also says residents should
+benefit from lower electricity costs, considering the health impact of coal mining." -- three
+separate policy promises (grants/bills relief, debt relief, electricity relief) on three unrelated
+topics; under this exception ANY ONE of these three sentence-level promises may be ranked droppable
+and dropped if needed, provided at least one promise (the general shape of "the party is promising
+several forms of relief") survives -- the same "list's own general point still comes through" test
+already applies, just measured across sentences instead of within one.
+
+When speaker_seriousness_mode is "cross_examination", this exception does not apply at all, in either
+its within-sentence or cross-sentence form -- even a seemingly parallel, listed allegation, or a
+witness naming several separate incidents in sequence, stays fully protected, since a witness's own
+itemized account is exactly the case where one "minor" item can independently matter to the real
+chronology. When there is real doubt about whether
 an item is a genuinely comparable, illustrative list member versus the segment's actual point, keep it
 protected.
 
