@@ -1551,8 +1551,15 @@ def _reset_for_contextual_speaker_repair(job: Any) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    # load_settings() loads .env into os.environ (via load_dotenv) as a side
+    # effect. Must run BEFORE parser() is built: real bug found 2026-09-10 --
+    # an argparse default reading os.getenv(...) directly (e.g.
+    # --skip-pronunciation-research's MATHULA_TV_SKIP_PRONUNCIATION_RESEARCH
+    # toggle) silently always saw the pre-dotenv environment when parser() was
+    # constructed first, so a value set only in .env (not actually exported in
+    # the shell) never took effect.
     settings = load_settings()
+    args = parser().parse_args(argv)
     if args.command == "viral-clips":
         print(json.dumps(run_viral_moments_command(args, settings), ensure_ascii=False, indent=2))
         return 0
