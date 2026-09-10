@@ -463,6 +463,49 @@ def _print_translation_result(
     print(f"Translation complete for job {job_id}.")
 
 
+def _native_dub_rush_rows(groups: Any) -> list[dict[str, Any]]:
+    """Extract each rendered phrase group's real, applied rush percentage.
+
+    ``speed_fit.speed_percent`` is the actual pitch-preserving atempo speed-up
+    _run_batch_adaptive_timing_controller applied at render time to hit the
+    real source mouth-close window -- 0.0 when a group needed no correction
+    (fit naturally or came in short). This is the real, final number, not the
+    candidate-pool's earlier translation-time estimate, which can differ once
+    turn rebalancing/compaction and the actual synthesized audio are in.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for group in groups or []:
+        speed_fit = group.get("speed_fit") or {}
+        rows.append({
+            "group_id": group.get("group_id"),
+            "speed_percent": float(speed_fit.get("speed_percent") or 0.0),
+            "speed_fit_mode": speed_fit.get("speed_fit_mode") or "none",
+            "mouth_close_sync_ok": bool(group.get("mouth_close_sync_ok", True)),
+        })
+    return rows
+
+
+def _print_native_dub_rush_summary(groups: Any) -> None:
+    """Print every rendered phrase group's real applied rush percentage.
+
+    Ordered worst-first so the sentences that actually needed compression are
+    immediately visible; groups that fit naturally (0.0%) still get listed so
+    the summary genuinely covers "all turns," not just the flagged ones.
+    """
+
+    rows = _native_dub_rush_rows(groups)
+    if not rows:
+        return
+    rows.sort(key=lambda row: -row["speed_percent"])
+    print(f"Rush by turn ({len(rows)} total, worst first):")
+    for row in rows:
+        flag = "" if row["mouth_close_sync_ok"] else "  [OUT OF SYNC]"
+        print(
+            f"  {row['group_id']:<22} {row['speed_percent']:>6.1f}%  ({row['speed_fit_mode']}){flag}"
+        )
+
+
 def _print_job_status(job: Any, *, json_output: bool) -> None:
     """Print only the current state unless the complete manifest is requested."""
 
@@ -2143,6 +2186,7 @@ def main(argv: list[str] | None = None) -> int:
                     "native_master_video": result.get("native_master_video"),
                     "timing_quality_review_required": result.get("timing_quality_review_required", False),
                     "timing_quality_flags": result.get("timing_quality_flags", []),
+                    "rush_by_turn": _native_dub_rush_rows(result.get("groups")),
                 }, ensure_ascii=False, indent=2))
             else:
                 print(
@@ -2170,6 +2214,7 @@ def main(argv: list[str] | None = None) -> int:
                         + "."
                     )
                 print(f"Final output: {result['output_video']}")
+                _print_native_dub_rush_summary(result.get("groups"))
             return 0
 
         # Lightweight test settings may omit provider fields; production always
