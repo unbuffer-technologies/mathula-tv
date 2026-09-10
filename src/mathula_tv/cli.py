@@ -472,16 +472,34 @@ def _native_dub_rush_rows(groups: Any) -> list[dict[str, Any]]:
     (fit naturally or came in short). This is the real, final number, not the
     candidate-pool's earlier translation-time estimate, which can differ once
     turn rebalancing/compaction and the actual synthesized audio are in.
+
+    ``needs_review`` mirrors _timing_quality_flags' own definition (real
+    overrun beyond BOTH REVIEW_REQUIRED_MIN_OVERRUN_MS and
+    REVIEW_REQUIRED_MIN_RUSH_PERCENT) -- NOT mouth_close_sync_ok, which a
+    first version of this used and which is wrong here: undershoot (natural
+    speech ending early) trips mouth_close_sync_ok's tight tolerance on
+    every turn that fits its window comfortably, even though this pipeline
+    treats undershoot as fine by design (no forced padding/stretching,
+    "Timing remains non-fatal"). natural_overrun_ms is 0 for any undershoot
+    by construction, so this flag only ever fires for the same real,
+    genuine-lateness case the pipeline's own review gate already flags.
     """
+
+    from .native_dub import REVIEW_REQUIRED_MIN_OVERRUN_MS, REVIEW_REQUIRED_MIN_RUSH_PERCENT
 
     rows: list[dict[str, Any]] = []
     for group in groups or []:
         speed_fit = group.get("speed_fit") or {}
+        overrun_ms = int(group.get("natural_overrun_ms") or 0)
+        raw_speed_percent = float(group.get("raw_speed_percent") or 0.0)
         rows.append({
             "group_id": group.get("group_id"),
             "speed_percent": float(speed_fit.get("speed_percent") or 0.0),
             "speed_fit_mode": speed_fit.get("speed_fit_mode") or "none",
-            "mouth_close_sync_ok": bool(group.get("mouth_close_sync_ok", True)),
+            "needs_review": (
+                overrun_ms > REVIEW_REQUIRED_MIN_OVERRUN_MS
+                and raw_speed_percent > REVIEW_REQUIRED_MIN_RUSH_PERCENT
+            ),
         })
     return rows
 
@@ -500,7 +518,7 @@ def _print_native_dub_rush_summary(groups: Any) -> None:
     rows.sort(key=lambda row: -row["speed_percent"])
     print(f"Rush by turn ({len(rows)} total, worst first):")
     for row in rows:
-        flag = "" if row["mouth_close_sync_ok"] else "  [OUT OF SYNC]"
+        flag = "  [NEEDS REVIEW]" if row["needs_review"] else ""
         print(
             f"  {row['group_id']:<22} {row['speed_percent']:>6.1f}%  ({row['speed_fit_mode']}){flag}"
         )
