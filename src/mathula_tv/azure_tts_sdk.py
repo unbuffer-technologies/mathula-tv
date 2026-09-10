@@ -173,7 +173,12 @@ class AzureSpeechSDKLiveBoundary:
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
             return SDKGroupSynthesisResponse(audio_data=bytes(result.audio_data), bookmarks=tuple(bookmarks))
         if result.reason == speechsdk.ResultReason.Canceled:
-            details = speechsdk.CancellationDetails.from_result(result)
+            # Real bug, confirmed against the installed SDK (1.51.2): there is no
+            # CancellationDetails.from_result classmethod for a synthesis result in
+            # this version (that class/API belongs to speech RECOGNITION results).
+            # A synthesis result's cancellation details are exposed directly as a
+            # property, matching Microsoft's own synthesis quickstart samples.
+            details = result.cancellation_details
             return SDKGroupSynthesisResponse(
                 audio_data=b"",
                 bookmarks=tuple(bookmarks),
