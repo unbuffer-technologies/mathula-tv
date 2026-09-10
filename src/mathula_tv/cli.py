@@ -949,10 +949,15 @@ def parser() -> argparse.ArgumentParser:
     native_translate.add_argument(
         "--skip-pronunciation-research",
         action="store_true",
+        default=os.getenv("MATHULA_TV_SKIP_PRONUNCIATION_RESEARCH", "0") == "1",
         help=(
             "Diagnostic only (--candidate-pool): skip Phase 17's web-search-backed pronunciation "
             "research entirely (real Azure Responses API call, real cost) -- entities keep "
-            "whatever pronunciation the hand-curated dictionaries already give them."
+            "whatever pronunciation the hand-curated dictionaries already give them. Defaults on "
+            "when MATHULA_TV_SKIP_PRONUNCIATION_RESEARCH=1 is set (e.g. web research is on a "
+            "separate, currently-exhausted deployment/quota from the main translation model) -- "
+            "a deterministic, zero-cost disable rather than waiting for every call to fail and "
+            "degrade on its own."
         ),
     )
     native_translate.add_argument(
