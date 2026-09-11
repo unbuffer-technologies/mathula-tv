@@ -37,6 +37,14 @@ zulu-morphology = ["foma-with-lib>=1.0", "zulmorph>=1.0.5"]
 # native_dub.py's translation/QA context via master_case_context.py. Not imported by
 # the core package; only needed to actually run the crawler.
 case-sync = ["tqdm>=4.60", "pypdf>=4.0"]
+# Language-independent phone recognition + articulatory-feature-weighted phonetic
+# distance (see phoneme_recognizer.py): compares the ORIGINAL English source
+# pronunciation of a name against synthesized Zulu TTS candidates in a shared
+# phone space, as a cheap local pre-filter before native_dub.py's paid Azure
+# TTS+STT round trip. allosaurus's model is downloaded lazily on first real use,
+# not at install time. native_dub.py imports this lazily so the rest of the
+# pipeline is unaffected when this extra isn't installed.
+phonetics = ["allosaurus>=1.0", "panphon>=0.20", "torch>=2.1"]
 
 [project.scripts]
 mathula-tv = "mathula_tv.cli:main"

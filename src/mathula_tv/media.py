@@ -42,6 +42,33 @@ def ffmpeg_version() -> str:
     return subprocess.run(["ffmpeg", "-version"], check=True, capture_output=True, text=True).stdout.splitlines()[0]
 
 
+def extract_clip(
+    source: Path, start_seconds: float, end_seconds: float, output: Path, *, pad_seconds: float = 0.15,
+) -> Path:
+    """Mono 16kHz PCM slice of `source` from start_seconds to end_seconds,
+    padded by pad_seconds each side (clamped at 0) for coarticulation context.
+    Seek-before-input (fast, not frame-exact) is fine here: callers use this
+    for short reference clips fed to phone recognition, not for anything
+    requiring sample-accurate timing.
+    """
+    require_media_tools()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    padded_start = max(0.0, start_seconds - pad_seconds)
+    duration = max(0.05, (end_seconds + pad_seconds) - padded_start)
+    temporary = output.with_suffix(".partial.wav")
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{padded_start:.3f}", "-i", str(source), "-t", f"{duration:.3f}",
+            "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+            str(temporary),
+        ],
+        check=True, capture_output=True,
+    )
+    temporary.replace(output)
+    return output
+
+
 def prepare_audio(source: Path, output: Path) -> dict[str, Any]:
     source_info = probe(source)
     output.parent.mkdir(parents=True, exist_ok=True)

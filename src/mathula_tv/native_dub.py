@@ -69,7 +69,7 @@ from .foundry_grok import (
     FoundryGrokProvider,
     GrokOutputTruncated,
 )
-from .media import checksum, probe, render_video
+from .media import checksum, extract_clip, probe, render_video
 from .alignment import atempo_chain, wav_duration_ms
 from .contextual_speaker_identity import resolve_contextual_speaker_identities
 from .direct_azure_persona import (
@@ -117,7 +117,7 @@ from .transcript_merge import reconcile
 from .voice_prosody import bounded_prosody_int
 from . import master_case_context
 from . import zulu_lexicon
-from . import zulu_morphology
+from . import phoneme_recognizer, zulu_morphology
 
 
 NATIVE_DUB_SCHEMA_VERSION = "mathula-native-dub-v3.8-four-block-semantic-window-rush-nonfatal"
@@ -10791,6 +10791,50 @@ def _pronunciation_round_trip_score(recovered_text: str, canonical_text: str) ->
     return best
 
 
+def _locate_entity_word_span(words: Sequence[Mapping[str, Any]], name: str) -> tuple[float, float] | None:
+    """(start_seconds, end_seconds) of the first contiguous run of English
+    source-transcript words whose casefolded text matches name's own tokens,
+    in order -- or None if the name never appears verbatim in the source
+    transcript (never spoken, or missed by STT). Callers must treat None as
+    "no source clip available", not an error: this is a best-effort lookup
+    feeding a supplementary signal, not a requirement.
+    """
+    name_tokens = [tok for tok in re.findall(r"[a-z0-9']+", name.casefold()) if tok]
+    if not name_tokens or not words:
+        return None
+    texts = [re.sub(r"[^a-z0-9']", "", str(item.get("text") or "").casefold()) for item in words]
+    span = len(name_tokens)
+    for start in range(0, len(texts) - span + 1):
+        if texts[start:start + span] == name_tokens:
+            first, last = words[start], words[start + span - 1]
+            return float(first.get("start") or 0.0), float(last.get("end") or 0.0)
+    return None
+
+
+def _extract_entity_english_source_clip(
+    *, job_root: Path, entity_id: str, canonical_text: str, audio_dir: Path,
+) -> Path | None:
+    """Best-effort clip of canonical_text's own spoken occurrence in the
+    original English source audio, for phoneme_recognizer's phonetic
+    pre-filter (see _measure_pronunciation_round_trip). Returns None -- never
+    raises -- whenever the source audio, its transcript, or a matching word
+    span isn't available; this must never block the round trip it augments.
+    """
+    diarization_path = Path(job_root) / "analysis" / "azure_diarization.json"
+    source_audio_path = Path(job_root) / "audio" / "analysis_mono.wav"
+    if not diarization_path.is_file() or not source_audio_path.is_file():
+        return None
+    try:
+        words = read_json(diarization_path).get("words") or []
+        span = _locate_entity_word_span(words, canonical_text)
+        if span is None:
+            return None
+        clip_path = audio_dir / f"{entity_id}_english_source.wav"
+        return extract_clip(source_audio_path, span[0], span[1], clip_path)
+    except Exception:
+        return None
+
+
 def _synthesize_and_score_round_trip(
     *,
     tts: AzureTTSBackend,
@@ -10823,6 +10867,7 @@ def _measure_pronunciation_round_trip(
     voices: Sequence[str],
     progress: Callable[[str], None] | None = None,
     repeats_per_voice: int = 2,
+    english_source_clip: Path | None = None,
 ) -> dict[str, Any]:
     """Real TTS+STT round trip for one accepted correction, across every
     configured voice -- which specific voice this entity's speaker will get
@@ -10847,9 +10892,33 @@ def _measure_pronunciation_round_trip(
     away). raw_best_score/candidate_best_score keep their established field
     names for API compatibility; their value is now this more robust
     mean-then-max estimate rather than a single raw sample.
+
+    When english_source_clip is given and the optional phonetics extra is
+    installed, each voice's repeat-0 raw/candidate audio (already synthesized
+    on disk for the STT round trip above -- no extra TTS calls) is additionally
+    scored against the ORIGINAL English pronunciation via phoneme_recognizer's
+    phonetic-distance comparison. This is recorded as phonetic_raw_score /
+    phonetic_candidate_score per voice, and phonetic_raw_best /
+    phonetic_candidate_best in the return value -- purely a DIAGNOSTIC signal
+    for now, deliberately not folded into `verified`: it needs real production
+    data alongside the established STT-based score before any fusion rule
+    could be trusted, the same discipline that produced the current `verified`
+    rule after multiple wrong first attempts (see the comment above it). Any
+    failure here (recognizer unavailable, clip missing, inference error)
+    degrades to a None score for that voice, never blocks the STT verdict.
     """
     audio_dir = native_dub_paths(job_root).root / "pronunciation_round_trip"
     audio_dir.mkdir(parents=True, exist_ok=True)
+    source_phones: phoneme_recognizer.PhoneSequence | None = None
+    if english_source_clip is not None and phoneme_recognizer.is_available():
+        try:
+            source_phones = phoneme_recognizer.recognize(english_source_clip)
+        except Exception as exc:  # noqa: BLE001 - a supplementary signal must never block the round trip
+            _emit_progress(
+                progress,
+                f"[native pronunciation] Phonetic pre-filter unavailable for '{canonical_text}' ({exc}); "
+                "continuing with the STT round trip alone.",
+            )
     per_voice: list[dict[str, Any]] = []
     for voice in voices:
         raw_text = _PRONUNCIATION_ROUND_TRIP_CARRIER_TEMPLATE.format(name=canonical_text)
@@ -10879,16 +10948,43 @@ def _measure_pronunciation_round_trip(
             continue
         raw_mean = sum(score for score, _ in raw_samples) / len(raw_samples)
         candidate_mean = sum(score for score, _ in candidate_samples) / len(candidate_samples)
+        phonetic_raw_score = phonetic_candidate_score = None
+        if source_phones is not None:
+            try:
+                raw_wav = audio_dir / f"{entity_id}_{voice}_raw_0.wav"
+                candidate_wav = audio_dir / f"{entity_id}_{voice}_candidate_0.wav"
+                phonetic_raw_score = phoneme_recognizer.best_window_similarity(
+                    phoneme_recognizer.recognize(raw_wav), source_phones,
+                )
+                phonetic_candidate_score = phoneme_recognizer.best_window_similarity(
+                    phoneme_recognizer.recognize(candidate_wav), source_phones,
+                )
+            except Exception as exc:  # noqa: BLE001 - diagnostic-only, must never block the STT verdict
+                _emit_progress(
+                    progress,
+                    f"[native pronunciation] Phonetic scoring failed for '{canonical_text}' on {voice} "
+                    f"({exc}); STT round trip for this voice is unaffected.",
+                )
         per_voice.append({
             "voice": voice, "raw_score": raw_mean, "raw_transcript": raw_samples[-1][1],
             "candidate_score": candidate_mean, "candidate_transcript": candidate_samples[-1][1],
             "raw_sample_scores": [score for score, _ in raw_samples],
             "candidate_sample_scores": [score for score, _ in candidate_samples],
+            "phonetic_raw_score": phonetic_raw_score, "phonetic_candidate_score": phonetic_candidate_score,
         })
     if not per_voice:
-        return {"verified": None, "raw_best_score": None, "candidate_best_score": None, "per_voice": []}
+        return {
+            "verified": None, "raw_best_score": None, "candidate_best_score": None,
+            "phonetic_raw_best": None, "phonetic_candidate_best": None, "per_voice": [],
+        }
     raw_best = max(item["raw_score"] for item in per_voice)
     candidate_best = max(item["candidate_score"] for item in per_voice)
+    phonetic_raw_scores = [item["phonetic_raw_score"] for item in per_voice if item["phonetic_raw_score"] is not None]
+    phonetic_candidate_scores = [
+        item["phonetic_candidate_score"] for item in per_voice if item["phonetic_candidate_score"] is not None
+    ]
+    phonetic_raw_best = max(phonetic_raw_scores) if phonetic_raw_scores else None
+    phonetic_candidate_best = max(phonetic_candidate_scores) if phonetic_candidate_scores else None
     # Never let the respelling regress vs. the raw spelling, and require either
     # a genuine improvement or an already-solid absolute score -- a flat "must
     # clear this fixed floor" rule (tried first) wrongly rejected a real,
@@ -10904,6 +11000,7 @@ def _measure_pronunciation_round_trip(
     )
     return {
         "verified": verified, "raw_best_score": raw_best, "candidate_best_score": candidate_best,
+        "phonetic_raw_best": phonetic_raw_best, "phonetic_candidate_best": phonetic_candidate_best,
         "per_voice": per_voice,
     }
 
@@ -10925,6 +11022,7 @@ def _verify_pronunciation_corrections_round_trip(
     with_web_researched_organisation_pronunciations's promotion gate can
     refuse to build a hidden alias from it without losing the record.
     """
+    audio_dir = native_dub_paths(job_root).root / "pronunciation_round_trip"
     verified_list: list[dict[str, Any]] = []
     for raw_item in accepted_corrections:
         item = dict(raw_item)
@@ -10933,22 +11031,30 @@ def _verify_pronunciation_corrections_round_trip(
         if not pronunciation_tts_text or not canonical_text:
             verified_list.append(item)
             continue
+        entity_id = str(item.get("entity_id") or _native_pronunciation_candidate_id(canonical_text))
+        english_source_clip = _extract_entity_english_source_clip(
+            job_root=job_root, entity_id=entity_id, canonical_text=canonical_text, audio_dir=audio_dir,
+        )
         result = _measure_pronunciation_round_trip(
             tts=tts, stt_backend=stt_backend, job_root=job_root,
-            entity_id=str(item.get("entity_id") or _native_pronunciation_candidate_id(canonical_text)),
+            entity_id=entity_id,
             canonical_text=canonical_text, pronunciation_tts_text=pronunciation_tts_text,
-            voices=voices, progress=progress,
+            voices=voices, progress=progress, english_source_clip=english_source_clip,
         )
         if result["verified"] is not None:
             item["round_trip_verified"] = bool(result["verified"])
         item["round_trip_raw_score"] = result["raw_best_score"]
         item["round_trip_candidate_score"] = result["candidate_best_score"]
+        item["round_trip_phonetic_raw_score"] = result["phonetic_raw_best"]
+        item["round_trip_phonetic_candidate_score"] = result["phonetic_candidate_best"]
         item["round_trip_detail"] = result["per_voice"]
         _emit_progress(
             progress,
             f"[native pronunciation] Round-trip '{canonical_text}' -> '{pronunciation_tts_text}': "
             f"raw={_round_or_none(result['raw_best_score'])}, "
-            f"candidate={_round_or_none(result['candidate_best_score'])}, verified={result.get('verified')}",
+            f"candidate={_round_or_none(result['candidate_best_score'])}, verified={result.get('verified')}, "
+            f"phonetic_raw={_round_or_none(result['phonetic_raw_best'])}, "
+            f"phonetic_candidate={_round_or_none(result['phonetic_candidate_best'])}",
         )
         verified_list.append(item)
     return verified_list
