@@ -426,6 +426,19 @@ _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS = {
     # proved too noisy to settle the case unattended. This is a TTS-only
     # alias and never changes captions.
     "Godfrey Gidi": ("Godrej Gade", "personal_name", ()),
+    # Real person (SABC News reporter, job b15075e7268049b491ee9e2222e5811f;
+    # user-reported live: "we are not pronouncing Taliesha Naidoo correctly").
+    # Real zu-ZA STT round-trip testing (both production voices, 2 repeats
+    # each, native_dub.py's _measure_pronunciation_round_trip) found the
+    # first name alone was already close (the "T"/"D" distinction is a real
+    # STT-recognition artifact, not a TTS mispronunciation), but the surname
+    # consistently recovered as garbled "naito"/"nayidu"/"nayido" across every
+    # spelling of "Naidoo" tried except this one. "Talisha Naydoo" scored a
+    # clean 1.0 on zu-ZA-ThembaNeural (the voice this job's speaker actually
+    # uses) and 0.93 on zu-ZA-ThandoNeural, both real improvements over the
+    # unmodified spelling's 0.86/0.79. This is a TTS-only alias and never
+    # changes captions.
+    "Talisha Naidoo": ("Talisha Naydoo", "personal_name", ()),
 }
 _SUPPORTED_SA_LANGUAGE_LOCALES = {
     "nr-za",  # isiNdebele

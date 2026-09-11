@@ -119,7 +119,7 @@ def test_zulu_word_acronyms_are_pronounced_as_words_not_letter_names():
     )
 
     assert target.spoken_text == "I-IDAC ibambisene ne-IPID kanye ne-SAPS."
-    assert target.tts_text == "I-Ay-dak ibambisene ne-Ay-pid kanye ne-Saps."
+    assert target.tts_text == "I-Aydak ibambisene ne-Ay-pid kanye ne-Saps."
     assert [item.before for item in target.pronunciation_substitutions] == [
         "IDAC",
         "IPID",
@@ -481,6 +481,23 @@ def test_zulu_code_switch_place_names_keep_display_text_and_use_reviewed_tts_ali
     assert result.spoken_text == ("Namhlanje iTshwane ifana neLondon; bantu baseBuffalo City.")
     assert result.tts_text == ("Namhlanje i Tšhwane ifana ne Landen; bantu base Baffalo Siti.")
     assert {item.kind for item in result.substitutions} == {"place_name"}
+
+
+def test_talisha_naidoo_uses_reviewed_hidden_code_switch():
+    # Real user-reported defect, job b15075e7268049b491ee9e2222e5811f: "we are
+    # not pronouncing Taliesha Naidoo correctly". Real zu-ZA STT round-trip
+    # testing found the surname alone consistently recovered as garbled
+    # "naito"/"nayidu" across the unmodified spelling; "Talisha Naydoo" scored
+    # a clean 1.0 on the job's actual voice (zu-ZA-ThembaNeural).
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    result = dictionary.apply("Manje sidlulisela kuTalisha Naidoo we-SABC News.")
+
+    assert result.spoken_text == "Manje sidlulisela kuTalisha Naidoo we-SABC News."
+    assert "Talisha Naydoo" in result.tts_text
+    assert "Talisha Naidoo" not in result.tts_text
+    assert {item.kind for item in result.substitutions} & {"personal_name"}
 
 
 def test_organisation_defaults_do_not_leak_into_unsupported_locales():
