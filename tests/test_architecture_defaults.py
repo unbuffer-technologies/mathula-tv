@@ -26,10 +26,13 @@ def test_production_provider_defaults_and_optional_pyannote(tmp_path, monkeypatc
     # touches real Azure billing/audio quality and hasn't been validated on a
     # real job yet, unlike enable_island_timing which defaults on.
     assert settings.enable_sdk_group_synthesis is False
-    # Phase 14: a second, independent, also-unvalidated fast path (turn-level
-    # bookmark synthesis) -- must default off for the same reason, and must be
-    # independently toggleable from enable_sdk_group_synthesis above.
-    assert settings.enable_turn_group_synthesis is False
+    # Phase 14 (turn-level bookmark synthesis): real-job-validated twice on
+    # two different jobs (2026-09-10/11) -- fixes a confirmed mouth-close drift
+    # defect AND a confirmed severe-rush defect in the island-splitting
+    # fallback it replaces (English-character-count-proportional windows are a
+    # poor proxy for isiZulu's per-sentence expansion-ratio variance). Now the
+    # default, independently toggleable from enable_sdk_group_synthesis above.
+    assert settings.enable_turn_group_synthesis is True
 
 
 def test_sdk_group_synthesis_env_toggle_flips_the_default(tmp_path, monkeypatch):
@@ -38,10 +41,10 @@ def test_sdk_group_synthesis_env_toggle_flips_the_default(tmp_path, monkeypatch)
     assert settings.enable_sdk_group_synthesis is True
 
 
-def test_turn_group_synthesis_env_toggle_flips_the_default(tmp_path, monkeypatch):
-    monkeypatch.setenv("MATHULA_TV_ENABLE_TURN_GROUP_SYNTHESIS", "1")
+def test_turn_group_synthesis_env_toggle_can_disable_the_new_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATHULA_TV_ENABLE_TURN_GROUP_SYNTHESIS", "0")
     settings = load_settings(tmp_path)
-    assert settings.enable_turn_group_synthesis is True
+    assert settings.enable_turn_group_synthesis is False
 
 
 def test_azure_speaker_labels_are_authoritative_when_pyannote_disagrees():

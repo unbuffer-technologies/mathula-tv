@@ -108,10 +108,23 @@ class Settings:
     # Speech SDK call and speed-fit it as one unit, instead of fitting each
     # sentence in the turn independently -- fixes a confirmed real defect where
     # a turn's last sentence drifts audibly past the true mouth-close (see
-    # native_dub.py's _synthesize_speaker_turns_with_bookmarks). Independent of
+    # native_dub.py's _synthesize_speaker_turns_with_bookmarks). Also the real
+    # fix (not a patch) for a second, separately-confirmed defect (2026-09-11):
+    # with this off, a multi-sentence merged translation block falls through to
+    # the older island-splitting path, which distributes timing windows by raw
+    # ENGLISH character count -- a poor proxy for isiZulu's often-very-different
+    # per-sentence expansion ratio, producing severe, audible rush on some
+    # islands (measured +84.7% on one real job) while neighbors sit seconds
+    # under-used. Real-job-validated twice (two different jobs) with this on:
+    # confirmed fixes the drift AND eliminates the island-proportion problem,
+    # while also cutting real Azure TTS call count. Now the default; requires
+    # the optional Speech SDK dependency (`pip install "mathula-tv[speech-sdk]"`)
+    # and AZURE_SPEECH_KEY/AZURE_SPEECH_REGION -- already required for the REST
+    # TTS path this whole pipeline depends on, so this is a smaller marginal
+    # requirement (the SDK package itself) than it looks. Independent of
     # enable_sdk_group_synthesis (a different, still-unvalidated mechanism for a
-    # different granularity) so each can be rolled out/validated separately.
-    enable_turn_group_synthesis: bool = False
+    # different granularity) so each stays separately toggleable.
+    enable_turn_group_synthesis: bool = True
     # Real yt-dlp defect confirmed 2026-09-09: some YouTube videos return
     # LOGIN_REQUIRED to every player client (independent of the bgutil PO-token
     # provider, which handles the generic bot-check but not this gate) even
@@ -312,7 +325,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
         max_artifact_download_bytes=int(os.getenv("MATHULA_TV_MAX_ARTIFACT_DOWNLOAD_BYTES", str(2 * 1024 * 1024 * 1024))),
         pyannote_enabled=os.getenv("MATHULA_TV_ENABLE_PYANNOTE_DIAGNOSTIC", "0") == "1",
         enable_sdk_group_synthesis=os.getenv("MATHULA_TV_ENABLE_SDK_GROUP_SYNTHESIS", "0") == "1",
-        enable_turn_group_synthesis=os.getenv("MATHULA_TV_ENABLE_TURN_GROUP_SYNTHESIS", "0") == "1",
+        enable_turn_group_synthesis=os.getenv("MATHULA_TV_ENABLE_TURN_GROUP_SYNTHESIS", "1") == "1",
         youtube_cookies_file=os.getenv("MATHULA_TV_YOUTUBE_COOKIES_FILE", "").strip(),
         max_clean_unit_wer=float(os.getenv("MATHULA_TV_MAX_CLEAN_UNIT_WER", "0.35")),
         max_openvoice_wer_degradation=float(os.getenv("MATHULA_TV_MAX_OPENVOICE_WER_DEGRADATION", "0.10")),
