@@ -54,6 +54,24 @@ class PhoneSequence:
         return "".join(self.phones)
 
 
+@dataclass(frozen=True)
+class TimedPhoneSequence:
+    """Same phone sequence as PhoneSequence, plus each phone's real onset
+    time -- lets a caller measure how long a specific phone was actually
+    held, which plain phonetic_similarity (phone IDENTITY only) cannot
+    answer at all.
+    """
+
+    phones: tuple[str, ...]
+    onsets_ms: tuple[float, ...]
+
+    def __bool__(self) -> bool:
+        return bool(self.phones)
+
+    def as_phone_sequence(self) -> PhoneSequence:
+        return PhoneSequence(self.phones)
+
+
 def is_available() -> bool:
     """Whether the optional phonetics extra (allosaurus + panphon) is
     installed. Does not trigger Allosaurus's model download -- that only
@@ -105,6 +123,56 @@ def recognize(audio_path: Path) -> PhoneSequence:
     return PhoneSequence(tuple(raw.split()))
 
 
+def recognize_with_timing(audio_path: Path) -> TimedPhoneSequence:
+    """Same universal phone recognition as recognize(), plus each phone's
+    real onset time in milliseconds.
+
+    Real, confirmed finding (2026-09-11): Allosaurus's own `timestamp=True`
+    output includes a per-line "duration" field, but it is a fixed constant
+    (0.045s on every single phone, across every real clip tested) -- a frame-
+    size artifact, not a real acoustic measurement, and useless for judging
+    whether a given phone/vowel was actually held longer than usual. The
+    ONSET times are real and vary meaningfully with actual audio content
+    (confirmed: inter-onset gaps ranged 0.03-0.30s across real candidates,
+    not a constant) -- so a phone's real duration must be derived from the
+    GAP to the next phone's onset (or to the clip's end, for the last
+    phone), not read from the reported duration field. See
+    phone_durations_ms() below, which does exactly this.
+
+    Raises PhoneRecognitionUnavailable if the phonetics extra isn't
+    installed; propagates any real Allosaurus inference error unchanged.
+    """
+    recognizer = _load_recognizer()
+    raw = recognizer.recognize(str(audio_path), lang_id="ipa", timestamp=True)
+    phones: list[str] = []
+    onsets_ms: list[float] = []
+    for line in raw.strip().splitlines():
+        if not line.strip():
+            continue
+        start_seconds, _reported_duration, phone = line.split(None, 2)
+        phones.append(phone)
+        onsets_ms.append(float(start_seconds) * 1000.0)
+    return TimedPhoneSequence(tuple(phones), tuple(onsets_ms))
+
+
+def phone_durations_ms(sequence: TimedPhoneSequence, clip_duration_ms: float) -> tuple[float, ...]:
+    """Real per-phone duration in milliseconds, derived from inter-onset
+    gaps (see recognize_with_timing()'s docstring for why this -- not the
+    reported duration field -- is the real signal). The last phone's
+    duration runs to the clip's actual end, so `clip_duration_ms` (e.g. from
+    alignment.wav_duration_ms) must be the real measured audio length, not a
+    requested/target duration.
+    """
+    if not sequence.onsets_ms:
+        return ()
+    durations = [
+        sequence.onsets_ms[i + 1] - sequence.onsets_ms[i]
+        for i in range(len(sequence.onsets_ms) - 1)
+    ]
+    durations.append(max(0.0, clip_duration_ms - sequence.onsets_ms[-1]))
+    return tuple(durations)
+
+
 def phonetic_similarity(a: PhoneSequence, b: PhoneSequence) -> float:
     """Articulatory-feature-weighted similarity in [0, 1] between two phone
     sequences. Two empty sequences are trivially identical (1.0); one empty
@@ -145,6 +213,35 @@ def phonetic_similarity(a: PhoneSequence, b: PhoneSequence) -> float:
     return max(0.0, 1.0 - raw_distance / worst_case)
 
 
+def best_window_span(haystack: PhoneSequence, needle: PhoneSequence) -> tuple[int, int] | None:
+    """The (start, end) exclusive index range of whichever equal-length
+    contiguous window of `haystack` best matches `needle`, or None if either
+    sequence is empty.
+
+    Exposes the WINNING window's position (not just its score, see
+    best_window_similarity below) specifically so a caller holding a
+    TimedPhoneSequence for the same audio can look up that window's real
+    measured phone durations -- e.g. "how long was the final vowel of the
+    matched name actually held," a genuine acoustic measurement, unlike
+    phonetic_similarity's phone-IDENTITY-only comparison, which cannot
+    answer a duration/elongation question at all.
+    """
+    if not needle.phones or not haystack.phones:
+        return None
+    window_size = len(needle.phones)
+    if window_size >= len(haystack.phones):
+        return (0, len(haystack.phones))
+    best_score = -1.0
+    best_span = (0, window_size)
+    for start in range(0, len(haystack.phones) - window_size + 1):
+        window = PhoneSequence(haystack.phones[start:start + window_size])
+        score = phonetic_similarity(window, needle)
+        if score > best_score:
+            best_score = score
+            best_span = (start, start + window_size)
+    return best_span
+
+
 def best_window_similarity(haystack: PhoneSequence, needle: PhoneSequence) -> float:
     """Best phonetic_similarity between `needle` and any equal-length
     contiguous window of `haystack`.
@@ -158,11 +255,9 @@ def best_window_similarity(haystack: PhoneSequence, needle: PhoneSequence) -> fl
     """
     if not needle.phones or not haystack.phones:
         return 0.0
-    window_size = len(needle.phones)
-    if window_size >= len(haystack.phones):
-        return phonetic_similarity(haystack, needle)
-    best = 0.0
-    for start in range(0, len(haystack.phones) - window_size + 1):
-        window = PhoneSequence(haystack.phones[start:start + window_size])
-        best = max(best, phonetic_similarity(window, needle))
+    span = best_window_span(haystack, needle)
+    assert span is not None  # both non-empty, checked above
+    start, end = span
+    window = PhoneSequence(haystack.phones[start:end])
+    best = phonetic_similarity(window, needle)
     return best

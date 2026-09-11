@@ -430,21 +430,28 @@ _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS = {
     # Naidoo" -- confirmed via real web research, job
     # b15075e7268049b491ee9e2222e5811f's own ASR transcript simplified it to
     # "Talisha"; captions keep the ASR spelling unchanged, only the hidden TTS
-    # text is corrected here). User-reported live in two rounds: (1) "we are
-    # not pronouncing Taliesha Naidoo correctly", (2) after a first fix
+    # text is corrected here). User-reported live across THREE rounds: (1)
+    # "we are not pronouncing Taliesha Naidoo correctly", (2) after a fix
     # confirmed via STT round-trip alone ("Talisha Naydoo") -- "the 'o' in
-    # Naydoo suppose to be dragged". Round-trip scoring alone cannot judge
-    # vowel quality or duration (it only checks whether Azure's STT
-    # recognizes the WORD, not how it actually sounds), so this second round
-    # combined real web research (confirming the surname's standard
-    # pronunciation is stressed "NAI-doo", not "NAY-doo" -- an Anglicized
-    # Tamil surname, common in South Africa) with real measured audio
-    # duration as a proxy for "dragged": "Taleesha Nai-dooo" scored a clean
-    # 1.0 on zu-ZA-ThembaNeural (this job's actual speaker voice) AND
-    # measured ~150ms longer than the first-round fix on an identical carrier
-    # phrase, consistent with the requested elongation. This is a TTS-only
+    # Naydoo suppose to be dragged", (3) after a second fix ("Taleesha
+    # Nai-dooo", confirmed only via STT round-trip + total clip duration) --
+    # "the o is still not dragging", followed directly by "I dont want to be
+    # the one who has to say which is better, I need the system to find a
+    # way of being able to measure". That request drove building a genuine,
+    # objective measurement (phoneme_recognizer.py's recognize_with_timing/
+    # phone_durations_ms, native_dub.py's phone-space comparison work):
+    # Allosaurus's own per-phone durations against the real English source
+    # clip, not another round of STT-recognizes-the-word-correctly scoring
+    # (which cannot judge duration/elongation at all -- confirmed the hard
+    # way twice). Four respellings were compared this way; "Taleesha
+    # Nai-dooo" (round 2's fix) measured only 60ms on its final vowel,
+    # "Taleesha Nai-dooooo" measured 90ms (50% longer) at the SAME
+    # phone-identity match quality against the real English source (0.624) --
+    # a real, reproducible, automated measurement, not a guess from the
+    # spelling (a hyphenated variant with fewer extra vowels measured
+    # SHORTER despite looking like it should drag more). This is a TTS-only
     # alias and never changes captions.
-    "Talisha Naidoo": ("Taleesha Nai-dooo", "personal_name", ()),
+    "Talisha Naidoo": ("Taleesha Nai-dooooo", "personal_name", ()),
 }
 _SUPPORTED_SA_LANGUAGE_LOCALES = {
     "nr-za",  # isiNdebele

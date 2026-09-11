@@ -84,6 +84,55 @@ def test_best_window_similarity_falls_back_to_whole_sequence_when_needle_is_not_
     assert pr.best_window_similarity(seq, seq) == pytest.approx(1.0)
 
 
+def test_best_window_span_locates_the_matching_window_indices():
+    needle = _seq("l", "ɪ", "ŋ", "k", "ə", "n")
+    haystack = _seq("k", "u", "k", "h", "u", "l", "u", "ŋ", "ɔ", "l", "ɪ", "ŋ", "k", "ə", "n", "k", "u", "l", "e", "s", "i")
+    assert pr.best_window_span(haystack, needle) == (9, 15)
+
+
+def test_best_window_span_is_none_when_either_side_is_empty():
+    assert pr.best_window_span(_seq(), _seq("l", "ɪ", "ŋ")) is None
+    assert pr.best_window_span(_seq("l", "ɪ", "ŋ"), _seq()) is None
+
+
+def test_best_window_span_covers_the_whole_haystack_when_needle_is_not_shorter():
+    seq = _seq("l", "ɪ", "ŋ", "k", "ə", "n")
+    assert pr.best_window_span(seq, seq) == (0, 6)
+
+
+# Real, confirmed finding (2026-09-11), driving phone_durations_ms's whole
+# design: Allosaurus's own reported per-phone "duration" field is a fixed
+# 0.045s constant on every real clip tested -- a frame-size artifact, useless
+# for judging whether a vowel was held longer than usual. Real duration must
+# come from the GAP to the next phone's onset instead.
+def test_phone_durations_uses_inter_onset_gaps_not_a_reported_duration_field():
+    timed = pr.TimedPhoneSequence(phones=("a", "b", "c"), onsets_ms=(0.0, 100.0, 250.0))
+    assert pr.phone_durations_ms(timed, clip_duration_ms=400.0) == (100.0, 150.0, 150.0)
+
+
+def test_phone_durations_is_empty_for_an_empty_sequence():
+    timed = pr.TimedPhoneSequence(phones=(), onsets_ms=())
+    assert pr.phone_durations_ms(timed, clip_duration_ms=1000.0) == ()
+
+
+def test_phone_durations_never_goes_negative_if_clip_duration_is_stale():
+    # Defensive: a caller passing a clip_duration_ms shorter than the last
+    # phone's own onset (e.g. a stale/wrong measurement) must not silently
+    # produce a negative "duration" -- floor at 0.0 instead.
+    timed = pr.TimedPhoneSequence(phones=("a",), onsets_ms=(500.0,))
+    assert pr.phone_durations_ms(timed, clip_duration_ms=100.0) == (0.0,)
+
+
+def test_timed_phone_sequence_is_falsy_when_empty():
+    assert bool(pr.TimedPhoneSequence(phones=(), onsets_ms=())) is False
+    assert bool(pr.TimedPhoneSequence(phones=("a",), onsets_ms=(0.0,))) is True
+
+
+def test_timed_phone_sequence_converts_to_a_plain_phone_sequence():
+    timed = pr.TimedPhoneSequence(phones=("a", "b"), onsets_ms=(0.0, 50.0))
+    assert timed.as_phone_sequence() == pr.PhoneSequence(("a", "b"))
+
+
 @pytest.mark.live
 def test_recognize_produces_a_nonempty_phone_sequence_for_real_speech(tmp_path):
     pytest.importorskip("soundfile")
@@ -100,3 +149,21 @@ def test_recognize_produces_a_nonempty_phone_sequence_for_real_speech(tmp_path):
     sf.write(str(silence_path), samples, 16000)
     result = pr.recognize(silence_path)
     assert isinstance(result, pr.PhoneSequence)
+
+
+@pytest.mark.live
+def test_recognize_with_timing_produces_real_increasing_onsets(tmp_path):
+    pytest.importorskip("soundfile")
+    import numpy as np
+    import soundfile as sf
+
+    tone_path = tmp_path / "tone.wav"
+    samples = (0.1 * np.sin(2 * np.pi * 220 * np.linspace(0, 1, 16000))).astype("float32")
+    sf.write(str(tone_path), samples, 16000)
+    timed = pr.recognize_with_timing(tone_path)
+    assert isinstance(timed, pr.TimedPhoneSequence)
+    assert len(timed.phones) == len(timed.onsets_ms)
+    assert timed.onsets_ms == tuple(sorted(timed.onsets_ms))
+    durations = pr.phone_durations_ms(timed, clip_duration_ms=1000.0)
+    assert len(durations) == len(timed.phones)
+    assert all(d >= 0.0 for d in durations)

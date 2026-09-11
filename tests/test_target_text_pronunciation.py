@@ -484,21 +484,20 @@ def test_zulu_code_switch_place_names_keep_display_text_and_use_reviewed_tts_ali
 
 
 def test_talisha_naidoo_uses_reviewed_hidden_code_switch():
-    # Real user-reported defect, job b15075e7268049b491ee9e2222e5811f, two
-    # rounds: (1) "we are not pronouncing Taliesha Naidoo correctly", (2)
-    # after a first STT-round-trip-only fix -- "the 'o' in Naydoo suppose to
-    # be dragged". Real web research confirmed the surname's standard
-    # pronunciation is stressed "NAI-doo" (not the first round's "NAY-doo"),
-    # and real measured audio duration confirmed "Taleesha Nai-dooo" is
-    # genuinely longer (~150ms on an identical carrier phrase) while still
-    # scoring a clean 1.0 STT round-trip on the job's actual voice.
+    # Real user-reported defect, job b15075e7268049b491ee9e2222e5811f, three
+    # rounds -- the third asked for an automated MEASUREMENT instead of
+    # another guess: phoneme_recognizer.py's recognize_with_timing() measured
+    # "Taleesha Nai-dooooo"'s final vowel at 90ms vs. the prior round's
+    # "Taleesha Nai-dooo" at only 60ms, at the same phone-identity match
+    # quality (0.624) against the real English source clip -- a real,
+    # reproducible measurement, not another guess from the spelling.
     dictionary = with_default_organisation_initialisms(
         PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
     )
     result = dictionary.apply("Manje sidlulisela kuTalisha Naidoo we-SABC News.")
 
     assert result.spoken_text == "Manje sidlulisela kuTalisha Naidoo we-SABC News."
-    assert "Taleesha Nai-dooo" in result.tts_text
+    assert "Taleesha Nai-dooooo" in result.tts_text
     assert "Talisha Naidoo" not in result.tts_text
     assert {item.kind for item in result.substitutions} & {"personal_name"}
 
