@@ -29,6 +29,7 @@ ZU_ENGLISH_ENTITY_CODE_SWITCH_VERSION = "mathula-zu-english-entity-code-switch-v
 ZU_WEB_RESEARCHED_ORGANISATION_PRONUNCIATION_VERSION = "mathula-zu-web-researched-entity-pronunciation-v2-v13.19.14"
 ZU_PREFIXED_CARDINAL_VERSION = "mathula-zu-prefixed-cardinal-v2-currency-safe-v13.18.62"
 ZU_RAND_MILLION_CODE_SWITCH_VERSION = "mathula-zu-rand-million-code-switch-v1-v13.18.62"
+ZU_SPACE_GROUPED_THOUSAND_CODE_SWITCH_VERSION = "mathula-zu-space-grouped-thousand-code-switch-v1"
 ZU_ENGLISH_REFERENCE_NUMBER_CODE_SWITCH_VERSION = "mathula-zu-english-reference-number-code-switch-v1-v13.19.20"
 PRONUNCIATION_KINDS = {
     "personal_name",
@@ -741,6 +742,32 @@ _ZU_CODE_SWITCH_RAND_MILLION = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# Real bug, confirmed live (job b15075e7268049b491ee9e2222e5811f, user-
+# reported: "bad pronunciation of 10000"): a South African-formatted amount
+# using a SPACE as the thousands separator (e.g. "amaRandi ayi-10 000" for
+# R10,000) has no reviewed reading at all -- unlike _ZU_CODE_SWITCH_RAND_
+# MILLION above, nothing here ever handled thousands. The leading group
+# ("10") is left as a bare digit (read fine by the voice's own native number
+# handling), but the trailing "000" group, with a SPACE separating it from
+# "10" rather than being part of one attached digit string, independently
+# matches _ZU_BARE_REFERENCE_NUMBER's "3+ bare digits" reference-number
+# pattern below and gets digit-spelled literally as "zeeroh zeeroh zeeroh"
+# instead of being read as a magnitude -- confirmed directly from the real
+# SSML sent to Azure: "amaRandi ayi-10 zeeroh zeeroh zeeroh ngemibandela...".
+# Fixed per the user's own direction ("we should code switch '10 thousand'",
+# "the model should be able to pronounce money like a normal person"): code-
+# switch the whole space-grouped amount as English "<N> thousand" rather than
+# reading it as isiZulu digits at all -- this is deliberately NOT restricted
+# to a currency-word/"R" prefix immediately before it (unlike the million
+# case above): an exact "<1-3 digits> 000" shape is essentially always a
+# rounded quantity or currency amount in real transcript text, never a
+# coincidental reference/docket number (those are not round multiples of
+# 1000), so this is safe to apply generally.
+_ZU_SPACE_GROUPED_THOUSAND = re.compile(
+    r"(?<!\w)(?P<number>[1-9][0-9]{0,2})[  ](?P<thousands>000)(?!\w)",
+    re.UNICODE,
+)
+
 
 def _zulu_class10_two_digit_cardinal(number: int) -> str:
     if not 20 <= number <= 99:
@@ -788,6 +815,29 @@ def _zulu_dynamic_currency_candidates(
                     notes=(
                         "Application-controlled isiZulu rand-million reading",
                         ZU_RAND_MILLION_CODE_SWITCH_VERSION,
+                        "Approved/display code switch remains immutable",
+                    ),
+                ),
+            )
+        )
+    for match in _ZU_SPACE_GROUPED_THOUSAND.finditer(text):
+        before = match.group(0)
+        after = f"{match.group('number')} thousand"
+        candidates.append(
+            (
+                match.start(),
+                match.end(),
+                PronunciationEntry(
+                    display_text=before,
+                    spoken_text=before,
+                    tts_text=after,
+                    language=language,
+                    source="application_default",
+                    confidence=1.0,
+                    kind="currency",
+                    notes=(
+                        "Application-controlled English thousand-magnitude code switch",
+                        ZU_SPACE_GROUPED_THOUSAND_CODE_SWITCH_VERSION,
                         "Approved/display code switch remains immutable",
                     ),
                 ),
