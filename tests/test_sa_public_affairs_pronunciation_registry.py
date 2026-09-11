@@ -32,7 +32,7 @@ def test_major_word_acronyms_are_not_spelled_letter_by_letter():
         "I-IDAC ne-IPID basebenza ne-SAPS, SARS, SASSA, SANRAL ne-NATJOINTS."
     )
     assert result.tts_text == (
-        "I-Ay-dak ne-Ay-pid basebenza ne-Saps, Sars, Sassa, San-ral ne-Nat-joints."
+        "I-Aydak ne-Ay-pid basebenza ne-Saps, Sars, Sassa, San-ral ne-Nat-joints."
     )
     assert all(item.kind == "acronym" for item in result.substitutions)
 
