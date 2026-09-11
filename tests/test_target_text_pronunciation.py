@@ -484,20 +484,21 @@ def test_zulu_code_switch_place_names_keep_display_text_and_use_reviewed_tts_ali
 
 
 def test_talisha_naidoo_uses_reviewed_hidden_code_switch():
-    # Real user-reported defect, job b15075e7268049b491ee9e2222e5811f, three
-    # rounds -- the third asked for an automated MEASUREMENT instead of
-    # another guess: phoneme_recognizer.py's recognize_with_timing() measured
-    # "Taleesha Nai-dooooo"'s final vowel at 90ms vs. the prior round's
-    # "Taleesha Nai-dooo" at only 60ms, at the same phone-identity match
-    # quality (0.624) against the real English source clip -- a real,
-    # reproducible measurement, not another guess from the spelling.
+    # Real user-reported defect, job b15075e7268049b491ee9e2222e5811f, four
+    # rounds. Round 4's real, confirmed lesson: raw measured phone duration
+    # (phoneme_recognizer.py's recognize_with_timing) is NOT a reliable proxy
+    # for perceived naturalness -- picking "Taleesha Nai-dooooo" for
+    # measuring a longer final vowel than "Taleesha Nai-dooo" got direct,
+    # blunt feedback: "the drag is worse than no drag". Reverted to round 3's
+    # "Taleesha Nai-dooo" -- the last version never reported as sounding
+    # wrong -- rather than chase more measured duration further.
     dictionary = with_default_organisation_initialisms(
         PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
     )
     result = dictionary.apply("Manje sidlulisela kuTalisha Naidoo we-SABC News.")
 
     assert result.spoken_text == "Manje sidlulisela kuTalisha Naidoo we-SABC News."
-    assert "Taleesha Nai-dooooo" in result.tts_text
+    assert "Taleesha Nai-dooo" in result.tts_text
     assert "Talisha Naidoo" not in result.tts_text
     assert {item.kind for item in result.substitutions} & {"personal_name"}
 

@@ -430,28 +430,31 @@ _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS = {
     # Naidoo" -- confirmed via real web research, job
     # b15075e7268049b491ee9e2222e5811f's own ASR transcript simplified it to
     # "Talisha"; captions keep the ASR spelling unchanged, only the hidden TTS
-    # text is corrected here). User-reported live across THREE rounds: (1)
+    # text is corrected here). User-reported live across FOUR rounds: (1)
     # "we are not pronouncing Taliesha Naidoo correctly", (2) after a fix
     # confirmed via STT round-trip alone ("Talisha Naydoo") -- "the 'o' in
     # Naydoo suppose to be dragged", (3) after a second fix ("Taleesha
-    # Nai-dooo", confirmed only via STT round-trip + total clip duration) --
-    # "the o is still not dragging", followed directly by "I dont want to be
-    # the one who has to say which is better, I need the system to find a
-    # way of being able to measure". That request drove building a genuine,
-    # objective measurement (phoneme_recognizer.py's recognize_with_timing/
-    # phone_durations_ms, native_dub.py's phone-space comparison work):
-    # Allosaurus's own per-phone durations against the real English source
-    # clip, not another round of STT-recognizes-the-word-correctly scoring
-    # (which cannot judge duration/elongation at all -- confirmed the hard
-    # way twice). Four respellings were compared this way; "Taleesha
-    # Nai-dooo" (round 2's fix) measured only 60ms on its final vowel,
-    # "Taleesha Nai-dooooo" measured 90ms (50% longer) at the SAME
-    # phone-identity match quality against the real English source (0.624) --
-    # a real, reproducible, automated measurement, not a guess from the
-    # spelling (a hyphenated variant with fewer extra vowels measured
-    # SHORTER despite looking like it should drag more). This is a TTS-only
-    # alias and never changes captions.
-    "Talisha Naidoo": ("Taleesha Nai-dooooo", "personal_name", ()),
+    # Nai-dooo", confirmed via STT round-trip + real web research into the
+    # surname's standard "NAI-doo" pronunciation) -- "the o is still not
+    # dragging", followed by "I need the system to find a way of being able
+    # to measure" -- built phoneme_recognizer.py's real per-phone duration
+    # measurement (recognize_with_timing/phone_durations_ms) specifically for
+    # this. (4) Applied that measurement mechanically -- picked "Taleesha
+    # Nai-dooooo" for measuring a 50% longer final vowel (90ms vs. 60ms) at
+    # the same phone-identity match quality -- and got real, direct
+    # correction: "the drag is worse than no drag". Real, confirmed lesson:
+    # raw measured phone duration is NOT a reliable proxy for perceived
+    # naturalness -- every text-based elongation attempt tried (extra
+    # repeated vowels, hyphens, commas) measured as "more dragged" while
+    # sounding WORSE by ear, a consistent pattern across multiple real
+    # attempts, not one bad guess. Reverted to round 3's "Taleesha Nai-dooo"
+    # -- the last version never reported as sounding wrong, only as not yet
+    # dragged enough -- and stopped trying to force further elongation via
+    # spelling; genuine prosody control (SSML on this one word, not
+    # currently supported by this file's SSML builder) would be the correct
+    # tool if more drag is wanted, not another respelling guess. This is a
+    # TTS-only alias and never changes captions.
+    "Talisha Naidoo": ("Taleesha Nai-dooo", "personal_name", ()),
 }
 _SUPPORTED_SA_LANGUAGE_LOCALES = {
     "nr-za",  # isiNdebele
