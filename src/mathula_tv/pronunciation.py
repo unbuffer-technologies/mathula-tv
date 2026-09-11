@@ -426,19 +426,25 @@ _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS = {
     # proved too noisy to settle the case unattended. This is a TTS-only
     # alias and never changes captions.
     "Godfrey Gidi": ("Godrej Gade", "personal_name", ()),
-    # Real person (SABC News reporter, job b15075e7268049b491ee9e2222e5811f;
-    # user-reported live: "we are not pronouncing Taliesha Naidoo correctly").
-    # Real zu-ZA STT round-trip testing (both production voices, 2 repeats
-    # each, native_dub.py's _measure_pronunciation_round_trip) found the
-    # first name alone was already close (the "T"/"D" distinction is a real
-    # STT-recognition artifact, not a TTS mispronunciation), but the surname
-    # consistently recovered as garbled "naito"/"nayidu"/"nayido" across every
-    # spelling of "Naidoo" tried except this one. "Talisha Naydoo" scored a
-    # clean 1.0 on zu-ZA-ThembaNeural (the voice this job's speaker actually
-    # uses) and 0.93 on zu-ZA-ThandoNeural, both real improvements over the
-    # unmodified spelling's 0.86/0.79. This is a TTS-only alias and never
-    # changes captions.
-    "Talisha Naidoo": ("Talisha Naydoo", "personal_name", ()),
+    # Real person (SABC News senior reporter, correctly spelled "Taliesha
+    # Naidoo" -- confirmed via real web research, job
+    # b15075e7268049b491ee9e2222e5811f's own ASR transcript simplified it to
+    # "Talisha"; captions keep the ASR spelling unchanged, only the hidden TTS
+    # text is corrected here). User-reported live in two rounds: (1) "we are
+    # not pronouncing Taliesha Naidoo correctly", (2) after a first fix
+    # confirmed via STT round-trip alone ("Talisha Naydoo") -- "the 'o' in
+    # Naydoo suppose to be dragged". Round-trip scoring alone cannot judge
+    # vowel quality or duration (it only checks whether Azure's STT
+    # recognizes the WORD, not how it actually sounds), so this second round
+    # combined real web research (confirming the surname's standard
+    # pronunciation is stressed "NAI-doo", not "NAY-doo" -- an Anglicized
+    # Tamil surname, common in South Africa) with real measured audio
+    # duration as a proxy for "dragged": "Taleesha Nai-dooo" scored a clean
+    # 1.0 on zu-ZA-ThembaNeural (this job's actual speaker voice) AND
+    # measured ~150ms longer than the first-round fix on an identical carrier
+    # phrase, consistent with the requested elongation. This is a TTS-only
+    # alias and never changes captions.
+    "Talisha Naidoo": ("Taleesha Nai-dooo", "personal_name", ()),
 }
 _SUPPORTED_SA_LANGUAGE_LOCALES = {
     "nr-za",  # isiNdebele
