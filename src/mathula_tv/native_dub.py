@@ -13696,7 +13696,7 @@ def _trim_by_fact_priority(
 # drop a name/number/date/quote/attribution/claim-denial) stays completely intact
 # there -- this only ever runs for a block that already exhausted Tier 1's entire
 # ladder and still does not fit.
-PROTECTED_CONTENT_LAST_RESORT_PROMPT_VERSION = "native-protected-content-last-resort-v2-hedge-generalization"
+PROTECTED_CONTENT_LAST_RESORT_PROMPT_VERSION = "native-protected-content-last-resort-v3-social-media-vocabulary"
 # Deliberately HIGHER than DEFAULT_MAX_NATURAL_SPEED_PERCENT (12) -- confirmed
 # real bug (job 8372120960474ef6b1d75af7de51a605, 2026-09-04): gating this
 # tier on the routine 12% "fits naturally" bar fired it on 8 individual
@@ -13719,6 +13719,19 @@ has ALREADY had every safely-droppable clause removed by an earlier stage and ST
 its real time budget. This is the FINAL fallback: you may now compress content that is normally
 permanently protected everywhere else in this pipeline -- a name, a number, a date, or the
 substance of a claim/denial.
+
+ZULU SOCIAL MEDIA VOCABULARY carries over from the earlier translation stage that produced
+current_isizulu_text, regardless of speaker_seriousness_mode: when you rewrite wording here, never
+silently drift it toward a more formal, "textbook" register just because you are producing a fresh
+isizulu_text at this compression stage. If current_isizulu_text already used a code-switched or
+lightly nativized English/Afrikaans-origin word or short phrase that real isiZulu-speaking
+social-media users actually say (e.g. "i-racism", "i-corruption") rather than the more formal native
+term, KEEP using that same code-switched form in your compressed result -- do not "correct" it back
+to the formal alternative. If current_isizulu_text used a formal native term for a modern concept
+where a shorter, equally natural code-switched form exists, prefer the code-switch here too, since a
+shorter authentic option directly serves this stage's own purpose of fitting more content into less
+time. This never changes which facts survive (that is governed entirely by the STRICT order below),
+only which real-world isiZulu vocabulary carries them.
 
 Follow this STRICT order for each unit, attempting only what is actually needed and no more:
 
