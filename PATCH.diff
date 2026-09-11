@@ -1,0 +1,351 @@
+--- /mnt/data/fourblock_base/mathula-native-four-block-semantic-window-rush-nonfatal-20260821T1345SAST/src/mathula_tv/native_dub.py	2026-08-21 11:51:04.000000000 +0000
++++ /mnt/data/mathula-native-four-block-semantic-window-backtranslate-qa-20260821T1500SAST/src/mathula_tv/native_dub.py	2026-08-21 13:59:58.921825124 +0000
+@@ -67,8 +67,8 @@
+ STT_RESTORATION_SCHEMA_VERSION = "mathula-native-stt-restoration-v1"
+ NATURAL_TRANSLATION_SCHEMA_VERSION = "mathula-native-natural-translation-v2-soft-duration-intent"
+ ROLLING_NATURAL_TRANSLATION_SCHEMA_VERSION = "mathula-native-natural-translation-v3-rolling-syllable-budget"
+-TEMPORAL_MASK_TRANSLATION_SCHEMA_VERSION = "mathula-native-natural-translation-v5-four-block-semantic-window"
+-TEMPORAL_MASK_PROMPT_VERSION = "native-temporal-mask-compose-v3-four-block-window-rush-nonfatal"
++TEMPORAL_MASK_TRANSLATION_SCHEMA_VERSION = "mathula-native-natural-translation-v6-four-block-semantic-window-backtranslate-qa"
++TEMPORAL_MASK_PROMPT_VERSION = "native-temporal-mask-compose-v4-four-block-window-backtranslate-qa"
+ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
+ MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
+ TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
+@@ -645,50 +645,57 @@
+ 
+ 
+ 
+-TEMPORAL_MASK_SYSTEM_PROMPT = r"""You are Mathula TV's FOUR-BLOCK TEMPORAL MASK isiZulu dialogue composer.
++TEMPORAL_MASK_SYSTEM_PROMPT = r"""You are Mathula TV's FOUR-BLOCK isiZulu dialogue composer.
+ 
+-Every provider request is a semantic/comprehension WINDOW, not a set of unrelated sentences. The authoritative
+-unit is four chronological English acoustic blocks. Candidate label 'a' across the returned masks is ONE coherent
+-four-block isiZulu combination; label 'b' across the returned masks is another combination, and so on.
++Every provider request is ONE semantic/comprehension window, not four unrelated translations. Treat the
++chronological English blocks as a single conversation/argument. Candidate 'a' across the returned masks is ONE
++coherent four-block isiZulu combination; never mix candidate columns.
+ 
+ FOUR-BLOCK HARD CONTRACT
+-- Read the supplied four_block_semantic_window as one discourse unit.
+-- The corresponding four-block isiZulu combination must preserve the combined meaning and comprehension of the
+-  four English blocks: facts, names/identities, numbers/dates, negation, uncertainty, attribution/agency,
+-  pronoun/reference relationships, chronology/causality, questions/answers, corrections and speaker stance.
++- Read the complete four_block_semantic_window as one discourse unit before composing any mutable block.
++- Preserve the COMPLETE meaning and comprehension of all supplied English blocks: facts, names/identities,
++  numbers/dates, negation, uncertainty, attribution/agency, pronoun/reference relationships, chronology/causality,
++  questions/answers, self-corrections, fragments, discourse markers, and speaker stance.
+ - Preserve which speaker owns each statement. Never move a fact across a speaker boundary.
+-- Locked isiZulu blocks in the four-block window are IMMUTABLE and are already what the audience heard.
+-- Returned mutable blocks must make the COMPLETE four-block isiZulu window faithful and natural together.
+-- continuity_context contains up to two already-committed English/Zulu predecessors. It is read-only discourse
+-  continuity, not part of the current four-block meaning payload.
+-- English outside the current four-block semantic window is context only and must not become new content.
+-
+-TEMPORAL/SYLLABLE CONTRACT
+-For each mutable mask, compose directly for its supplied syllable planning range. The minimum goal is at least ONE
+-syllable longer than the source-equivalent estimate. Prefer natural isiZulu to be slightly LONGER, never shorter;
+-Mathula will pitch-preservingly speed the
+-final waveform to the exact source window. +12% is a QUALITY WARNING THRESHOLD, NOT a semantic or pipeline limit.
+-Do not delete or distort meaning merely to stay below +12%. If faithful natural isiZulu needs more, keep the
+-faithful wording; Mathula may render it rushed and warn in red.
+-
+-Before returning JSON, internally self-review/revise the whole four-block isiZulu combination up to four times:
+-1. combined four-block meaning/comprehension equivalence;
+-2. speaker attribution and references;
+-3. protected literal occurrence counts;
+-4. each mutable block is not obviously undersized for its syllable target.
+-Do not expose drafts or reasoning. Return only the final candidate combination(s).
+-
+-When a block can be shorter without semantic loss, use natural ellipsis/brachylogy/asyndeton/contextual epitome.
+-When a block is undersized, use useful pleonasm, tautology, context-grounded restatement or periphrasis. Never add
+-new facts or meaningless filler. Aposiopesis only when source is unfinished; auxesis only when source intensifies.
++- Locked isiZulu blocks are IMMUTABLE and are already what the audience heard.
++- Use continuity_context only to understand references and conversational continuity. It is read-only and must not
++  become new content in the current window.
++- Do not summarize a long English block. Preserve its complete argumentative or conversational progression.
++- Future English context outside this window is not permission to invent or import facts.
++
++SEMANTIC SELF-QA — REQUIRED BEFORE RETURNING
++For every candidate, silently perform this loop internally: DRAFT -> back-translate the COMPLETE FOUR-BLOCK ZULU
++combination back into English -> compare that reconstruction against the COMPLETE original four-block English window
++-> identify any lost/changed meaning -> revise the Zulu combination -> back-translate again. Repeat as needed, up to
++four internal revision cycles. The comparison is for the WHOLE FOUR-BLOCK COMBINATION, not independent sentences.
++Explicitly check names, numbers, dates, negation, uncertainty, speaker attribution, pronouns/references, questions,
++answers, self-corrections, and the logical/chronological relationship between blocks. If the back-translation would
++make an uncertain statement definite, or a denial affirmative, revise it. Do not expose the back-translation, drafts,
++or reasoning; return only the final JSON.
++
++SYLLABLE CONTRACT
++- The supplied source_equivalent_syllables is the English syllable floor for the corresponding block.
++- The hard minimum is the same number of syllables as English. The preferred target is ONE syllable MORE than English.
++- Slightly longer natural isiZulu is preferred to shorter speech. There is NO hard maximum syllable count.
++- The syllable target is only a linguistic planning objective. It is NOT an instruction to add meaningless filler.
++- If a block is naturally short, use context-grounded natural expansion: tautology, pleonasm, macrology, periphrasis,
++  natural repetition, discourse markers, fuller grammatical realization, or useful restatement. Only use expansion that
++  remains faithful to the source meaning and sounds like something a natural speaker could say.
++- Never delete meaning merely to reduce syllables.
++- +12% is only a downstream quality-warning threshold. You are NOT asked to fit Azure milliseconds and you are NOT
++  given Azure duration/rate/overhead information. A faithful phrase may be substantially longer and may later be
++  delivered as rushed speech.
++
++SHORTENING RULE
++If a block is already sufficiently substantial, do not pad it mechanically. If it is naturally shorter than English,
++prefer useful context-grounded expansion rather than artificial filler. Never invent a fact merely to gain syllables.
+ 
+ CANDIDATE ALIGNMENT
+-Return exactly the requested candidate IDs for every mutable mask. The same candidate_id across all masks belongs
+-to the same four-block Zulu combination. candidate_id='a' is the primary combination. Do not optimize one block in
+-isolation in a way that breaks the combined comprehension of its four-block window.
++Return exactly the requested candidate IDs for every mutable mask. The same candidate_id across every mask belongs
++to the same four-block Zulu combination. Candidate 'a' is the primary combination. Optimize the window as one
++conversation, then distribute the final wording across the original speaker/block boundaries.
+ 
+-Azure TTS rate_percent=0 is used only after composition as a physical measurement. Azure milliseconds are NOT part
+-of your linguistic reasoning. Syllables are the planning proxy. No tools/web. JSON only."""
++No tools/web. JSON only."""
+ 
+ TEMPORAL_MASK_RESIDUAL_SYSTEM_PROMPT = r"""You are correcting ONE Mathula TV FOUR-BLOCK temporal-mask window after deterministic validation/measurement.
+ You receive the same FOUR-BLOCK semantic/comprehension window plus deterministic validation feedback for the
+@@ -1025,12 +1032,37 @@
+ 
+ 
+ 
++def _estimate_english_syllables(text: str) -> int:
++    """Conservative English syllable proxy used only to establish a language floor.
++
++    This value is deliberately independent of Azure duration, source milliseconds,
++    speaking-rate estimates, or TTS overhead. It is a planning floor: isiZulu should
++    normally carry at least this much syllabic material, and the preferred target is
++    one syllable above it.
++    """
++    total = 0
++    for token in re.findall(r"[A-Za-z]+(?:['’][A-Za-z]+)?|\d+(?:[.,]\d+)*", str(text or "")):
++        if re.fullmatch(r"\d+(?:[.,]\d+)*", token):
++            digits = re.sub(r"\D", "", token)
++            total += max(1, len(digits))
++            continue
++        word = re.sub(r"[^A-Za-z]", "", token).lower()
++        if not word:
++            continue
++        groups = re.findall(r"[aeiouy]+", word)
++        count = max(1, len(groups))
++        if count > 1 and len(word) > 3 and word.endswith("e") and not word.endswith(("le", "ye")):
++            count -= 1
++        total += max(1, count)
++    return max(1, total)
++
++
+ def _estimate_zulu_syllables(text: str) -> int:
+     """Deterministic orthographic isiZulu syllable proxy.
+ 
+     IsiZulu syllables are vowel-centred, so vowel nuclei are a useful cheap proxy.
+     Numeric and acronym tokens need explicit treatment because Azure speaks them even
+-    though the orthography itself contains few/no vowels.  This is intentionally an
++    though the orthography itself contains few/no vowels. This is intentionally an
+     estimator used for language planning; Azure duration remains the final timing judge.
+     """
+     total = 0
+@@ -1862,27 +1894,13 @@
+     target_raw_ms = int(round(source_ms * (1.0 + int(preferred_raw_speed_percent) / 100.0)))
+     minimum_raw_ms = max(1, source_ms - early_ms)
+     maximum_raw_ms = int(round((source_ms + late_ms) * (1.0 + int(max_natural_speed_percent) / 100.0)))
+-    syllable_budget = _rolling_syllable_budget(
+-        {"start_ms": 0, "end_ms": source_ms},
+-        preferred_raw_speed_percent=int(preferred_raw_speed_percent),
+-        content_syllables_per_second=float(content_syllables_per_second),
+-        azure_utterance_overhead_ms=int(azure_utterance_overhead_ms),
+-        tolerance_percent=int(syllable_tolerance_percent),
+-    )
+-    source_equivalent_budget = _rolling_syllable_budget(
+-        {"start_ms": 0, "end_ms": source_ms},
+-        preferred_raw_speed_percent=0,
+-        content_syllables_per_second=float(content_syllables_per_second),
+-        azure_utterance_overhead_ms=int(azure_utterance_overhead_ms),
+-        tolerance_percent=0,
+-    )
+-    source_equivalent_syllables = int(source_equivalent_budget["target_syllables"])
+-    target_syllables = max(
+-        int(syllable_budget["target_syllables"]),
+-        source_equivalent_syllables + 1,
+-    )
+-    min_syllables = target_syllables
+-    max_syllables = max(int(syllable_budget["max_syllables"]), target_syllables + 2)
++    # Language planning is now independent of Azure timing. The source-equivalent
++    # syllable floor comes directly from the corrected English block. Azure geometry
++    # remains local-only for later TTS measurement/selection and is never sent to Grok.
++    source_equivalent_syllables = _estimate_english_syllables(str(group.get("source_text") or ""))
++    target_syllables = source_equivalent_syllables + 1
++    min_syllables = source_equivalent_syllables
++    max_syllables = None
+     return {
+         "preferred_start_ms": int(group["start_ms"]),
+         "preferred_end_ms": source_end_ms,
+@@ -1898,9 +1916,9 @@
+         "source_equivalent_syllables": source_equivalent_syllables,
+         "target_syllables": int(target_syllables),
+         "min_syllables": int(min_syllables),
+-        "max_syllables": int(max_syllables),
++        "max_syllables": None,
+         "minimum_extra_syllables": 1,
+-        "budget_impossible": bool(syllable_budget["budget_impossible"]),
++        "budget_impossible": False,
+     }
+ 
+ 
+@@ -1930,17 +1948,14 @@
+             "same_speaker_as_previous": bool(previous_speaker and previous_speaker == str(group["speaker_id"])),
+             "source_is_unfinished": bool(re.search(r"(?:--|—|\.\.\.)\s*$", current_source.strip())),
+         },
+-        "temporal_mask": {
+-            "source_start_ms": int(geometry["preferred_start_ms"]),
+-            "source_end_ms": int(geometry["preferred_end_ms"]),
++        "syllable_plan": {
+             "source_equivalent_syllables": int(geometry["source_equivalent_syllables"]),
+-            "target_syllables": int(geometry["target_syllables"]),
+-            "min_syllables": int(geometry["min_syllables"]),
+-            "max_syllables": int(geometry["max_syllables"]),
+-            "minimum_extra_syllables": 1,
++            "minimum_syllables": int(geometry["source_equivalent_syllables"]),
++            "preferred_syllables": int(geometry["source_equivalent_syllables"]) + 1,
++            "hard_maximum": None,
+             "prefer_slightly_longer": True,
+             "overlong_allowed": True,
+-            "rush_warning_threshold_percent": DEFAULT_MAX_NATURAL_SPEED_PERCENT,
++            "planning_only": True,
+         },
+         "protected_literals": _protected_timing_literals(group),
+         "high_risk_occurrence_requirements": _temporal_mask_source_occurrence_requirements(current_source),
+@@ -1962,9 +1977,16 @@
+     programme contains at least four source groups.
+     """
+     end = min(len(groups), int(mutable_start) + int(mutable_count))
+-    start = max(0, end - TEMPORAL_MASK_SEMANTIC_WINDOW_SIZE)
+-    # For a normal full call start == mutable_start. For a final short suffix, include
+-    # committed predecessors to retain an exact four-block combination.
++    # Normal windows begin at the current block and include following blocks. At the
++    # end of the transcript, a final one-block suffix gets one committed predecessor
++    # so the smallest semantic window remains two blocks. We never invent padding.
++    if int(mutable_count) == 1 and int(mutable_start) > 0:
++        start = int(mutable_start) - 1
++    else:
++        start = int(mutable_start)
++    start = max(0, start)
++    # For a normal full call start == mutable_start. A final two/three-block suffix
++    # remains two/three blocks; only a one-block suffix is paired with its predecessor.
+     accepted_by_id = {str(item.get("group_id")): item for item in accepted}
+     blocks: list[dict[str, Any]] = []
+     for pos in range(start, end):
+@@ -2595,6 +2617,13 @@
+                     "candidate_ids_are_joint_columns": True,
+                     "do_not_mix_candidate_columns": True,
+                     "self_review_passes_before_return": 4,
++                    "internal_backtranslation_semantic_qa_required": True,
++                    "backtranslation_scope": "complete_four_block_combination",
++                    "syllable_floor_is_english_equivalent": True,
++                    "preferred_extra_syllables": 1,
++                    "hard_maximum_syllables": None,
++                    "azure_duration_fields_sent_to_grok": False,
++                    "azure_rate_fields_sent_to_grok": False,
+                     "slightly_longer_is_preferred_to_shorter": True,
+                     "rush_warning_threshold_percent": DEFAULT_MAX_NATURAL_SPEED_PERCENT,
+                     "rush_threshold_is_non_fatal": True,
+@@ -2824,7 +2853,7 @@
+         "temporal_mask_mode": True,
+         "rolling_syllable_mode": False,
+         "timing_optimized": True,
+-        "timing_optimization_mode": "compose_into_temporal_mask_then_azure_measure_commit",
++        "timing_optimization_mode": "language_syllable_floor_then_azure_measure_commit",
+         "candidate_count": int(candidate_count),
+         "semantic_window_size": int(TEMPORAL_MASK_SEMANTIC_WINDOW_SIZE),
+         "requested_batch_size_ignored_for_window_contract": int(batch_size),
+@@ -2855,6 +2884,9 @@
+             "default_joint_candidate_columns": int(DEFAULT_TEMPORAL_MASK_CANDIDATES),
+             "residual_repair_scope": "whole_four_block_window",
+             "azure_milliseconds_hidden_from_grok": True,
++            "azure_timing_hidden_from_grok": True,
++            "english_syllable_floor_only": True,
++            "internal_backtranslation_qa": True,
+         },
+         "temporal_mask_groups": accepted,
+         "translations": translations,
+--- /mnt/data/fourblock_base/mathula-native-four-block-semantic-window-rush-nonfatal-20260821T1345SAST/tests/test_native_four_block_temporal_policy.py	2026-08-21 11:50:50.000000000 +0000
++++ /mnt/data/mathula-native-four-block-semantic-window-backtranslate-qa-20260821T1500SAST/tests/test_native_four_block_temporal_policy.py	2026-08-21 14:00:08.569868087 +0000
+@@ -5,7 +5,7 @@
+ )
+ 
+ 
+-def test_tail_window_remains_four_blocks_with_locked_predecessor():
++def test_tail_window_uses_only_remaining_blocks_when_two_or_more_remain():
+     groups = [
+         {"group_id": f"g{i}", "speaker_id": "S", "source_text": f"E{i}"}
+         for i in range(7)
+@@ -17,9 +17,27 @@
+     window = _temporal_four_block_semantic_window(
+         groups, mutable_start=4, mutable_count=3, accepted=accepted
+     )
+-    assert [item["group_id"] for item in window["blocks"]] == ["g3", "g4", "g5", "g6"]
++    assert [item["group_id"] for item in window["blocks"]] == ["g4", "g5", "g6"]
++    assert all(item["locked"] is False for item in window["blocks"])
++
++
++def test_final_one_block_suffix_uses_one_committed_predecessor():
++    groups = [
++        {"group_id": f"g{i}", "speaker_id": "S", "source_text": f"E{i}"}
++        for i in range(5)
++    ]
++    accepted = [
++        {"group_id": f"g{i}", "spoken_text": f"Z{i}"}
++        for i in range(4)
++    ]
++    window = _temporal_four_block_semantic_window(
++        groups, mutable_start=4, mutable_count=1, accepted=accepted
++    )
++    assert [item["group_id"] for item in window["blocks"]] == ["g3", "g4"]
+     assert window["blocks"][0]["locked"] is True
+     assert window["blocks"][0]["zulu"] == "Z3"
++    assert window["blocks"][1]["locked"] is False
++
+ 
+ 
+ def test_joint_candidate_columns_are_not_mixed():
+--- /mnt/data/fourblock_base/mathula-native-four-block-semantic-window-rush-nonfatal-20260821T1345SAST/tests/test_native_temporal_mask.py	2026-08-21 11:48:43.000000000 +0000
++++ /mnt/data/mathula-native-four-block-semantic-window-backtranslate-qa-20260821T1500SAST/tests/test_native_temporal_mask.py	2026-08-21 14:00:22.305090205 +0000
+@@ -215,7 +215,7 @@
+ 
+ 
+ 
+-def test_four_block_window_tail_is_left_padded_with_locked_zulu():
++def test_four_block_window_tail_uses_remaining_blocks_without_padding():
+     from mathula_tv.native_dub import _temporal_four_block_semantic_window
+ 
+     groups = [
+@@ -229,9 +229,28 @@
+     window = _temporal_four_block_semantic_window(
+         groups, mutable_start=4, mutable_count=3, accepted=accepted
+     )
+-    assert [item["group_id"] for item in window["blocks"]] == ["g3", "g4", "g5", "g6"]
++    assert [item["group_id"] for item in window["blocks"]] == ["g4", "g5", "g6"]
++    assert all(item["locked"] is False for item in window["blocks"])
++
++
++def test_four_block_window_final_single_block_uses_one_locked_predecessor():
++    from mathula_tv.native_dub import _temporal_four_block_semantic_window
++
++    groups = [
++        {"group_id": f"g{i}", "speaker_id": "S", "source_text": f"English {i}"}
++        for i in range(5)
++    ]
++    accepted = [
++        {"group_id": f"g{i}", "spoken_text": f"Zulu {i}"}
++        for i in range(4)
++    ]
++    window = _temporal_four_block_semantic_window(
++        groups, mutable_start=4, mutable_count=1, accepted=accepted
++    )
++    assert [item["group_id"] for item in window["blocks"]] == ["g3", "g4"]
+     assert window["blocks"][0]["locked"] is True
+     assert window["blocks"][0]["zulu"] == "Zulu 3"
++    assert window["blocks"][1]["locked"] is False
+ 
+ 
+ def test_four_block_candidate_selection_never_mixes_columns():

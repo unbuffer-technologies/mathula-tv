@@ -1,0 +1,5 @@
+- Legacy acoustic voice-family classification is mandatory before Grok fallback when unresolved speakers need classification.
+- Missing local classifier/dependencies no longer silently fall through to Grok.
+- Console prints per-speaker ECAPA family/confidence, or low-confidence masculine/feminine probabilities.
+- speaker-recognition extra now explicitly includes huggingface_hub.
+- model installer output is concise rather than JSON.
