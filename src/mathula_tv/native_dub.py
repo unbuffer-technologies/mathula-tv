@@ -130,8 +130,8 @@ CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
-CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v11-prefer-shorter-equal-phrasing"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v36-prefer-shorter-equal-phrasing"
+CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v12-general-news-influencer-register"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v37-general-news-influencer-register"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1187,6 +1187,28 @@ writing this note is how you actually engage with the register question above on
 rather than defaulting to the native form out of habit. This field is never read back to you; it
 exists only to make you commit to a real, considered answer while you translate this specific unit.
 
+GENERAL_NEWS INFLUENCER REGISTER -- ONLY when this unit's speaker_seriousness_mode is
+"general_news": lean further toward the informal, contemporary, code-switch-friendly register real
+isiZulu social-media creators and vernacular broadcast commentary actually use, rather than the
+more formal, "textbook" isiZulu a classroom or a written pamphlet would default to. Concretely,
+widen the SUBSTITUTION license above beyond modern political/social/institutional concept nouns to
+ANY ordinary word or short phrase (a verb, an adjective, a common noun, a casual connective) where a
+code-switched or lightly nativized English/Afrikaans-origin form is genuinely how a young isiZulu-
+speaking social-media creator would say it on their own channel, even when a fully native isiZulu
+word exists and is not wrong. This is a real-world register choice for THIS kind of content
+specifically, not laziness: general_news (defined below, alongside cross_examination and
+political_speech) is exactly the register-flexible case where the target audience increasingly
+speaks and shares in this mixed, code-switched way, and a stiffly formal rendering reads as less
+authentic and less shareable to them. Judge case by case using your own knowledge of real contemporary isiZulu
+social-media/vernacular speech -- never invent a code-switch that isn't genuinely how people talk,
+and never force one where it reads as unnatural or unclear. This widened license changes ONLY
+vocabulary and phrasing choice within already-decided content -- it never touches which clauses
+survive (that is governed entirely by the clause-ranking rules elsewhere in this prompt), and it
+NEVER weakens this prompt's own preservation rules for names, numbers, dates, negation, attribution,
+or a claim/denial's own substance, all of which stay exactly as precise and unabridged as in every
+other mode. When speaker_seriousness_mode is "cross_examination" or "political_speech", ignore this
+paragraph entirely and follow the SUBSTITUTION guidance above exactly as written.
+
 CRITICAL LIMIT on substitution, confirmed by a real test failure: a substituted word must preserve
 the EXACT precise real-world implication of the original, especially for a verb describing a
 legally or evidentially significant act. "Intercepted" (implies something was tampered with or
@@ -1367,6 +1389,29 @@ writing this note is how you actually engage with the register question above on
 rather than defaulting to the native form out of habit. This field is never read back to you; it
 exists only to make you commit to a real, considered answer while you translate this specific
 segment.
+
+GENERAL_NEWS INFLUENCER REGISTER -- ONLY when this window's speaker_seriousness_mode (defined below,
+alongside cross_examination and political_speech) is "general_news": lean further toward the
+informal, contemporary, code-switch-friendly register real isiZulu social-media creators and
+vernacular broadcast commentary actually use, rather than the more formal, "textbook" isiZulu a
+classroom or a written pamphlet would default to. Concretely, widen the SUBSTITUTION license above
+beyond modern political/social/institutional concept nouns to ANY ordinary word or short phrase (a
+verb, an adjective, a common noun, a casual connective) where a code-switched or lightly nativized
+English/Afrikaans-origin form is genuinely how a young isiZulu-speaking social-media creator would
+say it on their own channel, even when a fully native isiZulu word exists and is not wrong. This is
+a real-world register choice for THIS kind of content specifically, not laziness: general_news is
+exactly the register-flexible case where the target audience increasingly speaks and shares in this
+mixed, code-switched way, and a stiffly formal rendering reads as less authentic and less shareable
+to them. Judge case by case using your own knowledge of real contemporary isiZulu social-media/
+vernacular speech -- never invent a code-switch that isn't genuinely how people talk, and never
+force one where it reads as unnatural or unclear. This widened license changes ONLY vocabulary and
+phrasing choice within an already-decided retelling -- it is completely independent of, and never a
+substitute for, THE SECOND EXCEPTION below (which governs whether a whole clause/list item may be
+DROPPED, not how a surviving clause is WORDED), and it NEVER weakens the HARD RULE below: names,
+numbers, dates, quotations, attributions, and a claim/denial's own core proposition stay exactly as
+precise and unabridged as in every other mode. When speaker_seriousness_mode is "cross_examination"
+or "political_speech", ignore this paragraph entirely and follow the SUBSTITUTION guidance above
+exactly as written.
 
 CRITICAL LIMIT on substitution, confirmed by a real test failure: a substituted word must preserve the
 EXACT precise real-world implication of the original, especially for a verb describing a legally or
