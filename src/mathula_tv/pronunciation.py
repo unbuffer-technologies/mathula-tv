@@ -31,6 +31,7 @@ ZU_PREFIXED_CARDINAL_VERSION = "mathula-zu-prefixed-cardinal-v2-currency-safe-v1
 ZU_RAND_MILLION_CODE_SWITCH_VERSION = "mathula-zu-rand-million-code-switch-v1-v13.18.62"
 ZU_SPACE_GROUPED_THOUSAND_CODE_SWITCH_VERSION = "mathula-zu-space-grouped-thousand-code-switch-v1"
 ZU_ENGLISH_REFERENCE_NUMBER_CODE_SWITCH_VERSION = "mathula-zu-english-reference-number-code-switch-v1-v13.19.20"
+ZU_VOICE_SPECIFIC_PRONUNCIATION_VERSION = "mathula-zu-voice-specific-pronunciation-v1"
 PRONUNCIATION_KINDS = {
     "personal_name",
     "place_name",
@@ -456,6 +457,28 @@ _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS = {
     # tool if more drag is wanted, not another respelling guess. This is a
     # TTS-only alias and never changes captions.
     "Talisha Naidoo": ("Taleesha Nai-dooo", "personal_name", ()),
+    # Generic English-origin code-switched word ("i-racism"/"ne-racism"), not a
+    # name -- confirmed via real Azure TTS+STT round-trip testing (2026-09-12,
+    # job fb3d08b63fed4d90922b08f7e325b906, user-reported live: "second turn
+    # does not pronounce racism well"). The raw spelling is kept as the shared
+    # default (it already recovers reasonably, 0.833, on zu-ZA-ThembaNeural),
+    # but on zu-ZA-ThandoNeural it garbles ("iresism"/"irathism", 0.667) -- a
+    # genuinely per-voice defect, not a universal one: see
+    # _ZU_VOICE_SPECIFIC_CODE_SWITCH_PRONUNCIATIONS below for the
+    # ThandoNeural-only override, which was the confirmed motivating case for
+    # adding per-voice branching to PronunciationEntry at all.
+    "racism": ("racism", "english_code_switch", ()),
+}
+# A handful of code-switch pronunciations measurably help on one configured
+# Azure zu-ZA voice but measurably HURT on another (confirmed via real TTS+STT
+# round-trip testing, not assumed) -- a genuine per-voice trade-off, unlike
+# every other entry above which shares one tts_text across every voice. Any
+# voice not listed here for a given display_text falls back to that entry's
+# ordinary shared tts_text, so adding a voice-specific branch can never affect
+# a voice (including any future one added to the roster) it wasn't measured
+# against.
+_ZU_VOICE_SPECIFIC_CODE_SWITCH_PRONUNCIATIONS: dict[str, dict[str, str]] = {
+    "racism": {"zu-ZA-ThandoNeural": "raysizim"},
 }
 _SUPPORTED_SA_LANGUAGE_LOCALES = {
     "nr-za",  # isiNdebele
@@ -1388,6 +1411,14 @@ class PronunciationEntry:
     aliases: tuple[str, ...] = ()
     entry_id: str | None = None
     schema_version: str = PRONUNCIATION_ENTRY_SCHEMA_VERSION
+    # Optional per-voice tts_text overrides, e.g. {"zu-ZA-ThandoNeural": "raysizim"}.
+    # A voice absent from this mapping (including any voice added to the roster
+    # after this entry was written) always falls back to the shared `tts_text`
+    # above -- this can only ever narrow a substitution's effect to a specific,
+    # already-measured voice, never silently broaden it. Stored as a tuple of
+    # (voice, text) pairs for hashability/immutability, matching this
+    # dataclass's own `notes`/`aliases` convention; accepts a plain mapping too.
+    tts_text_by_voice: tuple[tuple[str, str], ...] | Mapping[str, str] = ()
 
     def __post_init__(self) -> None:
         if self.schema_version != PRONUNCIATION_ENTRY_SCHEMA_VERSION:
@@ -1408,6 +1439,19 @@ class PronunciationEntry:
         aliases = tuple(_safe_literal(alias, "alias") for alias in self.aliases)
         object.__setattr__(self, "notes", notes)
         object.__setattr__(self, "aliases", aliases)
+        raw_voice_map = self.tts_text_by_voice
+        pairs = raw_voice_map.items() if isinstance(raw_voice_map, Mapping) else raw_voice_map
+        voice_map: list[tuple[str, str]] = []
+        seen_voices: set[str] = set()
+        for voice_name, voice_text in pairs:
+            voice_name = str(voice_name).strip()
+            if not voice_name:
+                raise ValueError("tts_text_by_voice keys must be non-empty voice names")
+            if voice_name in seen_voices:
+                raise ValueError(f"Duplicate tts_text_by_voice entry for voice {voice_name!r}")
+            seen_voices.add(voice_name)
+            voice_map.append((voice_name, _safe_literal(voice_text, f"tts_text_by_voice[{voice_name}]")))
+        object.__setattr__(self, "tts_text_by_voice", tuple(sorted(voice_map)))
         if self.entry_id is None:
             identity = {
                 "display_text": self.display_text,
@@ -1417,6 +1461,10 @@ class PronunciationEntry:
                 "kind": self.kind,
                 "source": self.source,
             }
+            # Only included when non-empty, so an entry that never used this
+            # field keeps computing the exact same entry_id it always has.
+            if self.tts_text_by_voice:
+                identity["tts_text_by_voice"] = [list(pair) for pair in self.tts_text_by_voice]
             object.__setattr__(
                 self, "entry_id", "pron_" + hashlib.sha256(_canonical_json(identity).encode()).hexdigest()[:16]
             )
@@ -1434,6 +1482,7 @@ class PronunciationEntry:
                 **dict(value),
                 "notes": tuple(value.get("notes") or ()),
                 "aliases": tuple(value.get("aliases") or ()),
+                "tts_text_by_voice": dict(value.get("tts_text_by_voice") or {}),
             }
         )
 
@@ -1441,7 +1490,18 @@ class PronunciationEntry:
         value = asdict(self)
         value["notes"] = list(self.notes)
         value["aliases"] = list(self.aliases)
+        value["tts_text_by_voice"] = dict(self.tts_text_by_voice)
         return value
+
+    def tts_text_for_voice(self, voice: str | None) -> str:
+        """The TTS-application text for a specific Azure voice, falling back to
+        the shared ``tts_text`` when no voice is given or this entry carries no
+        override for it."""
+        if voice:
+            for voice_name, voice_text in self.tts_text_by_voice:
+                if voice_name == voice:
+                    return voice_text
+        return self.tts_text
 
     def match_texts(self) -> tuple[str, ...]:
         seen: set[str] = set()
@@ -1592,7 +1652,14 @@ class PronunciationDictionary:
         spoken_text: str,
         *,
         kinds: set[str] | None = None,
+        voice: str | None = None,
     ) -> PronunciationResult:
+        """``voice``, when given, selects a matched entry's per-voice
+        `tts_text_by_voice` override (falling back to its shared `tts_text`
+        for any voice not listed) -- lets the same source text render
+        differently for a voice with a confirmed, measured pronunciation
+        defect without touching every other configured voice's own,
+        already-working default."""
         text = _safe_literal(spoken_text, "spoken_text")
         candidates: list[tuple[int, int, int, int, str, PronunciationEntry]] = []
         scoped_entries = [(0, entry) for entry in self.job_overrides] + [(1, entry) for entry in self.entries]
@@ -1684,8 +1751,9 @@ class PronunciationDictionary:
         substitutions: list[PronunciationSubstitution] = []
         cursor = 0
         for start, end, entry in selected:
+            applied_tts_text = entry.tts_text_for_voice(voice)
             output.append(text[cursor:start])
-            output.append(entry.tts_text)
+            output.append(applied_tts_text)
             before = text[start:end]
             substitutions.append(
                 PronunciationSubstitution(
@@ -1693,9 +1761,9 @@ class PronunciationDictionary:
                     kind=entry.kind,
                     display_text=entry.display_text,
                     spoken_text=entry.spoken_text,
-                    tts_text=entry.tts_text,
+                    tts_text=applied_tts_text,
                     before=before,
-                    after=entry.tts_text,
+                    after=applied_tts_text,
                     source_start=start,
                     source_end=end,
                     source=entry.source,
@@ -1869,6 +1937,7 @@ def with_default_organisation_initialisms(
             confidence=1.0,
             kind=kind,
             aliases=aliases,
+            tts_text_by_voice=_ZU_VOICE_SPECIFIC_CODE_SWITCH_PRONUNCIATIONS.get(display_text, {}),
             notes=(
                 "Application-controlled hidden TTS code-switch pronunciation",
                 ZU_CODE_SWITCH_PRONUNCIATION_VERSION,
@@ -1881,6 +1950,10 @@ def with_default_organisation_initialisms(
                 *(
                     (ZU_ENGLISH_ENTITY_CODE_SWITCH_VERSION,)
                     if display_text in {"SA First Forum", "Hawks", "Justice College", "Brown Mogotsi", "Segeels", "Lincoln", "Brigitte"} else ()
+                ),
+                *(
+                    (ZU_VOICE_SPECIFIC_PRONUNCIATION_VERSION,)
+                    if display_text in _ZU_VOICE_SPECIFIC_CODE_SWITCH_PRONUNCIATIONS else ()
                 ),
             ),
         )

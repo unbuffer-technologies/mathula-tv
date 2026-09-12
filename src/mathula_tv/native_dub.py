@@ -8756,7 +8756,9 @@ def _apply_native_pronunciation_research_to_job_cache(
     return dictionary
 
 
-def _native_dub_tts_ready_text(text: str, *, job_root: Path | str | None = None) -> str:
+def _native_dub_tts_ready_text(
+    text: str, *, job_root: Path | str | None = None, voice: str | None = None,
+) -> str:
     """Apply the reviewed pronunciation dictionary's TTS-only substitutions.
 
     Never touches the committed/display text (captions, QA back-translation,
@@ -8769,11 +8771,16 @@ def _native_dub_tts_ready_text(text: str, *, job_root: Path | str | None = None)
     job's own web-research-augmented dictionary instead of the plain
     job-agnostic default -- omitting it, or passing an unregistered job_root,
     preserves today's exact behavior byte-for-byte.
+
+    ``voice``, when given, lets a matched entry apply a per-voice
+    `tts_text_by_voice` override instead of its shared default (confirmed
+    real motivating case: "racism" garbles on zu-ZA-ThandoNeural but not on
+    zu-ZA-ThembaNeural) -- omitting it preserves today's exact behavior.
     """
     dictionary = _native_dub_pronunciation_dictionary()
     if job_root is not None:
         dictionary = _NATIVE_DUB_PRONUNCIATION_DICTIONARY_BY_JOB.get(str(job_root), dictionary)
-    return dictionary.apply(text).tts_text
+    return dictionary.apply(text, voice=voice).tts_text
 
 
 def _synthesize_group(
@@ -8787,6 +8794,7 @@ def _synthesize_group(
     force: bool,
     job_root: Path | None = None,
 ) -> AzureTTSResult:
+    selected_voice = str(voice_info["selected_voice"])
     typed_parts = []
     plain_text: list[str] = []
     for part in group["parts"]:
@@ -8794,7 +8802,7 @@ def _synthesize_group(
             typed_parts.append(BreakPart(int(part["duration_ms"])))
         else:
             text = str(part["text"])
-            typed_parts.append(TextPart(_native_dub_tts_ready_text(text, job_root=job_root)))
+            typed_parts.append(TextPart(_native_dub_tts_ready_text(text, job_root=job_root, voice=selected_voice)))
             plain_text.append(text)
     prosody = voice_info.get("base_prosody") if isinstance(voice_info.get("base_prosody"), Mapping) else {}
     # Rate is always exactly zero for this experimental architecture. Stable
@@ -8807,7 +8815,7 @@ def _synthesize_group(
         text=" ".join(plain_text),
         preferred_duration_ms=max(1, int(preferred_ms)),
         maximum_duration_ms=max(1, int(maximum_ms)),
-        voice=str(voice_info["selected_voice"]),
+        voice=selected_voice,
         language="zu-ZA",
         rate_percent=0,
         pitch_percent=pitch,
@@ -9260,7 +9268,7 @@ def _synthesize_speaker_turns_with_bookmarks(
                 # one flat pitch/volume for the whole turn is both simpler and
                 # measurably more natural.
                 islands = [
-                    (gid, _native_dub_tts_ready_text(_group_spoken_zulu(groups_by_id[gid]), job_root=job_root))
+                    (gid, _native_dub_tts_ready_text(_group_spoken_zulu(groups_by_id[gid]), job_root=job_root, voice=voice))
                     for gid in member_ids
                 ]
                 # Bounded regardless of turn size -- see _measure_speaker_turn_total's
@@ -9489,7 +9497,7 @@ def _presynthesize_islands_with_bookmarks(
         volume = bounded_prosody_int(prosody.get("volume_percent"), default=0, lower=-3, upper=3)
         voice = str(voice_info["selected_voice"])
         island_texts = [
-            (str(item["group_id"]), _native_dub_tts_ready_text(_group_spoken_zulu(item), job_root=job_root))
+            (str(item["group_id"]), _native_dub_tts_ready_text(_group_spoken_zulu(item), job_root=job_root, voice=voice))
             for item in ordered
         ]
 

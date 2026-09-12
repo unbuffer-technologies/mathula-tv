@@ -508,6 +508,74 @@ def test_organisation_defaults_do_not_leak_into_unsupported_locales():
     assert with_default_organisation_initialisms(dictionary) is dictionary
 
 
+def test_pronunciation_entry_per_voice_override_falls_back_to_shared_default():
+    override = entry(
+        "Fikile", "Fikeeleh", "personal_name", tts_text_by_voice={"zu-ZA-ThandoNeural": "Fee-kee-leh"},
+    )
+    assert override.tts_text_for_voice(None) == "Fikeeleh"
+    assert override.tts_text_for_voice("zu-ZA-ThembaNeural") == "Fikeeleh"
+    assert override.tts_text_for_voice("zu-ZA-ThandoNeural") == "Fee-kee-leh"
+
+
+def test_dictionary_apply_selects_per_voice_override_only_for_the_listed_voice():
+    dictionary = PronunciationDictionary(
+        "1.0.0",
+        entries=(
+            entry("Fikile", "Fikeeleh", "personal_name", tts_text_by_voice={"zu-ZA-ThandoNeural": "Fee-kee-leh"}),
+        ),
+    )
+    text = "Sikhuluma noFikile namuhla."
+
+    assert "Fikeeleh" in dictionary.apply(text).tts_text
+    assert "Fikeeleh" in dictionary.apply(text, voice="zu-ZA-ThembaNeural").tts_text
+    result = dictionary.apply(text, voice="zu-ZA-ThandoNeural")
+    assert "Fee-kee-leh" in result.tts_text
+    assert "Fikeeleh" not in result.tts_text
+    assert result.substitutions[0].tts_text == "Fee-kee-leh"
+
+
+def test_entry_id_is_unchanged_for_entries_without_a_voice_override():
+    # Guards the identity-hash backward-compatibility promise: adding this
+    # field must never change entry_id for any entry that doesn't use it.
+    without_override = entry("Fikile", "Fikeeleh", "personal_name")
+    with_empty_override = entry("Fikile", "Fikeeleh", "personal_name", tts_text_by_voice={})
+    assert without_override.entry_id == with_empty_override.entry_id
+
+
+def test_pronunciation_entry_round_trips_a_voice_override_through_json():
+    original = entry(
+        "Fikile", "Fikeeleh", "personal_name", tts_text_by_voice={"zu-ZA-ThandoNeural": "Fee-kee-leh"},
+    )
+    restored = PronunciationEntry.from_dict(original.to_dict())
+    assert restored.tts_text_by_voice == original.tts_text_by_voice
+    assert restored.tts_text_for_voice("zu-ZA-ThandoNeural") == "Fee-kee-leh"
+
+
+def test_racism_uses_shared_default_pronunciation_by_default():
+    # Real user-reported defect, job fb3d08b63fed4d90922b08f7e325b906:
+    # "second turn does not pronounce racism well" -- confirmed via real
+    # Azure TTS+STT round-trip testing (2026-09-12) to be a genuinely
+    # per-voice defect (zu-ZA-ThandoNeural garbles "racism"; zu-ZA-ThembaNeural
+    # recovers it reasonably as-is), not a universal one.
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    text = "Emsebenzini kune-racism eningi."
+
+    assert "racism" in dictionary.apply(text).tts_text
+    assert "racism" in dictionary.apply(text, voice="zu-ZA-ThembaNeural").tts_text
+
+
+def test_racism_uses_the_calibrated_respelling_only_on_thando_neural():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    result = dictionary.apply("Emsebenzini kune-racism eningi.", voice="zu-ZA-ThandoNeural")
+
+    assert "raysizim" in result.tts_text
+    assert "racism" not in result.tts_text
+
+
 def test_job_pronunciation_override_wins_over_default_initialism():
     dictionary = PronunciationDictionary(
         "v1",
