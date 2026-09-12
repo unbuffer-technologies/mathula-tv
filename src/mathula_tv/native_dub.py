@@ -102,6 +102,7 @@ from .models import JobManifest, utcnow
 from .pronunciation import (
     _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS,
     PronunciationDictionary,
+    build_initialism_ssml_parts,
     with_default_organisation_initialisms,
     with_web_researched_organisation_pronunciations,
 )
@@ -112,7 +113,7 @@ from .referent_audit import (
     REFERENT_AUDIT_SCHEMA_VERSION,
     audit_and_repair_pass2,
 )
-from .tts_ssml import BreakPart, TextPart
+from .tts_ssml import BreakPart, CharacterPart, SSMLPart, TextPart
 from .transcript_merge import reconcile
 from .voice_prosody import bounded_prosody_int
 from . import master_case_context
@@ -8783,6 +8784,38 @@ def _native_dub_tts_ready_text(
     return dictionary.apply(text, voice=voice).tts_text
 
 
+def _native_dub_tts_ready_parts(
+    text: str, *, job_root: Path | str | None = None, voice: str | None = None,
+) -> str | tuple[SSMLPart, ...]:
+    """Like ``_native_dub_tts_ready_text``, but additionally splits out any
+    character-mode-flagged token (e.g. "ANC", see pronunciation.py's
+    ``_ZU_SA_PUBLIC_AFFAIRS_ACRONYMS``) into a real SSML ``CharacterPart`` so
+    the configured voice spells it letter-by-letter instead of guessing at a
+    whole-word pronunciation.
+
+    Confirmed real, structural gap this closes: ``build_initialism_ssml_
+    parts`` (pronunciation.py) already existed and is used by the legacy
+    production_pipeline.py/direct_azure_dub.py pipelines, but was never wired
+    into native_dub.py at all -- every synthesis call here only ever handed
+    Azure a plain string, so a character-mode entry's own ``resolved_tts_
+    text()`` (which returns the token unchanged, e.g. "ANC") reached Azure
+    completely unmarked, left entirely to that voice's own guess (user-
+    reported live, job fb3d08b63fed4d90922b08f7e325b906: "ANC is not
+    pronounced correctly").
+
+    Returns a plain string, byte-identical to ``_native_dub_tts_ready_text``'s
+    own output, when no character-mode token is present in this text -- only
+    a synthesis call site that can actually consume typed SSML parts (every
+    real one in this file, as of this fix) should call this instead of
+    ``_native_dub_tts_ready_text`` directly; a decision-time-only caller that
+    just wants plain text (e.g. a syllable-count estimate) should keep using
+    ``_native_dub_tts_ready_text``.
+    """
+    ready_text = _native_dub_tts_ready_text(text, job_root=job_root, voice=voice)
+    parts = build_initialism_ssml_parts(ready_text, language="zu-ZA")
+    return parts if parts else ready_text
+
+
 def _synthesize_group(
     *,
     tts: AzureTTSBackend,
@@ -8802,7 +8835,11 @@ def _synthesize_group(
             typed_parts.append(BreakPart(int(part["duration_ms"])))
         else:
             text = str(part["text"])
-            typed_parts.append(TextPart(_native_dub_tts_ready_text(text, job_root=job_root, voice=selected_voice)))
+            ready = _native_dub_tts_ready_parts(text, job_root=job_root, voice=selected_voice)
+            if isinstance(ready, str):
+                typed_parts.append(TextPart(ready))
+            else:
+                typed_parts.extend(ready)
             plain_text.append(text)
     prosody = voice_info.get("base_prosody") if isinstance(voice_info.get("base_prosody"), Mapping) else {}
     # Rate is always exactly zero for this experimental architecture. Stable
@@ -9268,7 +9305,7 @@ def _synthesize_speaker_turns_with_bookmarks(
                 # one flat pitch/volume for the whole turn is both simpler and
                 # measurably more natural.
                 islands = [
-                    (gid, _native_dub_tts_ready_text(_group_spoken_zulu(groups_by_id[gid]), job_root=job_root, voice=voice))
+                    (gid, _native_dub_tts_ready_parts(_group_spoken_zulu(groups_by_id[gid]), job_root=job_root, voice=voice))
                     for gid in member_ids
                 ]
                 # Bounded regardless of turn size -- see _measure_speaker_turn_total's
@@ -9497,7 +9534,7 @@ def _presynthesize_islands_with_bookmarks(
         volume = bounded_prosody_int(prosody.get("volume_percent"), default=0, lower=-3, upper=3)
         voice = str(voice_info["selected_voice"])
         island_texts = [
-            (str(item["group_id"]), _native_dub_tts_ready_text(_group_spoken_zulu(item), job_root=job_root, voice=voice))
+            (str(item["group_id"]), _native_dub_tts_ready_parts(_group_spoken_zulu(item), job_root=job_root, voice=voice))
             for item in ordered
         ]
 

@@ -296,8 +296,57 @@ class SafeSSMLBuilder:
             raise SSMLValidationError(f"SSML {name} must be between {lower} and {upper}")
 
 
+def _render_bookmark_island_body(value: "str | Sequence[SSMLPart]", *, mark: str) -> tuple[str, int]:
+    """Render one bookmarked island's spoken content to an XML fragment plus
+    its real text-character count (for ``build_group_bookmark_ssml``'s shared
+    ``max_text_characters`` bound).
+
+    A plain string is the common case (one implicit ``TextPart``) and renders
+    byte-identically to this function's original, string-only contract.  A
+    sequence of parts is scoped deliberately narrow -- only ``TextPart`` and
+    ``CharacterPart`` -- matching this module's own long-standing reason
+    islands never needed the full ``SSMLPart`` union (``build_island_phrase_
+    groups`` has never needed ``BreakPart``/``EmphasisPart``/
+    ``SubstitutionPart`` inside one island). ``CharacterPart`` support exists
+    specifically for a code-switched acronym that must be spelled letter-by-
+    letter (e.g. "ANC") within an otherwise plain-text island -- confirmed
+    real defect: without it, "ANC" reached Azure as unmarked literal text
+    with no letter-spelling markup, left entirely to the voice's own guess.
+    """
+    if isinstance(value, str):
+        checked_text = _check_text(value, field_name="SSML island text")
+        if not checked_text.strip():
+            raise SSMLValidationError(f"SSML island text cannot be empty: {mark!r}")
+        return escape(checked_text, quote=False), len(checked_text)
+
+    fragments: list[str] = []
+    text_characters = 0
+    has_spoken_text = False
+    for part in value:
+        if isinstance(part, TextPart):
+            checked_text = _check_text(part.text, field_name="SSML island text")
+            fragments.append(escape(checked_text, quote=False))
+            text_characters += len(checked_text)
+            if checked_text.strip():
+                has_spoken_text = True
+        elif isinstance(part, CharacterPart):
+            checked_text = _check_text(part.text, field_name="SSML character text")
+            if not checked_text.strip() or not re.fullmatch(r"[A-Za-z0-9]+", checked_text):
+                raise SSMLValidationError("SSML character text must be non-empty letters or digits")
+            fragments.append(f'<say-as interpret-as="characters">{escape(checked_text, quote=False)}</say-as>')
+            text_characters += len(checked_text)
+            has_spoken_text = True
+        else:
+            raise SSMLValidationError(
+                f"SSML island parts only support TextPart/CharacterPart, got {type(part).__name__}"
+            )
+    if not has_spoken_text:
+        raise SSMLValidationError(f"SSML island text cannot be empty: {mark!r}")
+    return "".join(fragments), text_characters
+
+
 def build_group_bookmark_ssml(
-    islands: Sequence[tuple[str, str]],
+    islands: Sequence[tuple[str, "str | Sequence[SSMLPart]"]],
     *,
     voice: str,
     allowed_voices: Iterable[str],
@@ -314,13 +363,14 @@ def build_group_bookmark_ssml(
     immediately before its text, so a single Speech SDK synthesis call can report
     the real audio offset where each island's speech begins via the
     ``BookmarkReached`` event (see ``speech_islands.slice_wav_by_bookmarks``).
-    Kept deliberately separate from ``SafeSSMLBuilder.build()``: islands never
-    carry ``BreakPart``/``EmphasisPart``/``SubstitutionPart``/``CharacterPart``
-    (``build_island_phrase_groups`` always emits a single plain-text part per
-    island), so this only needs text+bookmark handling, not the full
-    ``SSMLPart`` union. Returns ``(xml, sha256)`` rather than an ``SSMLDocument``
-    since there is no other consumer of that dataclass's per-request metadata
-    parity contract (``validate_document``) for a bookmarked group document.
+    An island's content is normally a plain string (``build_island_phrase_groups``
+    emits a single plain-text part per island); it may also be a sequence of
+    ``TextPart``/``CharacterPart`` when one island needs a letter-spelled
+    acronym mid-text (see ``_render_bookmark_island_body``) -- still a narrow
+    subset of the full ``SSMLPart`` union, not general island formatting.
+    Returns ``(xml, sha256)`` rather than an ``SSMLDocument`` since there is no
+    other consumer of that dataclass's per-request metadata parity contract
+    (``validate_document``) for a bookmarked group document.
     """
     allowed_voices_set = frozenset(str(item).strip() for item in allowed_voices)
     if voice not in allowed_voices_set:
@@ -345,19 +395,17 @@ def build_group_bookmark_ssml(
     seen_marks: set[str] = set()
     rendered: list[str] = []
     text_characters = 0
-    for island_id, text in islands:
+    for island_id, content in islands:
         mark = str(island_id)
         if not _BOOKMARK_MARK.fullmatch(mark):
             raise SSMLValidationError(f"Invalid SSML bookmark mark: {mark!r}")
         if mark in seen_marks:
             raise SSMLValidationError(f"Duplicate SSML bookmark mark: {mark!r}")
         seen_marks.add(mark)
-        checked_text = _check_text(text, field_name="SSML island text")
-        if not checked_text.strip():
-            raise SSMLValidationError(f"SSML island text cannot be empty: {mark!r}")
-        text_characters += len(checked_text)
+        island_body, island_char_count = _render_bookmark_island_body(content, mark=mark)
+        text_characters += island_char_count
         rendered.append(f'<bookmark mark="{escape(mark, quote=True)}" />')
-        rendered.append(escape(checked_text, quote=False))
+        rendered.append(island_body)
     if text_characters > resolved_bounds.max_text_characters:
         raise SSMLValidationError("SSML text exceeds the configured character limit")
 

@@ -296,10 +296,22 @@ def _slice_paths(output_dir: Path, island_id: str, *, output_suffix: str) -> tup
     return wav_path, manifest_path
 
 
+def _island_content_hash_source(value: "str | Sequence[object]") -> str:
+    """A stable string to hash for one island's content, whether it is the
+    common plain string or a sequence of typed SSML parts (``TextPart``/
+    ``CharacterPart``, see ``tts_ssml.build_group_bookmark_ssml``). Type-tags
+    each part so a ``CharacterPart`` and a ``TextPart`` carrying the same
+    literal text still hash differently -- they are genuinely different
+    requests (letter-spelled vs. plain-text pronunciation)."""
+    if isinstance(value, str):
+        return value
+    return "\x1f".join(f"{type(part).__name__}:{part.text}" for part in value)
+
+
 def _group_request_hash(
     *,
     parent_group_id: str,
-    islands: Sequence[tuple[str, str]],
+    islands: Sequence[tuple[str, "str | Sequence[object]"]],
     voice: str,
     language: str,
     rate_percent: int,
@@ -313,7 +325,8 @@ def _group_request_hash(
         "schema_version": GROUP_MANIFEST_SCHEMA_VERSION,
         "parent_group_id": str(parent_group_id),
         "islands": [
-            [str(island_id), hashlib.sha256(text.encode("utf-8")).hexdigest()] for island_id, text in islands
+            [str(island_id), hashlib.sha256(_island_content_hash_source(text).encode("utf-8")).hexdigest()]
+            for island_id, text in islands
         ],
         "voice": voice,
         "language": language,
@@ -464,7 +477,7 @@ def _reuse_existing_group(
 
 def synthesize_group_with_bookmarks(
     boundary: AzureSpeechSDKBoundary,
-    islands: Sequence[tuple[str, str]],
+    islands: Sequence[tuple[str, "str | Sequence[object]"]],
     *,
     parent_group_id: str,
     voice: str,

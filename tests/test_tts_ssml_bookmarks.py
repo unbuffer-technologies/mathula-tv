@@ -4,8 +4,11 @@ the Speech SDK grouped-synthesis path (see speech_islands.slice_wav_by_bookmarks
 import pytest
 
 from mathula_tv.tts_ssml import (
+    BreakPart,
+    CharacterPart,
     SSMLBounds,
     SSMLValidationError,
+    TextPart,
     build_group_bookmark_ssml,
     validate_ssml,
 )
@@ -125,3 +128,59 @@ def test_preserves_island_order_in_xml():
     xml, _ = build_group_bookmark_ssml(islands, voice=_VOICE, allowed_voices=_ALLOWED_VOICES)
     assert xml.index("isl00") < xml.index("isl01") < xml.index("isl02")
     assert xml.index("First.") < xml.index("Second.") < xml.index("Third.")
+
+
+def test_island_content_may_be_typed_parts_with_a_character_mode_acronym():
+    # Real motivating case: "ANC" must be spelled letter-by-letter, not read
+    # as a whole word, without disturbing the plain text around it.
+    islands = [
+        ("g1__isl00", (TextPart("Lawo mawele e-"), CharacterPart("ANC"), TextPart(" kumele azi."))),
+    ]
+    xml, _ = build_group_bookmark_ssml(islands, voice=_VOICE, allowed_voices=_ALLOWED_VOICES)
+    assert '<say-as interpret-as="characters">ANC</say-as>' in xml
+    assert "Lawo mawele e-" in xml
+    assert " kumele azi." in xml
+    metadata = validate_ssml(xml, bounds=SSMLBounds(), allowed_voices=_ALLOWED_VOICES)
+    assert metadata["voice"] == _VOICE
+
+
+def test_typed_parts_island_still_gets_its_own_bookmark():
+    islands = [
+        ("g1__isl00", "Sawubona."),
+        ("g1__isl01", (TextPart("e-"), CharacterPart("EFF"))),
+    ]
+    xml, _ = build_group_bookmark_ssml(islands, voice=_VOICE, allowed_voices=_ALLOWED_VOICES)
+    assert xml.index('mark="g1__isl00"') < xml.index('mark="g1__isl01"') < xml.index("EFF")
+
+
+def test_typed_parts_string_and_object_render_identically_for_plain_text():
+    # A single TextPart must render byte-identically to the plain-string form
+    # -- proof this is a real generalization, not a separate code path.
+    string_xml, _ = build_group_bookmark_ssml(
+        [("g1__isl00", "Ngiyabonga.")], voice=_VOICE, allowed_voices=_ALLOWED_VOICES
+    )
+    typed_xml, _ = build_group_bookmark_ssml(
+        [("g1__isl00", (TextPart("Ngiyabonga."),))], voice=_VOICE, allowed_voices=_ALLOWED_VOICES
+    )
+    assert string_xml == typed_xml
+
+
+def test_character_part_must_be_letters_or_digits_only():
+    with pytest.raises(SSMLValidationError, match="letters or digits"):
+        build_group_bookmark_ssml(
+            [("g1__isl00", (CharacterPart("AN C"),))], voice=_VOICE, allowed_voices=_ALLOWED_VOICES,
+        )
+
+
+def test_rejects_unsupported_part_type_in_an_island():
+    with pytest.raises(SSMLValidationError, match="TextPart/CharacterPart"):
+        build_group_bookmark_ssml(
+            [("g1__isl00", (BreakPart(200),))], voice=_VOICE, allowed_voices=_ALLOWED_VOICES,
+        )
+
+
+def test_rejects_typed_parts_island_with_no_real_spoken_text():
+    with pytest.raises(SSMLValidationError, match="cannot be empty"):
+        build_group_bookmark_ssml(
+            [("g1__isl00", (TextPart("   "),))], voice=_VOICE, allowed_voices=_ALLOWED_VOICES,
+        )

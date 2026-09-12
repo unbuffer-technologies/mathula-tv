@@ -150,6 +150,53 @@ def test_different_text_at_same_path_conflicts_without_force(tmp_path):
     assert forced.bookmark_offsets_ms == {"g1__isl00": 0, "g1__isl01": 1200, "g1__isl02": 2000}
 
 
+def test_island_content_may_be_typed_ssml_parts(tmp_path):
+    # Real motivating case: an island containing a character-mode acronym
+    # (e.g. "ANC") is a tuple of TextPart/CharacterPart, not a plain string --
+    # confirms this reaches synthesis without crashing (the real bug: hashing
+    # assumed every island's content was always a plain str and called
+    # `.encode()` on it directly).
+    from mathula_tv.tts_ssml import CharacterPart, TextPart
+
+    boundary = FakeBoundary(
+        responses=[_completed_response(bookmarks_ms={"g1__isl00": 0, "g1__isl01": 1000})]
+    )
+    islands = [
+        ("g1__isl00", "Sawubona."),
+        ("g1__isl01", (TextPart("Lawo mawele e-"), CharacterPart("ANC"), TextPart(" kumele azi."))),
+    ]
+    output_path = tmp_path / "g1.sdk-group.wav"
+
+    result = synthesize_group_with_bookmarks(
+        boundary, islands, parent_group_id="g1", voice=VOICE,
+        allowed_voices=ALLOWED_VOICES, output_path=output_path,
+    )
+
+    assert result.island_ids == ("g1__isl00", "g1__isl01")
+    assert '<say-as interpret-as="characters">ANC</say-as>' in Path(result.ssml_path).read_text(encoding="utf-8")
+
+
+def test_typed_parts_island_conflicts_with_a_plain_text_version_at_the_same_path(tmp_path):
+    # The hash must distinguish "ANC" spoken as letters from "ANC" spoken as
+    # plain text -- these are genuinely different requests, not the same
+    # content in two representations.
+    from mathula_tv.tts_ssml import CharacterPart, TextPart
+
+    boundary = FakeBoundary(
+        responses=[_completed_response(bookmarks_ms={"g1__isl00": 0})]
+    )
+    output_path = tmp_path / "g1.sdk-group.wav"
+    kwargs = dict(
+        parent_group_id="g1", voice=VOICE, allowed_voices=ALLOWED_VOICES, output_path=output_path
+    )
+    synthesize_group_with_bookmarks(boundary, [("g1__isl00", "e-ANC")], **kwargs)
+
+    with pytest.raises(AzureTTSIdempotencyError, match="different synthesis request"):
+        synthesize_group_with_bookmarks(
+            boundary, [("g1__isl00", (TextPart("e-"), CharacterPart("ANC")))], **kwargs
+        )
+
+
 def test_leading_silence_trim_shifts_bookmark_offsets(tmp_path):
     # Bookmarks are reported relative to the RAW audio; canonicalization trims
     # leading digital silence off the front of the WAV that gets written to disk

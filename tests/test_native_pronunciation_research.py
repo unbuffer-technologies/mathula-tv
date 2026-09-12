@@ -543,6 +543,42 @@ def test_tts_ready_text_omitting_job_root_matches_todays_default_exactly(tmp_pat
     assert "Nabanda Akhademi" not in _native_dub_tts_ready_text(text)
 
 
+def test_ready_parts_splits_out_a_character_mode_acronym():
+    # Real user-reported defect, job fb3d08b63fed4d90922b08f7e325b906:
+    # "ANC is not pronounced correctly". Root cause: ANC's own reviewed
+    # registry entry is character_mode=True (see pronunciation.py's
+    # _ZU_SA_PUBLIC_AFFAIRS_ACRONYMS), but native_dub.py never wired
+    # build_initialism_ssml_parts in at all, so "ANC" reached Azure as
+    # unmarked literal text. _native_dub_tts_ready_parts is the fix.
+    from mathula_tv.native_dub import _native_dub_tts_ready_parts
+    from mathula_tv.tts_ssml import CharacterPart, TextPart
+
+    result = _native_dub_tts_ready_parts("Lawo mawele e-ANC kumele azi.")
+
+    assert isinstance(result, tuple)
+    assert TextPart("Lawo mawele e-") in result
+    assert CharacterPart("ANC") in result
+    assert TextPart(" kumele azi.") in result
+
+
+def test_ready_parts_returns_a_plain_string_with_no_character_mode_token():
+    from mathula_tv.native_dub import _native_dub_tts_ready_parts
+
+    result = _native_dub_tts_ready_parts("Sikhathele i-racism, sikhathele ukuntuleka.")
+
+    assert isinstance(result, str)
+    assert result == _native_dub_tts_ready_text("Sikhathele i-racism, sikhathele ukuntuleka.")
+
+
+def test_ready_parts_still_honors_a_per_voice_override_before_splitting():
+    from mathula_tv.native_dub import _native_dub_tts_ready_parts
+
+    result = _native_dub_tts_ready_parts("Sikhathele i-racism.", voice="zu-ZA-ThandoNeural")
+
+    assert isinstance(result, str)
+    assert "raysizim" in result
+
+
 def test_render_reloads_research_from_disk(tmp_path):
     """Simulates render_native_dub running as a separate process from
     build_candidate_pool: the in-memory job cache is gone, only the artifact
