@@ -13920,6 +13920,352 @@ def _request_protected_content_last_resort_batch(
     return by_id, usage
 
 
+# Real user-reported defect, job fb3d08b63fed4d90922b08f7e325b906 (2026-09-13):
+# "0:40 finishes too early" -- native_phrase_0005 measured 8,389ms against a
+# real 12,800ms window, a 4,411ms shortfall with zero free gap after it
+# (the very next block starts at the same instant this one's window ends,
+# per _temporal_mask_geometry's own free_gap_ms). Confirmed root cause: this
+# pipeline has a rich toolkit for a block that runs too LONG (fact-priority
+# trim, last-resort compression, turn rebalancing) but nothing at all for one
+# that runs too SHORT beyond _pad_wav_with_trailing_silence's own tiny,
+# deliberately-scoped MAX_UNRESOLVED_EARLY_SILENCE_PAD_MS (150ms) rounding
+# fix -- anything bigger than that was simply accepted as-is, however large.
+# 1000ms is a deliberately conservative floor, comfortably above that 150ms
+# rounding case and any ordinary natural-pace variance, while catching the
+# real 4,411ms case with wide margin -- tune from real job data if it proves
+# too eager or too lax once run broadly.
+_ELABORATION_TRIGGER_MS = 1000
+SENTENCE_ELABORATION_PROMPT_VERSION = "native-sentence-elaboration-v1"
+SENTENCE_ELABORATION_SYSTEM_PROMPT = r"""Mathula TV is a fixed-runtime social broadcast product: a
+sentence that finishes speaking well before its own real on-screen window ends reads as an
+audible, awkward silence -- the dub visibly "runs out of things to say" while the on-screen
+speaker's own mouth, from the original footage, is still moving. Each unit you are given measured
+NOTICEABLY shorter than its own real available speaking time once translated naturally. This is
+the opposite problem from every other editing prompt in this pipeline: you are not shortening, you
+are NATURALLY LENGTHENING -- using ONLY the ADDITION technique this pipeline already permits
+elsewhere (natural connective/narrative scaffolding a real Zulu broadcaster would use to link ideas
+smoothly), never inventing a new fact, name, number, date, claim, or implication that is not
+already present in source_text.
+
+For each unit, return TWO increasingly fuller English rewordings of current_english_text:
+
+1. fuller_english_text: the LIGHTEST elaboration -- restate ONE clause more fully and completely
+   (spell out something that currently reads as clipped or abbreviated, use a fuller grammatical
+   construction instead of a terse one, restate a connective more naturally) without adding any
+   genuinely new phrase or idea.
+2. elaborated_english_text: a DEEPER elaboration than fuller_english_text -- add natural narrative
+   or connective scaffolding a real broadcaster would use to slow down and fill real airtime (a
+   natural transitional phrase, a fuller scene-setting frame, restating the same point with more
+   complete, unhurried phrasing) -- still never a new fact, only a fuller, more natural way of
+   saying the SAME facts that are already there.
+
+Every fact, name, number, date, and negation present in source_text must still be present, exactly
+as accurate, in BOTH rewordings -- this is a HARD RULE with no exception. If you genuinely cannot
+find any safe way to add real, natural length without inventing content, return
+current_english_text UNCHANGED for one or both fields -- this is a valid, honest answer, not a
+failure; a later, purely mechanical step measures the real result and only ever keeps whichever
+tier (or the original) actually helps.
+
+Use target_syllables/min_syllables/max_syllables (this unit's own real window's syllable budget) to
+judge how much elaboration is actually needed -- these are LANGUAGE-PLANNING TARGETS, not
+permission to pad with meaningless filler beyond what a real newsreader would naturally say. No
+tools or web search. Return JSON only."""
+
+
+def _sentence_elaboration_schema(expected_unit_ids: Sequence[str]) -> dict[str, Any]:
+    requested_ids = [str(value) for value in expected_unit_ids]
+    if len(set(requested_ids)) != len(requested_ids):
+        raise ValueError("Sentence elaboration schema received duplicate expected unit IDs")
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["units"],
+        "properties": {
+            "units": {
+                "type": "array",
+                "minItems": len(requested_ids),
+                "maxItems": len(requested_ids),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["unit_id", "fuller_english_text", "elaborated_english_text"],
+                    "properties": {
+                        "unit_id": {"type": "string", "enum": requested_ids},
+                        "fuller_english_text": {"type": "string", "minLength": 1},
+                        "elaborated_english_text": {"type": "string", "minLength": 1},
+                    },
+                },
+            },
+        },
+    }
+
+
+def _request_sentence_elaboration_batch(
+    *,
+    provider: FoundryGrokProvider,
+    items: Sequence[Mapping[str, Any]],
+    glossary: Mapping[str, Any],
+    context_ledger: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """items: [{"unit_id", "source_text", "current_english_text", "target_syllables",
+    "min_syllables", "max_syllables"}, ...]. Returns {unit_id: {"fuller_english_text",
+    "elaborated_english_text"}}. Identity mismatch on unit_id is fatal (same
+    convention as every other candidate-translate-family function in this file).
+    """
+    expected_ids = [str(item["unit_id"]) for item in items]
+    response = provider.complete_json(
+        operation="native_sentence_elaboration_batch",
+        system_prompt=SENTENCE_ELABORATION_SYSTEM_PROMPT,
+        payload={
+            "zulu_terminology_glossary": dict(glossary),
+            "context_ledger": dict(context_ledger or {}),
+            "units": [
+                {
+                    "unit_id": str(item["unit_id"]),
+                    "source_text": str(item["source_text"]),
+                    "current_english_text": str(item["current_english_text"]),
+                    "target_syllables": int(item["target_syllables"]),
+                    "min_syllables": int(item["min_syllables"]),
+                    "max_syllables": int(item["max_syllables"]),
+                }
+                for item in items
+            ],
+        },
+        schema=_sentence_elaboration_schema(expected_ids),
+        max_output_tokens=min(max(1500, 500 * len(items)), 8192),
+    )
+    returned = list(response.data.get("units") or [])
+    expected_set = set(expected_ids)
+    by_id: dict[str, dict[str, Any]] = {}
+    duplicate_ids: list[str] = []
+    unknown_ids: list[str] = []
+    for item in returned:
+        unit_id = str(item.get("unit_id") or "")
+        if unit_id in by_id:
+            duplicate_ids.append(unit_id)
+            continue
+        if unit_id not in expected_set:
+            unknown_ids.append(unit_id)
+            continue
+        by_id[unit_id] = {
+            "fuller_english_text": str(item.get("fuller_english_text") or "").strip(),
+            "elaborated_english_text": str(item.get("elaborated_english_text") or "").strip(),
+        }
+
+    missing_ids = [unit_id for unit_id in expected_ids if unit_id not in by_id]
+    if duplicate_ids or unknown_ids or missing_ids:
+        details = []
+        if missing_ids:
+            details.append("missing=" + ",".join(missing_ids))
+        if unknown_ids:
+            details.append("unknown=" + ",".join(unknown_ids))
+        if duplicate_ids:
+            details.append("duplicate=" + ",".join(duplicate_ids))
+        raise ValueError("Sentence elaboration batch identity mismatch: " + "; ".join(details))
+
+    usage = {
+        "input_tokens": int(response.input_tokens),
+        "output_tokens": int(response.output_tokens),
+        "attempts": int(response.attempts),
+    }
+    return by_id, usage
+
+
+def _elaborate_undersized_sentences(
+    *,
+    provider: FoundryGrokProvider,
+    groups: Sequence[Mapping[str, Any]],
+    winners: Mapping[str, Mapping[str, Any]],
+    natural_english_by_group: Mapping[str, str],
+    tts: AzureTTSBackend,
+    geometries: Mapping[str, Mapping[str, Any]],
+    voice_assignments: Mapping[str, Mapping[str, Any]],
+    measurement_audio_root: Path,
+    force: bool,
+    candidate_pool_tts_workers: int,
+    preferred_raw_speed_percent: int,
+    glossary: Mapping[str, Any],
+    context_ledger: Mapping[str, Any] | None = None,
+    modes_by_speaker: Mapping[str, str] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """The "expand" counterpart to _trim_by_fact_priority/_compress_protected_
+    content_last_resort: a block whose current winner measures NOTICEABLY
+    shorter than its own real window (an audible early silence, not just a
+    rounding residual -- see _ELABORATION_TRIGGER_MS) gets one batched Grok
+    call requesting two increasingly fuller English rewordings, each then
+    translated (reusing the unmodified _request_candidate_translation_batch)
+    and measured for real via Azure TTS. English-side editing, never Zulu --
+    the same "compact/expand English, not Zulu" principle this whole file's
+    shrink-side mechanisms already follow, for the identical reason (editing
+    Zulu directly requires the same weak Zulu comprehension that causes
+    translation errors in the first place).
+
+    Selection reuses the SAME real _timing_candidate_rank tuple every other
+    timing decision in this file relies on (already documented, right above
+    _compress_protected_content_last_resort's own selection, to rank
+    undersized-with-dead-air as the WORST tier -- worse than a rushed-but-
+    atempo-rescuable candidate) -- promoted only if the best elaborated
+    candidate's rank is a real, measured improvement over the baseline's,
+    exactly the same never-worse discipline as every other mechanism here.
+    Ties prefer the LIGHTER elaboration tier (fuller over elaborated), since
+    less-invasive editing is preferred whenever it does the job equally well.
+    """
+    groups_by_id = {str(g["group_id"]): g for g in groups}
+    usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+    updated_winners = dict(winners)
+
+    def _shortfall_ms(group_id: str, winner: Mapping[str, Any]) -> int:
+        window_ms = int((geometries.get(group_id) or {}).get("source_window_ms") or 0)
+        return max(0, window_ms - int(winner.get("measured_ms") or 0))
+
+    triggered_group_ids = [
+        gid for gid, winner in updated_winners.items()
+        if winner.get("direction") == "expand" and _shortfall_ms(gid, winner) > _ELABORATION_TRIGGER_MS
+    ]
+    if not triggered_group_ids:
+        return updated_winners, usage_totals
+
+    _emit_progress(
+        progress,
+        f"[native candidate pool] {len(triggered_group_ids)} block(s) finish well before their real "
+        "window ends; attempting natural elaboration...",
+    )
+
+    items = []
+    for gid in triggered_group_ids:
+        geometry = geometries[gid]
+        budget = _rolling_syllable_budget(
+            {"start_ms": 0, "end_ms": int(geometry["source_window_ms"])},
+            preferred_raw_speed_percent=preferred_raw_speed_percent,
+            content_syllables_per_second=DEFAULT_ZULU_CONTENT_SYLLABLES_PER_SECOND,
+            azure_utterance_overhead_ms=DEFAULT_AZURE_UTTERANCE_OVERHEAD_MS,
+            tolerance_percent=DEFAULT_SYLLABLE_TOLERANCE_PERCENT,
+        )
+        items.append({
+            "unit_id": gid,
+            "source_text": str(groups_by_id[gid]["source_text"]),
+            "current_english_text": natural_english_by_group.get(gid, str(groups_by_id[gid]["source_text"])),
+            "target_syllables": int(budget["target_syllables"]),
+            "min_syllables": int(budget["min_syllables"]),
+            "max_syllables": int(budget["max_syllables"]),
+        })
+
+    try:
+        by_id, usage = _request_sentence_elaboration_batch(
+            provider=provider, items=items, glossary=glossary, context_ledger=context_ledger,
+        )
+    except Exception as exc:
+        _emit_progress(progress, f"[native candidate pool] Elaboration request failed: {exc}")
+        return updated_winners, usage_totals
+    for key in usage_totals:
+        usage_totals[key] += usage.get(key, 0)
+
+    translate_units: list[dict[str, Any]] = []
+    tier_by_unit_id: dict[str, tuple[str, str]] = {}
+    for gid in triggered_group_ids:
+        result = by_id.get(gid)
+        if not result:
+            continue
+        source_text = str(groups_by_id[gid]["source_text"])
+        speaker_mode = (modes_by_speaker or {}).get(
+            str(groups_by_id[gid].get("speaker_id") or ""), _SPEAKER_SERIOUSNESS_MODE_DEFAULT,
+        )
+        seen_texts: set[str] = set()
+        for tier_label, key_name in (("fuller", "fuller_english_text"), ("elaborated", "elaborated_english_text")):
+            candidate_text = str(result.get(key_name) or "").strip()
+            if not candidate_text or candidate_text in seen_texts:
+                continue
+            if not _sentence_preserves_required_literals(source_text=source_text, candidate_text=candidate_text):
+                continue
+            seen_texts.add(candidate_text)
+            unit_id = f"{gid}__elaborate_{tier_label}"
+            tier_by_unit_id[unit_id] = (gid, tier_label)
+            translate_units.append({
+                "unit_id": unit_id,
+                "english_text": candidate_text,
+                "speaker_seriousness_mode": speaker_mode,
+            })
+
+    if not translate_units:
+        _emit_progress(progress, "[native candidate pool] Elaboration produced no usable candidates.")
+        return updated_winners, usage_totals
+
+    try:
+        translated_by_id, translate_usage = _request_candidate_translation_batch(
+            provider=provider, units=translate_units, glossary=glossary, context_ledger=context_ledger,
+        )
+    except Exception as exc:
+        _emit_progress(progress, f"[native candidate pool] Elaboration translation failed: {exc}")
+        return updated_winners, usage_totals
+    for key in usage_totals:
+        usage_totals[key] += translate_usage.get(key, 0)
+
+    candidates_by_group: dict[str, list[dict[str, Any]]] = {}
+    for unit_id, (gid, tier_label) in tier_by_unit_id.items():
+        translated = translated_by_id.get(unit_id)
+        if not translated:
+            continue
+        zulu_text = str(translated.get("zulu_text") or "").strip()
+        if not zulu_text:
+            continue
+        candidates_by_group.setdefault(gid, []).append({
+            "candidate_id": unit_id,
+            "variant_id": f"elaborate_{tier_label}",
+            "translator": "grok",
+            "spoken_text": zulu_text,
+        })
+
+    if not candidates_by_group:
+        _emit_progress(progress, "[native candidate pool] Elaboration produced no translatable candidates.")
+        return updated_winners, usage_totals
+
+    measured_group_ids = list(candidates_by_group)
+    raw_measured = _measure_temporal_batch(
+        tts=tts, groups=[groups_by_id[gid] for gid in measured_group_ids],
+        candidates_by_group=candidates_by_group,
+        geometries={gid: geometries[gid] for gid in measured_group_ids},
+        voice_assignments=voice_assignments, output_root=measurement_audio_root,
+        round_number=11, force=force, workers=candidate_pool_tts_workers,
+    )
+
+    _tier_preference = {"elaborate_fuller": 0, "elaborate_elaborated": 1}
+    for gid in measured_group_ids:
+        measured = raw_measured.get(gid) or []
+        if not measured:
+            continue
+        baseline = updated_winners[gid]
+        baseline_shortfall_ms = _shortfall_ms(gid, baseline)
+        enriched = _enrich_measured_candidates(measured=measured, original_candidates=candidates_by_group[gid])
+        best = min(
+            enriched,
+            key=lambda c: (tuple(c.get("rank") or (9, 0, 0)), _tier_preference.get(c.get("variant_id"), 9)),
+        )
+        best_rank = tuple(best.get("rank") or (9, 0, 0))
+        baseline_rank = tuple(baseline.get("rank") or (9, 0, 0))
+        if best_rank < baseline_rank:
+            best["requires_review"] = True
+            if baseline.get("effective_start_ms") is not None:
+                best.setdefault("effective_start_ms", baseline["effective_start_ms"])
+            if baseline.get("effective_source_end_ms") is not None:
+                best.setdefault("effective_source_end_ms", baseline["effective_source_end_ms"])
+            updated_winners[gid] = best
+            new_shortfall_ms = _shortfall_ms(gid, best)
+            _emit_progress(
+                progress,
+                f"[native candidate pool] {gid} improved via natural elaboration ({best.get('variant_id')}): "
+                f"{baseline_shortfall_ms}ms -> {new_shortfall_ms}ms early.",
+            )
+        else:
+            _emit_progress(
+                progress,
+                f"[native candidate pool] Elaboration for {gid} did not improve on the original "
+                f"({baseline_shortfall_ms}ms early baseline; best attempt did not measure a real improvement).",
+            )
+
+    return updated_winners, usage_totals
+
+
 def _compress_protected_content_last_resort(
     *,
     provider: FoundryGrokProvider,
@@ -14158,6 +14504,7 @@ def build_candidate_pool(
     skip_pronunciation_research: bool = False,
     skip_pronunciation_round_trip: bool = False,
     skip_speaker_seriousness_mode: bool = False,
+    skip_elaboration: bool = False,
     stt_backend: AzureFastTranscriptionBackend | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -14202,6 +14549,14 @@ def build_candidate_pool(
     window-reallocation entirely, so every sentence's `required_speed_percent`
     reflects its own raw natural-translation timing, unaffected by turn
     rebalancing.
+
+    ``skip_elaboration=True`` is a diagnostic-only mode: skips the natural-
+    elaboration pass entirely (see _elaborate_undersized_sentences), so a
+    block that finishes well before its own real window ends is left exactly
+    as its natural translation, rebalancing, and compaction stages produced
+    it -- real user-reported defect fixed by this pass, 2026-09-13: a sentence
+    measuring several real seconds shorter than its own window plays as an
+    audible early silence with nothing else in this file ever addressing it.
 
     Sentences are grouped into real, uncapped speaker turns (the PRIMARY unit
     -- see _build_speaker_turns) BEFORE translation now (Phase 16): each turn
@@ -14304,6 +14659,9 @@ def build_candidate_pool(
         "bridge_max_word_count": _BRIDGE_MAX_WORD_COUNT,
         "bridge_max_source_span_ms": _BRIDGE_MAX_SOURCE_SPAN_MS,
         "max_shortened_candidates_per_segment": _MAX_SHORTENED_CANDIDATES_PER_SEGMENT,
+        "sentence_elaboration_prompt_version": SENTENCE_ELABORATION_PROMPT_VERSION,
+        "elaboration_trigger_ms": _ELABORATION_TRIGGER_MS,
+        "skip_elaboration": bool(skip_elaboration),
         "skip_turn_rebalance": bool(skip_turn_rebalance),
         "skip_turn_block_translation": bool(skip_turn_block_translation),
         "skip_pronunciation_research": bool(skip_pronunciation_research),
@@ -14443,7 +14801,22 @@ def build_candidate_pool(
     )
     _merge_updated_winners(winners)
 
-    # Either compaction stage above can independently shorten one member of a
+    elaboration_usage = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+    if not skip_elaboration:
+        winners, elaboration_usage = _elaborate_undersized_sentences(
+            provider=provider, groups=block_groups, winners=winners,
+            natural_english_by_group=natural_english_by_group, tts=tts, geometries=geometries,
+            voice_assignments=voice_assignments, measurement_audio_root=measurement_audio_root,
+            force=force, candidate_pool_tts_workers=candidate_pool_tts_workers,
+            preferred_raw_speed_percent=int(preferred_raw_speed_percent),
+            glossary=glossary, context_ledger=context_ledger, modes_by_speaker=modes_by_speaker,
+            progress=progress,
+        )
+        _merge_updated_winners(winners)
+    else:
+        _emit_progress(progress, "[native candidate pool] Natural elaboration skipped (diagnostic mode).")
+
+    # Either compaction stage above (or the elaboration stage) can independently shorten/lengthen one member of a
     # multi-member turn without the other members changing at all -- re-sync
     # the turn's real aggregate one final time so every member reports the
     # SAME honest number that Phase 14 will actually render as one shared
@@ -14464,7 +14837,7 @@ def build_candidate_pool(
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
     for usage in (
         context_usage, glossary_usage, pronunciation_research_usage, speaker_mode_usage, grok_usage, trim_usage,
-        last_resort_usage,
+        last_resort_usage, elaboration_usage,
     ):
         for key in usage_totals:
             usage_totals[key] += int(usage.get(key) or 0)
