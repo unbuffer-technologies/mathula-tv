@@ -437,6 +437,76 @@ def test_build_candidate_pool_end_to_end_translates_and_measures_natural_text(tm
     assert native_dub_paths(job_root).candidate_pool.is_file()
 
 
+class _FakeDualVariantProvider:
+    """Registers BOTH the condensed and extended turn-block-translate
+    operations with genuinely different, fully-valid (real clauses)
+    responses -- unlike _FakeIntegrationProvider above, which only registers
+    the condensed operation and omits clauses entirely (so its own fixture
+    always falls back to independent per-sentence translation regardless of
+    this dual-variant mechanism). This proves the real, measured-fit
+    selection: whichever candidate's real synthesized duration actually
+    lands closer to the sentence's own window wins, not whichever variant
+    happened to run first.
+    """
+
+    def __init__(self):
+        self.config = SimpleNamespace(max_output_tokens=8192)
+        self.calls: list[str] = []
+
+    def complete_json(self, *, operation, system_prompt, payload, schema, max_output_tokens=None):
+        self.calls.append(operation)
+        if operation == "native_zulu_glossary":
+            return SimpleNamespace(
+                data={"zulu_terminology_glossary": {
+                    "terms": [], "do_not_translate": [],
+                    "register": {"formality": "formal", "address_form": "neutral", "tense_default": "present"},
+                }},
+                model="grok-test", input_tokens=10, output_tokens=5, attempts=1,
+            )
+        if operation in ("native_turn_block_translate_batch", "native_turn_block_translate_extended_batch"):
+            text = "Ephuzile." if operation == "native_turn_block_translate_batch" else (
+                "Wayefike sekwephuzile kakhulu emhlanganweni lowo obalulekile."
+            )
+            windows_response = [{
+                "window_id": w["window_id"],
+                "segments": [{
+                    "start_index": 1, "end_index": len(w["members"]), "isizulu_text": text,
+                    "clauses": [{"clause_id": "c1", "english_text": w["members"][0]["english_text"], "rank": 1}],
+                }],
+            } for w in payload["windows"]]
+            return SimpleNamespace(data={"windows": windows_response}, model="grok-test",
+                                    input_tokens=10, output_tokens=5, attempts=1)
+        raise AssertionError(f"unexpected operation: {operation}")
+
+
+def test_the_better_measured_fitting_variant_wins_not_construction_order(tmp_path):
+    # Real window is 3000ms (see _seed_job). The condensed candidate ("Ephuzile.")
+    # measures far too short (undersized); the extended candidate (a fuller,
+    # informal retelling of the same fact) measures close to the real window.
+    # The extended candidate must win by real measured fit, even though
+    # condensed is always constructed FIRST in candidate_by_block_group_id.
+    job_root = _seed_job(tmp_path, sentences=["He was late for the meeting."])
+    provider = _FakeDualVariantProvider()
+    durations = {
+        "Ephuzile.": 900,
+        "Wayefike sekwephuzile kakhulu emhlanganweni lowo obalulekile.": 2950,
+    }
+    tts = _FakePoolTts(durations)
+
+    artifact = build_candidate_pool(
+        job_root=job_root, provider=provider, tts=tts,
+        candidate_pool_workers=1, candidate_pool_tts_workers=1,
+    )
+
+    record = artifact["candidate_pool"][0]
+    winner = next(c for c in record["candidates"] if c["candidate_id"] == record["selected_candidate_id"])
+    assert winner["candidate_id"] == "grok_extended"
+    assert winner["variant_id"] == "extended"
+    assert winner["measured_ms"] == 2950
+    candidate_ids = {c["candidate_id"] for c in record["candidates"]}
+    assert candidate_ids == {"grok_condensed", "grok_extended"}  # both real candidates were measured
+
+
 def test_build_candidate_pool_classifies_a_short_utterance_as_bridge(tmp_path):
     # _seed_job's fixed 3000ms-per-sentence spacing is too long to trigger the
     # bridge span threshold -- seed a genuinely short (900ms) source window directly.

@@ -30,6 +30,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from mathula_tv.native_dub import (
+    TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION,
+    TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT,
     TURN_BLOCK_TRANSLATE_PROMPT_VERSION,
     TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT,
     _build_speaker_turns,
@@ -45,21 +47,30 @@ def test_turn_block_prompt_distinguishes_intensifying_repetition_from_filler():
     assert "INTENSITY or EMPHASIS" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
     assert "doubled \"very, very\" to be silently deleted" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
     assert "is not filler" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-    assert "v40-real-ms-headroom-informal-retelling" in TURN_BLOCK_TRANSLATE_PROMPT_VERSION
+    assert "v41-condensed-variant-of-dual-call" in TURN_BLOCK_TRANSLATE_PROMPT_VERSION
 
 
-def test_turn_block_prompt_pushes_real_headroom_usage_with_concrete_ms():
-    # Real user direction, 2026-09-17: a generic "narrative scaffolding is free
-    # to use" instruction was confirmed, via a live diagnostic call against the
-    # real fb3d08b63fed4d90922b08f7e325b906 turn 0009/0010, to leave real spare
-    # airtime unused as silence rather than natural retelling -- a much more
-    # assertive, real-milliseconds-driven, informal-storyteller framing
-    # measurably closed the gap in that live test. This asserts the prompt
-    # actually carries that stronger framing, not just the old soft language.
+def test_turn_block_prompt_is_the_condensed_variant_of_a_dual_call():
+    # Real user direction, 2026-09-17: embedding a "use real spare airtime"
+    # paragraph inside this SAME prompt (the one live-tested and briefly
+    # shipped, then confirmed via a real production re-run to have zero real
+    # effect) lost to this prompt's own existing, concrete "prefer shorter"
+    # TIGHT SUBSTITUTION instruction. The fix: two completely separate,
+    # independently-biased calls (see TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_
+    # PROMPT for the other one) -- this prompt now explicitly names itself as
+    # the CONDENSED half and carries no competing expansion instruction.
     assert "window_source_ms" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-    assert "was NOT assertive enough on its own" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-    assert "animatedly recounting this exact story to a friend" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-    assert "is the WRONG choice whenever real spare airtime is" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "THIS IS THE CONDENSED VARIANT" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "that call owns filling real headroom" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "never stretch a retelling to fill spare time" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+
+
+def test_extended_prompt_pushes_real_spare_airtime_usage():
+    assert "THIS IS THE EXTENDED VARIANT" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
+    assert "animatedly recounting this exact story to a friend" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
+    assert "is the WRONG choice here" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
+    assert "rank EVERY clause 1" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
+    assert "v1-real-spare-airtime-retelling" in TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION
 
 
 def _group(group_id: str, source_text: str, *, speaker_id: str = "SPEAKER_00", start_ms: int, span_ms: int = 3000) -> dict:
@@ -99,7 +110,7 @@ class _FakeTurnBlockProvider:
 
     def complete_json(self, *, operation, system_prompt, payload, schema, max_output_tokens=None):
         self.calls.append(operation)
-        if operation == "native_turn_block_translate_batch":
+        if operation in ("native_turn_block_translate_batch", "native_turn_block_translate_extended_batch"):
             if self._raise_for_windows.intersection(w["window_id"] for w in payload["windows"]):
                 # Real failure mode, not hypothetical: complete_json itself
                 # raises AIInvalidStructuredOutput (a PipelineError, not a
@@ -277,7 +288,7 @@ def test_a_merge_with_no_sentence_count_reduction_now_stays_merged():
     )
     assert [b["group_id"] for b in block_groups] == ["native_phrase_0024"]
     assert block_groups[0]["member_group_ids"] == ["native_phrase_0024", "native_phrase_0025"]
-    assert candidate_by_group["native_phrase_0024"]["spoken_text"] == (
+    assert candidate_by_group["native_phrase_0024"][0]["spoken_text"] == (
         "Ungajahi. Wena wakhuluma nini noMnu. Mogotsi?"
     )
     assert "native_candidate_translate_batch" not in provider.calls
@@ -355,7 +366,7 @@ def test_the_real_train_of_thought_case_merges_with_a_droppable_ladder():
     assert block_groups[0]["member_group_ids"] == [
         "native_phrase_0003", "native_phrase_0004", "native_phrase_0005", "native_phrase_0006",
     ]
-    assert candidate_by_group["native_phrase_0003"]["spoken_text"] == full_text
+    assert candidate_by_group["native_phrase_0003"][0]["spoken_text"] == full_text
     ladder = block_groups[0]["shortened_candidates"]
     assert [c["dropped_clause_ids"] for c in ladder] == [["c1"], ["c1", "c2", "c5"]]
     # The clause breakdown that produced this ladder must also survive onto
@@ -381,8 +392,8 @@ def test_a_window_returning_more_than_one_segment_falls_back():
         provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
     )
     assert [b["group_id"] for b in block_groups] == ["p1", "p2"]
-    assert candidate_by_group["p1"]["spoken_text"] == "Fallback Zulu for p1."
-    assert candidate_by_group["p2"]["spoken_text"] == "Fallback Zulu for p2."
+    assert candidate_by_group["p1"][0]["spoken_text"] == "Fallback Zulu for p1."
+    assert candidate_by_group["p2"][0]["spoken_text"] == "Fallback Zulu for p2."
     assert "native_candidate_translate_batch" in provider.calls
 
 
@@ -407,8 +418,8 @@ def test_a_window_whose_batch_call_raises_falls_back_instead_of_crashing():
         provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
     )
     assert [b["group_id"] for b in block_groups] == ["p1", "p2"]
-    assert candidate_by_group["p1"]["spoken_text"] == "Fallback Zulu for p1."
-    assert candidate_by_group["p2"]["spoken_text"] == "Fallback Zulu for p2."
+    assert candidate_by_group["p1"][0]["spoken_text"] == "Fallback Zulu for p1."
+    assert candidate_by_group["p2"][0]["spoken_text"] == "Fallback Zulu for p2."
     assert "native_candidate_translate_batch" in provider.calls
 
 
@@ -476,15 +487,19 @@ def test_a_window_returning_partial_coverage_falls_back():
         provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
     )
     assert [b["group_id"] for b in block_groups] == ["p1", "p2"]
-    assert candidate_by_group["p1"]["spoken_text"] == "Fallback Zulu for p1."
-    assert candidate_by_group["p2"]["spoken_text"] == "Fallback Zulu for p2."
+    assert candidate_by_group["p1"][0]["spoken_text"] == "Fallback Zulu for p1."
+    assert candidate_by_group["p2"][0]["spoken_text"] == "Fallback Zulu for p2."
 
 
 def test_falling_back_logs_the_specific_missing_literal_not_just_a_count():
     # Real user direction, 2026-09-09: "the model need to do better logging
     # [of the] reasons behind every decision" -- diagnosing why a real merge
-    # fell back used to require a bespoke script; the reason is now
-    # surfaced inline, per window, before the blanket count message.
+    # fell back used to require a bespoke script; the reason is now surfaced
+    # inline, per (window, variant), before the blanket count message. Since
+    # the fake provider gives BOTH the condensed and extended calls the same
+    # bad response, both variants independently fail and both get their own
+    # log line -- real, useful signal (which variant(s) actually failed), not
+    # a regression from the single-variant-era count of 1.
     groups = [
         _group("p1", "The number is 24.", start_ms=0, span_ms=1000),
         _group("p2", "Confirmed by IDAC.", start_ms=1000, span_ms=1000),
@@ -503,9 +518,13 @@ def test_falling_back_logs_the_specific_missing_literal_not_just_a_count():
         progress=messages.append,
     )
     reason_lines = [m for m in messages if "dropped required literal" in m]
-    assert len(reason_lines) == 1
-    assert "'24'" in reason_lines[0]
-    assert "'IDAC'" in reason_lines[0]
+    assert len(reason_lines) == 2
+    assert {"condensed", "extended"} == {
+        "condensed" if "(condensed)" in line else "extended" for line in reason_lines
+    }
+    for line in reason_lines:
+        assert "'24'" in line
+        assert "'IDAC'" in line
     assert "p1" in reason_lines[0]
 
 
@@ -535,7 +554,7 @@ def test_a_bare_ordinal_number_merge_no_longer_falls_back():
         provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
     )
     assert [b["group_id"] for b in block_groups] == ["p1"]
-    assert candidate_by_group["p1"]["spoken_text"] == merged_text
+    assert candidate_by_group["p1"][0]["spoken_text"] == merged_text
     assert "native_candidate_translate_batch" not in provider.calls  # never fell back
 
 
@@ -557,8 +576,8 @@ def test_a_literal_dropping_merge_falls_back_to_independent_translation():
         provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
     )
     assert [b["group_id"] for b in block_groups] == ["p1", "p2"]
-    assert candidate_by_group["p1"]["spoken_text"] == "Fallback Zulu for p1."
-    assert candidate_by_group["p2"]["spoken_text"] == "Fallback Zulu for p2."
+    assert candidate_by_group["p1"][0]["spoken_text"] == "Fallback Zulu for p1."
+    assert candidate_by_group["p2"][0]["spoken_text"] == "Fallback Zulu for p2."
 
 
 def test_turn_id_is_attached_to_every_block_including_fallback_ones():

@@ -133,7 +133,8 @@ ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v4-turn-id"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v13-social-media-vocabulary-all-modes"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v40-real-ms-headroom-informal-retelling"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v41-condensed-variant-of-dual-call"
+TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION = "native-turn-block-translate-extended-v1-real-spare-airtime-retelling"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -230,6 +231,26 @@ _TURN_BLOCK_TRANSLATE_MAX_MEMBERS = 8
 # Windows (not individual sentences) per provider call -- keeps one batch's
 # prompt/response size bounded regardless of how many turns a job has.
 DEFAULT_TURN_BLOCK_TRANSLATE_BATCH_SIZE = 5
+# Two independent, purpose-built translation calls per window, run in parallel:
+# a CONDENSED variant (today's original prompt, biased toward economy via its
+# own TIGHT SUBSTITUTION guidance) and an EXTENDED variant (a real spare-
+# airtime informal retelling, with zero competing "prefer shorter" pressure).
+# Confirmed necessary by real production testing: embedding an additional
+# "use real headroom" paragraph INSIDE the condensed prompt produced no real
+# measured improvement, because it had to compete against that same prompt's
+# own explicit, concrete "prefer shorter" instruction -- splitting the two
+# goals into separate calls removes the competition entirely. Both candidates
+# are measured via real Azure TTS and the better-fitting one wins (see
+# build_candidate_pool's winner-selection step, right after _measure_temporal_
+# batch) -- never worse than either single candidate alone.
+# (variant_id, operation) only -- each variant's actual system prompt constant
+# is defined much later in this file, so it's resolved by name inside
+# _translate_turn_blocks_via_grok itself (a plain module-level lookup at call
+# time), not baked into this tuple at module-load time.
+_TURN_BLOCK_TRANSLATE_VARIANTS: tuple[tuple[str, str], ...] = (
+    ("condensed", "native_turn_block_translate_batch"),
+    ("extended", "native_turn_block_translate_extended_batch"),
+)
 # How many preceding groups' real English feed a window's recent_turns_digest
 # (clause-ranking discourse context) -- bounded so a job-wide digest never
 # grows unbounded; 3 covers the real confirmed case (a fact stated, then
@@ -1522,20 +1543,16 @@ window MAY also include window_source_ms -- this window's own real total airtime
 actual duration this person spoke for -- given so you can reason in concrete seconds of real airtime,
 not just an abstract syllable count.
 
-When window_source_ms and max_syllables show this window genuinely has real spare airtime beyond what a
-terse, minimal-words rendering of this content would need, USE IT -- confirmed by direct testing: a
-generic instruction to add "narrative scaffolding" was NOT assertive enough on its own and left real
-seconds of a real turn sitting as dead air rather than natural speech. Retell the content the way a real
-person animatedly recounting this exact story to a friend would when they have real time to spend -- add
-a natural aside, a fuller and more vivid way of saying something, an emphatic repetition where the
-English itself already leans emphatic, or a natural connective that makes the story flow -- not by
-padding with irrelevant words or mechanically repeating a sentence. This is retelling, not a technical
-transfer: a flatly literal, minimal-words rendering is the WRONG choice whenever real spare airtime is
-available, exactly as much as inventing a fact would be wrong. When the window is already near or over
-target_syllables, favor DELETION and tight SUBSTITUTION instead and skip ADDITION entirely for this
-window -- a retelling with zero added scaffolding is a completely valid, honest choice on a tight
-window, not a lesser one. Never delete a proposition just to hit a syllable count, and never treat the
-budget as license to damage meaning in either direction.
+THIS IS THE CONDENSED VARIANT of this window's translation. A completely separate call independently
+retells the SAME window with a mandate to use real spare airtime via natural elaboration when there is
+room to (that call owns filling real headroom -- confirmed by direct testing that asking one single
+call to both economize AND expand on demand is unreliable, since a concrete "prefer shorter" instruction
+elsewhere in this prompt reliably wins out over a softer "add scaffolding when there's room" one). YOUR
+job here is a natural, well-paced, ECONOMICAL retelling: favor DELETION and tight SUBSTITUTION whenever
+the content already fits comfortably, and never stretch a retelling to fill spare time -- that is the
+other variant's job, not yours. Use target_syllables/min_syllables/max_syllables/window_source_ms only
+to judge how much cutting (if any) this window's own content genuinely needs. Never delete a
+proposition just to hit a syllable count, and never treat the budget as license to damage meaning.
 
 TIGHT SUBSTITUTION, made concrete: real evidence from this pipeline's own repeated output on the
 IDENTICAL sentence confirms that when two isiZulu phrasings are both fully natural and equally
@@ -1892,6 +1909,73 @@ itemized account is exactly the case where one "minor" item can independently ma
 chronology. When there is real doubt about whether
 an item is a genuinely comparable, illustrative list member versus the segment's actual point, keep it
 protected.
+
+Return every requested window_id exactly once, with exactly one segment covering its whole sentence
+range as described above. No tools or web search. Return JSON only."""
+
+
+TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT = r"""Mathula TV is a social-media broadcast product: naturalness
+of the isiZulu is the PRIMARY goal. You will be given WINDOWS of English sentences. Each window is a
+real, ordered, consecutive run of sentences spoken back-to-back by ONE person in a single continuous
+turn of speech. RETELL each window the way a real isiZulu broadcast journalist would actually narrate
+this turn on air, not a clause-by-clause transfer of the English. Use native isiZulu morphology,
+agreement, word order and idiom. Preserve names, numbers/dates/approximations (every occurrence, exactly
+as many times as it appears), negation, uncertainty/allegation framing, attribution/agency, causal/
+temporal/conditional logic, legal/evidential qualification, and speaker intent. Never invent a fact the
+English text does not contain, and never drop one it does.
+
+THIS IS THE EXTENDED VARIANT of this window's translation -- a completely separate call independently
+retells the SAME window with a mandate to stay tight and economical (that call owns shrinking when the
+window is genuinely too dense for its own time). YOUR job here is the opposite and exclusive: this
+window has real, confirmed SPARE airtime, and your retelling must genuinely USE it, not merely permit
+using it. A window's target_syllables/min_syllables/max_syllables/window_source_ms describe this
+window's own real available spoken time -- treat max_syllables as a real, comfortable target to reach
+toward, not a ceiling to avoid.
+
+Retell the content the way a real person animatedly recounting this exact story to a friend would when
+they genuinely have real time to spend -- add a natural aside, a fuller and more vivid way of saying
+something, an emphatic repetition where the English itself already leans emphatic, a natural connective
+that makes the story flow, or a moment of scene-setting that a caring storyteller would naturally include
+-- never by padding with irrelevant words, inventing a new fact, or mechanically repeating a sentence
+verbatim. A flatly literal, minimal-words rendering is the WRONG choice here, exactly as much as
+inventing a fact would be wrong -- that terse rendering is what the OTHER (condensed) call already
+produces; your entire reason for existing is to be the fuller, warmer, more complete alternative to it.
+
+Use everyday, informal isiZulu social-media register -- the same vernacular a real isiZulu-speaking
+audience actually uses, including a natural code-switched form for a modern political/social/
+institutional concept noun when that is genuinely how people talk (e.g. "i-racism"), not a stiffer
+formal register. This is retelling, not a technical transfer: your own real knowledge of how a person
+would naturally elaborate when recounting something interesting to a friend, with time to spare, is
+exactly what this variant asks for.
+
+zulu_terminology_glossary is a BINDING whole-programme reference: terms lists a recurring name/role/
+organisation/term with its exact canonical isiZulu rendering -- use it verbatim every time it recurs.
+do_not_translate lists proper nouns, acronyms, and case/file numbers that must survive unchanged.
+confirmed_translation_pitfalls lists hand-confirmed real mistranslations from this same production
+pipeline -- treat every entry as binding guidance to actively avoid repeating. context_ledger (summary,
+entities, speaker_roles) is whole-programme background -- use it not just to resolve an ambiguous
+pronoun or reference, but as real material for your elaboration: a natural aside genuinely grounded in
+the real story so far reads far better than a generic one.
+
+A window MAY include preceding_english -- the immediately preceding sentence's English, given ONLY to
+resolve THIS window's own elliptical or anaphoric content at its very start. Never import content from
+preceding_english into your output, and never treat it as this window's own content.
+
+STRUCTURAL RULE, always required: treat the WHOLE window as ONE continuous retelling from the start --
+return exactly one segment covering every sentence position in the window (start_index=1, end_index=the
+window's own last position).
+
+This variant's output still requires the same clauses/communicative_goal/register_notes/
+shortened_candidates fields as any other segment, but their purpose here is minimal: identify
+communicative_goal (the real point of this window) and break isizulu_text into its natural clause
+units for clauses (each with a clause_id/english_text), but rank EVERY clause 1 -- this variant never
+drops content, so nothing is droppable. Return shortened_candidates as an empty list; a later,
+completely separate mechanism handles compaction if it is ever genuinely needed for whatever variant
+ultimately wins, and it is never this variant's own job to prepare for that.
+
+HARD RULE: every name, number, date, direct quotation, attribution, and the CORE PROPOSITION of any
+claim or denial must appear in isizulu_text exactly as the English states it -- elaboration adds
+narrative color around these facts, it never substitutes for, weakens, or duplicates them.
 
 Return every requested window_id exactly once, with exactly one segment covering its whole sentence
 range as described above. No tools or web search. Return JSON only."""
@@ -12299,6 +12383,8 @@ def _request_turn_block_translation_batch(
     windows: Sequence[Mapping[str, Any]],
     glossary: Mapping[str, Any],
     context_ledger: Mapping[str, Any] | None = None,
+    operation: str = "native_turn_block_translate_batch",
+    system_prompt: str = TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
     """windows: [{"window_id", "members": [{"index", "english_text"}, ...],
     "speaker_seriousness_mode"?, "preceding_english"?, "recent_turns_digest"?,
@@ -12309,11 +12395,17 @@ def _request_turn_block_translation_batch(
     (same convention as every other candidate-translate-family function);
     per-window segment SHAPE problems are the caller's job to detect and
     degrade, not this function's.
+
+    `operation`/`system_prompt` default to the CONDENSED variant (today's
+    original behavior, byte-identical when omitted); the caller passes the
+    EXTENDED variant's operation/prompt explicitly for the second, parallel
+    call -- same response schema either way (_turn_block_translate_schema),
+    only the system prompt differs.
     """
     expected_ids = [str(w["window_id"]) for w in windows]
     response = provider.complete_json(
-        operation="native_turn_block_translate_batch",
-        system_prompt=TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT,
+        operation=operation,
+        system_prompt=system_prompt,
         payload={
             "confirmed_translation_pitfalls": list(CONFIRMED_TRANSLATION_PITFALLS),
             "zulu_terminology_glossary": dict(glossary),
@@ -12620,30 +12712,46 @@ def _translate_turn_blocks_via_grok(
     batch_size: int = DEFAULT_TURN_BLOCK_TRANSLATE_BATCH_SIZE,
     workers: int = DEFAULT_CANDIDATE_POOL_WORKERS,
     progress: Callable[[str], None] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, int]]:
-    """Phase 16 (Phase 23 revision): translate each speaker turn as one or more
-    WINDOWS (bounded, consecutive chunks of up to max_members_per_window
-    original sentences -- a call-size limit only, never a merge-eligibility
-    decision). Each window is ALWAYS translated and clause-ranked as ONE whole
-    retelling unit in a single Grok call (see TURN_BLOCK_TRANSLATE_SYSTEM_
-    PROMPT's STRUCTURAL RULE and _validate_turn_block_segments, which now
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, int]]:
+    """Phase 16 (Phase 23 revision, dual-variant revision): translate each
+    speaker turn as one or more WINDOWS (bounded, consecutive chunks of up to
+    max_members_per_window original sentences -- a call-size limit only, never
+    a merge-eligibility decision). Each window is ALWAYS translated and
+    clause-ranked as ONE whole retelling unit (see TURN_BLOCK_TRANSLATE_
+    SYSTEM_PROMPT's STRUCTURAL RULE and _validate_turn_block_segments, which
     requires exactly one segment covering the whole window) -- there is no
     longer a separate "did this merge earn its keep" question for any guard to
     answer; the model's own clause ranking (with its hard rule protecting
     names/numbers/dates/claims) is what prevents information loss, not a
-    post-hoc consolidation check. Replaces _translate_natural_via_grok as
-    build_candidate_pool's primary translation step; that function is kept,
-    unchanged, as the per-sentence fallback for any window that fails
-    structural or literal-preservation validation -- a rejected window
-    degrades to exactly today's proven mechanism for exactly its own members,
-    never a partial or silently-broken result.
+    post-hoc consolidation check.
+
+    Each window is translated TWICE, in parallel, by two independently-biased
+    variants (_TURN_BLOCK_TRANSLATE_VARIANTS: "condensed" keeps today's
+    original economy-biased prompt; "extended" is a real spare-airtime
+    informal retelling with zero competing "prefer shorter" pressure) --
+    confirmed necessary by real production testing that a single prompt
+    cannot reliably serve both goals at once. Both surviving (structurally
+    valid, literal-preserving) candidates are returned; build_candidate_pool's
+    own real Azure TTS measurement step picks whichever actually fits better,
+    same "generate redundantly, measure, select" discipline used throughout
+    this file.
+
+    Replaces _translate_natural_via_grok as build_candidate_pool's primary
+    translation step; that function is kept, unchanged, as the per-sentence
+    fallback for any window where NEITHER variant produces a structurally
+    valid, literal-preserving translation -- a rejected window degrades to
+    exactly today's proven mechanism for exactly its own members, never a
+    partial or silently-broken result.
 
     Returns (block_groups, candidate_by_block_group_id, usage_totals).
-    block_groups is in true chronological order BY CONSTRUCTION -- the final
-    assembly walks `turns`/members in their own already-chronological order,
-    so no sort step is ever needed. A single-member turn, or a window that
-    fails validation, degenerates to exactly today's one-block-per-sentence
-    shape (plus member_group_ids=[gid]) -- there is no separate code path for
+    candidate_by_block_group_id maps each block's group_id to a LIST of 1-2
+    candidate dicts (both variants when both survived; one when only one did;
+    always exactly one for a fallback-translated block). block_groups is in
+    true chronological order BY CONSTRUCTION -- the final assembly walks
+    `turns`/members in their own already-chronological order, so no sort step
+    is ever needed. A single-member turn, or a window where neither variant
+    validates, degenerates to exactly today's one-block-per-sentence shape
+    (plus member_group_ids=[gid]) -- there is no separate code path for
     "nothing to merge"; it is the size-1 case of the same mechanism.
     """
     groups_by_id = {str(g["group_id"]): g for g in groups}
@@ -12716,29 +12824,37 @@ def _translate_turn_blocks_via_grok(
             "window_source_ms": syllable_budget["source_ms"],
         }
 
-    def _run_translate_batches(
+    variant_system_prompts: dict[str, str] = {
+        "condensed": TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT,
+        "extended": TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT,
+    }
+
+    def _run_translate_variant_batches(
         payload_windows_by_batch: Sequence[Sequence[dict[str, Any]]],
-    ) -> dict[str, list[dict[str, Any]]]:
-        """Run one or more batches of already-built payload windows through
-        _request_turn_block_translation_batch, accumulating usage_totals and
-        emitting a fallback-worthy log line per failed batch. Returns raw,
-        not-yet-validated segments keyed by window_id -- a window whose batch
-        outright failed simply has no entry (caller treats that exactly like
-        a validation failure).
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        """Run EVERY batch for EVERY variant (condensed + extended) concurrently
+        in ONE shared pool -- genuinely parallel, not one variant's calls
+        completing before the other's start. Accumulates usage_totals and emits
+        a fallback-worthy log line per failed (batch, variant) pair. Returns raw,
+        not-yet-validated segments as {window_id: {variant_id: segments}} -- a
+        window missing an entry for one variant simply didn't get that
+        candidate (treated exactly like a validation failure for that variant
+        alone, not fatal as long as the OTHER variant still produced something).
         """
-        by_window_id: dict[str, list[dict[str, Any]]] = {}
-        with ThreadPoolExecutor(
-            max_workers=max(1, min(int(workers), len(payload_windows_by_batch)))
-        ) as pool:
-            futures: dict[Any, Sequence[dict[str, Any]]] = {}
+        by_window_variant: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        total_jobs = len(payload_windows_by_batch) * len(_TURN_BLOCK_TRANSLATE_VARIANTS)
+        with ThreadPoolExecutor(max_workers=max(1, min(int(workers), total_jobs))) as pool:
+            futures: dict[Any, tuple[str, Sequence[dict[str, Any]]]] = {}
             for payload_windows in payload_windows_by_batch:
-                future = pool.submit(
-                    _request_turn_block_translation_batch, provider=provider, windows=payload_windows,
-                    glossary=glossary, context_ledger=context_ledger,
-                )
-                futures[future] = payload_windows
+                for variant_id, operation in _TURN_BLOCK_TRANSLATE_VARIANTS:
+                    future = pool.submit(
+                        _request_turn_block_translation_batch, provider=provider, windows=payload_windows,
+                        glossary=glossary, context_ledger=context_ledger,
+                        operation=operation, system_prompt=variant_system_prompts[variant_id],
+                    )
+                    futures[future] = (variant_id, payload_windows)
             for future in as_completed(futures):
-                payload_windows = futures[future]
+                variant_id, payload_windows = futures[future]
                 try:
                     result, usage = future.result()
                 except Exception as exc:  # noqa: BLE001 - a window's failure must degrade, never crash the job
@@ -12752,12 +12868,16 @@ def _translate_turn_blocks_via_grok(
                     # A narrower except ValueError here once let exactly that
                     # case crash the whole job instead of falling back to
                     # independent per-sentence translation for this window.
-                    _emit_progress(progress, f"[native candidate pool] Turn block translate batch failed: {exc}")
+                    _emit_progress(
+                        progress,
+                        f"[native candidate pool] Turn block translate batch ({variant_id}) failed: {exc}",
+                    )
                     continue
                 for key in usage_totals:
                     usage_totals[key] += usage.get(key, 0)
-                by_window_id.update(result)
-        return by_window_id
+                for window_id, segments in result.items():
+                    by_window_variant.setdefault(window_id, {})[variant_id] = segments
+        return by_window_variant
 
     all_windows: list[dict[str, Any]] = []
     for turn in turns:
@@ -12766,56 +12886,77 @@ def _translate_turn_blocks_via_grok(
         for chunk in _chunk_sequence(member_ids, max_members_per_window):
             all_windows.append({"window_id": chunk[0], "member_ids": chunk, "turn_id": turn_id})
 
-    validated_segments_by_window_id: dict[str, list[dict[str, Any]]] = {}
+    # Per window, up to one validated candidate PER VARIANT (condensed/extended)
+    # survives here -- 0, 1, or 2. A window with zero surviving candidates falls
+    # back to independent per-sentence translation; one or two survivors both
+    # become real, real-TTS-measured options for build_candidate_pool's own
+    # winner-selection step (never fewer real options than today, only ever
+    # potentially more).
+    validated_candidates_by_window_id: dict[str, list[dict[str, Any]]] = {}
     fallback_member_ids: list[str] = []
 
     initial_batches = [
         [_payload_window(w["window_id"], w["member_ids"]) for w in batch]
         for batch in _chunk_sequence(all_windows, batch_size)
     ]
-    by_window_id = _run_translate_batches(initial_batches)
+    by_window_variant = _run_translate_variant_batches(initial_batches)
     for window in all_windows:
         window_id = window["window_id"]
         member_ids = window["member_ids"]
-        raw_segments = by_window_id.get(window_id)
-        if raw_segments is None:
-            _emit_progress(
-                progress,
-                f"[native candidate pool] Window {window_id} {member_ids}: no response from the "
-                "turn-block translate batch (request/parse failure, see above) -- falling back to "
-                "independent per-sentence translation.",
-            )
-            fallback_member_ids.extend(member_ids)
-            continue
-        validated = _validate_turn_block_segments(member_count=len(member_ids), segments=raw_segments)
-        if validated is None:
-            _emit_progress(
-                progress,
-                f"[native candidate pool] Window {window_id} {member_ids}: response failed structural "
-                "validation (not exactly one segment covering the whole window, or a missing/malformed "
-                "clause breakdown) -- falling back to independent per-sentence translation.",
-            )
-            fallback_member_ids.extend(member_ids)
-            continue
         members = [groups_by_id[gid] for gid in member_ids]
         combined_source_text = " ".join(str(member["source_text"]) for member in members)
-        combined_candidate_text = " ".join(segment["isizulu_text"] for segment in validated)
-        missing = _missing_required_literals(
-            source_text=combined_source_text, candidate_text=combined_candidate_text,
-        )
-        if missing:
-            missing_desc = ", ".join(
-                f"{item['literal']!r} (needed {item['required_count']}x)" for item in missing
+        variant_results = by_window_variant.get(window_id, {})
+        valid_candidates: list[dict[str, Any]] = []
+        for variant_id, _operation in _TURN_BLOCK_TRANSLATE_VARIANTS:
+            raw_segments = variant_results.get(variant_id)
+            if raw_segments is None:
+                _emit_progress(
+                    progress,
+                    f"[native candidate pool] Window {window_id} {member_ids} ({variant_id}): no response "
+                    "from the turn-block translate batch (request/parse failure, see above).",
+                )
+                continue
+            validated = _validate_turn_block_segments(member_count=len(member_ids), segments=raw_segments)
+            if validated is None:
+                _emit_progress(
+                    progress,
+                    f"[native candidate pool] Window {window_id} {member_ids} ({variant_id}): response failed "
+                    "structural validation (not exactly one segment covering the whole window, or a "
+                    "missing/malformed clause breakdown).",
+                )
+                continue
+            segment = validated[0]
+            combined_candidate_text = str(segment["isizulu_text"])
+            missing = _missing_required_literals(
+                source_text=combined_source_text, candidate_text=combined_candidate_text,
             )
+            if missing:
+                missing_desc = ", ".join(
+                    f"{item['literal']!r} (needed {item['required_count']}x)" for item in missing
+                )
+                _emit_progress(
+                    progress,
+                    f"[native candidate pool] Window {window_id} {member_ids} ({variant_id}): translation "
+                    f"dropped required literal(s) [{missing_desc}].",
+                )
+                continue
+            valid_candidates.append({
+                "variant_id": variant_id,
+                "isizulu_text": combined_candidate_text,
+                "clauses": segment.get("clauses"),
+                "shortened_candidates": segment.get("shortened_candidates") or [],
+                "communicative_goal": segment.get("communicative_goal"),
+                "register_notes": segment.get("register_notes"),
+            })
+        if not valid_candidates:
             _emit_progress(
                 progress,
-                f"[native candidate pool] Window {window_id} {member_ids}: merged translation dropped "
-                f"required literal(s) [{missing_desc}] -- falling back to independent per-sentence "
-                "translation.",
+                f"[native candidate pool] Window {window_id} {member_ids}: neither variant produced a "
+                "usable translation -- falling back to independent per-sentence translation.",
             )
             fallback_member_ids.extend(member_ids)
             continue
-        validated_segments_by_window_id[window_id] = validated
+        validated_candidates_by_window_id[window_id] = valid_candidates
 
     fallback_candidates: dict[str, dict[str, Any]] = {}
     if fallback_member_ids:
@@ -12835,30 +12976,45 @@ def _translate_turn_blocks_via_grok(
             usage_totals[key] += fallback_usage.get(key, 0)
 
     block_groups: list[dict[str, Any]] = []
-    candidate_by_block_group_id: dict[str, dict[str, Any]] = {}
+    candidate_by_block_group_id: dict[str, list[dict[str, Any]]] = {}
     for window in all_windows:
         window_id = window["window_id"]
         member_ids = window["member_ids"]
         window_turn_id = window["turn_id"]
         members = [groups_by_id[gid] for gid in member_ids]
-        validated = validated_segments_by_window_id.get(window_id)
-        if validated is not None:
-            # Exactly one segment, always -- Phase 23 removed multi-segment
-            # tiling entirely, so a validated window is always kept as ONE
-            # whole block covering every one of its members.
-            segment = validated[0]
+        candidates = validated_candidates_by_window_id.get(window_id)
+        if candidates is not None:
+            # Exactly one segment per surviving variant, always -- Phase 23
+            # removed multi-segment tiling entirely, so a validated window is
+            # always kept as ONE whole block covering every one of its members.
+            # The block group is built from the FIRST surviving candidate as a
+            # placeholder for clauses/shortened_candidates/etc. -- these get
+            # overwritten with the WINNING candidate's own values once real TTS
+            # measurement picks a winner (build_candidate_pool, right after
+            # _measure_temporal_batch); the group's spoken text is never read
+            # directly, only candidate_by_block_group_id's own entries are.
             block_group_id = str(members[0]["group_id"])
+            first = candidates[0]
             block_groups.append(_build_turn_block_group(
                 group_id=block_group_id, members=members, turn_id=window_turn_id,
-                shortened_candidates=segment.get("shortened_candidates") or [],
-                clauses=segment.get("clauses"),
-                communicative_goal=segment.get("communicative_goal"),
-                register_notes=segment.get("register_notes"),
+                shortened_candidates=first.get("shortened_candidates") or [],
+                clauses=first.get("clauses"),
+                communicative_goal=first.get("communicative_goal"),
+                register_notes=first.get("register_notes"),
             ))
-            candidate_by_block_group_id[block_group_id] = {
-                "candidate_id": "grok_natural", "variant_id": "natural", "translator": "grok",
-                "spoken_text": segment["isizulu_text"],
-            }
+            candidate_by_block_group_id[block_group_id] = [
+                {
+                    "candidate_id": f"grok_{candidate['variant_id']}",
+                    "variant_id": candidate["variant_id"],
+                    "translator": "grok",
+                    "spoken_text": candidate["isizulu_text"],
+                    "clauses": candidate.get("clauses"),
+                    "shortened_candidates": candidate.get("shortened_candidates") or [],
+                    "communicative_goal": candidate.get("communicative_goal"),
+                    "register_notes": candidate.get("register_notes"),
+                }
+                for candidate in candidates
+            ]
             continue
         for gid in member_ids:
             if gid in fallback_candidates:
@@ -12868,7 +13024,7 @@ def _translate_turn_blocks_via_grok(
                     clauses=fallback_candidates[gid].get("clauses"),
                     register_notes=fallback_candidates[gid].get("register_notes"),
                 ))
-                candidate_by_block_group_id[gid] = fallback_candidates[gid]
+                candidate_by_block_group_id[gid] = [fallback_candidates[gid]]
 
     return block_groups, candidate_by_block_group_id, usage_totals
 
@@ -13025,6 +13181,19 @@ def _enrich_measured_candidates(
             merged["dropped_clause_ids"] = list(original["dropped_clause_ids"])
         if original.get("omitted_items"):
             merged["omitted_items"] = list(original["omitted_items"])
+        # Carried through so a post-measurement winner-selection step (e.g. the
+        # condensed/extended dual-variant translate call) can copy the WINNING
+        # candidate's own clause-ranking/compaction-ladder metadata onto its
+        # block group, without needing a second lookup back into a
+        # pre-measurement candidate list.
+        if original.get("clauses") is not None:
+            merged["clauses"] = original["clauses"]
+        if original.get("shortened_candidates"):
+            merged["shortened_candidates"] = list(original["shortened_candidates"])
+        if original.get("communicative_goal") is not None:
+            merged["communicative_goal"] = original["communicative_goal"]
+        if original.get("register_notes") is not None:
+            merged["register_notes"] = original["register_notes"]
         enriched.append(merged)
     return enriched
 
@@ -15035,6 +15204,7 @@ def build_candidate_pool(
         "pass1_sha256": checksum(paths.pass1),
         "prompt_version": CANDIDATE_TRANSLATE_PROMPT_VERSION,
         "turn_block_translate_prompt_version": TURN_BLOCK_TRANSLATE_PROMPT_VERSION,
+        "turn_block_translate_extended_prompt_version": TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION,
         "turn_block_translate_max_members": _TURN_BLOCK_TRANSLATE_MAX_MEMBERS,
         "provider_version": FOUNDRY_GROK_PROVIDER_VERSION,
         "preferred_raw_speed_percent": int(preferred_raw_speed_percent),
@@ -15062,11 +15232,14 @@ def build_candidate_pool(
             return existing
 
     if skip_turn_block_translation:
-        grok_candidate_by_group, grok_usage = _translate_natural_via_grok(
+        grok_candidate_by_group_raw, grok_usage = _translate_natural_via_grok(
             provider=provider, groups=groups, natural_english_by_group=natural_english_by_group,
             glossary=glossary, context_ledger=context_ledger, workers=candidate_pool_workers, progress=progress,
             modes_by_speaker=modes_by_speaker, preferred_raw_speed_percent=int(preferred_raw_speed_percent),
         )
+        grok_candidate_by_group: dict[str, list[dict[str, Any]]] = {
+            group_id: [candidate] for group_id, candidate in grok_candidate_by_group_raw.items()
+        }
         # A copy, not a mutation of the caller's own group dicts -- carries
         # shortened_candidates/clauses through to _trim_by_fact_priority
         # exactly like _build_turn_block_group already does for the primary
@@ -15077,10 +15250,10 @@ def build_candidate_pool(
                 **group,
                 "turn_id": turn_id_by_group_id.get(str(group["group_id"])),
                 "shortened_candidates": list(
-                    grok_candidate_by_group.get(str(group["group_id"]), {}).get("shortened_candidates") or []
+                    grok_candidate_by_group_raw.get(str(group["group_id"]), {}).get("shortened_candidates") or []
                 ),
-                "clauses": grok_candidate_by_group.get(str(group["group_id"]), {}).get("clauses"),
-                "register_notes": grok_candidate_by_group.get(str(group["group_id"]), {}).get("register_notes"),
+                "clauses": grok_candidate_by_group_raw.get(str(group["group_id"]), {}).get("clauses"),
+                "register_notes": grok_candidate_by_group_raw.get(str(group["group_id"]), {}).get("register_notes"),
             }
             for group in groups
         ]
@@ -15103,9 +15276,16 @@ def build_candidate_pool(
     # rendered output afterward (the same "generate with redundancy, verify
     # by real measurement, never re-check with another LLM call" discipline
     # this file already applies to fact-priority trim), not caught in-pipeline.
-    winners: dict[str, dict[str, Any]] = {
-        group_id: {**candidate, "qa_penalty": 0, "qa_record": None, "qa_records": [], "requires_review": False}
-        for group_id, candidate in grok_candidate_by_group.items()
+    # grok_candidate_by_group is a LIST per group -- 2 real candidates
+    # (condensed + extended) for a dual-variant-translated block, 1 for a
+    # fallback-translated one -- ALL of them get measured for real below, and
+    # the winner is picked by real measured fit, not by construction order.
+    candidates_by_group: dict[str, list[dict[str, Any]]] = {
+        group_id: [
+            {**candidate, "qa_penalty": 0, "qa_record": None, "qa_records": [], "requires_review": False}
+            for candidate in candidates
+        ]
+        for group_id, candidates in grok_candidate_by_group.items()
     }
 
     geometries: dict[str, dict[str, Any]] = {}
@@ -15131,7 +15311,6 @@ def build_candidate_pool(
     measurement_voice_info = {"selected_voice": str(tts.default_voice), "base_prosody": {}}
     voice_assignments = {str(g["speaker_id"]): measurement_voice_info for g in block_groups}
     measurement_audio_root = paths.root / "pass2_candidate_pool_measurements"
-    candidates_by_group = {group_id: [winner] for group_id, winner in winners.items()}
     raw_measured_by_group = _measure_temporal_batch(
         tts=tts, groups=block_groups, candidates_by_group=candidates_by_group, geometries=geometries,
         voice_assignments=voice_assignments, output_root=measurement_audio_root,
@@ -15143,7 +15322,29 @@ def build_candidate_pool(
         )
         for group_id, measured in raw_measured_by_group.items()
     }
-    winners = {group_id: measured[0] for group_id, measured in measured_by_group.items() if measured}
+    # Select whichever candidate genuinely fits best, via the SAME rank tuple
+    # (_timing_candidate_rank) already computed for every measured candidate
+    # -- when a window produced two independent real candidates (condensed/
+    # extended dual-variant translation), this is what picks the winner by
+    # REAL measured fit, not construction order. A single-candidate group
+    # (every fallback-translated block, and the common non-dual-variant case)
+    # is unaffected -- min() over one item is just that item.
+    winners = {
+        group_id: min(measured, key=lambda candidate: candidate["rank"])
+        for group_id, measured in measured_by_group.items() if measured
+    }
+    # A block whose winner came from the dual-variant translate step needs the
+    # WINNING candidate's own clause-ranking/compaction-ladder metadata (used
+    # by _trim_by_fact_priority below) copied onto its group -- _build_turn_
+    # block_group was built from a placeholder-first candidate before real
+    # measurement could pick a winner.
+    for group_id, winner in winners.items():
+        group = groups_by_id.get(group_id)
+        if group is not None:
+            group["clauses"] = winner.get("clauses")
+            group["shortened_candidates"] = list(winner.get("shortened_candidates") or [])
+            group["communicative_goal"] = winner.get("communicative_goal")
+            group["register_notes"] = winner.get("register_notes")
 
     def _merge_updated_winners(current_winners: Mapping[str, Mapping[str, Any]]) -> None:
         for group_id, winner in current_winners.items():
