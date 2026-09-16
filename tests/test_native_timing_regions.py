@@ -46,6 +46,7 @@ from mathula_tv.native_dub import (
     _speaker_turn_geometry,
     _temporal_required_rush_percent,
     _turn_atomic_source_chunks,
+    _turns_from_turn_ids,
 )
 
 
@@ -191,6 +192,50 @@ def test_a_long_uninterrupted_same_speaker_run_is_one_turn_with_no_cap():
     turns = _build_speaker_turns(groups)
     assert len(turns) == 1
     assert len(turns[0]["member_group_ids"]) == 12
+
+
+# --- _turns_from_turn_ids (Phase 26) -----------------------------------------------------
+
+
+def test_turns_from_turn_ids_groups_by_the_carried_id_even_across_a_gap_adjacency_would_reject():
+    # Real motivating case: a Phase-25 un-merge can widen the real gap between
+    # two pieces of the same turn past what plain gap/speaker adjacency would
+    # still accept as one turn -- turn_id-based grouping must not care, since
+    # it's grouping by the real identity decided upstream, not re-inferring it.
+    g2_start = 3000 + SPEAKER_TURN_MAX_GAP_MS + 1
+    groups = [
+        {**_group("g1", start_ms=0, end_ms=3000), "turn_id": "g1"},
+        {**_group("g2", start_ms=g2_start, end_ms=g2_start + 3000), "turn_id": "g1"},
+    ]
+    turns = _turns_from_turn_ids(groups)
+    assert [t["member_group_ids"] for t in turns] == [["g1", "g2"]]
+    assert turns[0]["turn_id"] == "g1"
+    # Confirm the premise: plain adjacency-based grouping really would have
+    # split this pair, proving the two functions genuinely disagree here.
+    assert [t["member_group_ids"] for t in _build_speaker_turns(groups)] == [["g1"], ["g2"]]
+
+
+def test_turns_from_turn_ids_falls_back_to_legacy_adjacency_when_any_group_is_missing_it():
+    # A partially-migrated list (e.g. a pre-Phase-26 committed artifact) must
+    # never silently produce a half-correct split -- even one group missing
+    # turn_id degrades the WHOLE list to legacy adjacency-based grouping.
+    groups = [
+        {**_group("g1", start_ms=0, end_ms=3000), "turn_id": "g1"},
+        _group("g2", start_ms=3100, end_ms=6000),  # no turn_id at all
+    ]
+    turns = _turns_from_turn_ids(groups)
+    assert turns == _build_speaker_turns(groups)
+    assert [t["member_group_ids"] for t in turns] == [["g1", "g2"]]
+
+
+def test_turns_from_turn_ids_separates_two_distinct_real_turns():
+    groups = [
+        {**_group("g1", start_ms=0, end_ms=3000), "turn_id": "g1"},
+        {**_group("g2", start_ms=3100, end_ms=6000), "turn_id": "g1"},
+        {**_group("g3", start_ms=6100, end_ms=9000), "turn_id": "g3"},
+    ]
+    turns = _turns_from_turn_ids(groups)
+    assert [t["member_group_ids"] for t in turns] == [["g1", "g2"], ["g3"]]
 
 
 # --- _speaker_turn_geometry -------------------------------------------------------------

@@ -130,7 +130,7 @@ TEMPORAL_MASK_PROMPT_VERSION = "native-temporal-mask-window-v10-phase-a-no-self-
 CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
-CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v3-turn-blocks"
+CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v4-turn-id"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v13-social-media-vocabulary-all-modes"
 TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v38-social-media-vocabulary-all-modes"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
@@ -4591,6 +4591,7 @@ def _temporal_mask_groups_for_render(
             translations[segment_id] = text
         phrase_groups.append({
             "group_id": str(raw["group_id"]),
+            "turn_id": raw.get("turn_id"),
             "speaker_id": str(raw["speaker_id"]),
             "segment_ids": ids,
             "start_ms": int(raw["start_ms"]),
@@ -9237,7 +9238,7 @@ def _synthesize_speaker_turns_with_bookmarks(
     `_presynthesize_islands_with_bookmarks`'s own per-group degrade pattern.
     """
     groups_by_id = {str(g["group_id"]): g for g in phrase_groups}
-    turns = _build_speaker_turns(phrase_groups)
+    turns = _turns_from_turn_ids(phrase_groups)
     finalized: dict[str, dict[str, Any]] = {}
     for turn_index, turn in enumerate(turns):
         all_member_ids = [str(gid) for gid in turn["member_group_ids"]]
@@ -12251,6 +12252,7 @@ def _build_turn_block_group(
     *,
     group_id: str,
     members: Sequence[Mapping[str, Any]],
+    turn_id: str | None = None,
     shortened_candidates: Sequence[Mapping[str, Any]] = (),
     clauses: Sequence[Mapping[str, Any]] | None = None,
     communicative_goal: str | None = None,
@@ -12282,6 +12284,14 @@ def _build_turn_block_group(
     effect. Every call site must now pass the same clauses the shortened_
     candidates it's also passing came from.
 
+    ``turn_id`` (Phase 26) is the real speaker turn this block's members were
+    drawn from, computed ONCE at the canonical site in build_candidate_pool
+    (the turn's own first raw member's group_id) -- carried through so no
+    downstream stage (Phase 13/25 rebalancing, Phase 14 render-time
+    turn-finalization) ever needs to re-derive turn membership from block
+    adjacency, which is lossy once blocks have been merged/un-merged/
+    round-tripped through the committed artifact.
+
     ``communicative_goal`` and ``register_notes`` are the model's own,
     already-required-by-schema explanation of its translation/ranking
     choices (see CANDIDATE_TRANSLATE_SYSTEM_PROMPT/TURN_BLOCK_TRANSLATE_
@@ -12301,6 +12311,7 @@ def _build_turn_block_group(
         source_segments.extend(dict(segment) for segment in member["source_segments"])
     return {
         "group_id": group_id,
+        "turn_id": turn_id,
         "speaker_id": str(members[0]["speaker_id"]),
         "segment_ids": segment_ids,
         "member_group_ids": member_ids,
@@ -12471,8 +12482,9 @@ def _translate_turn_blocks_via_grok(
     all_windows: list[dict[str, Any]] = []
     for turn in turns:
         member_ids = [str(gid) for gid in turn["member_group_ids"]]
+        turn_id = turn.get("turn_id") or member_ids[0]
         for chunk in _chunk_sequence(member_ids, max_members_per_window):
-            all_windows.append({"window_id": chunk[0], "member_ids": chunk})
+            all_windows.append({"window_id": chunk[0], "member_ids": chunk, "turn_id": turn_id})
 
     validated_segments_by_window_id: dict[str, list[dict[str, Any]]] = {}
     fallback_member_ids: list[str] = []
@@ -12547,6 +12559,7 @@ def _translate_turn_blocks_via_grok(
     for window in all_windows:
         window_id = window["window_id"]
         member_ids = window["member_ids"]
+        window_turn_id = window["turn_id"]
         members = [groups_by_id[gid] for gid in member_ids]
         validated = validated_segments_by_window_id.get(window_id)
         if validated is not None:
@@ -12556,7 +12569,7 @@ def _translate_turn_blocks_via_grok(
             segment = validated[0]
             block_group_id = str(members[0]["group_id"])
             block_groups.append(_build_turn_block_group(
-                group_id=block_group_id, members=members,
+                group_id=block_group_id, members=members, turn_id=window_turn_id,
                 shortened_candidates=segment.get("shortened_candidates") or [],
                 clauses=segment.get("clauses"),
                 communicative_goal=segment.get("communicative_goal"),
@@ -12570,7 +12583,7 @@ def _translate_turn_blocks_via_grok(
         for gid in member_ids:
             if gid in fallback_candidates:
                 block_groups.append(_build_turn_block_group(
-                    group_id=gid, members=[groups_by_id[gid]],
+                    group_id=gid, members=[groups_by_id[gid]], turn_id=window_turn_id,
                     shortened_candidates=fallback_candidates[gid].get("shortened_candidates") or [],
                     clauses=fallback_candidates[gid].get("clauses"),
                     register_notes=fallback_candidates[gid].get("register_notes"),
@@ -12819,6 +12832,46 @@ def _build_speaker_turns(groups: Sequence[Mapping[str, Any]]) -> list[dict[str, 
         })
         index = cursor
     return turns
+
+
+def _turns_from_turn_ids(groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Phase 26: group `groups` (already chronological) by their own carried
+    `turn_id` field instead of re-deriving turn membership from gap/speaker
+    adjacency. `turn_id` is computed exactly once, from real raw per-sentence
+    data, at the canonical site in build_candidate_pool -- every group built
+    from it since (a Phase-16 translated block, a Phase-25 un-merged chunk,
+    a committed/render-read group) carries it forward. Grouping by this real,
+    stable identity is immune to the exact class of desync bug that motivated
+    this function: re-running _build_speaker_turns on a block/group list whose
+    shape has since changed (merged, un-merged, or round-tripped through the
+    committed JSON artifact) can silently reconstruct different turns than
+    were actually decided upstream.
+
+    Returns the same shape _build_speaker_turns produces (`member_group_ids`/
+    `start_ms`/`source_end_ms`, plus `turn_id` itself) -- every existing
+    consumer already only reads those three fields, confirmed by direct read,
+    so swapping which function builds the list needs no consumer-side changes.
+
+    Degrades to the legacy `_build_speaker_turns(groups)` computation for the
+    WHOLE list whenever even one group is missing `turn_id` (e.g. a
+    pre-Phase-26 committed artifact) -- a partially-migrated list must never
+    silently produce a half-correct turn split; either every group here has
+    real turn identity, or none of them are trusted for it.
+    """
+    if not groups or any(g.get("turn_id") is None for g in groups):
+        return _build_speaker_turns(groups)
+    turns_by_id: dict[str, list[Mapping[str, Any]]] = {}
+    for group in groups:
+        turns_by_id.setdefault(str(group["turn_id"]), []).append(group)
+    return [
+        {
+            "turn_id": turn_id,
+            "member_group_ids": [str(g["group_id"]) for g in members],
+            "start_ms": int(members[0]["start_ms"]),
+            "source_end_ms": int(members[-1]["source_end_ms"]),
+        }
+        for turn_id, members in turns_by_id.items()
+    ]
 
 
 # A large enough spread (percentage points) between members' own required-speed
@@ -13190,6 +13243,7 @@ def _split_merged_block(
     voice_assignments: Mapping[str, Mapping[str, Any]],
     force: bool,
     measurement_audio_root: Path,
+    turn_id: str | None = None,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]] | None:
     """Un-merge one Phase-16-merged block back into real, separate committed
     records -- one per original Pass-1 sentence -- so real silence can be
@@ -13207,6 +13261,12 @@ def _split_merged_block(
     the new pieces' real Zulu durations need a fresh, real Azure TTS call
     each, since they're now synthesized independently rather than as one
     shared utterance.
+
+    ``turn_id`` (Phase 26) is copied onto every recovered chunk's new group
+    dict from the parent block's own turn -- a split must never strand a
+    chunk without the real turn identity its un-merged sibling still carries,
+    or downstream turn-grouping-by-id would fall back to legacy adjacency
+    re-derivation for the WHOLE group list, not just this one turn.
     """
     if len(chunks_for_block) < 2:
         return None
@@ -13221,6 +13281,7 @@ def _split_merged_block(
         speaker_id = str(chunk["speaker_id"])
         new_group: dict[str, Any] = {
             "group_id": original_group_id,
+            "turn_id": turn_id,
             "speaker_id": speaker_id,
             "segment_ids": list(chunk["segment_ids"]),
             "start_ms": int(chunk["start_ms"]),
@@ -13313,6 +13374,7 @@ def _reproduce_source_silence_pattern(
             winner=winners[block_group_id],
             chunks_for_block=block_chunks, tts=tts, voice_assignments=voice_assignments,
             force=force, measurement_audio_root=measurement_audio_root,
+            turn_id=turn.get("turn_id"),
         )
         if split is not None:
             split_results_by_block[block_group_id] = split
@@ -13430,7 +13492,7 @@ def _rebalance_speaker_turns(
     runs, since a split changes the committed group_id set itself.
     """
     groups_by_id = {str(g["group_id"]): g for g in groups}
-    turns = _build_speaker_turns(groups)
+    turns = _turns_from_turn_ids(groups)
     updated_winners = dict(winners)
     updated_geometries: dict[str, dict[str, Any]] = {}
     working_groups_by_id = dict(groups_by_id)
@@ -13883,7 +13945,7 @@ def _resync_turn_rush_aggregates(
     formula _rebalance_speaker_turns itself uses.
     """
     groups_by_id = {str(g["group_id"]): g for g in groups}
-    turns = _build_speaker_turns(groups)
+    turns = _turns_from_turn_ids(groups)
     updated_winners = dict(winners)
     for index, turn in enumerate(turns):
         member_ids = turn["member_group_ids"]
@@ -14673,6 +14735,21 @@ def build_candidate_pool(
     # Phase 16: turns are built BEFORE translation now -- translation itself
     # needs to know turn membership to decide which sentences may be merged.
     turns = _build_speaker_turns(groups)
+    # Phase 26: this is the ONE canonical, real computation of turn identity
+    # (from raw, pre-translation, per-sentence groups) in the whole pipeline.
+    # Every later stage -- Phase 16 block translation, Phase 13/25 rebalancing,
+    # Phase 14's render-time turn-finalization -- must carry this id forward
+    # rather than re-deriving turn membership from whatever block/group shape
+    # it happens to be holding (a real, user-caught bug: a Phase-25 un-merge
+    # or a JSON round-trip through the committed artifact can change gap/
+    # adjacency shape enough that re-running _build_speaker_turns on it no
+    # longer reconstructs the same real turns decided here).
+    turn_id_by_group_id: dict[str, str] = {}
+    for turn in turns:
+        turn_id = str(turn["member_group_ids"][0])
+        turn["turn_id"] = turn_id
+        for gid in turn["member_group_ids"]:
+            turn_id_by_group_id[str(gid)] = turn_id
 
     input_hash = _hash_payload({
         "pass1_sha256": checksum(paths.pass1),
@@ -14718,6 +14795,7 @@ def build_candidate_pool(
         block_groups = [
             {
                 **group,
+                "turn_id": turn_id_by_group_id.get(str(group["group_id"])),
                 "shortened_candidates": list(
                     grok_candidate_by_group.get(str(group["group_id"]), {}).get("shortened_candidates") or []
                 ),
@@ -14871,6 +14949,7 @@ def build_candidate_pool(
     candidate_pool_records = [
         {
             "group_id": group_id,
+            "turn_id": groups_by_id[group_id].get("turn_id"),
             "speaker_id": str(groups_by_id[group_id]["speaker_id"]),
             "source_text": str(groups_by_id[group_id]["source_text"]),
             # New (Phase 16): a committed block can no longer be reconstructed
@@ -14983,7 +15062,7 @@ def compare_candidate_pool_to_committed_pass2(*, job_root: Path) -> dict[str, An
     }
 
 
-CANDIDATE_POOL_COMMIT_SCHEMA_VERSION = "mathula-native-candidate-pool-commit-v2-turn-blocks"
+CANDIDATE_POOL_COMMIT_SCHEMA_VERSION = "mathula-native-candidate-pool-commit-v3-turn-id"
 
 
 def commit_candidate_pool(
@@ -15117,6 +15196,7 @@ def commit_candidate_pool(
         segment_ids = [str(value) for value in record["segment_ids"]]
         temporal_mask_groups.append({
             "group_id": group_id,
+            "turn_id": record.get("turn_id"),
             "speaker_id": str(record["speaker_id"]),
             "segment_ids": segment_ids,
             "member_group_ids": list(record.get("member_group_ids") or [group_id]),

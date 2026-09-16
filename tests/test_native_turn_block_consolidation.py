@@ -514,3 +514,56 @@ def test_a_literal_dropping_merge_falls_back_to_independent_translation():
     assert [b["group_id"] for b in block_groups] == ["p1", "p2"]
     assert candidate_by_group["p1"]["spoken_text"] == "Fallback Zulu for p1."
     assert candidate_by_group["p2"]["spoken_text"] == "Fallback Zulu for p2."
+
+
+def test_turn_id_is_attached_to_every_block_including_fallback_ones():
+    # Phase 26: turn_id is computed once (mimicking build_candidate_pool's own
+    # canonical computation) and must survive onto every block this function
+    # produces -- both a validated turn-block merge and a structural-failure
+    # fallback block -- so no downstream stage ever needs to re-derive turn
+    # membership from block adjacency.
+    groups = [
+        _group("t1_a", "First turn opener.", speaker_id="SPEAKER_00", start_ms=0, span_ms=1000),
+        _group("t1_b", "First turn closer.", speaker_id="SPEAKER_00", start_ms=1000, span_ms=1000),
+        _group("t2_a", "Second turn, different speaker.", speaker_id="SPEAKER_01", start_ms=2000, span_ms=1000),
+    ]
+    turns = _build_speaker_turns(groups)
+    for turn in turns:
+        turn["turn_id"] = turn["member_group_ids"][0]
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    # t1's window returns MORE than one segment -- a structural failure that
+    # falls back to independent per-sentence translation for its own members.
+    provider = _FakeTurnBlockProvider(responses={
+        "t1_a": [
+            {"start_index": 1, "end_index": 1, "isizulu_text": "A.", "clauses": [_clause("c1", "First turn opener.")]},
+            {"start_index": 2, "end_index": 2, "isizulu_text": "B.", "clauses": [_clause("c1", "First turn closer.")]},
+        ],
+    })
+    block_groups, _candidate_by_group, _usage = _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+    )
+    by_id = {b["group_id"]: b for b in block_groups}
+    assert by_id["t1_a"]["turn_id"] == "t1_a"
+    assert by_id["t1_b"]["turn_id"] == "t1_a"  # fallback block still shares its real turn's id
+    assert by_id["t2_a"]["turn_id"] == "t2_a"  # a different, solo turn gets its own id
+
+
+def test_turn_id_is_shared_across_windows_chunked_from_the_same_turn():
+    # A turn longer than _TURN_BLOCK_TRANSLATE_MAX_MEMBERS is chunked into
+    # multiple windows -- every resulting block must still carry the SAME
+    # turn_id, since they all really belong to one real speaker turn.
+    groups = [
+        _group(f"p{i}", f"Sentence number {i}.", speaker_id="SPEAKER_00", start_ms=i * 1000, span_ms=1000)
+        for i in range(10)
+    ]
+    turns = _build_speaker_turns(groups)
+    for turn in turns:
+        turn["turn_id"] = turn["member_group_ids"][0]
+    assert len(turns) == 1  # confirm this really is one long turn before asserting on it
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    provider = _FakeTurnBlockProvider()
+    block_groups, _candidate_by_group, _usage = _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+    )
+    assert len(block_groups) >= 2  # really did chunk into multiple windows/blocks
+    assert {b["turn_id"] for b in block_groups} == {"p0"}

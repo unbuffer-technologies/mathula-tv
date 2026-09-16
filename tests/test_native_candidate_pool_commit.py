@@ -180,6 +180,50 @@ def test_commit_reuses_checkpoint_without_rewriting(tmp_path):
     assert first["completed_at"] == second["completed_at"]
 
 
+def test_commit_carries_turn_id_through_to_the_committed_group(tmp_path):
+    # Phase 26: turn_id must survive a commit round-trip so render-time
+    # turn-finalization can group by it instead of re-deriving turn
+    # membership from committed-group adjacency.
+    job_root = _seed_job(tmp_path, sentences=["Hello there.", "Goodbye."])
+    _seed_pool(job_root, records=[
+        _record(
+            "native_phrase_0001", index=0, selected_candidate_id="grok_en_natural",
+            candidates=[_candidate("grok_en_natural", "Sawubona.")],
+            turn_id="native_phrase_0001",
+        ),
+        _record(
+            "native_phrase_0002", index=1, selected_candidate_id="grok_short1",
+            candidates=[_candidate("grok_short1", "Sala kahle.")],
+            turn_id="native_phrase_0001",
+        ),
+    ])
+    artifact = commit_candidate_pool(job_root=job_root)
+    groups = {g["group_id"]: g for g in artifact["temporal_mask_groups"]}
+    assert groups["native_phrase_0001"]["turn_id"] == "native_phrase_0001"
+    assert groups["native_phrase_0002"]["turn_id"] == "native_phrase_0001"
+
+    paths = native_dub_paths(job_root)
+    sentence_records = read_json(paths.pass1_sentences)["records"]
+    phrase_groups, _translations = _temporal_mask_groups_for_render(artifact, sentence_records)
+    assert {g["group_id"]: g["turn_id"] for g in phrase_groups} == {
+        "native_phrase_0001": "native_phrase_0001", "native_phrase_0002": "native_phrase_0001",
+    }
+
+
+def test_commit_tolerates_a_pool_record_missing_turn_id(tmp_path):
+    # A pre-Phase-26 pool artifact has no turn_id on any record at all --
+    # commit must not crash, and the committed group's turn_id is simply None.
+    job_root = _seed_job(tmp_path, sentences=["Hello there."])
+    _seed_pool(job_root, records=[
+        _record(
+            "native_phrase_0001", index=0, selected_candidate_id="grok_en_natural",
+            candidates=[_candidate("grok_en_natural", "Sawubona.")],
+        ),
+    ])
+    artifact = commit_candidate_pool(job_root=job_root)
+    assert artifact["temporal_mask_groups"][0]["turn_id"] is None
+
+
 def test_commit_force_regenerates_even_with_a_matching_checkpoint(tmp_path):
     job_root = _seed_job(tmp_path, sentences=["Hello there."])
     _seed_pool(job_root, records=[
