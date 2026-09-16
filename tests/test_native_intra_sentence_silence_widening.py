@@ -14,6 +14,7 @@ original text's own word count).
 """
 from __future__ import annotations
 
+import json
 import wave
 from pathlib import Path
 from types import SimpleNamespace
@@ -110,6 +111,11 @@ def test_widening_closes_the_shortfall_when_the_real_gap_is_generous(tmp_path):
     assert result["end_error_ms"] == 0
     assert result["widened_gap_ms"] == 800
     assert Path(result["output_path"]).is_file()
+    # Real production crash caught here: a real render wrote this whole dict
+    # into a JSON artifact and failed with "Object of type PosixPath is not
+    # JSON serializable" -- every path-shaped field, including each nested
+    # island's own "path", must be a plain string, never a raw Path object.
+    json.dumps(result)
 
 
 def test_widening_caps_at_the_gap_cap_and_leaves_an_honest_residual(tmp_path):

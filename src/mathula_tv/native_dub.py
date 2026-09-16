@@ -9698,7 +9698,7 @@ def _attempt_intra_sentence_silence_widening(
                 force=force, job_root=job_root,
             )
             measured_islands.append({
-                "path": output_path, "duration_ms": int(result.duration_ms),
+                "path": str(output_path), "duration_ms": int(result.duration_ms),
                 "source_text": island["source_text"], "spoken_text": piece_text,
             })
     except Exception:  # noqa: BLE001 - a synthesis failure aborts only this repair, never the render
