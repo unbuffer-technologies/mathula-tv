@@ -2154,6 +2154,9 @@ def main(argv: list[str] | None = None) -> int:
             provider = create_native_grok_backend(args.model, progress=progress)
             sdk_group_synthesis_enabled = bool(getattr(settings, "enable_sdk_group_synthesis", False))
             turn_group_synthesis_enabled = bool(getattr(settings, "enable_turn_group_synthesis", False))
+            intra_sentence_silence_widening_enabled = bool(
+                getattr(settings, "enable_intra_sentence_silence_widening", False)
+            )
             needs_sdk_boundary = sdk_group_synthesis_enabled or turn_group_synthesis_enabled
             result = render_native_dub(
                 job=job,
@@ -2176,6 +2179,7 @@ def main(argv: list[str] | None = None) -> int:
                 min_protected_pause_ms=args.min_protected_pause_ms,
                 enable_sdk_group_synthesis=sdk_group_synthesis_enabled,
                 enable_turn_group_synthesis=turn_group_synthesis_enabled,
+                enable_intra_sentence_silence_widening=intra_sentence_silence_widening_enabled,
                 sdk_boundary=(create_sdk_boundary(settings) if needs_sdk_boundary else None),
                 lite=bool(args.lite),
                 progress=progress,

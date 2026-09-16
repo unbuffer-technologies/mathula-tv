@@ -4,12 +4,15 @@ from pathlib import Path
 import pytest
 
 from mathula_tv.speech_islands import (
+    INTRA_SENTENCE_MIN_WORDS_PER_SIDE,
+    INTRA_SENTENCE_PAUSE_MIN_MS,
     MIN_ISLAND_DURATION_MS,
     ENGLISH_TITLE_ABBREVIATIONS,
     _pairs_have_reliable_correspondence,
     split_into_sentences,
     build_island_phrase_groups,
     derive_english_islands,
+    derive_intra_sentence_pause_islands,
     split_zulu_islands,
     stitch_islands_to_group_wav,
 )
@@ -306,6 +309,124 @@ def test_build_island_phrase_groups_falls_back_when_merging_collapses_everything
         "parts": [{"type": "text", "segment_id": "seg-1", "text": "Sawubona. Sala kahle."}],
     }
     assert build_island_phrase_groups(group, words_by_id, segments_by_id) is None
+
+
+# --- derive_intra_sentence_pause_islands (Phase 27) -------------------------------------
+
+# Modeled directly on real production data (job fb3d08b63fed4d90922b08f7e325b906,
+# native_phrase_0005): a single sentence whose real ASR word gaps cluster 0-320ms
+# ordinarily, with two real clause-boundary pauses (1040ms before "and", 960ms
+# before "to") sitting together right where the sentence's own subordinate clause
+# begins.
+_PAUSE_WORDS = [
+    _word("w1", "To", 30.670, 30.790),
+    _word("w2", "benefit", 31.390, 32.110),          # gap 600ms
+    _word("w3", "from", 32.750, 33.070),              # gap 640ms
+    _word("w4", "permanent", 33.390, 34.110),         # gap 320ms
+    _word("w5", "job", 34.190, 34.470),                # gap 80ms
+    _word("w6", "with", 34.670, 34.990),               # gap 200ms
+    _word("w7", "people", 35.070, 35.430),             # gap 80ms
+    _word("w8", "with", 35.430, 35.590),               # gap 0ms
+    _word("w9", "disability", 35.590, 36.510),         # gap 0ms
+    _word("w10", "and", 37.550, 37.870),               # gap 1040ms <<< largest
+    _word("w11", "to", 38.830, 38.950),                # gap 960ms
+    _word("w12", "work", 39.150, 39.550),              # gap 200ms
+    _word("w13", "very,", 39.790, 40.230),             # gap 240ms
+    _word("w14", "very", 40.230, 40.510),              # gap 0ms
+    _word("w15", "permanent", 40.510, 41.070),         # gap 0ms
+    _word("w16", "in", 41.070, 41.230),                # gap 0ms
+    _word("w17", "municipality", 41.230, 42.190),      # gap 0ms
+    _word("w18", "at", 42.230, 42.430),                # gap 40ms
+    _word("w19", "Lekwa", 42.430, 42.750),             # gap 0ms
+    _word("w20", "Municipality.", 42.750, 43.470),     # gap 0ms
+]
+_PAUSE_WORDS_BY_ID = {w["word_id"]: w for w in _PAUSE_WORDS}
+_PAUSE_SEGMENTS_BY_ID = {"seg-3": _segment("seg-3", [w["word_id"] for w in _PAUSE_WORDS])}
+_PAUSE_GROUP = {
+    "group_id": "native_phrase_0005",
+    "speaker_id": "SPEAKER_02",
+    "segment_ids": ["seg-3"],
+    "start_ms": 30670,
+    "source_end_ms": 43470,
+    "source_span_ms": 12800,
+    "source_text": (
+        "To benefit from permanent job with people with disability and to work "
+        "very, very permanent in municipality at Lekwa Municipality."
+    ),
+}
+
+
+def test_derive_intra_sentence_pause_islands_splits_at_the_largest_qualifying_pause():
+    islands = derive_intra_sentence_pause_islands(_PAUSE_GROUP, _PAUSE_WORDS_BY_ID, _PAUSE_SEGMENTS_BY_ID)
+    assert islands is not None
+    assert len(islands) == 2
+    assert islands[0]["source_text"] == (
+        "To benefit from permanent job with people with disability"
+    )
+    assert islands[1]["source_text"] == (
+        "and to work very, very permanent in municipality at Lekwa Municipality."
+    )
+    assert islands[1]["gap_before_ms"] == 1040
+    assert islands[0]["start_ms"] == 30670
+    assert islands[1]["end_ms"] == 43470
+
+
+def test_derive_intra_sentence_pause_islands_returns_none_when_no_gap_clears_the_threshold():
+    words = [
+        _word("w1", "Short", 0.0, 0.2),
+        _word("w2", "sentence", 0.2, 0.4),   # gap 0
+        _word("w3", "with", 0.5, 0.7),       # gap 100ms
+        _word("w4", "only", 0.8, 1.0),       # gap 100ms
+        _word("w5", "small", 1.1, 1.3),      # gap 100ms
+        _word("w6", "gaps.", 1.4, 1.6),      # gap 100ms
+    ]
+    words_by_id = {w["word_id"]: w for w in words}
+    segments_by_id = {"seg-1": _segment("seg-1", [w["word_id"] for w in words])}
+    group = {
+        **_PAUSE_GROUP, "segment_ids": ["seg-1"],
+        "source_text": "Short sentence with only small gaps.",
+    }
+    assert derive_intra_sentence_pause_islands(group, words_by_id, segments_by_id) is None
+
+
+def test_derive_intra_sentence_pause_islands_returns_none_for_a_multi_sentence_group():
+    group = {**_PAUSE_GROUP, "source_text": "Short one. Another sentence here."}
+    assert derive_intra_sentence_pause_islands(group, _PAUSE_WORDS_BY_ID, _PAUSE_SEGMENTS_BY_ID) is None
+
+
+def test_derive_intra_sentence_pause_islands_rejects_a_boundary_too_close_to_either_edge():
+    # A qualifying 700ms gap sits after only 1 word (fewer than
+    # INTRA_SENTENCE_MIN_WORDS_PER_SIDE=3 on the left) -- it must be skipped even
+    # though it clears the pause threshold, in favor of the real, later,
+    # well-supported 600ms boundary before "and" (index 5, exactly 3 words on
+    # each side).
+    assert INTRA_SENTENCE_MIN_WORDS_PER_SIDE == 3
+    words = [
+        _word("w1", "Well,", 0.00, 0.20),
+        _word("w2", "benefit", 0.90, 1.10),   # gap 700ms after just 1 word -- too close to the left edge
+        _word("w3", "from", 1.10, 1.30),      # gap 0
+        _word("w4", "permanent", 1.30, 1.60), # gap 0
+        _word("w5", "jobs", 1.60, 1.80),      # gap 0
+        _word("w6", "and", 2.40, 2.60),       # gap 600ms -- the real, well-supported boundary
+        _word("w7", "opportunity", 2.60, 2.90),  # gap 0
+        _word("w8", "here.", 2.90, 3.10),        # gap 0
+    ]
+    words_by_id = {w["word_id"]: w for w in words}
+    segments_by_id = {"seg-1": _segment("seg-1", [w["word_id"] for w in words])}
+    group = {
+        **_PAUSE_GROUP, "segment_ids": ["seg-1"],
+        "source_text": "Well, benefit from permanent jobs and opportunity here.",
+    }
+    islands = derive_intra_sentence_pause_islands(group, words_by_id, segments_by_id)
+    assert islands is not None
+    assert islands[0]["source_text"] == "Well, benefit from permanent jobs"
+    assert islands[1]["source_text"] == "and opportunity here."
+    assert islands[1]["gap_before_ms"] == 600
+
+
+def test_derive_intra_sentence_pause_islands_returns_none_without_raw_word_data():
+    group = {**_PAUSE_GROUP, "segment_ids": ["seg-does-not-exist"]}
+    assert derive_intra_sentence_pause_islands(group, _PAUSE_WORDS_BY_ID, _PAUSE_SEGMENTS_BY_ID) is None
 
 
 def test_pairs_have_reliable_correspondence_accepts_normal_length_variance():

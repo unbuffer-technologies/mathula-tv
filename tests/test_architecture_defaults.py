@@ -33,6 +33,11 @@ def test_production_provider_defaults_and_optional_pyannote(tmp_path, monkeypatc
     # poor proxy for isiZulu's per-sentence expansion-ratio variance). Now the
     # default, independently toggleable from enable_sdk_group_synthesis above.
     assert settings.enable_turn_group_synthesis is True
+    # Phase 27 (intra-sentence pause-island silence widening): new and
+    # unvalidated -- modifies real audio synthesis for a genuinely solo
+    # sentence, same rollout discipline as enable_sdk_group_synthesis's own
+    # history. Must default off until confirmed on a real job.
+    assert settings.enable_intra_sentence_silence_widening is False
 
 
 def test_sdk_group_synthesis_env_toggle_flips_the_default(tmp_path, monkeypatch):
@@ -45,6 +50,12 @@ def test_turn_group_synthesis_env_toggle_can_disable_the_new_default(tmp_path, m
     monkeypatch.setenv("MATHULA_TV_ENABLE_TURN_GROUP_SYNTHESIS", "0")
     settings = load_settings(tmp_path)
     assert settings.enable_turn_group_synthesis is False
+
+
+def test_intra_sentence_silence_widening_env_toggle_flips_the_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATHULA_TV_ENABLE_INTRA_SENTENCE_SILENCE_WIDENING", "1")
+    settings = load_settings(tmp_path)
+    assert settings.enable_intra_sentence_silence_widening is True
 
 
 def test_azure_speaker_labels_are_authoritative_when_pyannote_disagrees():

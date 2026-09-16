@@ -89,6 +89,7 @@ from .speech_islands import (
     ZULU_TITLE_ABBREVIATIONS,
     build_island_phrase_groups,
     derive_english_islands,
+    derive_intra_sentence_pause_islands,
     load_raw_word_index,
     slice_wav_by_bookmarks,
     split_into_sentences,
@@ -163,6 +164,13 @@ MOUTH_CLOSE_HARD_TOLERANCE_MS = 80
 # fits inside existing free room before the next block, close it with trailing silence
 # instead of failing the pipeline over a rounding-level residual.
 MAX_UNRESOLVED_EARLY_SILENCE_PAD_MS = 150
+# Phase 27: caps how far a single real intra-sentence pause (see speech_islands.py's
+# derive_intra_sentence_pause_islands) may be scaled up to close a large "expand"
+# shortfall in _attempt_intra_sentence_silence_widening -- same value/reasoning as
+# Phase 25's _TURN_SILENCE_GAP_CAP_MS (~1.5x AZURE_SENTENCE_BOUNDARY_PAUSE_MS), kept
+# as its own independently-tunable name per this file's established convention of
+# parallel-but-separately-named constants across sibling mechanisms.
+INTRA_SENTENCE_SILENCE_GAP_CAP_MS = 1500
 DEFAULT_QA_BACK_TRANSLATION_BATCH_SIZE = 15
 DEFAULT_QA_MAX_REPAIR_ROUNDS = 1
 # Matches DEFAULT_REFERENT_AUDIT_WORKERS's own reasoning: QA batches are fully
@@ -6506,6 +6514,7 @@ def render_native_dub(
     enable_island_timing: bool = True,
     enable_sdk_group_synthesis: bool = False,
     enable_turn_group_synthesis: bool = False,
+    enable_intra_sentence_silence_widening: bool = False,
     sdk_boundary: AzureSpeechSDKBoundary | None = None,
     lite: bool = False,
     progress: Callable[[str], None] | None = None,
@@ -6525,6 +6534,18 @@ def render_native_dub(
     `_synthesize_speaker_turns_with_bookmarks`). Independent of
     `enable_sdk_group_synthesis` (a different, still-unvalidated mechanism for
     sub-sentence islands); requires `sdk_boundary`, same as that flag does.
+
+    ``enable_intra_sentence_silence_widening=True`` (Phase 27) is a new,
+    unvalidated, render-time-only repair for a genuinely SOLO sentence whose
+    natural Zulu finishes well short of its window (beyond the small,
+    unconditional `MAX_UNRESOLVED_EARLY_SILENCE_PAD_MS` pad) -- splits it at
+    its own single largest real internal ASR pause and widens that real gap
+    to close the shortfall (see `_attempt_intra_sentence_silence_widening`).
+    Independent of `enable_island_timing`/`enable_sdk_group_synthesis`/
+    `enable_turn_group_synthesis`; needs no `sdk_boundary` (uses only `tts`).
+    Defaults off, matching this codebase's own rollout discipline for any new
+    mechanism that modifies real audio synthesis -- verify on a real job
+    before considering the default worth flipping.
     """
     paths = native_dub_paths(job_root)
     if not paths.pass2.is_file():
@@ -6662,6 +6683,7 @@ def render_native_dub(
     island_counts: dict[str, int] = {str(group["group_id"]): 1 for group in phrase_groups}
     timing_input_groups = phrase_groups
     presynthesized: dict[str, AzureTTSResult] = {}
+    word_index: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None
     if enable_island_timing and pass2.get("temporal_mask_mode"):
         word_index = _load_raw_word_index_for_job(job_root)
         # Turn-finalized whole-groups must never be split into sub-sentence
@@ -6716,6 +6738,8 @@ def render_native_dub(
         presynthesized=presynthesized,
         turn_finalized=turn_finalized,
         job_root=job_root,
+        word_index=word_index,
+        enable_intra_sentence_silence_widening=bool(enable_intra_sentence_silence_widening),
     )
 
     # Computed on the pre-restitch, per-real-synthesis-unit `measured` list (one entry
@@ -9609,6 +9633,115 @@ def _presynthesize_islands_with_bookmarks(
     return presynthesized
 
 
+def _attempt_intra_sentence_silence_widening(
+    *,
+    chosen_group: Mapping[str, Any],
+    source_window_ms: int,
+    voice_info: Mapping[str, Any],
+    tts: AzureTTSBackend,
+    audio_dir: Path,
+    word_index: tuple[Mapping[str, Any], Mapping[str, Any]] | None,
+    force: bool,
+    job_root: Path | None,
+    progress: Callable[[str], None] | None,
+) -> dict[str, Any] | None:
+    """Phase 27, render-time-only repair of last resort for a genuinely
+    single-sentence group whose natural Zulu underfills its window well
+    beyond MAX_UNRESOLVED_EARLY_SILENCE_PAD_MS (the caller's own small-pad
+    cap). Splits the sentence at its single largest real ASR-detected
+    internal pause (derive_intra_sentence_pause_islands), splits the
+    already-final Zulu text proportionally (_reverse_engineer_zulu_chunk_
+    split, unmodified -- the same estimate Phase 25 already uses), synthesizes
+    each half independently, and stitches them back with a widened silence
+    gap scaled to close the shortfall (capped at INTRA_SENTENCE_SILENCE_GAP_
+    CAP_MS; any residual left after capping is honestly accepted, never
+    fabricated away).
+
+    Never commits anything and never mints a second segment_id anywhere --
+    this produces exactly one WAV for the caller's own single group_id,
+    identical in shape to what the caller already does for a normal "expand"
+    case. Returns None (caller falls through to today's unmodified "accept
+    natural pace" warning) on: no word index, not a genuinely single
+    sentence, no qualifying internal pause, a degenerate Zulu split, any
+    synthesis exception, or the split not actually helping. Never raises.
+    """
+    if word_index is None:
+        return None
+    words_by_id, segments_by_id = word_index
+    try:
+        pause_islands = derive_intra_sentence_pause_islands(chosen_group, words_by_id, segments_by_id)
+    except Exception:  # noqa: BLE001 - detection must never crash a render
+        return None
+    if pause_islands is None:
+        return None
+
+    shares = [max(1, _estimate_english_syllables(island["source_text"])) for island in pause_islands]
+    pieces = _reverse_engineer_zulu_chunk_split(_group_spoken_zulu(chosen_group), shares)
+    if pieces is None:
+        return None
+
+    group_id = str(chosen_group["group_id"])
+    speaker_id = str(chosen_group["speaker_id"])
+    measured_islands: list[dict[str, Any]] = []
+    try:
+        for index, (island, piece_text) in enumerate(zip(pause_islands, pieces)):
+            island_span_ms = max(1, int(island["end_ms"]) - int(island["start_ms"]))
+            island_group = {
+                "group_id": f"{group_id}__pause{index:02d}",
+                "speaker_id": speaker_id,
+                "parts": [{"type": "text", "text": piece_text}],
+            }
+            output_path = audio_dir / f"{group_id}.pause-widen-isl{index:02d}.wav"
+            result = _synthesize_group(
+                tts=tts, group=island_group, voice_info=voice_info, output_path=output_path,
+                preferred_ms=island_span_ms, maximum_ms=island_span_ms * 3,
+                force=force, job_root=job_root,
+            )
+            measured_islands.append({
+                "path": output_path, "duration_ms": int(result.duration_ms),
+                "source_text": island["source_text"], "spoken_text": piece_text,
+            })
+    except Exception:  # noqa: BLE001 - a synthesis failure aborts only this repair, never the render
+        return None
+
+    total_measured_ms = sum(item["duration_ms"] for item in measured_islands)
+    needed_gap_ms = source_window_ms - total_measured_ms
+    if needed_gap_ms <= 0:
+        return None  # splitting didn't help -- no reason to accept the extra TTS/prosody risk for nothing
+
+    boundary_gap_ms = int(pause_islands[1]["gap_before_ms"])
+    if boundary_gap_ms <= 0:
+        return None  # should not happen given detection's own threshold, but never divide by zero
+    scale = needed_gap_ms / boundary_gap_ms
+    widened_gap_ms = min(INTRA_SENTENCE_SILENCE_GAP_CAP_MS, boundary_gap_ms * scale)
+
+    output_path = audio_dir / f"{group_id}.intra-sentence-silence-widened.wav"
+    stitch_result = stitch_islands_to_group_wav(
+        [item["path"] for item in measured_islands], output_path,
+        inter_island_silence_ms=[round(widened_gap_ms)],
+    )
+    final_duration_ms = int(stitch_result["final_duration_ms"])
+    _emit_progress(
+        progress,
+        f"[native dub] {group_id} intra-sentence pause widened +{round(widened_gap_ms)} ms "
+        f"(real pause {boundary_gap_ms} ms, scale {scale:.2f}x, capped at {INTRA_SENTENCE_SILENCE_GAP_CAP_MS} ms) "
+        f"-> {final_duration_ms} ms (window {source_window_ms} ms)",
+    )
+    return {
+        "schema_version": "mathula-native-intra-sentence-silence-widening-v1",
+        "method": "intra_sentence_silence_widening",
+        "source_path": str(output_path), "output_path": str(output_path),
+        "before_duration_ms": total_measured_ms, "target_duration_ms": source_window_ms,
+        "allowed_early_ms": 0, "allowed_late_ms": 0,
+        "final_duration_ms": final_duration_ms, "speed_factor": 1.0, "speed_percent": 0.0,
+        "end_error_ms": final_duration_ms - source_window_ms,
+        "mouth_close_sync_ok": True,
+        "boundary_gap_ms": boundary_gap_ms, "widened_gap_ms": round(widened_gap_ms), "scale": round(scale, 3),
+        "islands": measured_islands,
+        "speed_fit_mode": "sentence_end",
+    }
+
+
 def _run_batch_adaptive_timing_controller(
     *,
     phrase_groups: Sequence[Mapping[str, Any]],
@@ -9628,6 +9761,8 @@ def _run_batch_adaptive_timing_controller(
     presynthesized: Mapping[str, AzureTTSResult] | None = None,
     turn_finalized: Mapping[str, Mapping[str, Any]] | None = None,
     job_root: Path | None = None,
+    word_index: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None,
+    enable_intra_sentence_silence_widening: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Measure all phrases, accepting both directions non-fatally: overlong speech is
     pitch-preserving speed-fit (rushed) and undersized speech plays at its own
@@ -9857,6 +9992,7 @@ def _run_batch_adaptive_timing_controller(
             mouth_close_late_tolerance_ms=int(state["late_tolerance_ms"]),
         )
         silence_pad_applied: dict[str, Any] | None = None
+        silence_widening_applied: dict[str, Any] | None = None
         if direction == "expand":
             shortfall_ms = max(0, source_window_ms - int(chosen_result.duration_ms))
             state["unresolved_early_mouth_close_ms"] = shortfall_ms
@@ -9887,21 +10023,42 @@ def _run_batch_adaptive_timing_controller(
                     f"(window {source_window_ms} ms, free gap {free_gap_ms} ms available)",
                 )
             else:
-                # Natural speech is genuinely shorter than its window. Mathula no
-                # longer forces wording repair or expansion to close this gap -- a
-                # shorter, faithful, natural-paced rendering is preferred over
-                # padding wording just to fill time (the rhetorical-expansion
-                # mechanism this used to trigger was the exact root cause of a real
-                # production bug where an island's expansion repair restated most
-                # of a sibling island's content to hit a syllable floor). Play at
-                # natural speed and accept the early mouth-close; timing in this
-                # direction is now non-fatal, symmetric with "compress".
-                _emit_red_warning(
-                    progress,
-                    f"[native dub] {chosen_group['group_id']}: natural speech is {shortfall_ms} ms shorter than "
-                    "its window; playing at natural speed instead of stretching or padding wording. Timing "
-                    "remains non-fatal and the pipeline continues.",
-                )
+                # Phase 27: the small pad above can't help with a shortfall this
+                # large -- try splitting the sentence at its own single largest
+                # real internal ASR pause and widening that real gap to close
+                # (or shrink) the shortfall, before giving up on it entirely.
+                if enable_intra_sentence_silence_widening:
+                    silence_widening_applied = _attempt_intra_sentence_silence_widening(
+                        chosen_group=chosen_group, source_window_ms=source_window_ms,
+                        voice_info=state["voice_info"], tts=tts, audio_dir=audio_dir,
+                        word_index=word_index, force=force, job_root=job_root, progress=progress,
+                    )
+                if silence_widening_applied is not None:
+                    chosen_result = replace(
+                        chosen_result,
+                        output_path=str(silence_widening_applied["output_path"]),
+                        duration_ms=int(silence_widening_applied["final_duration_ms"]),
+                    )
+                    state["chosen_result"] = chosen_result
+                    state["unresolved_early_mouth_close_ms"] = max(
+                        0, source_window_ms - int(silence_widening_applied["final_duration_ms"]),
+                    )
+                else:
+                    # Natural speech is genuinely shorter than its window. Mathula no
+                    # longer forces wording repair or expansion to close this gap -- a
+                    # shorter, faithful, natural-paced rendering is preferred over
+                    # padding wording just to fill time (the rhetorical-expansion
+                    # mechanism this used to trigger was the exact root cause of a real
+                    # production bug where an island's expansion repair restated most
+                    # of a sibling island's content to hit a syllable floor). Play at
+                    # natural speed and accept the early mouth-close; timing in this
+                    # direction is now non-fatal, symmetric with "compress".
+                    _emit_red_warning(
+                        progress,
+                        f"[native dub] {chosen_group['group_id']}: natural speech is {shortfall_ms} ms shorter than "
+                        "its window; playing at natural speed instead of stretching or padding wording. Timing "
+                        "remains non-fatal and the pipeline continues.",
+                    )
         elif direction == "compress":
             required_speed = _temporal_required_rush_percent(
                 int(chosen_result.duration_ms), source_window_ms + int(state["late_tolerance_ms"])
@@ -9931,6 +10088,8 @@ def _run_batch_adaptive_timing_controller(
         }
         if silence_pad_applied is not None:
             speed_fit = silence_pad_applied
+        elif silence_widening_applied is not None:
+            speed_fit = silence_widening_applied
         elif final_duration_ms > source_window_ms + int(state["late_tolerance_ms"]):
             # Speed-fit target is the sentence's own end PLUS the already-tracked safe
             # gap before the next sentence (mode 2, "gap_aware") -- if a gap exists, some

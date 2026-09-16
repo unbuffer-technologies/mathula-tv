@@ -322,6 +322,108 @@ def derive_english_islands(
     return _proportional_split_islands(sentences, group_id=group_id, start_ms=start_ms, end_ms=end_ms)
 
 
+# Real data (job fb3d08b63fed4d90922b08f7e325b906, native_phrase_0005): ordinary
+# word-to-word gaps within a sentence cluster 0-320ms; real clause-boundary pauses
+# measured 600/640/1040/960ms. 500ms sits cleanly between the two clusters, and is
+# also >3x MAX_UNRESOLVED_EARLY_SILENCE_PAD_MS (native_dub.py, 150ms) -- the small-
+# shortfall pad's own cap -- which is what keeps this mechanism's trigger rare by
+# construction: a sentence can only ever reach this detector after that small pad
+# has already proven unable to help.
+INTRA_SENTENCE_PAUSE_MIN_MS = 500
+# Avoids a degenerate single-word island (e.g. cutting a sentence right after "To").
+INTRA_SENTENCE_MIN_WORDS_PER_SIDE = 3
+
+
+def derive_intra_sentence_pause_islands(
+    group: Mapping[str, Any],
+    words_by_id: Mapping[str, Mapping[str, Any]],
+    segments_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Split ONE already-single-sentence group at its single largest real
+    internal pause, using real ASR word-level timestamps.
+
+    This is the intra-sentence sibling of ``derive_english_islands``: that
+    function only ever splits at SENTENCE boundaries and returns None for a
+    group that is already one sentence (see its own `len(sentences) <= 1`
+    check). This function exists specifically for that leftover case, for
+    when a single sentence's own natural Zulu translation finishes well short
+    of its real ASR-derived window -- see native_dub.py's
+    `_attempt_intra_sentence_silence_widening`, the only caller.
+
+    Unlike `derive_english_islands`, there is no proportional-fallback tier
+    here: this mechanism only ever acts on a REAL detected pause, never an
+    estimate, so a missing/incomplete word index (or no real pause) always
+    returns None -- never a guessed split.
+
+    v1 deliberately returns at most ONE boundary (2 islands): the single
+    largest qualifying pause. A sentence with two separately-real qualifying
+    pauses only gets its largest one used for now -- narrower, cheaper, and
+    consistent with this codebase's own pattern of shipping the single-
+    boundary version first and generalizing only if a real job shows the
+    need.
+    """
+    source_text = str(group.get("source_text") or "").strip()
+    if not source_text:
+        return None
+    if len(split_into_sentences(source_text, ENGLISH_TITLE_ABBREVIATIONS)) > 1:
+        return None  # not this function's job -- derive_english_islands handles multi-sentence groups
+
+    segment_ids = [str(value) for value in group.get("segment_ids") or []]
+    word_sequence: list[Mapping[str, Any]] | None = []
+    for segment_id in segment_ids:
+        segment = segments_by_id.get(segment_id)
+        if segment is None:
+            word_sequence = None
+            break
+        for word_id in segment.get("source_word_ids") or []:
+            word = words_by_id.get(str(word_id))
+            if word is None:
+                word_sequence = None
+                break
+            word_sequence.append(word)
+        if word_sequence is None:
+            break
+    if not word_sequence:
+        return None
+
+    restored_words = source_text.split()
+    aligned = _align_words_to_timestamps(restored_words, word_sequence)
+    if aligned is None or len(aligned) < 2 * INTRA_SENTENCE_MIN_WORDS_PER_SIDE:
+        return None
+
+    best_index: int | None = None
+    best_gap_ms = 0
+    for index in range(INTRA_SENTENCE_MIN_WORDS_PER_SIDE, len(aligned) - INTRA_SENTENCE_MIN_WORDS_PER_SIDE + 1):
+        gap_ms = aligned[index][0] - aligned[index - 1][1]
+        if gap_ms >= INTRA_SENTENCE_PAUSE_MIN_MS and gap_ms > best_gap_ms:
+            best_gap_ms = gap_ms
+            best_index = index
+    if best_index is None:
+        return None
+
+    group_id = str(group.get("group_id") or "")
+    left_words = restored_words[:best_index]
+    right_words = restored_words[best_index:]
+    left_span = aligned[:best_index]
+    right_span = aligned[best_index:]
+    return [
+        {
+            "island_id": f"{group_id}__pause00", "index": 0,
+            "source_text": " ".join(left_words),
+            "start_ms": left_span[0][0], "end_ms": left_span[-1][1],
+            "alignment_method": "word_exact" if all(exact for _s, _e, exact in left_span) else "word_aligned_partial",
+            "gap_before_ms": 0,
+        },
+        {
+            "island_id": f"{group_id}__pause01", "index": 1,
+            "source_text": " ".join(right_words),
+            "start_ms": right_span[0][0], "end_ms": right_span[-1][1],
+            "alignment_method": "word_exact" if all(exact for _s, _e, exact in right_span) else "word_aligned_partial",
+            "gap_before_ms": best_gap_ms,
+        },
+    ]
+
+
 def split_zulu_islands(spoken_text: str) -> list[str]:
     return split_into_sentences(str(spoken_text or ""), ZULU_TITLE_ABBREVIATIONS)
 

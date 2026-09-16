@@ -125,6 +125,14 @@ class Settings:
     # enable_sdk_group_synthesis (a different, still-unvalidated mechanism for a
     # different granularity) so each stays separately toggleable.
     enable_turn_group_synthesis: bool = True
+    # Phase 27, new and unvalidated: render-time-only repair for a genuinely
+    # solo sentence whose natural Zulu finishes well short of its window --
+    # splits it at its own single largest real internal ASR pause and widens
+    # that real gap. Independent of enable_island_timing/enable_sdk_group_
+    # synthesis/enable_turn_group_synthesis; needs no Speech SDK boundary.
+    # Defaults off until confirmed on a real job, same rollout discipline as
+    # enable_sdk_group_synthesis's own history.
+    enable_intra_sentence_silence_widening: bool = False
     # Real yt-dlp defect confirmed 2026-09-09: some YouTube videos return
     # LOGIN_REQUIRED to every player client (independent of the bgutil PO-token
     # provider, which handles the generic bot-check but not this gate) even
@@ -326,6 +334,9 @@ def load_settings(project_root: Path | None = None) -> Settings:
         pyannote_enabled=os.getenv("MATHULA_TV_ENABLE_PYANNOTE_DIAGNOSTIC", "0") == "1",
         enable_sdk_group_synthesis=os.getenv("MATHULA_TV_ENABLE_SDK_GROUP_SYNTHESIS", "0") == "1",
         enable_turn_group_synthesis=os.getenv("MATHULA_TV_ENABLE_TURN_GROUP_SYNTHESIS", "1") == "1",
+        enable_intra_sentence_silence_widening=os.getenv(
+            "MATHULA_TV_ENABLE_INTRA_SENTENCE_SILENCE_WIDENING", "0",
+        ) == "1",
         youtube_cookies_file=os.getenv("MATHULA_TV_YOUTUBE_COOKIES_FILE", "").strip(),
         max_clean_unit_wer=float(os.getenv("MATHULA_TV_MAX_CLEAN_UNIT_WER", "0.35")),
         max_openvoice_wer_degradation=float(os.getenv("MATHULA_TV_MAX_OPENVOICE_WER_DEGRADATION", "0.10")),
