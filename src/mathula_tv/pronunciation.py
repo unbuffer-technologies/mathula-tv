@@ -410,24 +410,33 @@ _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS = {
     # but give the voice a calibrated South African-English approximation instead
     # of letting it infer isiZulu phonetics for the English social descriptor.
     "coloured": ("Khalad", "english_code_switch", ("colored",)),
-    # Real person (EFF Mbombela mayoral candidate, job
-    # fb3d08b63fed4d90922b08f7e325b906). Unmodified, ThembaNeural's real
-    # zu-ZA STT round-trip badly mangled the surname (heard variously as
-    # "keet"/"kithi"/"kade" across repeated real attempts -- genuine call-to-
-    # call TTS/STT variance for this name, confirmed directly: the RAW
-    # spelling itself scored a clean 1.0 on one real round-trip and badly
-    # mangled on others, too noisy for the automated round-trip verifier to
-    # settle on its own). The correct pronunciation was found directly from
-    # this job's own source audio: Pass 1's raw (pre-spelling-correction)
-    # ASR transcript already read "Godrej Gade" for this exact name, before
-    # a later autocorrect step normalised it to the tidier "Godfrey Gidi" --
-    # real, job-specific audio evidence, not a guess. The self-supervised
-    # pronunciation pipeline (native_dub.py's raw_asr_hint mechanism)
-    # correctly proposed this exact respelling from that evidence on its
-    # own; a human confirmed it by ear once automated round-trip scoring
-    # proved too noisy to settle the case unattended. This is a TTS-only
-    # alias and never changes captions.
-    "Godfrey Gidi": ("Godrej Gade", "personal_name", ()),
+    # Real person: Godrich Gardee, EFF deputy president and the party's
+    # Mbombela mayoral candidate (job fb3d08b63fed4d90922b08f7e325b906,
+    # confirmed via web search against en.wikipedia.org/wiki/Godrich_Gardee).
+    # CORRECTION, 2026-09-16: this entry previously targeted "Godfrey Gidi"
+    # and respelled it "Godrej Gade" -- but "Godfrey Gidi" was never a real
+    # name at all. Pass 1's automatic STT-restoration correction had
+    # fabricated it from the raw ASR text "Godrej Gade" with zero web
+    # verification (automatic_web_search was False for this job), and a
+    # SEPARATE later user report ("Godfrey Gidi is also wrong godrich gardee
+    # is th correct name") caught the real identity error, not just a
+    # pronunciation one. Fixed at the source via a manual Pass-1 correction
+    # override, so "Godfrey Gidi" no longer appears in any committed text --
+    # this dictionary key is renamed to the real surname to match.
+    # Separately, real TTS+STT round-trip testing found the FULL name
+    # "Godrich Gardee" already round-trips well unmodified (raw score
+    # 0.86-1.0 across both configured voices) -- the first name gives the
+    # voice enough context to say the surname correctly. Only the bare
+    # surname alone mispronounces badly (raw score 0.5, recovered as
+    # "ngokade"/"kade") -- a real, separate risk since this session's
+    # last-resort compaction mechanism is willing to drop a first name under
+    # timing pressure (confirmed: one real rebuild of this exact job did
+    # exactly that). "Gaardee" was the only respelling, out of ~20 tested via
+    # real round-trip search, that measurably and consistently improved the
+    # bare-surname case on BOTH configured voices at once (0.5 -> 0.667 on
+    # each, repeat-verified). This is a TTS-only alias and never changes
+    # captions.
+    "Gardee": ("Gaardee", "personal_name", ()),
     # Real person (SABC News senior reporter, correctly spelled "Taliesha
     # Naidoo" -- confirmed via real web research, job
     # b15075e7268049b491ee9e2222e5811f's own ASR transcript simplified it to
