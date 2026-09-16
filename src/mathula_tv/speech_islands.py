@@ -368,10 +368,19 @@ def derive_intra_sentence_pause_islands(
     if len(split_into_sentences(source_text, ENGLISH_TITLE_ABBREVIATIONS)) > 1:
         return None  # not this function's job -- derive_english_islands handles multi-sentence groups
 
+    # A committed group's own segment_ids carry the SENTENCE-level suffix
+    # _build_pass1_sentence_records mints (f"{raw_segment_id}__s00", confirmed
+    # real: job fb3d08b63fed4d90922b08f7e325b906's native_phrase_0005 carries
+    # segment_ids=["seg-00003__s00"]) -- but the raw ASR transcript's own
+    # segments_by_id (load_raw_word_index) is keyed by the BARE raw segment
+    # id ("seg-00003"), since raw ASR segmentation knows nothing about Pass-1's
+    # later sentence-splitting. A direct, unstripped lookup always misses.
+    # Strip back to the raw id before resolving real word data.
     segment_ids = [str(value) for value in group.get("segment_ids") or []]
     word_sequence: list[Mapping[str, Any]] | None = []
     for segment_id in segment_ids:
-        segment = segments_by_id.get(segment_id)
+        raw_segment_id = segment_id.split("__s", 1)[0]
+        segment = segments_by_id.get(raw_segment_id)
         if segment is None:
             word_sequence = None
             break

@@ -429,6 +429,20 @@ def test_derive_intra_sentence_pause_islands_returns_none_without_raw_word_data(
     assert derive_intra_sentence_pause_islands(group, _PAUSE_WORDS_BY_ID, _PAUSE_SEGMENTS_BY_ID) is None
 
 
+def test_derive_intra_sentence_pause_islands_strips_the_real_sentence_suffix_before_lookup():
+    # Real, confirmed production shape (job fb3d08b63fed4d90922b08f7e325b906,
+    # native_phrase_0005): a committed group's own segment_ids carry the
+    # sentence-level suffix _build_pass1_sentence_records mints
+    # ("seg-00003__s00"), but the raw ASR transcript's segments_by_id
+    # (load_raw_word_index) is keyed by the bare raw segment id ("seg-00003")
+    # -- a direct, unstripped lookup always misses, which silently made this
+    # whole mechanism inert on every real job until this was caught.
+    group = {**_PAUSE_GROUP, "segment_ids": ["seg-3__s00"]}
+    islands = derive_intra_sentence_pause_islands(group, _PAUSE_WORDS_BY_ID, _PAUSE_SEGMENTS_BY_ID)
+    assert islands is not None
+    assert islands[1]["gap_before_ms"] == 1040
+
+
 def test_pairs_have_reliable_correspondence_accepts_normal_length_variance():
     pairs = [
         {"en_text": "Good morning to everyone here today", "zu_text": "Sawubona kubantu bonke abakhona lapha namuhla"},
