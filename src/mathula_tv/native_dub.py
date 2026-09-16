@@ -9214,6 +9214,86 @@ def _restitch_island_measurements(
     return restitched, island_records
 
 
+def _widen_turn_member_gaps(
+    *,
+    member_ids: Sequence[str],
+    groups_by_id: Mapping[str, Mapping[str, Any]],
+    natural_slices: Mapping[str, Mapping[str, Any]],
+    shortfall_ms: int,
+    audio_dir: Path,
+    run_tag: str,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]] | None:
+    """Phase 30: insert real, capped, proportionally-distributed additional
+    silence at a turn's real inter-member boundaries to close a genuine
+    "expand" shortfall that the small tail-pad (MAX_UNRESOLVED_EARLY_SILENCE_PAD_MS)
+    can't fully resolve on its own.
+
+    Reuses Phase 25's exact scale-and-cap formula (_TURN_SILENCE_GAP_CAP_MS,
+    scale = needed_gap_ms / total_real_gap_ms) -- but applied at RENDER time,
+    as new silence appended to the end of each non-final member's own already-
+    synthesized natural WAV (the same "a member owns its own slice, including
+    whatever trailing silence follows it" convention `natural_slices` already
+    uses), not a decision-time window recompute. The committed gap between two
+    members is not literally reproduced in Azure's real one-shot audio (an
+    interior boundary "reflows" -- see this function's caller's own
+    docstring), so a real committed gap is used only as a relative WEIGHT for
+    distributing new silence, never as a value to detect/reproduce. Provably
+    safe: the uncapped scaled sum always equals exactly shortfall_ms, and
+    capping only ever reduces individual terms, so this can under-shoot (an
+    honest, accepted residual) but never overshoot past the real window.
+
+    Returns None (caller falls through to today's exact "accept natural pace,
+    zero widening" behavior) when every member is genuinely back-to-back in
+    the real source -- there is no real discontinuity anywhere in this turn
+    to widen. Otherwise returns (speed_fit, final_slices), the same shapes
+    the caller's other two "expand" sub-branches already produce.
+    """
+    real_gaps_ms = [
+        max(0, int(groups_by_id[member_ids[i + 1]]["start_ms"]) - int(groups_by_id[member_ids[i]]["source_end_ms"]))
+        for i in range(len(member_ids) - 1)
+    ]
+    total_real_gap_ms = sum(real_gaps_ms)
+    if total_real_gap_ms <= 0:
+        return None
+
+    scale = shortfall_ms / total_real_gap_ms
+    widened_gaps_ms = [min(_TURN_SILENCE_GAP_CAP_MS, real_gap_ms * scale) for real_gap_ms in real_gaps_ms]
+
+    natural_total_ms = sum(int(natural_slices[gid]["duration_ms"]) for gid in member_ids)
+    final_slices: dict[str, dict[str, Any]] = {}
+    for index, gid in enumerate(member_ids):
+        natural_path = Path(natural_slices[gid]["path"])
+        natural_ms = int(natural_slices[gid]["duration_ms"])
+        gap_ms = int(round(widened_gaps_ms[index])) if index < len(widened_gaps_ms) else 0
+        if gap_ms > 0:
+            widened_path = audio_dir / f"turn{run_tag}.{gid}.gap-widened.wav"
+            pad_result = _pad_wav_with_trailing_silence(
+                source_path=natural_path, output_path=widened_path,
+                target_duration_ms=natural_ms + gap_ms,
+            )
+            final_slices[gid] = {"path": str(widened_path), "duration_ms": int(pad_result["final_duration_ms"])}
+        else:
+            final_slices[gid] = {"path": str(natural_path), "duration_ms": natural_ms}
+
+    final_total_ms = sum(int(entry["duration_ms"]) for entry in final_slices.values())
+    speed_fit = {
+        "schema_version": "mathula-native-hard-sync-speed-v2-mouth-close-tolerance",
+        "method": "turn_gap_widened",
+        "source_path": str(Path(natural_slices[member_ids[0]]["path"])),
+        "output_path": str(Path(final_slices[member_ids[-1]]["path"])),
+        "before_duration_ms": natural_total_ms,
+        "final_duration_ms": final_total_ms,
+        "speed_factor": 1.0, "speed_percent": 0.0,
+        "mouth_close_sync_ok": True,
+        "real_gaps_ms": real_gaps_ms,
+        "widened_gaps_ms": [round(gap_ms) for gap_ms in widened_gaps_ms],
+        "total_real_gap_ms": total_real_gap_ms,
+        "scale": scale,
+        "shortfall_ms": shortfall_ms,
+    }
+    return speed_fit, final_slices
+
+
 def _synthesize_speaker_turns_with_bookmarks(
     *,
     phrase_groups: Sequence[Mapping[str, Any]],
@@ -9408,14 +9488,29 @@ def _synthesize_speaker_turns_with_bookmarks(
                         final_slices[last_gid] = padded_slices[last_gid]
                         speed_fit = pad_result
                     else:
-                        speed_fit = {
-                            "schema_version": "mathula-native-hard-sync-speed-v2-mouth-close-tolerance",
-                            "method": "none", "source_path": group_result.group_wav_path,
-                            "output_path": group_result.group_wav_path, "before_duration_ms": natural_duration_ms,
-                            "target_duration_ms": source_window_ms, "final_duration_ms": natural_duration_ms,
-                            "speed_factor": 1.0, "speed_percent": 0.0,
-                            "end_error_ms": natural_duration_ms - source_window_ms, "mouth_close_sync_ok": True,
-                        }
+                        # Phase 30: the small tail-pad above can't close this shortfall
+                        # (either too large, or no free room before the next thing) --
+                        # before falling all the way back to "accept natural pace with
+                        # zero widening" (a confirmed real defect: a turn's members can
+                        # finish audibly early while the speaker is still on screen),
+                        # try widening the turn's own real internal boundaries instead.
+                        widen_result = _widen_turn_member_gaps(
+                            member_ids=member_ids, groups_by_id=groups_by_id,
+                            natural_slices=natural_slices, shortfall_ms=shortfall_ms,
+                            audio_dir=audio_dir, run_tag=run_tag,
+                        )
+                        if widen_result is not None:
+                            speed_fit, final_slices = widen_result
+                            final_duration_ms = int(speed_fit["final_duration_ms"])
+                        else:
+                            speed_fit = {
+                                "schema_version": "mathula-native-hard-sync-speed-v2-mouth-close-tolerance",
+                                "method": "none", "source_path": group_result.group_wav_path,
+                                "output_path": group_result.group_wav_path, "before_duration_ms": natural_duration_ms,
+                                "target_duration_ms": source_window_ms, "final_duration_ms": natural_duration_ms,
+                                "speed_factor": 1.0, "speed_percent": 0.0,
+                                "end_error_ms": natural_duration_ms - source_window_ms, "mouth_close_sync_ok": True,
+                            }
                 elif natural_duration_ms > source_window_ms:
                     # Target the TRUE window, not source_window_ms + late_tolerance_ms.
                     # Confirmed real user insight: gap-overflow tolerance and

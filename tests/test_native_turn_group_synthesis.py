@@ -292,6 +292,90 @@ def test_undersized_turn_pads_only_the_last_members_slice(tmp_path):
     assert result["g1"]["turn_speed_fit"]["method"] == "trailing_silence_pad"
 
 
+def test_undersized_turn_widens_a_real_internal_gap_when_the_tail_pad_cant_close_it(tmp_path):
+    # Phase 30: turn span 7000ms (g1 0-3000, a real 1000ms gap in the source,
+    # then g2 4000-7000). Natural total is 6200ms -- a real 800ms shortfall,
+    # well over the 150ms tail-pad ceiling, but there IS a real internal
+    # boundary (the committed 1000ms gap between g1 and g2) to widen instead
+    # of falling all the way back to zero widening.
+    audio = _pcm_wav(seconds=6.2)
+    boundary = FakeBoundary(responses=[_completed_response({"g1": 0, "g2": 3100}, audio=audio)])
+    groups = [
+        _turn_group("g1", start_ms=0, end_ms=3000, text="Normal sentence one right here now."),
+        _turn_group("g2", start_ms=4000, end_ms=7000, text="Normal sentence two right here now."),
+    ]
+    result = _run(phrase_groups=groups, sdk_boundary=boundary, source_duration_ms=20_000)
+    assert result["g1"]["turn_speed_fit"]["method"] == "turn_gap_widened"
+    # The scaled widened gap (800ms, uncapped since it's well under the 1500ms
+    # cap) is appended to the END of g1's own natural slice -- g2's own audio
+    # is completely untouched.
+    assert result["g1"]["final_duration_ms"] == result["g1"]["natural_duration_ms"] + 800 == 3900
+    assert result["g2"]["final_duration_ms"] == result["g2"]["natural_duration_ms"] == 3100
+    # Combined, this closes the WHOLE real shortfall exactly (there was only
+    # one real internal boundary, so the whole 800ms shortfall lands there).
+    assert result["g1"]["final_duration_ms"] + result["g2"]["final_duration_ms"] == 7000
+    assert result["g2"]["start_ms"] == result["g1"]["source_end_ms"]
+
+
+def test_widened_gap_caps_at_the_established_ceiling_leaving_an_honest_residual(tmp_path):
+    # Real internal gap is only 100ms, but the real shortfall (2000ms) would
+    # need it scaled up to 2000ms to fully close -- capped at
+    # _TURN_SILENCE_GAP_CAP_MS (1500), so a real, honest 500ms residual
+    # remains rather than being fabricated away.
+    audio = _pcm_wav(seconds=5.0)
+    boundary = FakeBoundary(responses=[_completed_response({"g1": 0, "g2": 2500}, audio=audio)])
+    groups = [
+        _turn_group("g1", start_ms=0, end_ms=3000, text="Normal sentence one right here now."),
+        _turn_group("g2", start_ms=3100, end_ms=7000, text="Normal sentence two right here now."),
+    ]
+    result = _run(phrase_groups=groups, sdk_boundary=boundary, source_duration_ms=20_000)
+    assert result["g1"]["turn_speed_fit"]["method"] == "turn_gap_widened"
+    assert result["g1"]["turn_speed_fit"]["widened_gaps_ms"] == [1500]
+    assert result["g1"]["final_duration_ms"] == 2500 + 1500 == 4000
+    combined = result["g1"]["final_duration_ms"] + result["g2"]["final_duration_ms"]
+    assert combined == 6500  # 5000ms natural + 1500ms capped widening -- short of the 7000ms window
+    assert combined < 7000
+
+
+def test_undersized_turn_with_no_real_internal_gap_still_falls_back_to_natural_pace(tmp_path):
+    # Every member genuinely back-to-back in the real source (zero real gap
+    # anywhere) -- nothing to widen, so this must fall through to today's
+    # exact prior behavior (accept natural pace, zero widening), not crash or
+    # fabricate a gap that was never real.
+    audio = _pcm_wav(seconds=5.0)
+    boundary = FakeBoundary(responses=[_completed_response({"g1": 0, "g2": 2500}, audio=audio)])
+    groups = [
+        _turn_group("g1", start_ms=0, end_ms=3000, text="Normal sentence one right here now."),
+        _turn_group("g2", start_ms=3000, end_ms=7000, text="Normal sentence two right here now."),
+    ]
+    result = _run(phrase_groups=groups, sdk_boundary=boundary, source_duration_ms=20_000)
+    assert result["g1"]["turn_speed_fit"]["method"] == "none"
+    assert result["g1"]["final_duration_ms"] == result["g1"]["natural_duration_ms"] == 2500
+    assert result["g2"]["final_duration_ms"] == result["g2"]["natural_duration_ms"] == 2500
+
+
+def test_a_three_member_turn_widens_two_real_boundaries_independently(tmp_path):
+    # Mirrors the real native_phrase_0012/0013/0014 shape: two real internal
+    # gaps in one turn, each widened independently by the same shared scale.
+    audio = _pcm_wav(seconds=6.0)
+    boundary = FakeBoundary(responses=[_completed_response({"g1": 0, "g2": 2000, "g3": 4000}, audio=audio)])
+    groups = [
+        _turn_group("g1", start_ms=0, end_ms=2000, text="Normal sentence one right here now."),
+        _turn_group("g2", start_ms=2500, end_ms=4500, text="Normal sentence two right here now."),
+        _turn_group("g3", start_ms=5000, end_ms=7000, text="Normal sentence three right here now."),
+    ]
+    # Real gaps: g1->g2 = 500ms, g2->g3 = 500ms. Turn window = 7000ms. Natural
+    # total = 6000ms, shortfall = 1000ms. scale = 1000/1000 = 1.0 -> each real
+    # gap widened by exactly its own real size (500ms each, both well under cap).
+    result = _run(phrase_groups=groups, sdk_boundary=boundary, source_duration_ms=20_000)
+    assert result["g1"]["turn_speed_fit"]["method"] == "turn_gap_widened"
+    assert result["g1"]["final_duration_ms"] == 2000 + 500 == 2500
+    assert result["g2"]["final_duration_ms"] == 2000 + 500 == 2500
+    assert result["g3"]["final_duration_ms"] == 2000  # last member never widened
+    total = result["g1"]["final_duration_ms"] + result["g2"]["final_duration_ms"] + result["g3"]["final_duration_ms"]
+    assert total == 7000
+
+
 def test_overflow_turn_applies_one_shared_speed_factor_to_both_members(tmp_path):
     # Turn span 6000ms -- the TRUE window, not window+late-tolerance, is the
     # compression target (a non-bridge turn always demands tight mouth-close
