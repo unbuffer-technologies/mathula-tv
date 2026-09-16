@@ -13061,43 +13061,387 @@ def _score_speaker_turn(
     return score, info
 
 
+# Phase 25: real user-reported production defect (job fb3d08b63fed4d90922b08f7e325b906,
+# "turn 3 finishes early at 0:39") traced to real word-level ASR timing --
+# ~34% of the undersized block's own window was genuine silence between the
+# original English speaker's words (two adjacent 1000ms-class hesitation
+# pauses at a clause boundary), not slow articulation. Natural elaboration
+# (the file's old "expand" mechanism, since deleted) tried to close this gap
+# by ADDING Zulu content -- structurally the wrong tool, since silence isn't
+# content-shaped, and it reliably maxed out around 75% of the window across
+# three independent real rebuilds before hitting a genuine content-density
+# ceiling. The user's own direction: work at the TURN level, take the
+# DIRECT (already-translated, un-elaborated) Zulu text as-is, and widen the
+# REAL gaps already present in the English source to close the shortfall,
+# rather than inventing more speech.
+#
+# This requires reproducing silence at TWO nested kinds of real boundary a
+# turn can have: between two separate committed blocks within one turn
+# (what _reallocate_turn_windows already redistributes window-share across),
+# and -- confirmed necessary after finding render always re-synthesizes a
+# committed block's spoken_text fresh as ONE continuous utterance from only
+# its start_ms/source_end_ms (Phase 10's own established rule) -- INSIDE a
+# single block that Phase 16's turn-block translation had merged from
+# multiple original Pass-1 sentences. Reproducing silence in the second case
+# is only possible by un-merging that block back into separate committed
+# records, one per original sentence. Confirmed safe by direct exploration:
+# commit_candidate_pool's coverage check (native_dub.py, see
+# `expected_segment_ids`/`seen_segment_ids`) validates only the flattened,
+# in-order segment_ids sequence across all records, never group_id identity
+# or count -- two records each carrying a disjoint, correctly-ordered subset
+# of one merged record's segment_ids pass exactly as well as the original.
+_TURN_SILENCE_GAP_CAP_MS = 1500
+
+
+def _turn_atomic_source_chunks(
+    turn: Mapping[str, Any],
+    groups_by_id: Mapping[str, Mapping[str, Any]],
+    raw_groups_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Flatten a turn's member blocks into one ordered list of real ATOMIC
+    content chunks -- one per original Pass-1 sentence the turn ultimately
+    covers, whether that sentence is its own whole block or was absorbed
+    into a larger Phase-16 merge. Each chunk carries its own real, pre-merge
+    `start_ms`/`source_end_ms`/`segment_ids` (from `raw_groups_by_id`, the
+    output of `_build_temporal_mask_source_groups` BEFORE any merging) and
+    its English syllable weight, so the real gap between chunk i and i+1
+    (`chunks[i+1]["start_ms"] - chunks[i]["source_end_ms"]`) is exactly the
+    original speaker's own real silence at that point -- already-known
+    metadata, no fresh ASR/word-timestamp scan needed.
+    """
+    chunks: list[dict[str, Any]] = []
+    for block_group_id in turn["member_group_ids"]:
+        block = groups_by_id[str(block_group_id)]
+        member_ids = [str(value) for value in block.get("member_group_ids") or [block_group_id]]
+        for position, original_group_id in enumerate(member_ids):
+            raw_group = raw_groups_by_id.get(original_group_id)
+            if raw_group is None:
+                continue
+            chunk_source_text = str(raw_group.get("source_text") or "")
+            chunks.append({
+                "original_group_id": original_group_id,
+                "block_group_id": str(block_group_id),
+                "chunk_index_in_block": position,
+                "chunks_in_block": len(member_ids),
+                "start_ms": int(raw_group["start_ms"]),
+                "source_end_ms": int(raw_group["source_end_ms"]),
+                "segment_ids": [str(value) for value in raw_group.get("segment_ids") or []],
+                "speaker_id": str(raw_group.get("speaker_id") or block.get("speaker_id") or ""),
+                "source_text": chunk_source_text,
+                "english_syllables": max(1, _estimate_english_syllables(chunk_source_text)),
+            })
+    return chunks
+
+
+def _reverse_engineer_zulu_chunk_split(
+    spoken_text: str, english_syllable_shares: Sequence[float],
+) -> list[str] | None:
+    """Estimate where a merged block's own already-translated Zulu text splits
+    to match each original sentence's share of the block's combined English
+    content -- an estimate from existing syllable data, never a new LLM call
+    or schema field ("reverse-engineer the direct translation," per the
+    user's own framing). Splits ONLY at whitespace (the one genuinely safe
+    cut point in agglutinative Zulu). Returns None -- abort the split, treat
+    the block as one atomic unit -- if fewer than 2 real words are available
+    per share or any resulting piece would be empty: splitting can never
+    lose content (the pieces' concatenation is exactly the original,
+    already-QA'd text), but a degenerate split is worse than no split.
+    """
+    words = str(spoken_text or "").split()
+    total_share = sum(max(0.0, share) for share in english_syllable_shares)
+    if len(words) < len(english_syllable_shares) or total_share <= 0:
+        return None
+    syllable_running = 0
+    word_syllables = [max(1, _estimate_zulu_syllables(word)) for word in words]
+    total_zulu_syllables = sum(word_syllables)
+    pieces: list[str] = []
+    cursor = 0
+    cumulative_share = 0.0
+    for index, share in enumerate(english_syllable_shares):
+        is_last = index == len(english_syllable_shares) - 1
+        cumulative_share += max(0.0, share) / total_share
+        if is_last:
+            cut = len(words)
+        else:
+            target_syllables = cumulative_share * total_zulu_syllables
+            cut = cursor + 1
+            running = 0
+            for offset in range(cursor, len(words)):
+                running += word_syllables[offset]
+                cut = offset + 1
+                if cursor + running >= target_syllables:
+                    break
+            cut = max(cursor + 1, min(cut, len(words) - (len(english_syllable_shares) - index - 1)))
+        piece_words = words[cursor:cut]
+        if not piece_words:
+            return None
+        pieces.append(" ".join(piece_words))
+        cursor = cut
+    if cursor != len(words) or len(pieces) != len(english_syllable_shares):
+        return None
+    return pieces
+
+
+def _split_merged_block(
+    *,
+    winner: Mapping[str, Any],
+    chunks_for_block: Sequence[Mapping[str, Any]],
+    tts: AzureTTSBackend,
+    voice_assignments: Mapping[str, Mapping[str, Any]],
+    force: bool,
+    measurement_audio_root: Path,
+) -> list[tuple[dict[str, Any], dict[str, Any]]] | None:
+    """Un-merge one Phase-16-merged block back into real, separate committed
+    records -- one per original Pass-1 sentence -- so real silence can be
+    placed BETWEEN them at render time (impossible while they share one
+    committed record, since render always re-synthesizes a block's
+    spoken_text fresh as one continuous utterance). Returns None (caller
+    falls back to treating the block as one atomic, unsplit unit) when the
+    text can't be safely partitioned.
+
+    Each new record reuses its chunk's OWN real, pre-existing Pass-1
+    group_id/segment_ids -- no invented suffix needed, since every atomic
+    chunk already has a unique upstream identity. Splitting never risks
+    fidelity (the pieces are a partition of the already-QA'd original text,
+    not a rewrite), so no literal-preservation check is needed here; only
+    the new pieces' real Zulu durations need a fresh, real Azure TTS call
+    each, since they're now synthesized independently rather than as one
+    shared utterance.
+    """
+    if len(chunks_for_block) < 2:
+        return None
+    shares = [float(chunk["english_syllables"]) for chunk in chunks_for_block]
+    pieces = _reverse_engineer_zulu_chunk_split(str(winner.get("spoken_text") or ""), shares)
+    if pieces is None:
+        return None
+
+    results: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for chunk, piece_text in zip(chunks_for_block, pieces):
+        original_group_id = str(chunk["original_group_id"])
+        speaker_id = str(chunk["speaker_id"])
+        new_group: dict[str, Any] = {
+            "group_id": original_group_id,
+            "speaker_id": speaker_id,
+            "segment_ids": list(chunk["segment_ids"]),
+            "start_ms": int(chunk["start_ms"]),
+            "source_end_ms": int(chunk["source_end_ms"]),
+            "source_span_ms": max(1, int(chunk["source_end_ms"]) - int(chunk["start_ms"])),
+            "source_text": str(chunk.get("source_text") or ""),
+            "member_group_ids": [original_group_id],
+            "parts": [{"type": "text", "segment_id": chunk["segment_ids"][0] if chunk["segment_ids"] else "", "text": piece_text}],
+        }
+        voice_info = voice_assignments.get(speaker_id) or {"selected_voice": str(tts.default_voice), "base_prosody": {}}
+        output_path = Path(measurement_audio_root) / "silence_pattern_splits" / f"{original_group_id}.wav"
+        try:
+            result = _synthesize_group(
+                tts=tts, group=new_group, voice_info=voice_info, output_path=output_path,
+                preferred_ms=max(1, int(chunk["source_end_ms"]) - int(chunk["start_ms"])),
+                maximum_ms=max(1, int(chunk["source_end_ms"]) - int(chunk["start_ms"])) * 3,
+                force=force,
+            )
+        except Exception:  # noqa: BLE001 - a synthesis failure aborts this block's split, never the whole turn
+            return None
+        new_winner: dict[str, Any] = {
+            **winner,
+            "candidate_id": f"{original_group_id}__silence_pattern_split",
+            "spoken_text": piece_text,
+            "measured_ms": int(result.duration_ms),
+            "path": str(output_path),
+            "effective_start_ms": None,
+            "effective_source_end_ms": None,
+        }
+        results.append((new_group, new_winner))
+    return results
+
+
+def _reproduce_source_silence_pattern(
+    *,
+    turn: Mapping[str, Any],
+    groups_by_id: Mapping[str, Mapping[str, Any]],
+    raw_groups_by_id: Mapping[str, Mapping[str, Any]],
+    winners: Mapping[str, Mapping[str, Any]],
+    tts: AzureTTSBackend,
+    voice_assignments: Mapping[str, Mapping[str, Any]],
+    force: bool,
+    measurement_audio_root: Path,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[str]]]:
+    """Replace `_reallocate_turn_windows`'s pure content-proportional split
+    with one that reproduces the real English source's own silence pattern,
+    widened/scaled to close a genuine "expand" (undersized) shortfall --
+    strictly generalizing the old formula, which is still used verbatim
+    below as the degrade path whenever there's no real internal gap to
+    reproduce (a solo turn/block, or a turn that already fits/overflows).
+
+    Returns (new_group_by_id, new_winner_by_id, replaced_group_ids) -- the
+    caller splices these into its own `groups`/`winners` in place of the
+    turn's original member entries. `replaced_group_ids` maps a REMOVED
+    (un-merged) original block id to its ordered list of new replacement
+    chunk ids, needed to keep chronological group ordering correct.
+    """
+    atomic_chunks = _turn_atomic_source_chunks(turn, groups_by_id, raw_groups_by_id)
+    turn_start_ms = int(groups_by_id[turn["member_group_ids"][0]]["start_ms"])
+    turn_end_ms = int(groups_by_id[turn["member_group_ids"][-1]]["source_end_ms"])
+
+    def _plain_proportional_fallback() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[str]]]:
+        reallocated = _reallocate_turn_windows(turn=turn, groups_by_id=groups_by_id, winners=winners)
+        new_groups: dict[str, dict[str, Any]] = {}
+        new_winners: dict[str, dict[str, Any]] = {}
+        for group_id, adjustment in reallocated.items():
+            group = dict(groups_by_id[group_id])
+            group["start_ms"] = adjustment["start_ms"]
+            group["source_end_ms"] = adjustment["source_end_ms"]
+            group["source_span_ms"] = adjustment["source_span_ms"]
+            new_groups[group_id] = group
+            new_winners[group_id] = dict(winners[group_id])
+        return new_groups, new_winners, {}
+
+    if len(atomic_chunks) < 2:
+        return {}, {}, {}
+
+    # Attempt a split for every block covering 2+ chunks; a block that can't
+    # be safely split (or has only 1 chunk) stays exactly as its one
+    # existing atomic unit for the rest of this computation.
+    chunks_by_block: dict[str, list[dict[str, Any]]] = {}
+    for chunk in atomic_chunks:
+        chunks_by_block.setdefault(chunk["block_group_id"], []).append(chunk)
+
+    split_results_by_block: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for block_group_id, block_chunks in chunks_by_block.items():
+        if len(block_chunks) < 2:
+            continue
+        split = _split_merged_block(
+            winner=winners[block_group_id],
+            chunks_for_block=block_chunks, tts=tts, voice_assignments=voice_assignments,
+            force=force, measurement_audio_root=measurement_audio_root,
+        )
+        if split is not None:
+            split_results_by_block[block_group_id] = split
+
+    # Build the real, final ordered list of atomic units for this turn: a
+    # split block contributes its recovered chunks (real measured_ms each);
+    # an unsplit block (never merged, or a merge that failed to split)
+    # contributes its own single existing winner unchanged.
+    units: list[dict[str, Any]] = []
+    for block_group_id in turn["member_group_ids"]:
+        if block_group_id in split_results_by_block:
+            for new_group, new_winner in split_results_by_block[block_group_id]:
+                units.append({
+                    "group_id": new_group["group_id"], "group": new_group, "winner": new_winner,
+                    "measured_ms": int(new_winner["measured_ms"]),
+                })
+        else:
+            group = groups_by_id[block_group_id]
+            winner = winners[block_group_id]
+            units.append({
+                "group_id": block_group_id, "group": dict(group), "winner": dict(winner),
+                "measured_ms": max(1, int(winner.get("measured_ms") or 0)),
+            })
+
+    total_span_ms = max(1, turn_end_ms - turn_start_ms)
+    needed_gap_ms = total_span_ms - sum(unit["measured_ms"] for unit in units)
+    if needed_gap_ms <= 0:
+        return _plain_proportional_fallback()
+
+    # Real gap between adjacent atomic units, using each unit's own real
+    # window boundaries (a split unit's real chunk start/end; an unsplit
+    # unit's own group start/end) -- the same metadata Step 1 already
+    # computed, just re-derived per final unit for clarity.
+    def _unit_start_end(unit: Mapping[str, Any]) -> tuple[int, int]:
+        group = unit["group"]
+        return int(group["start_ms"]), int(group["source_end_ms"])
+
+    real_gaps_ms: list[int] = []
+    for index in range(len(units) - 1):
+        _, end_ms = _unit_start_end(units[index])
+        next_start_ms, _ = _unit_start_end(units[index + 1])
+        real_gaps_ms.append(max(0, next_start_ms - end_ms))
+
+    total_real_gap_ms = sum(real_gaps_ms)
+    if total_real_gap_ms <= 0 or not split_results_by_block:
+        return _plain_proportional_fallback()
+
+    scale = needed_gap_ms / total_real_gap_ms
+    widened_gaps_ms = [min(_TURN_SILENCE_GAP_CAP_MS, real_gap_ms * scale) for real_gap_ms in real_gaps_ms]
+
+    new_groups: dict[str, dict[str, Any]] = {}
+    new_winners: dict[str, dict[str, Any]] = {}
+    replaced_group_ids = {
+        block_group_id: [new_group["group_id"] for new_group, _ in split_results_by_block[block_group_id]]
+        for block_group_id in split_results_by_block
+    }
+    cursor = turn_start_ms
+    for index, unit in enumerate(units):
+        span_ms = max(1, unit["measured_ms"])
+        start_ms = cursor
+        end_ms = start_ms + span_ms
+        cursor = end_ms + (int(round(widened_gaps_ms[index])) if index < len(widened_gaps_ms) else 0)
+        group = dict(unit["group"])
+        group["start_ms"] = start_ms
+        group["source_end_ms"] = end_ms
+        group["source_span_ms"] = max(1, end_ms - start_ms)
+        winner = dict(unit["winner"])
+        winner["effective_start_ms"] = start_ms
+        winner["effective_source_end_ms"] = end_ms
+        new_groups[unit["group_id"]] = group
+        new_winners[unit["group_id"]] = winner
+    # The turn's real fixed outer end is never extended past its raw value
+    # (Phase 13.1's established lesson) -- the last unit absorbs any
+    # rounding drift onto that real end instead.
+    last_unit_id = units[-1]["group_id"]
+    new_groups[last_unit_id]["source_end_ms"] = turn_end_ms
+    new_groups[last_unit_id]["source_span_ms"] = max(1, turn_end_ms - new_groups[last_unit_id]["start_ms"])
+    new_winners[last_unit_id]["effective_source_end_ms"] = turn_end_ms
+
+    return new_groups, new_winners, replaced_group_ids
+
+
 def _rebalance_speaker_turns(
     *,
     groups: Sequence[Mapping[str, Any]],
+    raw_groups_by_id: Mapping[str, Mapping[str, Any]],
     winners: Mapping[str, Mapping[str, Any]],
     geometries: Mapping[str, Mapping[str, Any]],
     preferred_raw_speed_percent: int,
     measurement_audio_root: Path,
+    tts: AzureTTSBackend,
+    voice_assignments: Mapping[str, Mapping[str, Any]],
+    force: bool,
     progress: Callable[[str], None] | None = None,
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Phase 13's orchestrator: group sentences into real, UNCAPPED speaker turns
-    (the PRIMARY timing unit -- see _build_speaker_turns), and for every
-    multi-member turn that doesn't already fit its envelope evenly and without
-    an unabsorbed rush, resize each member's window share proportionally to its
-    own real, already-measured content (see _reallocate_turn_windows) -- pure
-    arithmetic, no text ever moves, and no new TTS/Speech-SDK call is needed
-    since nothing textual changes. Translation and QA never run again here, and
-    neither does re-synthesis -- only how much time window each sentence is
-    judged against can ever change.
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Phase 13/25's orchestrator: group sentences into real, UNCAPPED speaker
+    turns (the PRIMARY timing unit -- see _build_speaker_turns), and for
+    every turn that doesn't already fit its envelope evenly and without an
+    unabsorbed rush AND has more than one real atomic content chunk (either
+    2+ separate member blocks, or one block Phase 16 merged from 2+ original
+    sentences -- see _turn_atomic_source_chunks), reproduce the real
+    English source's own silence pattern (see _reproduce_source_silence_
+    pattern) -- widening real gaps to close a genuine shortfall, degrading
+    to the old pure content-proportional split whenever there's no real
+    internal gap to reproduce. Translation and QA never run again here.
 
-    Never worse than the winners passed in: a turn is only updated if its real
-    re-scored result is strictly better than its real baseline.
+    Never worse than the winners passed in: a turn is only updated if its
+    real re-scored result is strictly better than its real baseline.
 
-    Returns (updated_winners, updated_geometries) -- the second dict carries an
-    entry for exactly the members of turns that were actually promoted (a
-    real, fixed bug: the caller previously never learned a promoted member's
-    real reallocated geometry, so anything measuring a NEW candidate against
-    that member afterward was silently using the stale, pre-rebalance window).
+    Returns (updated_winners, updated_geometries, updated_groups) --
+    `updated_groups` is the full input `groups` list with any promoted split
+    spliced in (an un-merged block's original entry removed, replaced by its
+    real per-original-sentence entries, in chronological order) -- the
+    caller must rebuild `groups_by_id` from this before any later stage
+    runs, since a split changes the committed group_id set itself.
     """
     groups_by_id = {str(g["group_id"]): g for g in groups}
-    group_index_by_id = {str(g["group_id"]): i for i, g in enumerate(groups)}
     turns = _build_speaker_turns(groups)
     updated_winners = dict(winners)
     updated_geometries: dict[str, dict[str, Any]] = {}
+    working_groups_by_id = dict(groups_by_id)
+    group_order = [str(g["group_id"]) for g in groups]
 
-    multi_member_turns = [turn for turn in turns if len(turn["member_group_ids"]) > 1]
-    if not multi_member_turns:
-        return updated_winners, updated_geometries
+    eligible_turns = [
+        turn for turn in turns
+        if len(_turn_atomic_source_chunks(turn, groups_by_id, raw_groups_by_id)) > 1
+    ]
+    if not eligible_turns:
+        return updated_winners, updated_geometries, list(groups)
 
     turn_geometry_by_index: dict[int, dict[str, Any]] = {}
     for index, turn in enumerate(turns):
@@ -13111,7 +13455,8 @@ def _rebalance_speaker_turns(
         )
 
     for index, turn in enumerate(turns):
-        if len(turn["member_group_ids"]) < 2:
+        atomic_chunks = _turn_atomic_source_chunks(turn, groups_by_id, raw_groups_by_id)
+        if len(atomic_chunks) < 2:
             continue
         member_ids = turn["member_group_ids"]
         geometry = turn_geometry_by_index[index]
@@ -13137,9 +13482,11 @@ def _rebalance_speaker_turns(
         def _score_state(
             member_winners: Mapping[str, Mapping[str, Any]],
             member_geometries: Mapping[str, Mapping[str, Any]],
+            scoring_member_ids: Sequence[str] = member_ids,
         ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            scoring_turn = turn if scoring_member_ids is member_ids else {"member_group_ids": list(scoring_member_ids)}
             return _score_speaker_turn(
-                turn=turn, turn_geometry=geometry, member_winners=member_winners,
+                turn=scoring_turn, turn_geometry=geometry, member_winners=member_winners,
                 member_geometries=member_geometries,
                 measurement_audio_root=measurement_audio_root,
             )
@@ -13151,7 +13498,7 @@ def _rebalance_speaker_turns(
         baseline_score, baseline_info = _score_state(baseline_winners, baseline_geometries)
 
         if not has_bridge_member:
-            # The aggregate is invariant under window reallocation (same
+            # The aggregate is invariant under pure window reallocation (same
             # stitched duration_ms, same turn-level target window) -- set it
             # now, once, so it's correct even for a turn that never triggers
             # reallocation below (the early-continue "already fits" case).
@@ -13180,33 +13527,28 @@ def _rebalance_speaker_turns(
             progress,
             f"[native candidate pool] Turn {member_ids} {reason} "
             f"(required_speed={baseline_info['required_speed_percent']:.1f}%, spread={baseline_info['spread']:.1f}); "
-            "reallocating window shares...",
+            "reproducing the real source silence pattern...",
         )
 
-        reallocated = _reallocate_turn_windows(turn=turn, groups_by_id=groups_by_id, winners=baseline_winners)
+        new_groups, new_winners, replaced_group_ids = _reproduce_source_silence_pattern(
+            turn=turn, groups_by_id=groups_by_id, raw_groups_by_id=raw_groups_by_id,
+            winners=baseline_winners, tts=tts, voice_assignments=voice_assignments,
+            force=force, measurement_audio_root=measurement_audio_root,
+        )
 
-        reallocated_groups_by_id = dict(groups_by_id)
+        candidate_member_ids: list[str] = []
         for group_id in member_ids:
-            adjustment = reallocated[group_id]
-            adjusted_group = dict(groups_by_id[group_id])
-            adjusted_group["start_ms"] = adjustment["start_ms"]
-            adjusted_group["source_end_ms"] = adjustment["source_end_ms"]
-            adjusted_group["source_span_ms"] = adjustment["source_span_ms"]
-            reallocated_groups_by_id[group_id] = adjusted_group
+            candidate_member_ids.extend(replaced_group_ids.get(group_id, [group_id]))
 
-        reallocated_geometries: dict[str, dict[str, Any]] = {}
-        for position, group_id in enumerate(member_ids):
-            global_index = group_index_by_id[group_id]
-            next_group_id = (
-                member_ids[position + 1] if position + 1 < len(member_ids)
-                else (str(groups[global_index + 1]["group_id"]) if global_index + 1 < len(groups) else None)
-            )
+        candidate_geometries: dict[str, dict[str, Any]] = {}
+        for position, group_id in enumerate(candidate_member_ids):
+            next_group_id = candidate_member_ids[position + 1] if position + 1 < len(candidate_member_ids) else None
             next_start = (
-                int(reallocated_groups_by_id[next_group_id]["start_ms"]) if next_group_id is not None
-                else int(reallocated_groups_by_id[group_id]["source_end_ms"])
+                int(new_groups[next_group_id]["start_ms"]) if next_group_id is not None
+                else int(new_groups[group_id]["source_end_ms"])
             )
-            reallocated_geometries[group_id] = _temporal_mask_geometry(
-                reallocated_groups_by_id[group_id],
+            candidate_geometries[group_id] = _temporal_mask_geometry(
+                new_groups[group_id],
                 next_source_start_ms=next_start,
                 preferred_raw_speed_percent=int(preferred_raw_speed_percent),
                 max_natural_speed_percent=DEFAULT_MAX_NATURAL_SPEED_PERCENT,
@@ -13215,26 +13557,52 @@ def _rebalance_speaker_turns(
                 min_protected_pause_ms=DEFAULT_MIN_PROTECTED_PAUSE_MS,
             )
 
-        reallocated_score, reallocated_info = _score_state(baseline_winners, reallocated_geometries)
-        if reallocated_score < baseline_score:
-            for group_id in member_ids:
-                winner = dict(baseline_winners[group_id])
-                member_geometry = reallocated_geometries[group_id]
+        candidate_winners = {gid: new_winners[gid] for gid in candidate_member_ids}
+        candidate_score, candidate_info = _score_state(
+            candidate_winners, candidate_geometries, scoring_member_ids=candidate_member_ids,
+        )
+        # A genuine un-merge (replaced_group_ids non-empty) repositions REAL
+        # content to match the source's own silence pattern without ever
+        # changing how much content exists -- for a pure "expand" (undersized,
+        # never-rushed) turn, _score_speaker_turn's aggregate metric is
+        # provably invariant under this (same stitched total, same fits/
+        # required_speed_percent/spread on every axis), so a strict `<` would
+        # never promote the exact case this mechanism exists for. A real
+        # split is therefore accepted on a TIE too -- but never when it's
+        # provably WORSE on this same metric (a real safety net, e.g. against
+        # qa_penalty summing across more pieces than before). The plain
+        # reallocation-only path (no split) keeps the original strict `<`,
+        # since ties there are genuinely "nothing changed" (see
+        # test_rebalance_keeps_the_original_when_reallocation_does_not_improve).
+        promoted = (
+            candidate_score <= baseline_score if replaced_group_ids else candidate_score < baseline_score
+        )
+        if promoted:
+            # Removal must happen BEFORE the winners/groups are set below --
+            # a merged block's own group_id is very often ALSO the id of its
+            # own first original sentence (the un-merge reuses each chunk's
+            # real pre-merge identity, per Step 3 of the design), so removing
+            # "the old merged id" after already writing its real new winner
+            # would delete that just-written entry instead of a stale one.
+            # Confirmed real crash without this ordering: a real job un-merge
+            # left the reused id missing from updated_winners entirely.
+            for removed_group_id in replaced_group_ids:
+                updated_winners.pop(removed_group_id, None)
+                if removed_group_id in working_groups_by_id:
+                    position = group_order.index(removed_group_id)
+                    group_order[position:position + 1] = replaced_group_ids[removed_group_id]
+                    del working_groups_by_id[removed_group_id]
+            for group_id in candidate_member_ids:
+                winner = dict(new_winners[group_id])
+                member_geometry = candidate_geometries[group_id]
                 if has_bridge_member:
-                    # Confirmed real gap found on job 33cd7b46...: measured_ms
-                    # never changes (no re-synthesis), but required_speed_percent/
-                    # speed_fit_mode/direction/fit were computed against the OLD
-                    # per-sentence window and, unlike Phase 10's re-synthesized
-                    # boundary-shift winners, were never refreshed -- leaving a
-                    # stale, misleadingly-high number on a sentence that actually
-                    # measures fine against its new, larger effective window.
-                    # Recomputed here from the same unchanged measured_ms against
-                    # the already-computed reallocated_geometries -- free, no new
-                    # measurement. Only done for a bridge-containing turn, which
-                    # Phase 14 renders per-sentence -- these individual numbers
-                    # are the real, honest truth for that case (see the
-                    # has_bridge_member aggregate write-back above for the
-                    # opposite, all-normal case).
+                    # A bridge-containing turn is genuinely rendered
+                    # per-sentence by Phase 14, so ITS members' own
+                    # individual numbers are the real, honest truth --
+                    # recompute fresh from this unit's own real measured_ms
+                    # (unchanged for an unsplit unit, freshly re-synthesized
+                    # for a split one -- either way, always this unit's own
+                    # current, real value) against its own new geometry.
                     measured_ms = max(1, int(winner.get("measured_ms") or 0))
                     late_tolerance_ms = int(member_geometry["mouth_close_late_tolerance_ms"])
                     speed_fit_target_ms = int(member_geometry["source_window_ms"]) + late_tolerance_ms
@@ -13250,27 +13618,39 @@ def _rebalance_speaker_turns(
                     winner["speed_fit_mode"] = _speed_fit_mode_label(late_tolerance_ms)
                     winner["direction"] = direction
                     winner["fit"] = bool(direction is None)
-                # else: required_speed_percent/speed_fit_mode/fit already hold
-                # the turn's real aggregate (set above, before this reallocation
-                # branch even ran) -- invariant under window reallocation, so
-                # nothing to recompute here for an all-normal turn.
-                winner["effective_start_ms"] = int(reallocated_groups_by_id[group_id]["start_ms"])
-                winner["effective_source_end_ms"] = int(reallocated_groups_by_id[group_id]["source_end_ms"])
+                else:
+                    # An all-normal turn is rendered as ONE continuous
+                    # synthesis regardless of how its committed identity is
+                    # partitioned -- every unit reports the turn's own real,
+                    # freshly-recomputed aggregate (this is a strict
+                    # generalization of the old "invariant under pure
+                    # reallocation" case: when nothing was actually split,
+                    # candidate_info's aggregate is mathematically identical
+                    # to the baseline's own, so this produces the same
+                    # number as before).
+                    winner["required_speed_percent"] = round(candidate_info["required_speed_percent"], 3)
+                    winner["speed_fit_mode"] = candidate_info["speed_fit_mode"]
+                    winner["fit"] = bool(candidate_info["fits"])
+                winner["effective_start_ms"] = int(new_groups[group_id]["start_ms"])
+                winner["effective_source_end_ms"] = int(new_groups[group_id]["source_end_ms"])
                 updated_winners[group_id] = winner
-                updated_geometries[group_id] = reallocated_geometries[group_id]
+                updated_geometries[group_id] = member_geometry
+                working_groups_by_id[group_id] = new_groups[group_id]
             _emit_progress(
                 progress,
-                f"[native candidate pool] Turn {member_ids} rebalanced via window reallocation "
-                f"(spread {baseline_info['spread']:.1f} -> {reallocated_info['spread']:.1f}).",
+                f"[native candidate pool] Turn {member_ids} rebalanced via silence-pattern reproduction "
+                f"(spread {baseline_info['spread']:.1f} -> {candidate_info['spread']:.1f})"
+                + (f", un-merged into {candidate_member_ids}" if replaced_group_ids else "") + ".",
             )
         else:
             _emit_progress(
                 progress,
-                f"[native candidate pool] Window reallocation for turn {member_ids} did not improve on "
-                "the original; keeping original winners.",
+                f"[native candidate pool] Silence-pattern reproduction for turn {member_ids} did not "
+                "improve on the original; keeping original winners.",
             )
 
-    return updated_winners, updated_geometries
+    updated_groups = [working_groups_by_id[group_id] for group_id in group_order]
+    return updated_winners, updated_geometries, updated_groups
 
 
 def _missing_required_literals(
@@ -13920,352 +14300,6 @@ def _request_protected_content_last_resort_batch(
     return by_id, usage
 
 
-# Real user-reported defect, job fb3d08b63fed4d90922b08f7e325b906 (2026-09-13):
-# "0:40 finishes too early" -- native_phrase_0005 measured 8,389ms against a
-# real 12,800ms window, a 4,411ms shortfall with zero free gap after it
-# (the very next block starts at the same instant this one's window ends,
-# per _temporal_mask_geometry's own free_gap_ms). Confirmed root cause: this
-# pipeline has a rich toolkit for a block that runs too LONG (fact-priority
-# trim, last-resort compression, turn rebalancing) but nothing at all for one
-# that runs too SHORT beyond _pad_wav_with_trailing_silence's own tiny,
-# deliberately-scoped MAX_UNRESOLVED_EARLY_SILENCE_PAD_MS (150ms) rounding
-# fix -- anything bigger than that was simply accepted as-is, however large.
-# 1000ms is a deliberately conservative floor, comfortably above that 150ms
-# rounding case and any ordinary natural-pace variance, while catching the
-# real 4,411ms case with wide margin -- tune from real job data if it proves
-# too eager or too lax once run broadly.
-_ELABORATION_TRIGGER_MS = 1000
-SENTENCE_ELABORATION_PROMPT_VERSION = "native-sentence-elaboration-v1"
-SENTENCE_ELABORATION_SYSTEM_PROMPT = r"""Mathula TV is a fixed-runtime social broadcast product: a
-sentence that finishes speaking well before its own real on-screen window ends reads as an
-audible, awkward silence -- the dub visibly "runs out of things to say" while the on-screen
-speaker's own mouth, from the original footage, is still moving. Each unit you are given measured
-NOTICEABLY shorter than its own real available speaking time once translated naturally. This is
-the opposite problem from every other editing prompt in this pipeline: you are not shortening, you
-are NATURALLY LENGTHENING -- using ONLY the ADDITION technique this pipeline already permits
-elsewhere (natural connective/narrative scaffolding a real Zulu broadcaster would use to link ideas
-smoothly), never inventing a new fact, name, number, date, claim, or implication that is not
-already present in source_text.
-
-For each unit, return TWO increasingly fuller English rewordings of current_english_text:
-
-1. fuller_english_text: the LIGHTEST elaboration -- restate ONE clause more fully and completely
-   (spell out something that currently reads as clipped or abbreviated, use a fuller grammatical
-   construction instead of a terse one, restate a connective more naturally) without adding any
-   genuinely new phrase or idea.
-2. elaborated_english_text: a DEEPER elaboration than fuller_english_text -- add natural narrative
-   or connective scaffolding a real broadcaster would use to slow down and fill real airtime (a
-   natural transitional phrase, a fuller scene-setting frame, restating the same point with more
-   complete, unhurried phrasing) -- still never a new fact, only a fuller, more natural way of
-   saying the SAME facts that are already there.
-
-Every fact, name, number, date, and negation present in source_text must still be present, exactly
-as accurate, in BOTH rewordings -- this is a HARD RULE with no exception. If you genuinely cannot
-find any safe way to add real, natural length without inventing content, return
-current_english_text UNCHANGED for one or both fields -- this is a valid, honest answer, not a
-failure; a later, purely mechanical step measures the real result and only ever keeps whichever
-tier (or the original) actually helps.
-
-Use target_syllables/min_syllables/max_syllables (this unit's own real window's syllable budget) to
-judge how much elaboration is actually needed -- these are LANGUAGE-PLANNING TARGETS, not
-permission to pad with meaningless filler beyond what a real newsreader would naturally say. No
-tools or web search. Return JSON only."""
-
-
-def _sentence_elaboration_schema(expected_unit_ids: Sequence[str]) -> dict[str, Any]:
-    requested_ids = [str(value) for value in expected_unit_ids]
-    if len(set(requested_ids)) != len(requested_ids):
-        raise ValueError("Sentence elaboration schema received duplicate expected unit IDs")
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["units"],
-        "properties": {
-            "units": {
-                "type": "array",
-                "minItems": len(requested_ids),
-                "maxItems": len(requested_ids),
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["unit_id", "fuller_english_text", "elaborated_english_text"],
-                    "properties": {
-                        "unit_id": {"type": "string", "enum": requested_ids},
-                        "fuller_english_text": {"type": "string", "minLength": 1},
-                        "elaborated_english_text": {"type": "string", "minLength": 1},
-                    },
-                },
-            },
-        },
-    }
-
-
-def _request_sentence_elaboration_batch(
-    *,
-    provider: FoundryGrokProvider,
-    items: Sequence[Mapping[str, Any]],
-    glossary: Mapping[str, Any],
-    context_ledger: Mapping[str, Any] | None = None,
-) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
-    """items: [{"unit_id", "source_text", "current_english_text", "target_syllables",
-    "min_syllables", "max_syllables"}, ...]. Returns {unit_id: {"fuller_english_text",
-    "elaborated_english_text"}}. Identity mismatch on unit_id is fatal (same
-    convention as every other candidate-translate-family function in this file).
-    """
-    expected_ids = [str(item["unit_id"]) for item in items]
-    response = provider.complete_json(
-        operation="native_sentence_elaboration_batch",
-        system_prompt=SENTENCE_ELABORATION_SYSTEM_PROMPT,
-        payload={
-            "zulu_terminology_glossary": dict(glossary),
-            "context_ledger": dict(context_ledger or {}),
-            "units": [
-                {
-                    "unit_id": str(item["unit_id"]),
-                    "source_text": str(item["source_text"]),
-                    "current_english_text": str(item["current_english_text"]),
-                    "target_syllables": int(item["target_syllables"]),
-                    "min_syllables": int(item["min_syllables"]),
-                    "max_syllables": int(item["max_syllables"]),
-                }
-                for item in items
-            ],
-        },
-        schema=_sentence_elaboration_schema(expected_ids),
-        max_output_tokens=min(max(1500, 500 * len(items)), 8192),
-    )
-    returned = list(response.data.get("units") or [])
-    expected_set = set(expected_ids)
-    by_id: dict[str, dict[str, Any]] = {}
-    duplicate_ids: list[str] = []
-    unknown_ids: list[str] = []
-    for item in returned:
-        unit_id = str(item.get("unit_id") or "")
-        if unit_id in by_id:
-            duplicate_ids.append(unit_id)
-            continue
-        if unit_id not in expected_set:
-            unknown_ids.append(unit_id)
-            continue
-        by_id[unit_id] = {
-            "fuller_english_text": str(item.get("fuller_english_text") or "").strip(),
-            "elaborated_english_text": str(item.get("elaborated_english_text") or "").strip(),
-        }
-
-    missing_ids = [unit_id for unit_id in expected_ids if unit_id not in by_id]
-    if duplicate_ids or unknown_ids or missing_ids:
-        details = []
-        if missing_ids:
-            details.append("missing=" + ",".join(missing_ids))
-        if unknown_ids:
-            details.append("unknown=" + ",".join(unknown_ids))
-        if duplicate_ids:
-            details.append("duplicate=" + ",".join(duplicate_ids))
-        raise ValueError("Sentence elaboration batch identity mismatch: " + "; ".join(details))
-
-    usage = {
-        "input_tokens": int(response.input_tokens),
-        "output_tokens": int(response.output_tokens),
-        "attempts": int(response.attempts),
-    }
-    return by_id, usage
-
-
-def _elaborate_undersized_sentences(
-    *,
-    provider: FoundryGrokProvider,
-    groups: Sequence[Mapping[str, Any]],
-    winners: Mapping[str, Mapping[str, Any]],
-    natural_english_by_group: Mapping[str, str],
-    tts: AzureTTSBackend,
-    geometries: Mapping[str, Mapping[str, Any]],
-    voice_assignments: Mapping[str, Mapping[str, Any]],
-    measurement_audio_root: Path,
-    force: bool,
-    candidate_pool_tts_workers: int,
-    preferred_raw_speed_percent: int,
-    glossary: Mapping[str, Any],
-    context_ledger: Mapping[str, Any] | None = None,
-    modes_by_speaker: Mapping[str, str] | None = None,
-    progress: Callable[[str], None] | None = None,
-) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
-    """The "expand" counterpart to _trim_by_fact_priority/_compress_protected_
-    content_last_resort: a block whose current winner measures NOTICEABLY
-    shorter than its own real window (an audible early silence, not just a
-    rounding residual -- see _ELABORATION_TRIGGER_MS) gets one batched Grok
-    call requesting two increasingly fuller English rewordings, each then
-    translated (reusing the unmodified _request_candidate_translation_batch)
-    and measured for real via Azure TTS. English-side editing, never Zulu --
-    the same "compact/expand English, not Zulu" principle this whole file's
-    shrink-side mechanisms already follow, for the identical reason (editing
-    Zulu directly requires the same weak Zulu comprehension that causes
-    translation errors in the first place).
-
-    Selection reuses the SAME real _timing_candidate_rank tuple every other
-    timing decision in this file relies on (already documented, right above
-    _compress_protected_content_last_resort's own selection, to rank
-    undersized-with-dead-air as the WORST tier -- worse than a rushed-but-
-    atempo-rescuable candidate) -- promoted only if the best elaborated
-    candidate's rank is a real, measured improvement over the baseline's,
-    exactly the same never-worse discipline as every other mechanism here.
-    Ties prefer the LIGHTER elaboration tier (fuller over elaborated), since
-    less-invasive editing is preferred whenever it does the job equally well.
-    """
-    groups_by_id = {str(g["group_id"]): g for g in groups}
-    usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
-    updated_winners = dict(winners)
-
-    def _shortfall_ms(group_id: str, winner: Mapping[str, Any]) -> int:
-        window_ms = int((geometries.get(group_id) or {}).get("source_window_ms") or 0)
-        return max(0, window_ms - int(winner.get("measured_ms") or 0))
-
-    triggered_group_ids = [
-        gid for gid, winner in updated_winners.items()
-        if winner.get("direction") == "expand" and _shortfall_ms(gid, winner) > _ELABORATION_TRIGGER_MS
-    ]
-    if not triggered_group_ids:
-        return updated_winners, usage_totals
-
-    _emit_progress(
-        progress,
-        f"[native candidate pool] {len(triggered_group_ids)} block(s) finish well before their real "
-        "window ends; attempting natural elaboration...",
-    )
-
-    items = []
-    for gid in triggered_group_ids:
-        geometry = geometries[gid]
-        budget = _rolling_syllable_budget(
-            {"start_ms": 0, "end_ms": int(geometry["source_window_ms"])},
-            preferred_raw_speed_percent=preferred_raw_speed_percent,
-            content_syllables_per_second=DEFAULT_ZULU_CONTENT_SYLLABLES_PER_SECOND,
-            azure_utterance_overhead_ms=DEFAULT_AZURE_UTTERANCE_OVERHEAD_MS,
-            tolerance_percent=DEFAULT_SYLLABLE_TOLERANCE_PERCENT,
-        )
-        items.append({
-            "unit_id": gid,
-            "source_text": str(groups_by_id[gid]["source_text"]),
-            "current_english_text": natural_english_by_group.get(gid, str(groups_by_id[gid]["source_text"])),
-            "target_syllables": int(budget["target_syllables"]),
-            "min_syllables": int(budget["min_syllables"]),
-            "max_syllables": int(budget["max_syllables"]),
-        })
-
-    try:
-        by_id, usage = _request_sentence_elaboration_batch(
-            provider=provider, items=items, glossary=glossary, context_ledger=context_ledger,
-        )
-    except Exception as exc:
-        _emit_progress(progress, f"[native candidate pool] Elaboration request failed: {exc}")
-        return updated_winners, usage_totals
-    for key in usage_totals:
-        usage_totals[key] += usage.get(key, 0)
-
-    translate_units: list[dict[str, Any]] = []
-    tier_by_unit_id: dict[str, tuple[str, str]] = {}
-    for gid in triggered_group_ids:
-        result = by_id.get(gid)
-        if not result:
-            continue
-        source_text = str(groups_by_id[gid]["source_text"])
-        speaker_mode = (modes_by_speaker or {}).get(
-            str(groups_by_id[gid].get("speaker_id") or ""), _SPEAKER_SERIOUSNESS_MODE_DEFAULT,
-        )
-        seen_texts: set[str] = set()
-        for tier_label, key_name in (("fuller", "fuller_english_text"), ("elaborated", "elaborated_english_text")):
-            candidate_text = str(result.get(key_name) or "").strip()
-            if not candidate_text or candidate_text in seen_texts:
-                continue
-            if not _sentence_preserves_required_literals(source_text=source_text, candidate_text=candidate_text):
-                continue
-            seen_texts.add(candidate_text)
-            unit_id = f"{gid}__elaborate_{tier_label}"
-            tier_by_unit_id[unit_id] = (gid, tier_label)
-            translate_units.append({
-                "unit_id": unit_id,
-                "english_text": candidate_text,
-                "speaker_seriousness_mode": speaker_mode,
-            })
-
-    if not translate_units:
-        _emit_progress(progress, "[native candidate pool] Elaboration produced no usable candidates.")
-        return updated_winners, usage_totals
-
-    try:
-        translated_by_id, translate_usage = _request_candidate_translation_batch(
-            provider=provider, units=translate_units, glossary=glossary, context_ledger=context_ledger,
-        )
-    except Exception as exc:
-        _emit_progress(progress, f"[native candidate pool] Elaboration translation failed: {exc}")
-        return updated_winners, usage_totals
-    for key in usage_totals:
-        usage_totals[key] += translate_usage.get(key, 0)
-
-    candidates_by_group: dict[str, list[dict[str, Any]]] = {}
-    for unit_id, (gid, tier_label) in tier_by_unit_id.items():
-        translated = translated_by_id.get(unit_id)
-        if not translated:
-            continue
-        zulu_text = str(translated.get("zulu_text") or "").strip()
-        if not zulu_text:
-            continue
-        candidates_by_group.setdefault(gid, []).append({
-            "candidate_id": unit_id,
-            "variant_id": f"elaborate_{tier_label}",
-            "translator": "grok",
-            "spoken_text": zulu_text,
-        })
-
-    if not candidates_by_group:
-        _emit_progress(progress, "[native candidate pool] Elaboration produced no translatable candidates.")
-        return updated_winners, usage_totals
-
-    measured_group_ids = list(candidates_by_group)
-    raw_measured = _measure_temporal_batch(
-        tts=tts, groups=[groups_by_id[gid] for gid in measured_group_ids],
-        candidates_by_group=candidates_by_group,
-        geometries={gid: geometries[gid] for gid in measured_group_ids},
-        voice_assignments=voice_assignments, output_root=measurement_audio_root,
-        round_number=11, force=force, workers=candidate_pool_tts_workers,
-    )
-
-    _tier_preference = {"elaborate_fuller": 0, "elaborate_elaborated": 1}
-    for gid in measured_group_ids:
-        measured = raw_measured.get(gid) or []
-        if not measured:
-            continue
-        baseline = updated_winners[gid]
-        baseline_shortfall_ms = _shortfall_ms(gid, baseline)
-        enriched = _enrich_measured_candidates(measured=measured, original_candidates=candidates_by_group[gid])
-        best = min(
-            enriched,
-            key=lambda c: (tuple(c.get("rank") or (9, 0, 0)), _tier_preference.get(c.get("variant_id"), 9)),
-        )
-        best_rank = tuple(best.get("rank") or (9, 0, 0))
-        baseline_rank = tuple(baseline.get("rank") or (9, 0, 0))
-        if best_rank < baseline_rank:
-            best["requires_review"] = True
-            if baseline.get("effective_start_ms") is not None:
-                best.setdefault("effective_start_ms", baseline["effective_start_ms"])
-            if baseline.get("effective_source_end_ms") is not None:
-                best.setdefault("effective_source_end_ms", baseline["effective_source_end_ms"])
-            updated_winners[gid] = best
-            new_shortfall_ms = _shortfall_ms(gid, best)
-            _emit_progress(
-                progress,
-                f"[native candidate pool] {gid} improved via natural elaboration ({best.get('variant_id')}): "
-                f"{baseline_shortfall_ms}ms -> {new_shortfall_ms}ms early.",
-            )
-        else:
-            _emit_progress(
-                progress,
-                f"[native candidate pool] Elaboration for {gid} did not improve on the original "
-                f"({baseline_shortfall_ms}ms early baseline; best attempt did not measure a real improvement).",
-            )
-
-    return updated_winners, usage_totals
-
-
 def _compress_protected_content_last_resort(
     *,
     provider: FoundryGrokProvider,
@@ -14504,7 +14538,6 @@ def build_candidate_pool(
     skip_pronunciation_research: bool = False,
     skip_pronunciation_round_trip: bool = False,
     skip_speaker_seriousness_mode: bool = False,
-    skip_elaboration: bool = False,
     stt_backend: AzureFastTranscriptionBackend | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -14545,18 +14578,10 @@ def build_candidate_pool(
     sentence translated this way has no shortened candidates of its own, so
     it is never eligible for fact-priority trimming below.
 
-    ``skip_turn_rebalance=True`` is a diagnostic-only mode: skips Phase 13's
+    ``skip_turn_rebalance=True`` is a diagnostic-only mode: skips Phase 13/25's
     window-reallocation entirely, so every sentence's `required_speed_percent`
     reflects its own raw natural-translation timing, unaffected by turn
     rebalancing.
-
-    ``skip_elaboration=True`` is a diagnostic-only mode: skips the natural-
-    elaboration pass entirely (see _elaborate_undersized_sentences), so a
-    block that finishes well before its own real window ends is left exactly
-    as its natural translation, rebalancing, and compaction stages produced
-    it -- real user-reported defect fixed by this pass, 2026-09-13: a sentence
-    measuring several real seconds shorter than its own window plays as an
-    audible early silence with nothing else in this file ever addressing it.
 
     Sentences are grouped into real, uncapped speaker turns (the PRIMARY unit
     -- see _build_speaker_turns) BEFORE translation now (Phase 16): each turn
@@ -14659,9 +14684,7 @@ def build_candidate_pool(
         "bridge_max_word_count": _BRIDGE_MAX_WORD_COUNT,
         "bridge_max_source_span_ms": _BRIDGE_MAX_SOURCE_SPAN_MS,
         "max_shortened_candidates_per_segment": _MAX_SHORTENED_CANDIDATES_PER_SEGMENT,
-        "sentence_elaboration_prompt_version": SENTENCE_ELABORATION_PROMPT_VERSION,
-        "elaboration_trigger_ms": _ELABORATION_TRIGGER_MS,
-        "skip_elaboration": bool(skip_elaboration),
+        "turn_silence_gap_cap_ms": _TURN_SILENCE_GAP_CAP_MS,
         "skip_turn_rebalance": bool(skip_turn_rebalance),
         "skip_turn_block_translation": bool(skip_turn_block_translation),
         "skip_pronunciation_research": bool(skip_pronunciation_research),
@@ -14770,12 +14793,30 @@ def build_candidate_pool(
                 list(measured_by_group.get(group_id, [])), winner,
             )
 
+    raw_groups_by_id = {str(g["group_id"]): g for g in groups}
     if not skip_turn_rebalance:
-        winners, rebalanced_geometries = _rebalance_speaker_turns(
-            groups=block_groups, winners=winners, geometries=geometries,
+        winners, rebalanced_geometries, block_groups = _rebalance_speaker_turns(
+            groups=block_groups, raw_groups_by_id=raw_groups_by_id, winners=winners, geometries=geometries,
             preferred_raw_speed_percent=int(preferred_raw_speed_percent),
-            measurement_audio_root=measurement_audio_root, progress=progress,
+            measurement_audio_root=measurement_audio_root,
+            tts=tts, voice_assignments=voice_assignments, force=force, progress=progress,
         )
+        # A block un-merged back into per-original-sentence records (Phase 25)
+        # changes the group_id set itself, not just winners -- groups_by_id
+        # AND discourse_unit_kind_by_group must both be rebuilt from the
+        # returned block_groups so every downstream stage (fact-priority
+        # trim, last-resort compression, the morphology check, and the final
+        # candidate_pool_records assembly) sees the real, current set of
+        # committed units instead of the stale pre-split one. Confirmed real
+        # crash without this: a split-off id like a former merge partner's
+        # own original group_id never existed as its own top-level entry in
+        # the ORIGINAL discourse_unit_kind_by_group (computed once, before
+        # any splitting), so the final assembly's lookup raised a bare
+        # KeyError.
+        groups_by_id = {str(g["group_id"]): g for g in block_groups}
+        discourse_unit_kind_by_group = {
+            str(g["group_id"]): _classify_discourse_unit_kind(g) for g in block_groups
+        }
         # Without this, anything measuring a NEW candidate against a
         # rebalanced member afterward (fact-priority trimming below) would
         # silently use the stale, pre-rebalance window instead of the
@@ -14801,22 +14842,7 @@ def build_candidate_pool(
     )
     _merge_updated_winners(winners)
 
-    elaboration_usage = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
-    if not skip_elaboration:
-        winners, elaboration_usage = _elaborate_undersized_sentences(
-            provider=provider, groups=block_groups, winners=winners,
-            natural_english_by_group=natural_english_by_group, tts=tts, geometries=geometries,
-            voice_assignments=voice_assignments, measurement_audio_root=measurement_audio_root,
-            force=force, candidate_pool_tts_workers=candidate_pool_tts_workers,
-            preferred_raw_speed_percent=int(preferred_raw_speed_percent),
-            glossary=glossary, context_ledger=context_ledger, modes_by_speaker=modes_by_speaker,
-            progress=progress,
-        )
-        _merge_updated_winners(winners)
-    else:
-        _emit_progress(progress, "[native candidate pool] Natural elaboration skipped (diagnostic mode).")
-
-    # Either compaction stage above (or the elaboration stage) can independently shorten/lengthen one member of a
+    # Either compaction stage above (or Phase 25's silence-pattern reproduction) can independently shorten/lengthen one member of a
     # multi-member turn without the other members changing at all -- re-sync
     # the turn's real aggregate one final time so every member reports the
     # SAME honest number that Phase 14 will actually render as one shared
@@ -14837,7 +14863,7 @@ def build_candidate_pool(
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
     for usage in (
         context_usage, glossary_usage, pronunciation_research_usage, speaker_mode_usage, grok_usage, trim_usage,
-        last_resort_usage, elaboration_usage,
+        last_resort_usage,
     ):
         for key in usage_totals:
             usage_totals[key] += int(usage.get(key) or 0)

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 from mathula_tv.native_dub import (
     DEFAULT_MAX_NATURAL_SPEED_PERCENT,
@@ -40,9 +41,11 @@ from mathula_tv.native_dub import (
     _reallocate_turn_windows,
     _rebalance_speaker_turns,
     _resync_turn_rush_aggregates,
+    _reverse_engineer_zulu_chunk_split,
     _score_speaker_turn,
     _speaker_turn_geometry,
     _temporal_required_rush_percent,
+    _turn_atomic_source_chunks,
 )
 
 
@@ -401,10 +404,11 @@ def test_rebalance_skips_a_turn_that_already_fits_and_paces_evenly(tmp_path):
         "g2": {"candidate_id": "grok_natural", "spoken_text": "sawubona futhi", "measured_ms": 3100,
                "required_speed_percent": 0.0, "qa_penalty": 0, "path": str(wav2)},
     }
-    updated_winners, updated_geometries = _rebalance_speaker_turns(
-        groups=groups, winners=winners,
+    updated_winners, updated_geometries, _updated_groups = _rebalance_speaker_turns(
+        groups=groups, raw_groups_by_id={g["group_id"]: g for g in groups}, winners=winners,
         geometries={"g1": _turn_geometry(groups[0]), "g2": _turn_geometry(groups[1])},
         preferred_raw_speed_percent=6, measurement_audio_root=tmp_path,
+        tts=None, voice_assignments={}, force=True,
     )
     # Text/candidate identity/window are never touched by this mechanism --
     # but required_speed_percent/speed_fit_mode/fit ARE always overwritten to
@@ -425,11 +429,14 @@ def test_rebalance_skips_single_member_turns():
     groups = [_turn_group("g1", start_ms=0, source_text="All right.", span_ms=900)]
     winners = {"g1": {"candidate_id": "grok_natural", "spoken_text": "kulungile", "measured_ms": 900,
                        "required_speed_percent": 0.0, "qa_penalty": 0, "path": "/x.wav"}}
-    updated_winners, updated_geometries = _rebalance_speaker_turns(
-        groups=groups, winners=winners, geometries={"g1": _turn_geometry(groups[0])},
+    updated_winners, updated_geometries, updated_groups = _rebalance_speaker_turns(
+        groups=groups, raw_groups_by_id={g["group_id"]: g for g in groups}, winners=winners,
+        geometries={"g1": _turn_geometry(groups[0])},
         preferred_raw_speed_percent=6, measurement_audio_root=Path("."),
+        tts=None, voice_assignments={}, force=True,
     )
     assert updated_winners == winners
+    assert updated_groups == groups
 
 
 def test_rebalance_triggers_and_promotes_a_real_improvement_via_window_reallocation(tmp_path):
@@ -450,10 +457,11 @@ def test_rebalance_triggers_and_promotes_a_real_improvement_via_window_reallocat
         "g2": {"candidate_id": "grok_natural", "spoken_text": "kwenzekile kabi kakhulu", "measured_ms": 4600,
                "required_speed_percent": _real_required_speed(4600), "qa_penalty": 0, "path": str(wav2)},
     }
-    updated_winners, updated_geometries = _rebalance_speaker_turns(
-        groups=groups, winners=winners,
+    updated_winners, updated_geometries, _updated_groups = _rebalance_speaker_turns(
+        groups=groups, raw_groups_by_id={g["group_id"]: g for g in groups}, winners=winners,
         geometries={"g1": _turn_geometry(groups[0]), "g2": _turn_geometry(groups[1])},
         preferred_raw_speed_percent=6, measurement_audio_root=tmp_path,
+        tts=None, voice_assignments={}, force=True,
     )
     # Text and candidate identity are never touched by this mechanism.
     assert updated_winners["g1"]["spoken_text"] == "sawubona bakithi manje"
@@ -505,10 +513,11 @@ def test_rebalance_keeps_the_original_when_reallocation_does_not_improve(tmp_pat
         "g2": {"candidate_id": "grok_natural", "spoken_text": "g2 zulu overloaded", "measured_ms": 4000,
                "required_speed_percent": _real_required_speed(4000), "qa_penalty": 0, "path": str(wav2)},
     }
-    updated_winners, updated_geometries = _rebalance_speaker_turns(
-        groups=groups, winners=winners,
+    updated_winners, updated_geometries, _updated_groups = _rebalance_speaker_turns(
+        groups=groups, raw_groups_by_id={g["group_id"]: g for g in groups}, winners=winners,
         geometries={"g1": _turn_geometry(groups[0]), "g2": _turn_geometry(groups[1])},
         preferred_raw_speed_percent=6, measurement_audio_root=tmp_path,
+        tts=None, voice_assignments={}, force=True,
     )
     for group_id in ("g1", "g2"):
         assert updated_winners[group_id]["spoken_text"] == winners[group_id]["spoken_text"]
@@ -639,10 +648,11 @@ def test_rebalance_never_extends_the_turns_committed_end_past_the_real_mouth_clo
         "g2": {"candidate_id": "grok_natural", "spoken_text": "g2 zulu slack", "measured_ms": 1800,
                "required_speed_percent": 0.0, "qa_penalty": 0, "path": str(wav2)},
     }
-    updated_winners, updated_geometries = _rebalance_speaker_turns(
-        groups=groups, winners=winners,
+    updated_winners, updated_geometries, _updated_groups = _rebalance_speaker_turns(
+        groups=groups, raw_groups_by_id={g["group_id"]: g for g in groups}, winners=winners,
         geometries={"g1": _turn_geometry(groups[0]), "g2": _turn_geometry(groups[1])},
         preferred_raw_speed_percent=6, measurement_audio_root=tmp_path,
+        tts=None, voice_assignments={}, force=True,
     )
     # The turn's raw, real end is 6100 (g2's source_end_ms) -- the committed
     # result must stop exactly there, never extending into the real 5000ms
@@ -672,10 +682,11 @@ def test_rebalance_speaker_turns_returns_updated_geometries_for_a_promoted_turn(
         "g2": {"candidate_id": "grok_natural", "spoken_text": "kwenzekile kabi kakhulu", "measured_ms": 4600,
                "required_speed_percent": _real_required_speed(4600), "qa_penalty": 0, "path": str(wav2)},
     }
-    _, updated_geometries = _rebalance_speaker_turns(
-        groups=groups, winners=winners,
+    _, updated_geometries, _updated_groups = _rebalance_speaker_turns(
+        groups=groups, raw_groups_by_id={g["group_id"]: g for g in groups}, winners=winners,
         geometries={"g1": _turn_geometry(groups[0]), "g2": _turn_geometry(groups[1])},
         preferred_raw_speed_percent=6, measurement_audio_root=tmp_path,
+        tts=None, voice_assignments={}, force=True,
     )
     assert set(updated_geometries) == {"g1", "g2"}
     # g2's real reallocated window is bigger than its original 3000ms span --
@@ -694,12 +705,197 @@ def test_rebalance_speaker_turns_returns_no_geometry_entry_for_an_untouched_turn
         "g2": {"candidate_id": "grok_natural", "spoken_text": "sawubona futhi", "measured_ms": 3100,
                "required_speed_percent": 0.0, "qa_penalty": 0, "path": str(wav2)},
     }
-    _, updated_geometries = _rebalance_speaker_turns(
-        groups=groups, winners=winners,
+    _, updated_geometries, _updated_groups = _rebalance_speaker_turns(
+        groups=groups, raw_groups_by_id={g["group_id"]: g for g in groups}, winners=winners,
         geometries={"g1": _turn_geometry(groups[0]), "g2": _turn_geometry(groups[1])},
         preferred_raw_speed_percent=6, measurement_audio_root=tmp_path,
+        tts=None, voice_assignments={}, force=True,
     )
     assert updated_geometries == {}
+
+
+# --- Phase 25: _turn_atomic_source_chunks / _reverse_engineer_zulu_chunk_split / ---------
+# _rebalance_speaker_turns un-merging a Phase-16-merged block to reproduce the real
+# English source's own silence pattern, replacing natural elaboration.
+
+
+class _FakeSplitTts:
+    default_voice = "zu-ZA-ThandoNeural"
+
+    def __init__(self, ms_per_word: int = 200):
+        self._ms_per_word = ms_per_word
+        self.calls: list[str] = []
+
+    def synthesize(self, request, output_path, *, force=False):
+        self.calls.append(request.text)
+        duration_ms = len(request.text.split()) * self._ms_per_word
+        _write_real_wav(Path(output_path), ms=duration_ms)
+        return SimpleNamespace(duration_ms=duration_ms)
+
+
+def test_turn_atomic_source_chunks_flattens_a_mix_of_solo_and_merged_blocks():
+    # g1 was never merged (chunks_in_block=1); g2 absorbed two original
+    # sentences g2a/g2b (chunks_in_block=2) with a real 1000ms gap between
+    # them that a merged block's own outer start/end no longer exposes.
+    groups_by_id = {
+        "g1": _turn_group("g1", start_ms=0, span_ms=3000),
+        "g2": {
+            **_turn_group("g2", start_ms=3100, span_ms=6000),
+            "member_group_ids": ["g2a", "g2b"],
+        },
+    }
+    raw_groups_by_id = {
+        "g1": groups_by_id["g1"],
+        "g2a": _turn_group("g2a", start_ms=3100, span_ms=2000, source_text="First original sentence here."),
+        "g2b": _turn_group("g2b", start_ms=6100, span_ms=3000, source_text="Second original sentence right here now."),
+    }
+    turn = {"member_group_ids": ["g1", "g2"], "start_ms": 0, "source_end_ms": 9100}
+    chunks = _turn_atomic_source_chunks(turn, groups_by_id, raw_groups_by_id)
+    assert [c["original_group_id"] for c in chunks] == ["g1", "g2a", "g2b"]
+    assert chunks[0]["chunks_in_block"] == 1
+    assert chunks[1]["chunks_in_block"] == chunks[2]["chunks_in_block"] == 2
+    # The real gap between g2a's end (5100) and g2b's start (6100) is only
+    # visible via raw_groups_by_id -- g2's own merged span hides it.
+    assert chunks[1]["source_end_ms"] == 5100
+    assert chunks[2]["start_ms"] == 6100
+
+
+def test_reverse_engineer_zulu_chunk_split_only_cuts_at_whitespace():
+    pieces = _reverse_engineer_zulu_chunk_split(
+        "wordone wordtwo wordthree wordfour wordfive wordsix", [8.0, 11.0],
+    )
+    assert pieces is not None
+    assert len(pieces) == 2
+    assert " ".join(pieces).split() == "wordone wordtwo wordthree wordfour wordfive wordsix".split()
+    assert all(piece.strip() for piece in pieces)
+
+
+def test_reverse_engineer_zulu_chunk_split_returns_none_for_too_few_words():
+    assert _reverse_engineer_zulu_chunk_split("onlyoneword", [8.0, 11.0]) is None
+
+
+def test_rebalance_un_merges_an_undersized_block_and_widens_the_real_gap(tmp_path):
+    """The real motivating scenario Phase 25 exists for: a solo TURN-level
+    member ("g1") whose own block internally merged two original sentences
+    (g1a/g1b, a real Phase-16 merge) with a genuine 1000ms gap between them
+    in the source English. The merged block's own natural translation
+    measures well under the turn's real combined window -- exactly the
+    "finishes early" defect natural elaboration used to patch by inventing
+    content. This proves the block gets un-merged into two real, separate
+    committed records with a widened gap positioned where the source's own
+    silence was, using only the DIRECT translation (no elaboration).
+    """
+    g1a_text = "wordone wordtwo wordthree"
+    g1b_text = "wordfour wordfive wordsix wordseven"
+    merged_group = {
+        "group_id": "g1", "speaker_id": "S0", "start_ms": 0, "source_end_ms": 10000,
+        "source_span_ms": 10000, "source_text": f"{g1a_text}. {g1b_text}.",
+        "segment_ids": ["g1a_seg", "g1b_seg"], "member_group_ids": ["g1a", "g1b"],
+    }
+    raw_groups_by_id = {
+        "g1a": {
+            "group_id": "g1a", "speaker_id": "S0", "start_ms": 0, "source_end_ms": 4000,
+            "source_span_ms": 4000, "source_text": g1a_text, "segment_ids": ["g1a_seg"],
+        },
+        "g1b": {
+            "group_id": "g1b", "speaker_id": "S0", "start_ms": 5000, "source_end_ms": 10000,
+            "source_span_ms": 5000, "source_text": g1b_text, "segment_ids": ["g1b_seg"],
+        },
+    }
+    groups = [merged_group]
+    merged_spoken_text = "umusho owodwa ombili omthathu omune omhlanu omithupha omusho"  # 7 words
+    g1_wav = tmp_path / "g1.wav"
+    _write_real_wav(g1_wav, ms=1400)
+    winner = {
+        "candidate_id": "grok_natural", "spoken_text": merged_spoken_text, "measured_ms": 1400,
+        "required_speed_percent": 0.0, "qa_penalty": 0, "path": str(g1_wav),
+    }
+    tts = _FakeSplitTts(ms_per_word=200)
+    updated_winners, updated_geometries, updated_groups = _rebalance_speaker_turns(
+        groups=groups, raw_groups_by_id=raw_groups_by_id, winners={"g1": winner},
+        geometries={"g1": _turn_geometry(merged_group)},
+        preferred_raw_speed_percent=6, measurement_audio_root=tmp_path,
+        tts=tts, voice_assignments={"S0": {"selected_voice": "zu-ZA-ThandoNeural", "base_prosody": {}}},
+        force=True,
+    )
+    # The original merged id is gone; replaced by the two real original
+    # sentence ids, in chronological order.
+    assert set(updated_winners) == {"g1a", "g1b"}
+    assert [g["group_id"] for g in updated_groups] == ["g1a", "g1b"]
+    # No content lost -- the two pieces' text concatenates back to the
+    # original merged translation, word for word.
+    assert (
+        updated_winners["g1a"]["spoken_text"] + " " + updated_winners["g1b"]["spoken_text"]
+    ).split() == merged_spoken_text.split()
+    # A real gap now sits between the two pieces, positioned at their real
+    # boundary -- not glued back-to-back, and not the full original 1000ms
+    # raw gap either (widened/scaled to help close the real shortfall, but
+    # capped, per _TURN_SILENCE_GAP_CAP_MS).
+    g1a_group = next(g for g in updated_groups if g["group_id"] == "g1a")
+    g1b_group = next(g for g in updated_groups if g["group_id"] == "g1b")
+    real_gap_ms = g1b_group["start_ms"] - g1a_group["source_end_ms"]
+    assert real_gap_ms > 0
+    # The turn's real fixed outer bounds are preserved exactly.
+    assert g1a_group["start_ms"] == 0
+    assert g1b_group["source_end_ms"] == 10000
+    assert "g1" not in updated_geometries and "g1" not in updated_winners
+
+
+def test_rebalance_un_merge_survives_the_block_reusing_its_first_members_own_id(tmp_path):
+    """Regression test for a real crash found on job fb3d08b63fed4d90922b08f7e325b906:
+    a merged block's own group_id is very often ALSO the id of its own first
+    original sentence (Phase 16 mints the block's id from its first member),
+    e.g. a real un-merge log line reads "un-merged into ['native_phrase_0003',
+    'native_phrase_0004']" where the BLOCK's own id was 'native_phrase_0003'.
+    An earlier version of the promotion code set the new winner for that
+    reused id, then immediately popped it again as part of "removing the old
+    merged id" -- silently deleting the just-written entry. This uses the
+    same reused-id shape and proves the id survives with its real new data.
+    """
+    g1_text = "wordone wordtwo wordthree"
+    g2_text = "wordfour wordfive wordsix wordseven"
+    merged_group = {
+        # The block's own id is "g1" -- the SAME as its own first original
+        # member below, matching the real production shape exactly.
+        "group_id": "g1", "speaker_id": "S0", "start_ms": 0, "source_end_ms": 10000,
+        "source_span_ms": 10000, "source_text": f"{g1_text}. {g2_text}.",
+        "segment_ids": ["g1_seg", "g2_seg"], "member_group_ids": ["g1", "g2"],
+    }
+    raw_groups_by_id = {
+        "g1": {
+            "group_id": "g1", "speaker_id": "S0", "start_ms": 0, "source_end_ms": 4000,
+            "source_span_ms": 4000, "source_text": g1_text, "segment_ids": ["g1_seg"],
+        },
+        "g2": {
+            "group_id": "g2", "speaker_id": "S0", "start_ms": 5000, "source_end_ms": 10000,
+            "source_span_ms": 5000, "source_text": g2_text, "segment_ids": ["g2_seg"],
+        },
+    }
+    merged_spoken_text = "umusho owodwa ombili omthathu omune omhlanu omithupha omusho"  # 7 words
+    g1_wav = tmp_path / "g1.wav"
+    _write_real_wav(g1_wav, ms=1400)
+    winner = {
+        "candidate_id": "grok_natural", "spoken_text": merged_spoken_text, "measured_ms": 1400,
+        "required_speed_percent": 0.0, "qa_penalty": 0, "path": str(g1_wav),
+    }
+    tts = _FakeSplitTts(ms_per_word=200)
+    updated_winners, updated_geometries, updated_groups = _rebalance_speaker_turns(
+        groups=[merged_group], raw_groups_by_id=raw_groups_by_id, winners={"g1": winner},
+        geometries={"g1": _turn_geometry(merged_group)},
+        preferred_raw_speed_percent=6, measurement_audio_root=tmp_path,
+        tts=tts, voice_assignments={"S0": {"selected_voice": "zu-ZA-ThandoNeural", "base_prosody": {}}},
+        force=True,
+    )
+    # The reused id "g1" survives with its REAL new (split, first-piece) data
+    # -- not missing, and not still the stale whole-merged-text winner.
+    assert set(updated_winners) == {"g1", "g2"}
+    assert updated_winners["g1"]["spoken_text"] != merged_spoken_text
+    assert [g["group_id"] for g in updated_groups] == ["g1", "g2"]
+    g1_group = next(g for g in updated_groups if g["group_id"] == "g1")
+    g2_group = next(g for g in updated_groups if g["group_id"] == "g2")
+    assert g1_group["start_ms"] == 0
+    assert g2_group["source_end_ms"] == 10000
+    assert g2_group["start_ms"] > g1_group["source_end_ms"]  # a real widened gap
 
 
 # --- _score_speaker_turn: the "fits" signal vs. the coarse gap_aware/sentence_end label ---
