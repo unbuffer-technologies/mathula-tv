@@ -29,7 +29,23 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from mathula_tv.native_dub import _build_speaker_turns, _translate_turn_blocks_via_grok
+from mathula_tv.native_dub import (
+    TURN_BLOCK_TRANSLATE_PROMPT_VERSION,
+    TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT,
+    _build_speaker_turns,
+    _translate_turn_blocks_via_grok,
+)
+
+
+def test_turn_block_prompt_distinguishes_intensifying_repetition_from_filler():
+    # Real production bug (job fb3d08b63fed4d90922b08f7e325b906, native_phrase_0005):
+    # the prompt's own "redundant repetition" deletion license, with no carve-out,
+    # caused a real doubled intensifier ("very, very permanent") to be silently
+    # deleted entirely rather than rendered with real isiZulu emphasis.
+    assert "INTENSITY or EMPHASIS" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "doubled \"very, very\" to be silently deleted" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "is not filler" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "v39-intensifying-repetition-not-filler" in TURN_BLOCK_TRANSLATE_PROMPT_VERSION
 
 
 def _group(group_id: str, source_text: str, *, speaker_id: str = "SPEAKER_00", start_ms: int, span_ms: int = 3000) -> dict:

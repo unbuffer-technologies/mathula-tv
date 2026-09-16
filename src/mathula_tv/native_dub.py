@@ -133,7 +133,7 @@ ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v4-turn-id"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v13-social-media-vocabulary-all-modes"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v38-social-media-vocabulary-all-modes"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v39-intensifying-repetition-not-filler"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1369,6 +1369,16 @@ present anywhere in a window's original sentences must still appear somewhere in
 window -- content may be restated in a different place within the window, but it may never disappear or
 be duplicated. Epistemic hedges ("maybe", "I think", "allegedly", "possibly") are not filler and must
 survive.
+
+"Redundant repetition" means a meaningless disfluency or restatement ONLY -- a stutter, a false start
+repeated verbatim, or a whole clause/question/claim genuinely said twice with no added meaning the
+second time. It does NOT mean a doubled or repeated word used for INTENSITY or EMPHASIS ("very, very
+permanent", "no, no, absolutely not", "many, many years") -- confirmed real production bug: this
+exact ambiguity caused a real sentence's doubled "very, very" to be silently deleted entirely, leaving
+no trace of the speaker's real emphasis. An intensifying repetition is not filler; it is the speaker's
+own real emotional/rhetorical weight and must survive, rendered as isiZulu naturally expresses
+intensity (e.g. a doubled adjective/adverb, or an intensifying particle) -- never simply dropped to a
+single, flat occurrence.
 
 SUBSTITUTION also runs in the opposite direction for a specific, narrower category: a modern
 political, social, or institutional CONCEPT NOUN that entered everyday South African discourse
