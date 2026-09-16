@@ -45,7 +45,21 @@ def test_turn_block_prompt_distinguishes_intensifying_repetition_from_filler():
     assert "INTENSITY or EMPHASIS" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
     assert "doubled \"very, very\" to be silently deleted" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
     assert "is not filler" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-    assert "v39-intensifying-repetition-not-filler" in TURN_BLOCK_TRANSLATE_PROMPT_VERSION
+    assert "v40-real-ms-headroom-informal-retelling" in TURN_BLOCK_TRANSLATE_PROMPT_VERSION
+
+
+def test_turn_block_prompt_pushes_real_headroom_usage_with_concrete_ms():
+    # Real user direction, 2026-09-17: a generic "narrative scaffolding is free
+    # to use" instruction was confirmed, via a live diagnostic call against the
+    # real fb3d08b63fed4d90922b08f7e325b906 turn 0009/0010, to leave real spare
+    # airtime unused as silence rather than natural retelling -- a much more
+    # assertive, real-milliseconds-driven, informal-storyteller framing
+    # measurably closed the gap in that live test. This asserts the prompt
+    # actually carries that stronger framing, not just the old soft language.
+    assert "window_source_ms" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "was NOT assertive enough on its own" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "animatedly recounting this exact story to a friend" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "is the WRONG choice whenever real spare airtime is" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
 
 
 def _group(group_id: str, source_text: str, *, speaker_id: str = "SPEAKER_00", start_ms: int, span_ms: int = 3000) -> dict:
@@ -223,6 +237,21 @@ def test_speaker_seriousness_mode_reaches_the_fallback_payload():
     assert all(
         unit["speaker_seriousness_mode"] == "political_speech" for unit in fallback_call["payload"]["units"]
     )
+
+
+def test_window_source_ms_reaches_the_turn_block_payload():
+    # The model needs a concrete real-airtime anchor (not just an abstract
+    # syllable count) to reason about how much real spare time a window has --
+    # confirmed necessary by the live diagnostic referenced above.
+    groups = [_group("p1", "We will build houses.", speaker_id="POLITICIAN", start_ms=0, span_ms=2000)]
+    turns = _build_speaker_turns(groups)
+    natural_english = {g["group_id"]: g["source_text"] for g in groups}
+    provider = _PayloadCapturingProvider()
+    _translate_turn_blocks_via_grok(
+        provider=provider, groups=groups, turns=turns, natural_english_by_group=natural_english, glossary={},
+    )
+    turn_block_call = next(c for c in provider.calls if c["operation"] == "native_turn_block_translate_batch")
+    assert turn_block_call["payload"]["windows"][0]["window_source_ms"] == 2000
 
 
 def test_a_merge_with_no_sentence_count_reduction_now_stays_merged():

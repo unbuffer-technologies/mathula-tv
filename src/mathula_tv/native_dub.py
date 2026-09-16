@@ -133,7 +133,7 @@ ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v4-turn-id"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v13-social-media-vocabulary-all-modes"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v39-intensifying-repetition-not-filler"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v40-real-ms-headroom-informal-retelling"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1517,14 +1517,25 @@ judgment about the most natural, contextually correct isiZulu when they differ.
 A window's target_syllables/min_syllables/max_syllables describe the WHOLE window's combined output's
 real available spoken time, translated into an approximate isiZulu syllable budget -- a LANGUAGE-
 PLANNING OBJECTIVE, not permission to damage meaning, and not a number you need to hit exactly (later
-pipeline stages measure and fix the real result; you are not expected to count syllables precisely).
-Use it to gauge how much real slack this specific window actually has, and let that gauge how freely
-you reach for ADDITION and REORGANIZATION above: when max_syllables leaves real headroom over the
-content's natural length, narrative scaffolding that makes the retelling flow is genuinely free to use;
-when the window is already near or over target_syllables, favor DELETION and tight SUBSTITUTION instead
-and skip ADDITION entirely for this window -- a retelling with zero added scaffolding is a completely
-valid, honest choice on a tight window, not a lesser one. Never delete a proposition just to hit a
-syllable count, and never treat the budget as license to damage meaning in either direction.
+pipeline stages measure and fix the real result; you are not expected to count syllables precisely). A
+window MAY also include window_source_ms -- this window's own real total airtime in milliseconds, the
+actual duration this person spoke for -- given so you can reason in concrete seconds of real airtime,
+not just an abstract syllable count.
+
+When window_source_ms and max_syllables show this window genuinely has real spare airtime beyond what a
+terse, minimal-words rendering of this content would need, USE IT -- confirmed by direct testing: a
+generic instruction to add "narrative scaffolding" was NOT assertive enough on its own and left real
+seconds of a real turn sitting as dead air rather than natural speech. Retell the content the way a real
+person animatedly recounting this exact story to a friend would when they have real time to spend -- add
+a natural aside, a fuller and more vivid way of saying something, an emphatic repetition where the
+English itself already leans emphatic, or a natural connective that makes the story flow -- not by
+padding with irrelevant words or mechanically repeating a sentence. This is retelling, not a technical
+transfer: a flatly literal, minimal-words rendering is the WRONG choice whenever real spare airtime is
+available, exactly as much as inventing a fact would be wrong. When the window is already near or over
+target_syllables, favor DELETION and tight SUBSTITUTION instead and skip ADDITION entirely for this
+window -- a retelling with zero added scaffolding is a completely valid, honest choice on a tight
+window, not a lesser one. Never delete a proposition just to hit a syllable count, and never treat the
+budget as license to damage meaning in either direction.
 
 TIGHT SUBSTITUTION, made concrete: real evidence from this pipeline's own repeated output on the
 IDENTICAL sentence confirms that when two isiZulu phrasings are both fully natural and equally
@@ -12292,7 +12303,7 @@ def _request_turn_block_translation_batch(
     """windows: [{"window_id", "members": [{"index", "english_text"}, ...],
     "speaker_seriousness_mode"?, "preceding_english"?, "recent_turns_digest"?,
     "speaker_role"?, "reference_vocabulary"?, "target_syllables"?,
-    "min_syllables"?, "max_syllables"?}, ...]. Returns {window_id: raw segments as returned --
+    "min_syllables"?, "max_syllables"?, "window_source_ms"?}, ...]. Returns {window_id: raw segments as returned --
     NOT yet checked for exact contiguous tiling, see
     _validate_turn_block_segments}. Identity mismatch on window_id is fatal
     (same convention as every other candidate-translate-family function);
@@ -12344,6 +12355,10 @@ def _request_turn_block_translation_batch(
                     **(
                         {"max_syllables": int(w["max_syllables"])}
                         if w.get("max_syllables") is not None else {}
+                    ),
+                    **(
+                        {"window_source_ms": int(w["window_source_ms"])}
+                        if w.get("window_source_ms") is not None else {}
                     ),
                 }
                 for w in windows
@@ -12698,6 +12713,7 @@ def _translate_turn_blocks_via_grok(
             "target_syllables": syllable_budget["target_syllables"],
             "min_syllables": syllable_budget["min_syllables"],
             "max_syllables": syllable_budget["max_syllables"],
+            "window_source_ms": syllable_budget["source_ms"],
         }
 
     def _run_translate_batches(
