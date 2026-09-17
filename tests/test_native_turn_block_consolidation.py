@@ -30,8 +30,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from mathula_tv.native_dub import (
-    TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION,
-    TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT,
     TURN_BLOCK_TRANSLATE_PROMPT_VERSION,
     TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT,
     _build_speaker_turns,
@@ -47,44 +45,23 @@ def test_turn_block_prompt_distinguishes_intensifying_repetition_from_filler():
     assert "INTENSITY or EMPHASIS" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
     assert "doubled \"very, very\" to be silently deleted" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
     assert "is not filler" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-    assert "v41-condensed-variant-of-dual-call" in TURN_BLOCK_TRANSLATE_PROMPT_VERSION
+    assert "v42-single-call-reverted" in TURN_BLOCK_TRANSLATE_PROMPT_VERSION
 
 
-def test_turn_block_prompt_is_the_condensed_variant_of_a_dual_call():
-    # Real user direction, 2026-09-17: embedding a "use real spare airtime"
-    # paragraph inside this SAME prompt (the one live-tested and briefly
-    # shipped, then confirmed via a real production re-run to have zero real
-    # effect) lost to this prompt's own existing, concrete "prefer shorter"
-    # TIGHT SUBSTITUTION instruction. The fix: two completely separate,
-    # independently-biased calls (see TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_
-    # PROMPT for the other one) -- this prompt now explicitly names itself as
-    # the CONDENSED half and carries no competing expansion instruction.
+def test_turn_block_prompt_has_reverted_to_a_single_undivided_call():
+    # Real user direction, 2026-09-17: a parallel independent "extended"
+    # second call (tried right before this) DID measurably close real timing
+    # gaps, but had no structural tie to the already-good condensed
+    # translation and produced a real, confirmed content-quality regression
+    # (a redundant restatement of the same place name). Reverted back to a
+    # single call -- this prompt no longer names itself as one of two
+    # variants, and no competing "extended" prompt/version exists anymore.
     assert "window_source_ms" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-    assert "THIS IS THE CONDENSED VARIANT" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-    assert "that call owns filling real headroom" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-    assert "never stretch a retelling to fill spare time" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
-
-
-def test_extended_prompt_pushes_real_spare_airtime_usage():
-    assert "THIS IS THE EXTENDED VARIANT" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
-    assert "animatedly recounting this exact story to a friend" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
-    assert "is the WRONG choice here" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
-    assert "rank EVERY clause 1" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
-    assert "v2-no-redundant-entity-restatement" in TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION
-
-
-def test_extended_prompt_forbids_redundant_entity_restatement():
-    # Real production regression (job fb3d08b63fed4d90922b08f7e325b906,
-    # native_phrase_0005): asked to elaborate, the extended variant restated
-    # "municipality" via two different case-marked forms back to back
-    # ("...kamasipala kuMasipala waseLekwa") for a single English mention,
-    # producing a run-on, broken-sounding sentence -- a real content defect,
-    # not a timing one, that the pure duration-based selection couldn't catch
-    # (per feedback_qa_after_not_during, the fix belongs in generation, not a
-    # new in-pipeline audit call).
-    assert "kamasipala kuMasipala waseLekwa" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
-    assert "that is disqualifying, not merely non-ideal" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
-    assert "the SOURCE doubled it" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
+    assert "THIS IS THE CONDENSED VARIANT" not in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    assert "A separate, later, post-measurement mechanism" in TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT
+    from mathula_tv import native_dub
+    assert not hasattr(native_dub, "TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT")
+    assert not hasattr(native_dub, "TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION")
 
 
 def _group(group_id: str, source_text: str, *, speaker_id: str = "SPEAKER_00", start_ms: int, span_ms: int = 3000) -> dict:
@@ -509,11 +486,7 @@ def test_falling_back_logs_the_specific_missing_literal_not_just_a_count():
     # Real user direction, 2026-09-09: "the model need to do better logging
     # [of the] reasons behind every decision" -- diagnosing why a real merge
     # fell back used to require a bespoke script; the reason is now surfaced
-    # inline, per (window, variant), before the blanket count message. Since
-    # the fake provider gives BOTH the condensed and extended calls the same
-    # bad response, both variants independently fail and both get their own
-    # log line -- real, useful signal (which variant(s) actually failed), not
-    # a regression from the single-variant-era count of 1.
+    # inline, per (window, variant), before the blanket count message.
     groups = [
         _group("p1", "The number is 24.", start_ms=0, span_ms=1000),
         _group("p2", "Confirmed by IDAC.", start_ms=1000, span_ms=1000),
@@ -532,13 +505,10 @@ def test_falling_back_logs_the_specific_missing_literal_not_just_a_count():
         progress=messages.append,
     )
     reason_lines = [m for m in messages if "dropped required literal" in m]
-    assert len(reason_lines) == 2
-    assert {"condensed", "extended"} == {
-        "condensed" if "(condensed)" in line else "extended" for line in reason_lines
-    }
-    for line in reason_lines:
-        assert "'24'" in line
-        assert "'IDAC'" in line
+    assert len(reason_lines) == 1
+    assert "(condensed)" in reason_lines[0]
+    assert "'24'" in reason_lines[0]
+    assert "'IDAC'" in reason_lines[0]
     assert "p1" in reason_lines[0]
 
 

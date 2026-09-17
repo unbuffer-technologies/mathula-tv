@@ -133,8 +133,7 @@ ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
 ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v4-turn-id"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v13-social-media-vocabulary-all-modes"
-TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v41-condensed-variant-of-dual-call"
-TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION = "native-turn-block-translate-extended-v2-no-redundant-entity-restatement"
+TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v42-single-call-reverted"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -231,25 +230,26 @@ _TURN_BLOCK_TRANSLATE_MAX_MEMBERS = 8
 # Windows (not individual sentences) per provider call -- keeps one batch's
 # prompt/response size bounded regardless of how many turns a job has.
 DEFAULT_TURN_BLOCK_TRANSLATE_BATCH_SIZE = 5
-# Two independent, purpose-built translation calls per window, run in parallel:
-# a CONDENSED variant (today's original prompt, biased toward economy via its
-# own TIGHT SUBSTITUTION guidance) and an EXTENDED variant (a real spare-
-# airtime informal retelling, with zero competing "prefer shorter" pressure).
-# Confirmed necessary by real production testing: embedding an additional
-# "use real headroom" paragraph INSIDE the condensed prompt produced no real
-# measured improvement, because it had to compete against that same prompt's
-# own explicit, concrete "prefer shorter" instruction -- splitting the two
-# goals into separate calls removes the competition entirely. Both candidates
-# are measured via real Azure TTS and the better-fitting one wins (see
-# build_candidate_pool's winner-selection step, right after _measure_temporal_
-# batch) -- never worse than either single candidate alone.
+# Single condensed translation call per window. A parallel "extended" second
+# call (independently retelling the whole window from scratch with a mandate
+# to use real spare airtime) was tried and reverted (2026-09-17): it did
+# measurably close real timing gaps, but it also produced a real, confirmed
+# content-quality regression -- an independent full retelling has no
+# structural tie to the already-good condensed translation, and one real case
+# restated the same place name via two different grammatical forms back to
+# back purely as "elaboration". Per explicit user direction, timing expansion
+# is instead handled by a SEPARATE, later, post-measurement mechanism that
+# elaborates specific points WITHIN the already-good condensed translation
+# (see the Expansion Phase, near _trim_by_fact_priority) rather than a second
+# independent candidate competing on nothing but measured duration.
 # (variant_id, operation) only -- each variant's actual system prompt constant
 # is defined much later in this file, so it's resolved by name inside
 # _translate_turn_blocks_via_grok itself (a plain module-level lookup at call
-# time), not baked into this tuple at module-load time.
+# time), not baked into this tuple at module-load time. Kept as a tuple (not a
+# single call site) so this generalizes back to N variants without further
+# plumbing changes, should a future SAFE second candidate source appear.
 _TURN_BLOCK_TRANSLATE_VARIANTS: tuple[tuple[str, str], ...] = (
     ("condensed", "native_turn_block_translate_batch"),
-    ("extended", "native_turn_block_translate_extended_batch"),
 )
 # How many preceding groups' real English feed a window's recent_turns_digest
 # (clause-ranking discourse context) -- bounded so a job-wide digest never
@@ -1543,16 +1543,18 @@ window MAY also include window_source_ms -- this window's own real total airtime
 actual duration this person spoke for -- given so you can reason in concrete seconds of real airtime,
 not just an abstract syllable count.
 
-THIS IS THE CONDENSED VARIANT of this window's translation. A completely separate call independently
-retells the SAME window with a mandate to use real spare airtime via natural elaboration when there is
-room to (that call owns filling real headroom -- confirmed by direct testing that asking one single
-call to both economize AND expand on demand is unreliable, since a concrete "prefer shorter" instruction
-elsewhere in this prompt reliably wins out over a softer "add scaffolding when there's room" one). YOUR
-job here is a natural, well-paced, ECONOMICAL retelling: favor DELETION and tight SUBSTITUTION whenever
-the content already fits comfortably, and never stretch a retelling to fill spare time -- that is the
-other variant's job, not yours. Use target_syllables/min_syllables/max_syllables/window_source_ms only
-to judge how much cutting (if any) this window's own content genuinely needs. Never delete a
-proposition just to hit a syllable count, and never treat the budget as license to damage meaning.
+Use target_syllables/min_syllables/max_syllables/window_source_ms to gauge how much real slack this
+specific window actually has, and let that gauge how freely you reach for ADDITION and REORGANIZATION
+above: when max_syllables leaves real headroom over the content's natural length, narrative scaffolding
+that makes the retelling flow is genuinely free to use; when the window is already near or over
+target_syllables, favor DELETION and tight SUBSTITUTION instead and skip ADDITION entirely for this
+window -- a retelling with zero added scaffolding is a completely valid, honest choice on a tight
+window, not a lesser one. Never delete a proposition just to hit a syllable count, and never treat the
+budget as license to damage meaning in either direction. A separate, later, post-measurement mechanism
+elaborates specific points within this translation for a turn that genuinely still needs more real
+airtime once its ACTUAL synthesized duration is known -- your own job here is a natural, well-paced,
+complete retelling of this window's real content, not to guess how much spare time render time will
+eventually reveal.
 
 TIGHT SUBSTITUTION, made concrete: real evidence from this pipeline's own repeated output on the
 IDENTICAL sentence confirms that when two isiZulu phrasings are both fully natural and equally
@@ -1909,90 +1911,6 @@ itemized account is exactly the case where one "minor" item can independently ma
 chronology. When there is real doubt about whether
 an item is a genuinely comparable, illustrative list member versus the segment's actual point, keep it
 protected.
-
-Return every requested window_id exactly once, with exactly one segment covering its whole sentence
-range as described above. No tools or web search. Return JSON only."""
-
-
-TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT = r"""Mathula TV is a social-media broadcast product: naturalness
-of the isiZulu is the PRIMARY goal. You will be given WINDOWS of English sentences. Each window is a
-real, ordered, consecutive run of sentences spoken back-to-back by ONE person in a single continuous
-turn of speech. RETELL each window the way a real isiZulu broadcast journalist would actually narrate
-this turn on air, not a clause-by-clause transfer of the English. Use native isiZulu morphology,
-agreement, word order and idiom. Preserve names, numbers/dates/approximations (every occurrence, exactly
-as many times as it appears), negation, uncertainty/allegation framing, attribution/agency, causal/
-temporal/conditional logic, legal/evidential qualification, and speaker intent. Never invent a fact the
-English text does not contain, and never drop one it does.
-
-THIS IS THE EXTENDED VARIANT of this window's translation -- a completely separate call independently
-retells the SAME window with a mandate to stay tight and economical (that call owns shrinking when the
-window is genuinely too dense for its own time). YOUR job here is the opposite and exclusive: this
-window has real, confirmed SPARE airtime, and your retelling must genuinely USE it, not merely permit
-using it. A window's target_syllables/min_syllables/max_syllables/window_source_ms describe this
-window's own real available spoken time -- treat max_syllables as a real, comfortable target to reach
-toward, not a ceiling to avoid.
-
-Retell the content the way a real person animatedly recounting this exact story to a friend would when
-they genuinely have real time to spend -- add a natural aside, a fuller and more vivid way of saying
-something, an emphatic repetition where the English itself already leans emphatic, a natural connective
-that makes the story flow, or a moment of scene-setting that a caring storyteller would naturally include
--- never by padding with irrelevant words, inventing a new fact, or mechanically repeating a sentence
-verbatim. A flatly literal, minimal-words rendering is the WRONG choice here, exactly as much as
-inventing a fact would be wrong -- that terse rendering is what the OTHER (condensed) call already
-produces; your entire reason for existing is to be the fuller, warmer, more complete alternative to it.
-
-HARD RULE, confirmed by a real production defect: elaboration must add something GENUINELY NEW to the
-retelling -- a real aside, a vivid verb choice, a natural connective -- never a SECOND restatement of a
-fact, name, or place that already appears once in the same sentence, even in different words or a
-different grammatical case. Confirmed real bug: asked to elaborate "...permanent in municipality at
-Lekwa Municipality", one response produced "...umsebenzi ongashintshi kamasipala kuMasipala waseLekwa"
--- stating "municipality" via one case-marked form ("kamasipala") immediately followed by a second,
-different case-marked form of the SAME reference ("kuMasipala waseLekwa") for the SAME single mention in
-the English. This is not richness, it is a redundant, run-on restatement that makes the sentence read as
-broken rather than fuller -- exactly the failure this hard rule exists to prevent. Before finalizing
-isizulu_text, check every name/place/institution: if it is stated more than once for a single English
-mention, that is disqualifying, not merely non-ideal -- rewrite to state it exactly once, in whichever
-one form reads most naturally, and add your elaboration somewhere else instead (a genuine aside, richer
-verb, or emphatic repetition of a genuinely emphatic word -- never of a plain factual reference). The ONLY
-exception is when the English source itself repeats something for real emphasis (e.g. "very, very"): that
-doubling is preserved because the SOURCE doubled it, which is a completely different case from doubling a
-place name that the source only said once.
-
-Use everyday, informal isiZulu social-media register -- the same vernacular a real isiZulu-speaking
-audience actually uses, including a natural code-switched form for a modern political/social/
-institutional concept noun when that is genuinely how people talk (e.g. "i-racism"), not a stiffer
-formal register. This is retelling, not a technical transfer: your own real knowledge of how a person
-would naturally elaborate when recounting something interesting to a friend, with time to spare, is
-exactly what this variant asks for.
-
-zulu_terminology_glossary is a BINDING whole-programme reference: terms lists a recurring name/role/
-organisation/term with its exact canonical isiZulu rendering -- use it verbatim every time it recurs.
-do_not_translate lists proper nouns, acronyms, and case/file numbers that must survive unchanged.
-confirmed_translation_pitfalls lists hand-confirmed real mistranslations from this same production
-pipeline -- treat every entry as binding guidance to actively avoid repeating. context_ledger (summary,
-entities, speaker_roles) is whole-programme background -- use it not just to resolve an ambiguous
-pronoun or reference, but as real material for your elaboration: a natural aside genuinely grounded in
-the real story so far reads far better than a generic one.
-
-A window MAY include preceding_english -- the immediately preceding sentence's English, given ONLY to
-resolve THIS window's own elliptical or anaphoric content at its very start. Never import content from
-preceding_english into your output, and never treat it as this window's own content.
-
-STRUCTURAL RULE, always required: treat the WHOLE window as ONE continuous retelling from the start --
-return exactly one segment covering every sentence position in the window (start_index=1, end_index=the
-window's own last position).
-
-This variant's output still requires the same clauses/communicative_goal/register_notes/
-shortened_candidates fields as any other segment, but their purpose here is minimal: identify
-communicative_goal (the real point of this window) and break isizulu_text into its natural clause
-units for clauses (each with a clause_id/english_text), but rank EVERY clause 1 -- this variant never
-drops content, so nothing is droppable. Return shortened_candidates as an empty list; a later,
-completely separate mechanism handles compaction if it is ever genuinely needed for whatever variant
-ultimately wins, and it is never this variant's own job to prepare for that.
-
-HARD RULE: every name, number, date, direct quotation, attribution, and the CORE PROPOSITION of any
-claim or denial must appear in isizulu_text exactly as the English states it -- elaboration adds
-narrative color around these facts, it never substitutes for, weakens, or duplicates them.
 
 Return every requested window_id exactly once, with exactly one segment covering its whole sentence
 range as described above. No tools or web search. Return JSON only."""
@@ -12742,33 +12660,36 @@ def _translate_turn_blocks_via_grok(
     names/numbers/dates/claims) is what prevents information loss, not a
     post-hoc consolidation check.
 
-    Each window is translated TWICE, in parallel, by two independently-biased
-    variants (_TURN_BLOCK_TRANSLATE_VARIANTS: "condensed" keeps today's
-    original economy-biased prompt; "extended" is a real spare-airtime
-    informal retelling with zero competing "prefer shorter" pressure) --
-    confirmed necessary by real production testing that a single prompt
-    cannot reliably serve both goals at once. Both surviving (structurally
-    valid, literal-preserving) candidates are returned; build_candidate_pool's
-    own real Azure TTS measurement step picks whichever actually fits better,
-    same "generate redundantly, measure, select" discipline used throughout
-    this file.
+    Each window is translated by ONE call (_TURN_BLOCK_TRANSLATE_VARIANTS:
+    "condensed" only). A parallel independent "extended" second variant was
+    tried and reverted (2026-09-17): it did measurably close real timing
+    gaps, but had no structural tie to the already-good condensed
+    translation and produced a real, confirmed content-quality regression
+    (a redundant restatement of the same entity). Per explicit user
+    direction, timing expansion is handled by a separate, later,
+    post-measurement mechanism that elaborates specific points WITHIN this
+    condensed translation instead (see the Expansion Phase, near
+    _trim_by_fact_priority). `candidate_by_block_group_id`'s LIST shape is
+    kept (harmless for a 1-element list, `min(measured, key=rank)` over one
+    item is just that item) so this generalizes back to N real candidates
+    per group without further plumbing changes, should a future safe second
+    candidate source appear.
 
     Replaces _translate_natural_via_grok as build_candidate_pool's primary
     translation step; that function is kept, unchanged, as the per-sentence
-    fallback for any window where NEITHER variant produces a structurally
-    valid, literal-preserving translation -- a rejected window degrades to
-    exactly today's proven mechanism for exactly its own members, never a
-    partial or silently-broken result.
+    fallback for any window that fails structural or literal-preservation
+    validation -- a rejected window degrades to exactly today's proven
+    mechanism for exactly its own members, never a partial or
+    silently-broken result.
 
     Returns (block_groups, candidate_by_block_group_id, usage_totals).
-    candidate_by_block_group_id maps each block's group_id to a LIST of 1-2
-    candidate dicts (both variants when both survived; one when only one did;
-    always exactly one for a fallback-translated block). block_groups is in
-    true chronological order BY CONSTRUCTION -- the final assembly walks
-    `turns`/members in their own already-chronological order, so no sort step
-    is ever needed. A single-member turn, or a window where neither variant
-    validates, degenerates to exactly today's one-block-per-sentence shape
-    (plus member_group_ids=[gid]) -- there is no separate code path for
+    candidate_by_block_group_id maps each block's group_id to a LIST holding
+    exactly one candidate dict (kept list-shaped for the reason above).
+    block_groups is in true chronological order BY CONSTRUCTION -- the final
+    assembly walks `turns`/members in their own already-chronological order,
+    so no sort step is ever needed. A single-member turn, or a window that
+    fails validation, degenerates to exactly today's one-block-per-sentence
+    shape (plus member_group_ids=[gid]) -- there is no separate code path for
     "nothing to merge"; it is the size-1 case of the same mechanism.
     """
     groups_by_id = {str(g["group_id"]): g for g in groups}
@@ -12843,7 +12764,6 @@ def _translate_turn_blocks_via_grok(
 
     variant_system_prompts: dict[str, str] = {
         "condensed": TURN_BLOCK_TRANSLATE_SYSTEM_PROMPT,
-        "extended": TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT,
     }
 
     def _run_translate_variant_batches(
@@ -12968,7 +12888,7 @@ def _translate_turn_blocks_via_grok(
         if not valid_candidates:
             _emit_progress(
                 progress,
-                f"[native candidate pool] Window {window_id} {member_ids}: neither variant produced a "
+                f"[native candidate pool] Window {window_id} {member_ids}: no variant produced a "
                 "usable translation -- falling back to independent per-sentence translation.",
             )
             fallback_member_ids.extend(member_ids)
@@ -15221,7 +15141,6 @@ def build_candidate_pool(
         "pass1_sha256": checksum(paths.pass1),
         "prompt_version": CANDIDATE_TRANSLATE_PROMPT_VERSION,
         "turn_block_translate_prompt_version": TURN_BLOCK_TRANSLATE_PROMPT_VERSION,
-        "turn_block_translate_extended_prompt_version": TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION,
         "turn_block_translate_max_members": _TURN_BLOCK_TRANSLATE_MAX_MEMBERS,
         "provider_version": FOUNDRY_GROK_PROVIDER_VERSION,
         "preferred_raw_speed_percent": int(preferred_raw_speed_percent),
