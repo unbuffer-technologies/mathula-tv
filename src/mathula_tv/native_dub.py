@@ -134,7 +134,7 @@ ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-c
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v4-turn-id"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v13-social-media-vocabulary-all-modes"
 TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v41-condensed-variant-of-dual-call"
-TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION = "native-turn-block-translate-extended-v1-real-spare-airtime-retelling"
+TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION = "native-turn-block-translate-extended-v2-no-redundant-entity-restatement"
 MANUAL_WEB_OVERRIDE_SCHEMA_VERSION = "mathula-native-manual-web-overrides-v1"
 TIMING_REPAIR_SCHEMA_VERSION = "mathula-native-natural-timing-recast-v6-rhetorical-controller"
 SPEECH_ISLANDS_SCHEMA_VERSION = "mathula-native-speech-islands-v1"
@@ -1940,6 +1940,23 @@ that makes the story flow, or a moment of scene-setting that a caring storytelle
 verbatim. A flatly literal, minimal-words rendering is the WRONG choice here, exactly as much as
 inventing a fact would be wrong -- that terse rendering is what the OTHER (condensed) call already
 produces; your entire reason for existing is to be the fuller, warmer, more complete alternative to it.
+
+HARD RULE, confirmed by a real production defect: elaboration must add something GENUINELY NEW to the
+retelling -- a real aside, a vivid verb choice, a natural connective -- never a SECOND restatement of a
+fact, name, or place that already appears once in the same sentence, even in different words or a
+different grammatical case. Confirmed real bug: asked to elaborate "...permanent in municipality at
+Lekwa Municipality", one response produced "...umsebenzi ongashintshi kamasipala kuMasipala waseLekwa"
+-- stating "municipality" via one case-marked form ("kamasipala") immediately followed by a second,
+different case-marked form of the SAME reference ("kuMasipala waseLekwa") for the SAME single mention in
+the English. This is not richness, it is a redundant, run-on restatement that makes the sentence read as
+broken rather than fuller -- exactly the failure this hard rule exists to prevent. Before finalizing
+isizulu_text, check every name/place/institution: if it is stated more than once for a single English
+mention, that is disqualifying, not merely non-ideal -- rewrite to state it exactly once, in whichever
+one form reads most naturally, and add your elaboration somewhere else instead (a genuine aside, richer
+verb, or emphatic repetition of a genuinely emphatic word -- never of a plain factual reference). The ONLY
+exception is when the English source itself repeats something for real emphasis (e.g. "very, very"): that
+doubling is preserved because the SOURCE doubled it, which is a completely different case from doubling a
+place name that the source only said once.
 
 Use everyday, informal isiZulu social-media register -- the same vernacular a real isiZulu-speaking
 audience actually uses, including a natural code-switched form for a modern political/social/

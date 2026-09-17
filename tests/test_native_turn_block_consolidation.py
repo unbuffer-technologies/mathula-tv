@@ -70,7 +70,21 @@ def test_extended_prompt_pushes_real_spare_airtime_usage():
     assert "animatedly recounting this exact story to a friend" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
     assert "is the WRONG choice here" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
     assert "rank EVERY clause 1" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
-    assert "v1-real-spare-airtime-retelling" in TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION
+    assert "v2-no-redundant-entity-restatement" in TURN_BLOCK_TRANSLATE_EXTENDED_PROMPT_VERSION
+
+
+def test_extended_prompt_forbids_redundant_entity_restatement():
+    # Real production regression (job fb3d08b63fed4d90922b08f7e325b906,
+    # native_phrase_0005): asked to elaborate, the extended variant restated
+    # "municipality" via two different case-marked forms back to back
+    # ("...kamasipala kuMasipala waseLekwa") for a single English mention,
+    # producing a run-on, broken-sounding sentence -- a real content defect,
+    # not a timing one, that the pure duration-based selection couldn't catch
+    # (per feedback_qa_after_not_during, the fix belongs in generation, not a
+    # new in-pipeline audit call).
+    assert "kamasipala kuMasipala waseLekwa" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
+    assert "that is disqualifying, not merely non-ideal" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
+    assert "the SOURCE doubled it" in TURN_BLOCK_TRANSLATE_EXTENDED_SYSTEM_PROMPT
 
 
 def _group(group_id: str, source_text: str, *, speaker_id: str = "SPEAKER_00", start_ms: int, span_ms: int = 3000) -> dict:
