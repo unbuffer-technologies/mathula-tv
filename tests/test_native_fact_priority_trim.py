@@ -55,10 +55,12 @@ from mathula_tv.native_dub import (
     _canonicalize_segment_clauses,
     _canonicalize_shortened_candidates,
     _compress_protected_content_last_resort,
+    _elaborate_underfilled_sentences,
     _filter_safe_shortened_candidates,
     _missing_required_literals,
     _sentence_preserves_required_literals,
     _timing_candidate_rank,
+    _timing_recast_direction,
     _trim_by_fact_priority,
     _validate_turn_block_segments,
 )
@@ -915,4 +917,235 @@ def test_last_resort_batches_every_triggered_block_into_one_call(tmp_path):
     assert len(provider.calls) == 1  # one batched call, not one per block
     assert updated["g1"]["spoken_text"] == compressed1
     assert updated["g2"]["spoken_text"] == compressed2
+
+
+# --- _elaborate_underfilled_sentences: the expand-direction counterpart -----------------
+
+
+class _FakeElaborationProvider:
+    def __init__(self, *, responses=None, error=None):
+        self._responses = responses or {}
+        self._error = error
+        self.calls: list[dict] = []
+
+    def complete_json(self, *, operation, system_prompt, payload, schema, max_output_tokens):
+        self.calls.append({"operation": operation, "payload": payload})
+        if self._error is not None:
+            raise self._error
+        units = []
+        for item in payload["units"]:
+            result = self._responses.get(item["unit_id"])
+            if result is None:
+                continue
+            units.append({"unit_id": item["unit_id"], **result})
+        return SimpleNamespace(data={"units": units}, input_tokens=100, output_tokens=50, attempts=1)
+
+
+def _expand_winner(spoken_text, measured_ms, path, *, span_ms=3000):
+    # Mirrors _winner's own real rank-tuple computation, but for the "expand"
+    # (undersized) direction -- _winner's own helper never sets "direction"
+    # at all, and _elaborate_underfilled_sentences checks it directly.
+    geometry = _geometry(span_ms)
+    direction = _timing_recast_direction(
+        measured_ms, geometry["source_window_ms"],
+        max_speed_percent=DEFAULT_MAX_NATURAL_SPEED_PERCENT,
+        mouth_close_early_tolerance_ms=geometry["mouth_close_early_tolerance_ms"],
+        mouth_close_late_tolerance_ms=geometry["mouth_close_late_tolerance_ms"],
+    )
+    rank = _timing_candidate_rank(
+        measured_ms, geometry["source_window_ms"], geometry["preferred_raw_ms"],
+        max_speed_percent=DEFAULT_MAX_NATURAL_SPEED_PERCENT,
+        mouth_close_early_tolerance_ms=geometry["mouth_close_early_tolerance_ms"],
+        mouth_close_late_tolerance_ms=geometry["mouth_close_late_tolerance_ms"],
+    )
+    return {
+        "candidate_id": "grok_natural", "variant_id": "natural", "translator": "grok",
+        "spoken_text": spoken_text, "measured_ms": measured_ms, "direction": direction,
+        "fit": direction is None, "qa_penalty": 0, "qa_record": None, "requires_review": False,
+        "path": str(path), "rank": list(rank),
+    }
+
+
+def test_elaboration_skips_a_sentence_under_the_trigger_with_zero_provider_calls(tmp_path):
+    wav = tmp_path / "g1.wav"
+    _write_real_wav(wav, ms=2900)
+    group = _group("g1", source_text="A plain sentence.")
+    winner = _expand_winner("Umusho ojwayelekile.", 2900, wav)  # only a tiny, sub-trigger shortfall
+    provider = _FakeElaborationProvider()
+
+    updated, usage = _elaborate_underfilled_sentences(
+        provider=provider, groups=[group], winners={"g1": winner}, tts=_FakeTrimTts({}),
+        geometries={"g1": _geometry()}, voice_assignments=_VOICE_ASSIGNMENTS,
+        measurement_audio_root=tmp_path, force=True, candidate_pool_tts_workers=1,
+        glossary={},
+    )
+    assert updated["g1"] is winner
+    assert provider.calls == []
+    assert usage == {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+
+
+def test_elaboration_skips_a_sentence_that_already_fits_or_overshoots(tmp_path):
+    wav = tmp_path / "g1.wav"
+    _write_real_wav(wav, ms=3000)
+    group = _group("g1", source_text="A plain sentence.")
+    winner = _expand_winner("Umusho ojwayelekile ngempela.", 3000, wav)  # direction is None, not "expand"
+    provider = _FakeElaborationProvider()
+
+    updated, _usage = _elaborate_underfilled_sentences(
+        provider=provider, groups=[group], winners={"g1": winner}, tts=_FakeTrimTts({}),
+        geometries={"g1": _geometry()}, voice_assignments=_VOICE_ASSIGNMENTS,
+        measurement_audio_root=tmp_path, force=True, candidate_pool_tts_workers=1,
+        glossary={},
+    )
+    assert updated["g1"] is winner
+    assert provider.calls == []
+
+
+def test_elaboration_promotes_a_genuine_improvement_and_flags_it_for_review(tmp_path):
+    wav = tmp_path / "g1.wav"
+    _write_real_wav(wav, ms=2000)
+    source_text = "A short sentence that finishes early for its window."
+    spoken_text = "Umusho omfushane."
+    group = _group("g1", source_text=source_text)
+    winner = _expand_winner(spoken_text, 2000, wav)  # 3000ms window -> real 1000ms (33%) shortfall
+    elaborated_text = "Umusho omfushane, kodwa manje usuzwakala ngokugcwele nangokuqondile."
+    provider = _FakeElaborationProvider(responses={
+        "g1": {"isizulu_text": elaborated_text, "elaborated_points": ["added a natural closing aside"]},
+    })
+    tts = _FakeTrimTts({elaborated_text: 2950})  # a real, fuller measured duration once elaborated
+
+    updated, usage = _elaborate_underfilled_sentences(
+        provider=provider, groups=[group], winners={"g1": winner}, tts=tts,
+        geometries={"g1": _geometry()}, voice_assignments=_VOICE_ASSIGNMENTS,
+        measurement_audio_root=tmp_path, force=True, candidate_pool_tts_workers=1,
+        glossary={},
+    )
+    promoted = updated["g1"]
+    assert promoted["spoken_text"] == elaborated_text
+    assert promoted["requires_review"] is True
+    assert promoted["elaborated_points"] == ["added a natural closing aside"]
+    assert usage["attempts"] == 1  # exactly one real LLM call, batched
+    assert tts.calls == [elaborated_text]
+
+
+def test_elaboration_keeps_the_original_when_the_candidate_does_not_improve(tmp_path):
+    wav = tmp_path / "g1.wav"
+    _write_real_wav(wav, ms=2000)
+    source_text = "A short sentence that finishes early for its window."
+    spoken_text = "Umusho omfushane."
+    group = _group("g1", source_text=source_text)
+    winner = _expand_winner(spoken_text, 2000, wav)
+    elaborated_text = "Umusho omfushane kancane."
+    provider = _FakeElaborationProvider(responses={
+        "g1": {"isizulu_text": elaborated_text, "elaborated_points": ["barely changed anything"]},
+    })
+    # The elaborated candidate measures the SAME as the baseline -- a real
+    # Azure TTS call is not guaranteed to be longer just because the text
+    # nominally changed, and an identical rank tuple must not count as
+    # "improved" (strictly better is required, not merely as good).
+    tts = _FakeTrimTts({elaborated_text: 2000})
+
+    updated, _usage = _elaborate_underfilled_sentences(
+        provider=provider, groups=[group], winners={"g1": winner}, tts=tts,
+        geometries={"g1": _geometry()}, voice_assignments=_VOICE_ASSIGNMENTS,
+        measurement_audio_root=tmp_path, force=True, candidate_pool_tts_workers=1,
+        glossary={},
+    )
+    assert updated["g1"]["spoken_text"] == spoken_text
+    assert updated["g1"]["requires_review"] is False
+
+
+def test_elaboration_discards_a_candidate_that_drops_a_required_literal(tmp_path):
+    wav = tmp_path / "g1.wav"
+    _write_real_wav(wav, ms=2000)
+    source_text = "The report cites 24 documents from 2024."
+    spoken_text = "Umbiko ukhomba amadokhumenti angu-24 ka-2024."
+    group = _group("g1", source_text=source_text)
+    winner = _expand_winner(spoken_text, 2000, wav)
+    # Drops "24" and "2024" entirely -- must be discarded regardless of how
+    # well it would otherwise measure.
+    elaborated_text = "Umbiko ukhomba amadokhumenti amaningi ngokwedlule."
+    provider = _FakeElaborationProvider(responses={
+        "g1": {"isizulu_text": elaborated_text, "elaborated_points": ["added vague color"]},
+    })
+    tts = _FakeTrimTts({elaborated_text: 2950})
+
+    updated, _usage = _elaborate_underfilled_sentences(
+        provider=provider, groups=[group], winners={"g1": winner}, tts=tts,
+        geometries={"g1": _geometry()}, voice_assignments=_VOICE_ASSIGNMENTS,
+        measurement_audio_root=tmp_path, force=True, candidate_pool_tts_workers=1,
+        glossary={},
+    )
+    assert updated["g1"]["spoken_text"] == spoken_text
+    assert tts.calls == []  # discarded before ever spending on real TTS measurement
+
+
+def test_elaboration_returning_the_current_text_unchanged_is_a_valid_no_op(tmp_path):
+    # The prompt explicitly permits "current_isizulu_text unchanged, empty
+    # elaborated_points" whenever no safe, genuine elaboration point exists --
+    # this must be treated as a no-op, not measured or promoted.
+    wav = tmp_path / "g1.wav"
+    _write_real_wav(wav, ms=2000)
+    group = _group("g1", source_text="A short sentence that finishes early for its window.")
+    spoken_text = "Umusho omfushane."
+    winner = _expand_winner(spoken_text, 2000, wav)
+    provider = _FakeElaborationProvider(responses={
+        "g1": {"isizulu_text": spoken_text, "elaborated_points": []},
+    })
+
+    updated, _usage = _elaborate_underfilled_sentences(
+        provider=provider, groups=[group], winners={"g1": winner}, tts=_FakeTrimTts({}),
+        geometries={"g1": _geometry()}, voice_assignments=_VOICE_ASSIGNMENTS,
+        measurement_audio_root=tmp_path, force=True, candidate_pool_tts_workers=1,
+        glossary={},
+    )
+    assert updated["g1"] is winner
+
+
+def test_elaboration_degrades_gracefully_when_the_provider_call_fails(tmp_path):
+    wav = tmp_path / "g1.wav"
+    _write_real_wav(wav, ms=2000)
+    group = _group("g1", source_text="A short sentence that finishes early for its window.")
+    winner = _expand_winner("Umusho omfushane.", 2000, wav)
+    provider = _FakeElaborationProvider(error=RuntimeError("boom"))
+
+    updated, usage = _elaborate_underfilled_sentences(
+        provider=provider, groups=[group], winners={"g1": winner}, tts=_FakeTrimTts({}),
+        geometries={"g1": _geometry()}, voice_assignments=_VOICE_ASSIGNMENTS,
+        measurement_audio_root=tmp_path, force=True, candidate_pool_tts_workers=1,
+        glossary={},
+    )
+    assert updated["g1"] is winner
+    assert usage == {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+
+
+def test_elaboration_batches_every_triggered_sentence_into_one_call(tmp_path):
+    wav1 = tmp_path / "g1.wav"
+    wav2 = tmp_path / "g2.wav"
+    _write_real_wav(wav1, ms=2000)
+    _write_real_wav(wav2, ms=2000)
+    groups = [
+        _group("g1", source_text="First short sentence that finishes early.", span_ms=3000),
+        _group("g2", source_text="Second short sentence that finishes early.", speaker_id="S0", span_ms=3000),
+    ]
+    winners = {
+        "g1": _expand_winner("Umusho wokuqala omfushane.", 2000, wav1),
+        "g2": _expand_winner("Umusho wesibili omfushane.", 2000, wav2),
+    }
+    elaborated1, elaborated2 = "Umusho wokuqala omfushane, kodwa ochazwe kabanzi.", "Umusho wesibili omfushane, futhi ochazwe kabanzi."
+    provider = _FakeElaborationProvider(responses={
+        "g1": {"isizulu_text": elaborated1, "elaborated_points": ["added color"]},
+        "g2": {"isizulu_text": elaborated2, "elaborated_points": ["added color"]},
+    })
+    tts = _FakeTrimTts({elaborated1: 2950, elaborated2: 2950})
+
+    updated, _usage = _elaborate_underfilled_sentences(
+        provider=provider, groups=groups, winners=winners, tts=tts,
+        geometries={"g1": _geometry(), "g2": _geometry()}, voice_assignments=_VOICE_ASSIGNMENTS,
+        measurement_audio_root=tmp_path, force=True, candidate_pool_tts_workers=1,
+        glossary={},
+    )
+    assert len(provider.calls) == 1  # one batched call, not one per sentence
+    assert updated["g1"]["spoken_text"] == elaborated1
+    assert updated["g2"]["spoken_text"] == elaborated2
 

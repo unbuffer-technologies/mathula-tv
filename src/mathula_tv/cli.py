@@ -999,6 +999,15 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     native_translate.add_argument(
+        "--skip-elaboration",
+        action="store_true",
+        help=(
+            "Diagnostic only (--candidate-pool): skip the elaboration stage entirely (real cost) "
+            "-- a sentence that finishes real dead air short of its own window is left exactly as "
+            "turn rebalancing produced it, with no attempt to find real points to elaborate."
+        ),
+    )
+    native_translate.add_argument(
         "--json",
         "--json-output",
         dest="json_output",
@@ -1880,6 +1889,7 @@ def main(argv: list[str] | None = None) -> int:
                     skip_turn_block_translation=bool(args.skip_turn_block_translation),
                     skip_pronunciation_research=bool(args.skip_pronunciation_research),
                     skip_speaker_seriousness_mode=bool(args.skip_speaker_seriousness_mode),
+                    skip_elaboration=bool(args.skip_elaboration),
                     progress=progress,
                 )
                 job.media["native_candidate_pool"] = str(

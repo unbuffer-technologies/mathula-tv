@@ -13118,11 +13118,10 @@ def _enrich_measured_candidates(
             merged["dropped_clause_ids"] = list(original["dropped_clause_ids"])
         if original.get("omitted_items"):
             merged["omitted_items"] = list(original["omitted_items"])
-        # Carried through so a post-measurement winner-selection step (e.g. the
-        # condensed/extended dual-variant translate call) can copy the WINNING
-        # candidate's own clause-ranking/compaction-ladder metadata onto its
-        # block group, without needing a second lookup back into a
-        # pre-measurement candidate list.
+        # Carried through so a post-measurement winner-selection step can copy
+        # the WINNING candidate's own clause-ranking/compaction-ladder
+        # metadata onto its block group, without needing a second lookup back
+        # into a pre-measurement candidate list.
         if original.get("clauses") is not None:
             merged["clauses"] = original["clauses"]
         if original.get("shortened_candidates"):
@@ -13131,6 +13130,8 @@ def _enrich_measured_candidates(
             merged["communicative_goal"] = original["communicative_goal"]
         if original.get("register_notes") is not None:
             merged["register_notes"] = original["register_notes"]
+        if original.get("elaborated_points"):
+            merged["elaborated_points"] = list(original["elaborated_points"])
         enriched.append(merged)
     return enriched
 
@@ -14914,6 +14915,334 @@ def _compress_protected_content_last_resort(
     return updated_winners, usage_totals
 
 
+_ELABORATION_TRIGGER_PERCENT = 15.0
+# Real shortfall, as a percentage of the sentence's own real window, before this
+# tier is even offered a shot -- calibrated from this session's own real data
+# (turns measuring -16% to -49% after turn rebalancing alone had already done
+# everything pure arithmetic can). Deliberately narrower than the earlier,
+# reverted dual-parallel-call design's blanket per-window treatment: this tier
+# only ever runs for a sentence with a REAL, MEASURED residual gap, not every
+# sentence with any theoretical spare syllable budget.
+
+ELABORATION_PROMPT_VERSION = "native-elaboration-v1-real-spare-airtime-points"
+
+ELABORATION_SYSTEM_PROMPT = r"""Mathula TV is a fixed-runtime social broadcast product: a sentence whose
+isiZulu audio finishes noticeably EARLY plays as real, audible dead air while the source speaker is
+still visibly talking on screen -- exactly as broken-looking to a viewer as an audibly rushed sentence,
+just the opposite direction. Each unit you are given already has a good, natural isiZulu translation
+(current_isizulu_text) that correctly and completely conveys source_text -- your job is NOT to
+re-translate it, but to find specific real points within it where a genuine, natural elaboration
+closes some of real_shortfall_ms of real dead air that would otherwise play.
+
+Use context_ledger (the whole programme's own story so far -- its summary, entities, and speaker roles)
+as REAL material for elaboration, not just background: a natural aside, a fuller and more vivid way of
+saying something already there, or a moment of scene-setting genuinely grounded in the real story reads
+far better than a generic one. Also acceptable: an emphatic repetition, but ONLY where source_text
+itself already leans emphatic (e.g. a doubled English word) and current_isizulu_text has not already
+rendered that emphasis. Never invent a new fact, claim, name, number, or date that source_text does not
+contain, and never soften or drop one it does.
+
+HARD RULE, confirmed by a real production defect: elaboration must add something GENUINELY NEW to
+current_isizulu_text -- a real aside, a vivid verb choice, a natural connective grounded in
+context_ledger -- never a SECOND restatement of a fact, name, or place that current_isizulu_text
+already states once, even in different words or a different grammatical case. Confirmed real bug: asked
+to elaborate a sentence ending "...umsebenzi ongashintshi kamasipala kuMasipala waseLekwa", one response
+restated "municipality" via two different case-marked forms back to back ("kamasipala" immediately
+followed by "kuMasipala waseLekwa") for what was a single mention in source_text -- not richness, a
+redundant, run-on restatement that reads as broken rather than fuller. Before finalizing isizulu_text,
+check every name/place/institution/fact: if it would appear more than once for a single source_text
+mention, that is disqualifying, not merely non-ideal.
+
+Elaborate ONLY as much as genuinely fits naturally -- real_shortfall_ms is a rough real-world scale (a
+sentence with a small real_shortfall_ms needs at most one small addition; a large one may support two or
+three), never a number to hit exactly (a later, purely mechanical step measures the real result). Adding
+a point that does not genuinely, naturally belong is worse than leaving current_isizulu_text unchanged --
+returning current_isizulu_text UNCHANGED as isizulu_text, with an empty elaborated_points list, is a
+completely valid, expected answer whenever no safe, genuine elaboration point exists, not a failure.
+
+For each unit, return isizulu_text (current_isizulu_text with your elaboration applied, or unchanged) and
+elaborated_points: short plain-English descriptions of what was added and why (e.g. "added a brief aside
+naming the municipality's own election context, grounded in context_ledger's summary" or "rendered the
+source's doubled 'very, very' as an isiZulu intensifying repetition"). Return an empty elaborated_points
+list when isizulu_text is unchanged. No tools or web search. Return JSON only."""
+
+
+def _elaboration_schema(expected_unit_ids: Sequence[str]) -> dict[str, Any]:
+    requested_ids = [str(value) for value in expected_unit_ids]
+    if len(set(requested_ids)) != len(requested_ids):
+        raise ValueError("Elaboration schema received duplicate expected unit IDs")
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["units"],
+        "properties": {
+            "units": {
+                "type": "array",
+                "minItems": len(requested_ids),
+                "maxItems": len(requested_ids),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["unit_id", "isizulu_text", "elaborated_points"],
+                    "properties": {
+                        "unit_id": {"type": "string", "enum": requested_ids},
+                        "isizulu_text": {"type": "string", "minLength": 1},
+                        "elaborated_points": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "maxItems": 4,
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
+def _request_elaboration_batch(
+    *,
+    provider: FoundryGrokProvider,
+    items: Sequence[Mapping[str, Any]],
+    glossary: Mapping[str, Any],
+    context_ledger: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """items: [{"unit_id", "source_text", "current_isizulu_text", "real_shortfall_ms"}, ...].
+    Returns {unit_id: {"isizulu_text", "elaborated_points"}}. Identity
+    mismatch on unit_id is fatal (same convention as every other candidate-
+    translate-family function in this file).
+    """
+    expected_ids = [str(item["unit_id"]) for item in items]
+    response = provider.complete_json(
+        operation="native_elaboration_batch",
+        system_prompt=ELABORATION_SYSTEM_PROMPT,
+        payload={
+            "zulu_terminology_glossary": dict(glossary),
+            "context_ledger": dict(context_ledger or {}),
+            "units": [
+                {
+                    "unit_id": str(item["unit_id"]),
+                    "source_text": str(item["source_text"]),
+                    "current_isizulu_text": str(item["current_isizulu_text"]),
+                    "real_shortfall_ms": int(item["real_shortfall_ms"]),
+                }
+                for item in items
+            ],
+        },
+        schema=_elaboration_schema(expected_ids),
+        max_output_tokens=min(max(1500, 400 * len(items)), 8192),
+    )
+    returned = list(response.data.get("units") or [])
+    expected_set = set(expected_ids)
+    by_id: dict[str, dict[str, Any]] = {}
+    duplicate_ids: list[str] = []
+    unknown_ids: list[str] = []
+    for item in returned:
+        unit_id = str(item.get("unit_id") or "")
+        if unit_id in by_id:
+            duplicate_ids.append(unit_id)
+            continue
+        if unit_id not in expected_set:
+            unknown_ids.append(unit_id)
+            continue
+        by_id[unit_id] = {
+            "isizulu_text": str(item.get("isizulu_text") or "").strip(),
+            "elaborated_points": [str(value) for value in (item.get("elaborated_points") or [])],
+        }
+
+    missing_ids = [unit_id for unit_id in expected_ids if unit_id not in by_id]
+    if duplicate_ids or unknown_ids or missing_ids:
+        details = []
+        if missing_ids:
+            details.append("missing=" + ",".join(missing_ids))
+        if unknown_ids:
+            details.append("unknown=" + ",".join(unknown_ids))
+        if duplicate_ids:
+            details.append("duplicate=" + ",".join(duplicate_ids))
+        raise ValueError("Elaboration batch identity mismatch: " + "; ".join(details))
+
+    usage = {
+        "input_tokens": int(response.input_tokens),
+        "output_tokens": int(response.output_tokens),
+        "attempts": int(response.attempts),
+    }
+    return by_id, usage
+
+
+def _elaborate_underfilled_sentences(
+    *,
+    provider: FoundryGrokProvider,
+    groups: Sequence[Mapping[str, Any]],
+    winners: Mapping[str, Mapping[str, Any]],
+    tts: AzureTTSBackend,
+    geometries: Mapping[str, Mapping[str, Any]],
+    voice_assignments: Mapping[str, Mapping[str, Any]],
+    measurement_audio_root: Path,
+    force: bool,
+    candidate_pool_tts_workers: int,
+    glossary: Mapping[str, Any],
+    context_ledger: Mapping[str, Any] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """The expand-direction counterpart to _trim_by_fact_priority/
+    _compress_protected_content_last_resort: for a sentence whose current
+    winner still finishes real dead air short of its own real window
+    (`direction == "expand"`) by more than _ELABORATION_TRIGGER_PERCENT
+    after turn rebalancing has already tried pure arithmetic, make ONE
+    Grok call (batched across every triggered sentence in the job, same
+    discipline as every other compaction/expansion mechanism in this file)
+    asking it to find specific real points WITHIN the already-good current
+    translation to elaborate, using the whole programme's own context_ledger
+    as real grounding -- never an independent full re-translation.
+
+    Replaces the earlier, reverted parallel condensed/extended dual-call
+    design (2026-09-17): that design DID measurably close real timing gaps,
+    but an independently-generated full retelling has no structural tie to
+    the already-good translation and produced a real, confirmed content-
+    quality regression (a redundant restatement of the same place name).
+    Building on top of the existing good translation and asking for a
+    small, targeted addition -- with the exact same redundant-restatement
+    hard rule the regression taught -- is a narrower, safer surface for
+    the same real risk.
+
+    Never worse than the winner passed in: promoted only if the elaborated
+    candidate's real _timing_candidate_rank tuple is strictly better than
+    the current winner's, exactly like every other mechanism in this file
+    (never compare raw required_speed_percent alone -- see the real,
+    confirmed bug this avoids in _compress_protected_content_last_resort's
+    own docstring, which applies identically here). Always sets
+    requires_review and carries elaborated_points through to the committed
+    record when promoted, so a human always sees exactly what was added
+    before it airs. A sentence for which no safe elaboration exists, or
+    whose elaborated candidate doesn't measurably help, is left untouched.
+    """
+    groups_by_id = {str(g["group_id"]): g for g in groups}
+    usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+    updated_winners = dict(winners)
+
+    def _shortfall_ms(group_id: str, winner: Mapping[str, Any]) -> int:
+        geometry = geometries.get(group_id)
+        if geometry is None:
+            return 0
+        window_ms = int(geometry.get("source_window_ms") or 0)
+        measured_ms = int(winner.get("measured_ms") or 0)
+        return max(0, window_ms - measured_ms)
+
+    def _shortfall_percent(group_id: str, winner: Mapping[str, Any]) -> float:
+        geometry = geometries.get(group_id)
+        window_ms = int(geometry.get("source_window_ms") or 0) if geometry else 0
+        if window_ms <= 0:
+            return 0.0
+        return (_shortfall_ms(group_id, winner) / window_ms) * 100.0
+
+    triggered_group_ids = [
+        gid for gid, winner in updated_winners.items()
+        if winner.get("direction") == "expand"
+        and gid in groups_by_id
+        and _shortfall_percent(gid, winner) > _ELABORATION_TRIGGER_PERCENT
+    ]
+    if not triggered_group_ids:
+        return updated_winners, usage_totals
+
+    _emit_progress(
+        progress,
+        f"[native candidate pool] {len(triggered_group_ids)} sentence(s) still finish more than "
+        f"{_ELABORATION_TRIGGER_PERCENT:.0f}% short of their real window; attempting elaboration...",
+    )
+
+    items = [
+        {
+            "unit_id": gid,
+            "source_text": str(groups_by_id[gid]["source_text"]),
+            "current_isizulu_text": str(updated_winners[gid]["spoken_text"]),
+            "real_shortfall_ms": _shortfall_ms(gid, updated_winners[gid]),
+        }
+        for gid in triggered_group_ids
+    ]
+    try:
+        by_id, usage = _request_elaboration_batch(
+            provider=provider, items=items, glossary=glossary, context_ledger=context_ledger,
+        )
+    except Exception as exc:
+        _emit_progress(progress, f"[native candidate pool] Elaboration request failed: {exc}")
+        return updated_winners, usage_totals
+    for key in usage_totals:
+        usage_totals[key] += usage.get(key, 0)
+
+    candidates_by_group: dict[str, list[dict[str, Any]]] = {}
+    for gid in triggered_group_ids:
+        result = by_id.get(gid)
+        if not result:
+            continue
+        text = str(result.get("isizulu_text") or "").strip()
+        current_text = str(updated_winners[gid]["spoken_text"]).strip()
+        if not text or text == current_text:
+            continue
+        source_text = str(groups_by_id[gid]["source_text"])
+        if not _sentence_preserves_required_literals(source_text=source_text, candidate_text=text):
+            _emit_progress(
+                progress,
+                f"[native candidate pool] Elaboration for {gid} dropped a required literal -- discarding.",
+            )
+            continue
+        candidates_by_group[gid] = [{
+            "candidate_id": f"{gid}__elaboration", "variant_id": "elaboration",
+            "translator": "grok", "spoken_text": text, "qa_penalty": 0, "qa_record": None,
+            "requires_review": True, "elaborated_points": list(result.get("elaborated_points") or []),
+        }]
+
+    if not candidates_by_group:
+        _emit_progress(progress, "[native candidate pool] Elaboration produced no usable candidates.")
+        return updated_winners, usage_totals
+
+    measured_group_ids = list(candidates_by_group)
+    raw_measured = _measure_temporal_batch(
+        tts=tts, groups=[groups_by_id[gid] for gid in measured_group_ids],
+        candidates_by_group=candidates_by_group,
+        geometries={gid: geometries[gid] for gid in measured_group_ids},
+        voice_assignments=voice_assignments, output_root=measurement_audio_root,
+        round_number=11, force=force, workers=candidate_pool_tts_workers,
+    )
+
+    for gid in measured_group_ids:
+        measured = raw_measured.get(gid) or []
+        if not measured:
+            continue
+        baseline = updated_winners[gid]
+        baseline_shortfall_ms = _shortfall_ms(gid, baseline)
+        enriched = _enrich_measured_candidates(measured=measured, original_candidates=candidates_by_group[gid])
+        candidate = enriched[0]
+        candidate_shortfall_ms = _shortfall_ms(gid, candidate)
+        # Same real, confirmed-necessary comparator as every other timing
+        # mechanism in this file: compare the pre-existing _timing_candidate_
+        # rank tuple, never a single raw percentage/ms value alone, so a
+        # candidate that overshoots into mildly-rushed-but-atempo-rescuable
+        # territory is correctly preferred over one that stays undersized.
+        candidate_rank = tuple(candidate.get("rank") or (9, 0, 0))
+        baseline_rank = tuple(baseline.get("rank") or (9, 0, 0))
+        if candidate_rank < baseline_rank:
+            candidate["requires_review"] = True
+            if baseline.get("effective_start_ms") is not None:
+                candidate.setdefault("effective_start_ms", baseline["effective_start_ms"])
+            if baseline.get("effective_source_end_ms") is not None:
+                candidate.setdefault("effective_source_end_ms", baseline["effective_source_end_ms"])
+            updated_winners[gid] = candidate
+            _emit_progress(
+                progress,
+                f"[native candidate pool] {gid} improved via elaboration: real shortfall "
+                f"{baseline_shortfall_ms}ms -> {candidate_shortfall_ms}ms "
+                f"(added: {'; '.join(candidate.get('elaborated_points') or []) or 'no new points'}).",
+            )
+        else:
+            _emit_progress(
+                progress,
+                f"[native candidate pool] Elaboration for {gid} did not improve on the original "
+                f"({baseline_shortfall_ms}ms baseline shortfall vs {candidate_shortfall_ms}ms for the "
+                f"attempt: {candidate.get('spoken_text')!r}).",
+            )
+
+    return updated_winners, usage_totals
+
+
 def _apply_zulu_morphology_check(
     *,
     winners: dict[str, dict[str, Any]],
@@ -14986,6 +15315,7 @@ def build_candidate_pool(
     skip_pronunciation_research: bool = False,
     skip_pronunciation_round_trip: bool = False,
     skip_speaker_seriousness_mode: bool = False,
+    skip_elaboration: bool = False,
     stt_backend: AzureFastTranscriptionBackend | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -15050,6 +15380,15 @@ def build_candidate_pool(
     best, never requesting new wording). A solo "bridge" block (a short
     interjection like "All right.") is judged only on whether it collides
     with its neighbors, never on fitting its own tiny native window.
+
+    Right after turn rebalancing, `_elaborate_underfilled_sentences` handles
+    the OPPOSITE direction: a sentence that still finishes real dead air
+    short of its own window (turn rebalancing has no new content to
+    redistribute for a solo turn) gets ONE Grok call finding specific real
+    points within its already-good translation to elaborate, grounded in
+    context_ledger's whole-programme story -- never an independent full
+    re-translation. ``skip_elaboration=True`` is a diagnostic-only mode that
+    skips this stage entirely.
     """
     paths = native_dub_paths(job_root)
     if not paths.pass1.is_file():
@@ -15152,6 +15491,7 @@ def build_candidate_pool(
         "skip_turn_block_translation": bool(skip_turn_block_translation),
         "skip_pronunciation_research": bool(skip_pronunciation_research),
         "skip_speaker_seriousness_mode": bool(skip_speaker_seriousness_mode),
+        "skip_elaboration": bool(skip_elaboration),
         "speaker_seriousness_mode_prompt_version": SPEAKER_SERIOUSNESS_MODE_PROMPT_VERSION,
         # Deliberately excludes the glossary's own content -- see the plan's
         # Checkpointing section: a corrected glossary entry shouldn't discard
@@ -15212,10 +15552,10 @@ def build_candidate_pool(
     # rendered output afterward (the same "generate with redundancy, verify
     # by real measurement, never re-check with another LLM call" discipline
     # this file already applies to fact-priority trim), not caught in-pipeline.
-    # grok_candidate_by_group is a LIST per group -- 2 real candidates
-    # (condensed + extended) for a dual-variant-translated block, 1 for a
-    # fallback-translated one -- ALL of them get measured for real below, and
-    # the winner is picked by real measured fit, not by construction order.
+    # grok_candidate_by_group is a LIST per group (always exactly 1 entry
+    # today -- kept list-shaped so a future real second candidate source can
+    # plug in via the same measure-and-select-by-rank step below without
+    # further plumbing changes).
     candidates_by_group: dict[str, list[dict[str, Any]]] = {
         group_id: [
             {**candidate, "qa_penalty": 0, "qa_record": None, "qa_records": [], "requires_review": False}
@@ -15321,6 +15661,18 @@ def build_candidate_pool(
     else:
         _emit_progress(progress, "[native candidate pool] Turn rebalancing skipped (diagnostic mode).")
 
+    elaboration_usage = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
+    if not skip_elaboration:
+        winners, elaboration_usage = _elaborate_underfilled_sentences(
+            provider=provider, groups=block_groups, winners=winners, tts=tts, geometries=geometries,
+            voice_assignments=voice_assignments, measurement_audio_root=measurement_audio_root,
+            force=force, candidate_pool_tts_workers=candidate_pool_tts_workers,
+            glossary=glossary, context_ledger=context_ledger, progress=progress,
+        )
+        _merge_updated_winners(winners)
+    else:
+        _emit_progress(progress, "[native candidate pool] Elaboration skipped (diagnostic mode).")
+
     winners, trim_usage, fact_priority_ladder_exhausted_group_ids = _trim_by_fact_priority(
         groups=block_groups, winners=winners, tts=tts, geometries=geometries,
         voice_assignments=voice_assignments, measurement_audio_root=measurement_audio_root,
@@ -15357,8 +15709,8 @@ def build_candidate_pool(
 
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
     for usage in (
-        context_usage, glossary_usage, pronunciation_research_usage, speaker_mode_usage, grok_usage, trim_usage,
-        last_resort_usage,
+        context_usage, glossary_usage, pronunciation_research_usage, speaker_mode_usage, grok_usage,
+        elaboration_usage, trim_usage, last_resort_usage,
     ):
         for key in usage_totals:
             usage_totals[key] += int(usage.get(key) or 0)
