@@ -16007,7 +16007,7 @@ def commit_candidate_pool(
         "schema_version": CANDIDATE_POOL_COMMIT_SCHEMA_VERSION,
         "candidate_pool_committed": True,
         "candidate_pool_input_sha256": pool_artifact.get("input_sha256"),
-        "provider": "azure-foundry-grok",
+        "provider": "azure-openai-gpt",
         "input_sha256": input_hash,
         "source_pass1_path": str(paths.pass1),
         "source_pass1_sha256": pass1_sha256,
@@ -16288,7 +16288,7 @@ def _whole_transcript_preflight(segments: Sequence[Mapping[str, Any]], *, stage:
         raise ValueError(
             f"{stage} requires whole-transcript context but this transcript is approximately "
             f"{approximate_tokens:,} text tokens before prompt overhead. Split the programme at an editorial boundary "
-            "or use a Grok deployment with a verified larger context; Mathula will not silently chunk this pass."
+            "or use a GPT deployment with a verified larger context; Mathula will not silently chunk this pass."
         )
 
 

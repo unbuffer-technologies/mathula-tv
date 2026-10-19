@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .ai_provider import create_production_ai_provider
-from .foundry_grok import create_foundry_grok_provider
+from .foundry_grok import create_native_gpt_provider
 from .atomic_io import atomic_write_json, read_json
 from .azure_stt import AzureFastTranscriptionBackend, derive_endpoint
 from .azure_tts import AzureTTSBackend, AzureTTSHTTPBoundary
@@ -114,15 +114,21 @@ def create_translation_backend(provider: str | None = None, model: str | None = 
     raise ValueError(f"Unsupported AI provider: {selected}; no fallback is configured")
 
 
-def create_native_grok_backend(
+def create_native_gpt_backend(
     model: str | None = None,
     *,
     progress: Callable[[str], None] | None = None,
 ):
-    environment = dict(os.environ)
-    if model:
-        environment["AZURE_FOUNDRY_GROK_DEPLOYMENT"] = model
-    return create_foundry_grok_provider(environment, progress=progress)
+    """GPT (Azure OpenAI) backend for every native-* command.
+
+    ``model`` overrides the deployment; otherwise AZURE_OPENAI_CHAT_DEPLOYMENT /
+    AZURE_AI_DEPLOYMENT (default gpt-5.6-sol-1) is used. Grok is never selected.
+    """
+    return create_native_gpt_provider(dict(os.environ), deployment=model, progress=progress)
+
+
+# Backwards-compatible name for older call sites/tests.
+create_native_grok_backend = create_native_gpt_backend
 
 
 def _print_native_progress(message: str) -> None:
@@ -749,15 +755,15 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="mathula-tv")
     root.add_argument("--verbose", action="store_true")
     commands = root.add_subparsers(dest="command", required=True)
+    from . import experience_cli
+
+    experience_cli.add_parser(commands)
     submit = commands.add_parser("submit")
     submit.add_argument("video", help="Local MP4/WebM path or a YouTube video URL")
     submit.add_argument("--target-language", default="zu-ZA")
     submit.add_argument("--force", action="store_true")
 
     job_commands = {}
-    from . import experience_cli
-
-    experience_cli.add_parser(commands)
     for name in ("process", "transcribe", "diarize", "retry", "validate", "inspect"):
         job_commands[name] = _add_job_command(commands, name)
     job_commands["process"].add_argument(
@@ -796,7 +802,7 @@ def parser() -> argparse.ArgumentParser:
     native_web.add_argument("override_json", type=Path)
 
     native_translate = _add_job_command(commands, "native-translate")
-    native_translate.add_argument("--model", default=None, help="Foundry Grok deployment name")
+    native_translate.add_argument("--model", default=None, help="Azure OpenAI GPT deployment name (default: AZURE_OPENAI_CHAT_DEPLOYMENT / AZURE_AI_DEPLOYMENT)")
     native_translate.add_argument(
         "--pass",
         dest="native_pass",
@@ -1019,7 +1025,7 @@ def parser() -> argparse.ArgumentParser:
     )
 
     native_qa = _add_job_command(commands, "native-qa")
-    native_qa.add_argument("--model", default=None, help="Foundry Grok deployment used for back-translation QA")
+    native_qa.add_argument("--model", default=None, help="Azure OpenAI GPT deployment used for back-translation QA")
     native_qa.add_argument(
         "--batch-size",
         type=int,
@@ -1075,7 +1081,7 @@ def parser() -> argparse.ArgumentParser:
     )
 
     native_dub = _add_job_command(commands, "native-dub")
-    native_dub.add_argument("--model", default=None, help="Foundry Grok deployment used for native editorial hook and optional timing repair")
+    native_dub.add_argument("--model", default=None, help="Azure OpenAI GPT deployment used for native editorial hook and optional timing repair")
     native_dub.add_argument("--voice-map", type=Path)
     native_dub.add_argument(
         "--hook-edit",
@@ -1593,16 +1599,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "viral-clips":
         print(json.dumps(run_viral_moments_command(args, settings), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "experience":
+        from . import experience_cli
+
+        return experience_cli.run(args, settings)
 
     configure_logging(settings.work_dir / "logs/mathula-tv.jsonl", args.verbose)
     app = Orchestrator(settings)
     phase_timing: _PhaseDurationTracker | None = None
     phase_timing_reported = False
     try:
-    if args.command == "experience":
-        from . import experience_cli
-
-        return experience_cli.run(args, settings)
         if args.command == "submit":
             if is_youtube_url(args.video):
                 maximum_minutes = float(getattr(settings, "max_source_duration_minutes", 240))
@@ -1871,7 +1877,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not 1 <= int(args.candidate_pool_tts_workers) <= 12:
                     raise ValueError("--candidate-pool-tts-workers must be between 1 and 12")
                 progress = _print_native_progress if args.live_operation else None
-                provider = create_native_grok_backend(args.model, progress=progress)
+                provider = create_native_gpt_backend(args.model, progress=progress)
                 job_root = app.jobs.job_dir(job.job_id)
                 tts_backend = create_tts_backend(settings)
                 pronunciation_stt_backend = None
@@ -1927,7 +1933,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"selected winner, {review} flagged requires_review."
                     )
                     print(
-                        f"Grok tokens: in={int(usage.get('input_tokens') or 0):,}, "
+                        f"GPT tokens: in={int(usage.get('input_tokens') or 0):,}, "
                         f"out={int(usage.get('output_tokens') or 0):,}."
                     )
                     print(f"Saved: {job_root / 'native_dub' / 'pass2_candidate_pool.json'}")
@@ -1946,11 +1952,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.temporal_mask and not (1 <= int(args.temporal_mask_candidates) <= 8):
                 raise ValueError(
                     "--temporal-mask-candidates must be between 1 and 8; it is a ceiling on the "
-                    "natural-to-concise compaction ladder Grok may return per window, not an exact "
+                    "natural-to-concise compaction ladder GPT may return per window, not an exact "
                     "count it must fill"
                 )
             if args.temporal_mask and int(args.temporal_mask_residual_rounds) != 0:
-                raise ValueError("--temporal-mask-residual-rounds must be 0; temporal-mask revisions now occur inside one Grok call per window")
+                raise ValueError("--temporal-mask-residual-rounds must be 0; temporal-mask revisions now occur inside one GPT call per window")
             if not 1 <= int(args.temporal_mask_tts_workers) <= 12:
                 raise ValueError("--temporal-mask-tts-workers must be between 1 and 12")
             if not 1 <= int(args.rolling_syllable_batch_size) <= 16:
@@ -1968,7 +1974,7 @@ def main(argv: list[str] | None = None) -> int:
             if not 1 <= int(args.referent_audit_workers) <= 12:
                 raise ValueError("--referent-audit-workers must be between 1 and 12")
             progress = _print_native_progress if args.live_operation else None
-            provider = create_native_grok_backend(args.model, progress=progress)
+            provider = create_native_gpt_backend(args.model, progress=progress)
             job_root = app.jobs.job_dir(job.job_id)
             temporal_tts = (
                 create_tts_backend(settings)
@@ -2025,7 +2031,7 @@ def main(argv: list[str] | None = None) -> int:
                     azure_utterance_overhead_ms=int(args.rolling_azure_overhead_ms),
                     syllable_tolerance_percent=int(args.rolling_syllable_tolerance_percent),
                 )
-            job.providers["native_dub_ai"] = "azure-foundry-grok"
+            job.providers["native_dub_ai"] = provider.provider
             job.providers["native_dub_model"] = provider.config.deployment
             if bool(args.temporal_mask):
                 job.providers["native_dub_tts"] = "azure-speech-rate-0-temporal-mask-measurement"
@@ -2047,7 +2053,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"{len(result.get('corrections') or [])} STT correction(s)."
                     )
                     print(
-                        f"Grok: {result.get('model') or provider.config.deployment}; "
+                        f"GPT: {result.get('model') or provider.config.deployment}; "
                         f"tokens in={int(usage.get('input_tokens') or 0):,}, "
                         f"out={int(usage.get('output_tokens') or 0):,}."
                     )
@@ -2084,7 +2090,7 @@ def main(argv: list[str] | None = None) -> int:
                     cached_tokens = int(usage.get("cached_input_tokens") or 0)
                     cache_note = f", cached={cached_tokens:,}" if cached_tokens else ""
                     print(
-                        f"Grok: {result.get('model') or provider.config.deployment}; "
+                        f"GPT: {result.get('model') or provider.config.deployment}; "
                         f"tokens in={int(usage.get('input_tokens') or 0):,}{cache_note}, "
                         f"out={int(usage.get('output_tokens') or 0):,}."
                     )
@@ -2108,7 +2114,7 @@ def main(argv: list[str] | None = None) -> int:
             if not 1 <= int(args.qa_audit_workers) <= 12:
                 raise ValueError("--qa-audit-workers must be between 1 and 12")
             progress = _print_native_progress if args.live_operation else None
-            provider = create_native_grok_backend(args.model, progress=progress)
+            provider = create_native_gpt_backend(args.model, progress=progress)
             result = run_native_qa_back_translation(
                 job_root=app.jobs.job_dir(job.job_id),
                 provider=provider,
@@ -2136,7 +2142,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"{int(result.get('sentence_count') or 0)} sentence(s) still flagged for review"
                     + (f" ({accepted_minor} minor finding(s) accepted without repair)." if accepted_minor else ".")
                 )
-                print(f"Grok: {result.get('model')}; tokens in={int((result.get('usage') or {}).get('input_tokens') or 0):,}, "
+                print(f"GPT: {result.get('model')}; tokens in={int((result.get('usage') or {}).get('input_tokens') or 0):,}, "
                       f"out={int((result.get('usage') or {}).get('output_tokens') or 0):,}.")
                 for item in (result.get("flagged") or [])[:10]:
                     print(
@@ -2168,7 +2174,7 @@ def main(argv: list[str] | None = None) -> int:
             if not 0 <= args.min_protected_pause_ms <= 2000:
                 raise ValueError("--min-protected-pause-ms must be between 0 and 2000")
             progress = _print_native_progress if args.live_operation else None
-            provider = create_native_grok_backend(args.model, progress=progress)
+            provider = create_native_gpt_backend(args.model, progress=progress)
             sdk_group_synthesis_enabled = bool(getattr(settings, "enable_sdk_group_synthesis", False))
             turn_group_synthesis_enabled = bool(getattr(settings, "enable_turn_group_synthesis", False))
             intra_sentence_silence_widening_enabled = bool(
@@ -2201,7 +2207,7 @@ def main(argv: list[str] | None = None) -> int:
                 lite=bool(args.lite),
                 progress=progress,
             )
-            job.providers["native_dub_ai"] = "azure-foundry-grok"
+            job.providers["native_dub_ai"] = provider.provider
             job.providers["native_dub_model"] = provider.config.deployment
             job.providers["native_dub_tts"] = "azure-speech-rate-0-plus-bounded-hard-sync-atempo"
             job.media["native_dub_master"] = str(app.jobs.job_dir(job.job_id) / "native_dub" / "native_dubbed.mp4")

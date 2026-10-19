@@ -24,6 +24,11 @@ from .errors import AIAuthenticationFailure, AIInvalidStructuredOutput, AIRateLi
 
 FOUNDRY_GROK_PROVIDER = "azure-foundry-grok"
 FOUNDRY_GROK_PROVIDER_VERSION = "mathula-foundry-grok-openai-v1-chat-v1"
+# The native dubbing pipeline is GPT-only.  The transport below is a generic,
+# tool-free Azure OpenAI v1 Chat Completions client (the class name is historical),
+# so it is simply pointed at the GPT deployment and labelled as GPT everywhere.
+NATIVE_GPT_PROVIDER = "azure-openai-gpt"
+NATIVE_GPT_DEFAULT_DEPLOYMENT = "gpt-5.6-sol-1"
 _TRANSIENT = {408, 409, 425, 429, 500, 502, 503, 504, 529}
 _ENDPOINT = re.compile(
     r"https://[A-Za-z0-9][A-Za-z0-9.-]*(?:\.services\.ai\.azure\.com|\.openai\.azure\.com)\Z"
@@ -140,6 +145,48 @@ class FoundryGrokConfig:
         )
 
 
+def native_gpt_config_from_environment(
+    environ: Mapping[str, str] | None = None,
+    *,
+    deployment: str | None = None,
+) -> FoundryGrokConfig:
+    """Build the native-pipeline transport config for the GPT deployment.
+
+    Uses the same credentials/endpoint/deployment variables as the rest of the
+    GPT-only project (AZURE_AI_KEY, AZURE_AI_ENDPOINT, AZURE_OPENAI_CHAT_DEPLOYMENT
+    or AZURE_AI_DEPLOYMENT). The Grok variables are never consulted, and a
+    deployment name that looks like Grok is rejected so a stale --model value or
+    environment cannot silently route translation to another vendor.
+    """
+    env = environ if environ is not None else os.environ
+    chat_deployment = env.get("AZURE_OPENAI_CHAT_DEPLOYMENT", "").strip()
+    ai_deployment = env.get("AZURE_AI_DEPLOYMENT", "").strip()
+    explicit = (deployment or "").strip()
+    if not explicit and chat_deployment and ai_deployment and chat_deployment != ai_deployment:
+        raise ValueError(
+            "AZURE_OPENAI_CHAT_DEPLOYMENT and AZURE_AI_DEPLOYMENT disagree; set them to the same deployment"
+        )
+    name = explicit or chat_deployment or ai_deployment or NATIVE_GPT_DEFAULT_DEPLOYMENT
+    if "grok" in name.casefold():
+        raise ValueError(
+            f"Native dubbing is GPT-only but the deployment {name!r} looks like a Grok model; "
+            "pass a GPT deployment with --model or set AZURE_OPENAI_CHAT_DEPLOYMENT"
+        )
+    return FoundryGrokConfig(
+        api_key=env.get("AZURE_AI_KEY", "").strip(),
+        endpoint=env.get("AZURE_AI_ENDPOINT", "").strip(),
+        deployment=name,
+        timeout_seconds=float(env.get("MATHULA_TV_GPT_TIMEOUT_SECONDS", "900")),
+        max_retries=int(env.get("MATHULA_TV_GPT_MAX_RETRIES", "3")),
+        max_schema_repairs=int(env.get("MATHULA_TV_MAX_TRANSLATION_REPAIRS", "2")),
+        max_output_tokens=int(env.get("MATHULA_TV_NATIVE_GPT_MAX_OUTPUT_TOKENS", "8192")),
+        # gpt-5.6-sol-1 only accepts its default temperature (1); _send omits the
+        # parameter when it is >= 1.0.
+        temperature=1.0,
+        reasoning_effort=env.get("MATHULA_TV_TRANSLATION_GPT_EFFORT", "low").strip().lower(),
+    )
+
+
 def _describe_validation_error(exc: Exception) -> str:
     """One-line summary of why structured output failed validation.
 
@@ -201,8 +248,15 @@ class FoundryGrokProvider:
         sleep: Callable[[float], None] = time.sleep,
         progress: Callable[[str], None] | None = None,
         heartbeat_seconds: float = 15.0,
+        provider_name: str | None = None,
+        log_label: str | None = None,
     ) -> None:
         self.config = config
+        if provider_name:
+            # Instance attribute shadows the class default so artifacts and
+            # job.providers record the provider that actually served the call.
+            self.provider = provider_name
+        self._label = (log_label or "grok").strip() or "grok"
         self.session = session or requests.Session()
         self.sleep = sleep
         self.progress = progress
@@ -265,7 +319,7 @@ class FoundryGrokProvider:
             first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
             if str(first.get("finish_reason") or "") == "length":
                 self._emit(
-                    f"[grok] {operation}: model output limit reached after "
+                    f"[{self._label}] {operation}: model output limit reached after "
                     f"{output_tokens:,} completion tokens"
                 )
                 raise GrokOutputTruncated(
@@ -281,7 +335,7 @@ class FoundryGrokProvider:
                 jsonschema.validate(data, schema)
                 cache_note = f", cached={cached_tokens:,}" if cached_tokens else ""
                 self._emit(
-                    f"[grok] {operation}: response validated; "
+                    f"[{self._label}] {operation}: response validated; "
                     f"input={input_tokens:,} output={output_tokens:,} tokens{cache_note}, attempts={total_attempts}"
                 )
                 return GrokJSONResponse(
@@ -299,7 +353,7 @@ class FoundryGrokProvider:
                 # This is format/schema repair only. It does not ask Grok to
                 # reinterpret semantics or use external tools.
                 self._emit(
-                    f"[grok] {operation}: schema validation failed -- {_describe_validation_error(exc)} -- "
+                    f"[{self._label}] {operation}: schema validation failed -- {_describe_validation_error(exc)} -- "
                     f"requesting JSON-only repair ({schema_round + 1}/{self.config.max_schema_repairs})"
                 )
                 # Token-saving repair: do NOT resend the original (potentially huge)
@@ -455,7 +509,7 @@ class FoundryGrokProvider:
         last_exc: Exception | None = None
         for attempt in range(1, self.config.max_retries + 2):
             self._emit(
-                f"[grok] {operation}: sending Foundry request "
+                f"[{self._label}] {operation}: sending Foundry request "
                 f"(attempt {attempt}/{self.config.max_retries + 1}, model={self.config.deployment})"
             )
             started = time.monotonic()
@@ -466,7 +520,7 @@ class FoundryGrokProvider:
                     while not done.wait(self.heartbeat_seconds):
                         elapsed = int(time.monotonic() - started)
                         self._emit(
-                            f"[grok] {operation}: still waiting for Foundry response "
+                            f"[{self._label}] {operation}: still waiting for Foundry response "
                             f"({elapsed}s, attempt {attempt})"
                         )
                 heartbeat = threading.Thread(target=_heartbeat, daemon=True)
@@ -482,7 +536,7 @@ class FoundryGrokProvider:
                 done.set()
                 if heartbeat is not None:
                     heartbeat.join(timeout=0.2)
-                self._emit(f"[grok] {operation}: request timed out on attempt {attempt}")
+                self._emit(f"[{self._label}] {operation}: request timed out on attempt {attempt}")
                 last_exc = exc
                 if attempt > self.config.max_retries:
                     raise AITimeout("Foundry Grok request timed out") from exc
@@ -492,7 +546,7 @@ class FoundryGrokProvider:
                 done.set()
                 if heartbeat is not None:
                     heartbeat.join(timeout=0.2)
-                self._emit(f"[grok] {operation}: connection error on attempt {attempt}")
+                self._emit(f"[{self._label}] {operation}: connection error on attempt {attempt}")
                 last_exc = exc
                 if attempt > self.config.max_retries:
                     raise AIInvalidStructuredOutput("Foundry Grok connection failed") from exc
@@ -505,7 +559,7 @@ class FoundryGrokProvider:
 
             elapsed = time.monotonic() - started
             self._emit(
-                f"[grok] {operation}: HTTP {int(response.status_code)} after {elapsed:.1f}s "
+                f"[{self._label}] {operation}: HTTP {int(response.status_code)} after {elapsed:.1f}s "
                 f"(attempt {attempt})"
             )
             status = int(response.status_code)
@@ -517,7 +571,7 @@ class FoundryGrokProvider:
                 if attempt > self.config.max_retries:
                     raise AIRateLimit("Foundry Grok rate limit exhausted")
                 wait = self._retry_after(response, attempt)
-                self._emit(f"[grok] {operation}: rate limited; retrying in {wait:.1f}s")
+                self._emit(f"[{self._label}] {operation}: rate limited; retrying in {wait:.1f}s")
                 self.sleep(wait)
                 continue
             if status in _TRANSIENT:
@@ -526,7 +580,7 @@ class FoundryGrokProvider:
                         f"Foundry Grok transient HTTP {status} exhausted retries"
                     )
                 wait = self._retry_after(response, attempt)
-                self._emit(f"[grok] {operation}: transient HTTP {status}; retrying in {wait:.1f}s")
+                self._emit(f"[{self._label}] {operation}: transient HTTP {status}; retrying in {wait:.1f}s")
                 self.sleep(wait)
                 continue
             if status >= 400:
@@ -737,7 +791,32 @@ def create_foundry_grok_provider(
     )
 
 
+def create_native_gpt_provider(
+    environ: Mapping[str, str] | None = None,
+    *,
+    deployment: str | None = None,
+    session: Any = None,
+    sleep: Callable[[float], None] = time.sleep,
+    progress: Callable[[str], None] | None = None,
+    heartbeat_seconds: float = 15.0,
+) -> FoundryGrokProvider:
+    """GPT-backed provider for every native-* command (translate, qa, dub)."""
+    return FoundryGrokProvider(
+        native_gpt_config_from_environment(environ, deployment=deployment),
+        session=session,
+        sleep=sleep,
+        progress=progress,
+        heartbeat_seconds=heartbeat_seconds,
+        provider_name=NATIVE_GPT_PROVIDER,
+        log_label="gpt",
+    )
+
+
 __all__ = [
+    "NATIVE_GPT_DEFAULT_DEPLOYMENT",
+    "NATIVE_GPT_PROVIDER",
+    "create_native_gpt_provider",
+    "native_gpt_config_from_environment",
     "FOUNDRY_GROK_PROVIDER",
     "FOUNDRY_GROK_PROVIDER_VERSION",
     "FoundryGrokConfig",
