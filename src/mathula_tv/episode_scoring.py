@@ -357,6 +357,36 @@ def _score_group(
     }
 
 
+def annotate_collisions(groups: list[dict[str, Any]], speed_policy: str) -> None:
+    """Mark where a unit's audio runs into the next unit's speech (in place).
+
+    A unit is placed at its window start and plays for ``measured_ms``. If it is still playing when
+    the next unit starts, that is a collision of ``collision_ms``; across a speaker change it is the
+    worst kind (two people talking over each other). Under the "natural" policy there is no speed-up,
+    so the measured length is the length; under "pipeline" only a unit the renderer cannot rescue
+    (flagged rushed) can collide, and only up to its window end plus the free gap.
+    """
+    from .native_dub import MOUTH_CLOSE_TARGET_TOLERANCE_MS
+
+    order = sorted(range(len(groups)), key=lambda i: (groups[i]["start_ms"], groups[i]["end_ms"]))
+    for position, index in enumerate(order):
+        group = groups[index]
+        group.update(collision_ms=0, collides_with=None, cross_speaker_collision=False)
+        if position + 1 >= len(order):
+            continue
+        nxt = groups[order[position + 1]]
+        if speed_policy == "natural" or "rushed" in group["flags"]:
+            end = group["start_ms"] + group["measured_ms"]
+        else:
+            end = min(group["start_ms"] + group["measured_ms"], group["end_ms"] + int(group.get("free_gap_ms") or 0))
+        overlap = end - nxt["start_ms"]
+        if overlap > MOUTH_CLOSE_TARGET_TOLERANCE_MS:
+            group.update(
+                collision_ms=int(overlap), collides_with=nxt["group_id"],
+                cross_speaker_collision=str(group.get("speaker_id")) != str(nxt.get("speaker_id")),
+            )
+
+
 def _turn_rollup(groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     by_turn: dict[str, list[Mapping[str, Any]]] = {}
     for group in groups:
@@ -444,6 +474,8 @@ def score_items(
             speed_policy=speed_policy,
         ))
 
+    annotate_collisions(groups, speed_policy)
+
     render_info: dict[str, Any] = dict(render or {"available": False})
     if timing_plan is not None and not render_info.get("stale"):
         render_info = _render_summary(groups, timing_plan)
@@ -473,6 +505,12 @@ def score_items(
         "mean_rush_pct": round(sum(g["rush_pct"] for g in groups) / len(groups), 2) if groups else 0.0,
         "worst_rush_pct": max((g["rush_pct"] for g in groups), default=0.0),
         "groups_rushed": sum(1 for g in groups if "rushed" in g["flags"] or "overrun" in g["flags"]),
+        # Audio running into the next speech: the harm an overrun causes. Cross-speaker ones are two voices
+        # at once; the clip flows from start to finish only if both counts are zero.
+        "collisions": sum(1 for g in groups if g["collision_ms"]),
+        "cross_speaker_collisions": sum(1 for g in groups if g["cross_speaker_collision"]),
+        "worst_collision_ms": max((g["collision_ms"] for g in groups), default=0),
+        "collision_ms_total": sum(g["collision_ms"] for g in groups),
         "speed_policy": speed_policy,
         "review_rate": round(sum(1 for g in groups if g["requires_review"]) / len(groups), 3) if groups else 0.0,
         "gate_failures": sum(len(ids) for ids in gate_summary.values()),

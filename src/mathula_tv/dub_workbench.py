@@ -28,6 +28,39 @@ from .experience_store import ExperienceStore
 DEFAULT_TTS_BUDGET = 800
 
 
+_BAD_TIMING_FLAGS = frozenset({"overrun", "rushed", "dead_air"})
+
+
+def segment_timing_status(card: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per source segment: does the unit(s) covering it fit its time frame? (ok, plus why not.)
+
+    Keyed by segment, not by unit, because an agent may regroup units between submissions while the
+    segments they cover stay put. A segment split across several units fits only if all of them do.
+    """
+    by_unit = {str(g["group_id"]): g for g in card["groups"]}
+    status: dict[str, dict[str, Any]] = {}
+    for item in items:
+        group = by_unit.get(str(item["item_id"]))
+        if group is None:
+            continue
+        why = sorted(_BAD_TIMING_FLAGS & set(group["flags"]))
+        if group.get("collision_ms"):
+            why.append(f"collides {group['collision_ms']}ms with {group['collides_with']}")
+        for segment_id in item["source_segment_ids"]:
+            entry = status.setdefault(str(segment_id), {"ok": True, "unit": str(item["item_id"]), "why": []})
+            if why:
+                entry.update(ok=False, unit=str(item["item_id"]), why=why)
+    return status
+
+
+def ratchet_regressions(locked: set[str], status: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Segments that fitted before and no longer do."""
+    return [
+        {"segment": sid, "unit": status[sid]["unit"], "now": status[sid]["why"]}
+        for sid in sorted(locked) if sid in status and not status[sid]["ok"]
+    ]
+
+
 class BudgetExhausted(RuntimeError):
     """Raised when the agent asks for more measurements than its episode budget allows."""
 
@@ -36,6 +69,7 @@ class Workbench:
     def __init__(
         self, store: ExperienceStore, tts_factory: Callable[[], Any], *,
         scope: dict[str, Any] | None = None, subdir: str | None = None, measure_root: Path | None = None,
+        timing_ratchet: bool = True,
     ) -> None:
         """``scope`` ({segment_ids, next_start_ms}) narrows this workbench to one speaker turn of the
         clip; ``subdir`` puts its episode files under ``<episode>/turns/<subdir>``; ``measure_root``
@@ -47,6 +81,11 @@ class Workbench:
         self.subdir = subdir
         self._measure_root = Path(measure_root) if measure_root else None
         self.last_items: list[dict[str, Any]] | None = None
+        # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
+        # keep fitting. A submission that breaks one is rejected, so fixing one unit can never silently
+        # break another, and the clip's flow only ever improves.
+        self.timing_ratchet = timing_ratchet
+        self.locked_segments: set[str] = set()
         self.episode: dict[str, Any] | None = None
         self.last_submit: dict[str, Any] | None = None   # the latest accepted submit_dub result, for the harness
 
@@ -250,8 +289,6 @@ class Workbench:
         if errors:
             return {"accepted": False, "errors": errors, "warnings": warnings}
         directory = Path(episode["dir"])
-        write_submission(directory / "submission.json", submission)
-        episode["submissions"] += 1
         card = score_submission_dir(
             native, submission, tts=self.tts, measure_root=self._measure_dir(),
             labels=self.store.load_labels(episode["clip_id"]),
@@ -260,10 +297,27 @@ class Workbench:
             segments=segments if self.scope else None,
             next_start_after_ms=self.scope.get("next_start_ms") if self.scope else None,
         )
+        status = segment_timing_status(card, items)
+        if self.timing_ratchet:
+            regressions = ratchet_regressions(self.locked_segments, status)
+            if regressions:
+                return {
+                    "accepted": False,
+                    "errors": [
+                        f"timing regression: {len(regressions)} segment(s) fitted their time frame in your previous "
+                        "submission but no longer do, so this submission was not accepted. Fix these and resubmit "
+                        "(the earlier submission still stands)."
+                    ],
+                    "regressions": regressions[:12],
+                }
+        write_submission(directory / "submission.json", submission)
+        episode["submissions"] += 1
+        self.locked_segments |= {sid for sid, entry in status.items() if entry["ok"]}
         atomic_write_json(directory / "scorecard.json", card)
         self.last_items = [dict(i) for i in items]
         self.last_submit = {
             "accepted": True, "warnings": warnings, "headline": card["headline"], "gates": card["gates"],
+            "timing_lock": {"fitting_segments": len(self.locked_segments), "total_segments": len(segments)},
             "turn_padding": [
                 {"turn_id": t["turn_id"], "units": t["group_ids"], "shortfall_ms": t["shortfall_ms"],
                  "mechanism": t["padding"]["mechanism"], "padded_ms": t["padding"]["padded_ms"],

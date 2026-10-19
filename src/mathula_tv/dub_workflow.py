@@ -75,7 +75,8 @@ def score_key(result: dict[str, Any] | None) -> tuple[float, float, float]:
     """Lower is better: hard gates first, then overruns, then dead air that is left."""
     headline = (result or {}).get("headline") or {}
     return (
-        float(headline.get("gate_failures", 1e9)), float(headline.get("groups_rushed", 1e9)),
+        float(headline.get("gate_failures", 1e9)), float(headline.get("cross_speaker_collisions", 0)),
+        float(headline.get("collisions", 0)), float(headline.get("groups_rushed", 1e9)),
         float(headline.get("residual_dead_air_pct", 1e9)),
     )
 

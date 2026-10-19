@@ -55,7 +55,13 @@ You work through tools and decide your own method. You are scored on:
    a fallback, not a goal: a viewer hears padding as a pause, so prefer wording that fills the time,
    and use preview_turn_padding to see how much silence a turn would be left with.
 
-   Priority when timing trades off: an overrun is WORSE than dead air. Speech that spills past its
+   FIT FIRST. Fitting every unit into its time frame is the first job, because that is what keeps speakers
+from talking over each other and lets a multi-speaker clip flow from start to finish. Do it before any
+polishing. The harness locks timing as you go: once a segment has fitted in an accepted submission, a
+later submission that breaks it is rejected. So work toward a first submission that fits everywhere, then
+improve wording only in ways you have measured still fit.
+
+Priority when timing trades off: an overrun is WORSE than dead air. Speech that spills past its
    window collides with the next speaker and breaks sync, while a little silence is only a pause.
    So first make sure no unit overruns (overrun_pct must be 0), and only then shorten the dead air
    that is left. Never accept an overrun to remove a shortfall.
@@ -67,7 +73,7 @@ steps (drafts, measurements, checks) are trimmed from your history: the clip, yo
 and its result are always kept, so keep any lesson you need in your next draft, not in old steps.
 
 The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so):
-no unit overruns, no hard-gate failures, and residual_dead_air_pct at or below
+no unit overruns or runs into another unit's speech (collisions), no hard-gate failures, and residual_dead_air_pct at or below
 {max_dead_air}. If you stop while a submission is still
 below that bar and you have budget left, you will be sent back to the specific units to fix.
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word
@@ -340,6 +346,7 @@ def compact_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
 _SLIM_HEADLINE = (
     "group_count", "dead_air_pct", "turn_shortfall_pct", "silence_padded_pct", "residual_dead_air_pct",
     "groups_dead_air", "groups_rushed", "gate_failures", "worst_turn_shortfall_pct",
+    "collisions", "cross_speaker_collisions", "worst_collision_ms",
 )
 
 
@@ -351,6 +358,8 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
         "accepted": True,
         "headline": {k: result["headline"][k] for k in _SLIM_HEADLINE if k in result["headline"]},
     }
+    if result.get("timing_lock"):
+        slim["timing_lock"] = result["timing_lock"]
     gates = {k: v for k, v in (result.get("gates") or {}).items() if v}
     if gates:
         slim["gates"] = gates
@@ -411,6 +420,10 @@ def unmet_targets(result: dict[str, Any] | None, *, max_dead_air_pct: float) -> 
     if not headline:
         return []
     unmet = []
+    if headline.get("cross_speaker_collisions", 0) > 0:
+        unmet.append(f"{headline['cross_speaker_collisions']} unit(s) run into ANOTHER speaker's speech")
+    elif headline.get("collisions", 0) > 0:
+        unmet.append(f"{headline['collisions']} unit(s) run into the next unit's speech")
     if headline.get("groups_rushed", 0) > 0:
         unmet.append(f"{headline['groups_rushed']} unit(s) overrun their window")
     if headline.get("gate_failures", 0) > 0:
@@ -432,6 +445,12 @@ def pushback_message(result: dict[str, Any], unmet: list[str], *, tts_left: int)
     if flagged:
         lines.append("Flagged units: " + "; ".join(
             f"{f['item_id']} [{', '.join(f['gates'] + f['flags'])}]" for f in flagged) + ".")
+    lock = result.get("timing_lock")
+    if lock and lock.get("fitting_segments"):
+        lines.append(
+            f"Timing is locked for {lock['fitting_segments']} of {lock['total_segments']} segments: a submission that "
+            "breaks one of them is rejected, so fix the failing units without touching the ones that fit."
+        )
     lines.append(
         f"You still have {tts_left} measurements. Fix these units and resubmit: where speech is short, restore faithful "
         "content from the English you compressed or dropped (never filler); where it overruns, tighten. "
