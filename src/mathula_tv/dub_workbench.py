@@ -71,6 +71,9 @@ class Workbench:
         result.pop("audio_path", None)
         if self._episode().get("speed_policy") == "natural":
             result["overrun_pct"] = result.pop("required_speed_percent", 0.0)
+            # The pipeline's fit flag forgives a speed-up of up to ~10%. Here nothing is forgiven:
+            # it fits only if it needs no speed-up and is not undersized.
+            result["fits_naturally"] = result["overrun_pct"] == 0 and result.get("direction") != "expand"
             result.pop("speed_fit_mode", None)
             result.pop("rank", None)
         return result

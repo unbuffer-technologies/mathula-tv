@@ -309,8 +309,10 @@ def _score_group(
     if shortfall_pct >= SHORTFALL_FLAG_PCT:
         flags.append("dead_air")
     if speed_policy == "natural":
-        # No speed-up exists in this world: any unit that does not fit at natural speed overruns.
-        if rush_pct > 0 and item.get("fits_naturally") is not True:
+        # No speed-up exists in this world: a unit that needs ANY speed-up to finish inside its
+        # allowance (window + the protected late tolerance) overruns. The pipeline's own `fit`
+        # flag is not used here: it forgives up to the renderer's speed-up ceiling.
+        if rush_pct > 0:
             flags.append("overrun")
     elif rush_pct >= rush_flag_pct:
         flags.append("rushed")
