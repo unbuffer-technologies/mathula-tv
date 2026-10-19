@@ -169,7 +169,7 @@ def test_responses_client_translates_history_and_keeps_reasoning_items():
     shaped = ResponsesClient.to_chat_shape({"output": api_output, "usage": {"input_tokens": 50, "output_tokens": 7}})
     message = shaped["choices"][0]["message"]
     assert message["tool_calls"][0]["id"] == "call_9" and message["tool_calls"][0]["function"]["name"] == "check_text"
-    assert shaped["usage"] == {"prompt_tokens": 50, "completion_tokens": 7}
+    assert shaped["usage"] == {"prompt_tokens": 50, "completion_tokens": 7, "cached_tokens": 0}
 
     history = [
         {"role": "system", "content": "sys"}, {"role": "user", "content": "go"},
@@ -309,3 +309,119 @@ def test_the_bar_is_in_the_system_prompt():
     from mathula_tv.dub_agent import SYSTEM_PROMPT
 
     assert "residual_dead_air_pct at or below" in SYSTEM_PROMPT and "{max_dead_air}" not in SYSTEM_PROMPT
+
+
+# ---- token economy: history compaction, slim observations, cached tokens ----------------------------
+
+def _assistant(call_id, name, raw=None):
+    return {"role": "assistant", "content": None, "_raw": raw or [{"type": "function_call", "call_id": call_id, "name": name}],
+            "tool_calls": [_call(call_id, name, {})]}
+
+
+def _tool(call_id, content="result"):
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+
+def _history():
+    return [
+        {"role": "system", "content": "sys"}, {"role": "user", "content": "task"},
+        _assistant("o", "open_clip"), _tool("o", "THE CLIP"),
+        _assistant("l", "recall_lessons"), _tool("l", "LESSONS"),
+        _assistant("m1", "measure_tts_batch"), _tool("m1", "draft 1 measurements"),
+        _assistant("s1", "submit_dub"), _tool("s1", "score 1"),
+        {"role": "user", "content": "Not done yet. pushback 1"},
+        _assistant("m2", "measure_tts_batch"), _tool("m2", "draft 2 measurements"),
+        _assistant("c2", "check_text"), _tool("c2", "check"),
+        _assistant("s2", "submit_dub"), _tool("s2", "score 2"),
+        {"role": "user", "content": "Not done yet. pushback 2"},
+        _assistant("m3", "measure_tts_batch"), _tool("m3", "draft 3 measurements"),
+    ]
+
+
+def test_compaction_drops_superseded_steps_but_keeps_clip_lessons_latest_submit_and_what_follows():
+    from mathula_tv.dub_agent import COMPACTION_NOTE, compact_history
+
+    compacted, dropped = compact_history(_history())
+    texts = [m.get("content") for m in compacted]
+    assert dropped == 4                                     # m1, s1, m2, c2 steps
+    assert "THE CLIP" in texts and "LESSONS" in texts       # clip + lessons survive
+    assert "score 2" in texts and "draft 3 measurements" in texts and "Not done yet. pushback 2" in texts
+    assert not any(t in texts for t in ("draft 1 measurements", "score 1", "draft 2 measurements", "check", "Not done yet. pushback 1"))
+    assert texts.count(COMPACTION_NOTE) == 1
+    assert texts.index(COMPACTION_NOTE) < texts.index("score 2")
+
+
+def test_compaction_keeps_every_remaining_tool_call_paired_with_its_result():
+    from mathula_tv.dub_agent import compact_history
+
+    compacted, _ = compact_history(_history())
+    called = {c["id"] for m in compacted if m["role"] == "assistant" for c in m.get("tool_calls") or []}
+    answered = {m["tool_call_id"] for m in compacted if m["role"] == "tool"}
+    assert called == answered
+    raw_ids = {i["call_id"] for m in compacted if m["role"] == "assistant" for i in m.get("_raw") or []}
+    assert raw_ids == called                                # the Responses-API view stays consistent too
+
+
+def test_compaction_is_idempotent_and_does_nothing_before_the_first_submission():
+    from mathula_tv.dub_agent import compact_history
+
+    once, _ = compact_history(_history())
+    twice, dropped = compact_history(once)
+    assert dropped == 0 and [m.get("content") for m in twice] == [m.get("content") for m in once]
+    early = _history()[:8]                                   # open, lessons, one measurement step, no submit yet
+    same, dropped = compact_history(early)
+    assert dropped == 0 and same is early
+
+
+def test_a_second_submission_replaces_the_first_note_instead_of_stacking_notes():
+    from mathula_tv.dub_agent import COMPACTION_NOTE, compact_history
+
+    once, _ = compact_history(_history())
+    longer = once + [_assistant("m4", "measure_tts_batch"), _tool("m4", "draft 4"),
+                     _assistant("s3", "submit_dub"), _tool("s3", "score 3")]
+    again, dropped = compact_history(longer)
+    texts = [m.get("content") for m in again]
+    assert dropped >= 2 and texts.count(COMPACTION_NOTE) == 1
+    assert "score 3" in texts and "score 2" not in texts
+
+
+def test_run_agent_compacts_once_the_context_is_large_and_logs_it(tmp_path):
+    big = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [_call("x", "recall_lessons", {})]}}],
+           "usage": {"prompt_tokens": 30_000, "completion_tokens": 10, "cached_tokens": 25_000}}
+    replies = [
+        _reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("m", "measure_tts", {"text": "x", "start_ms": 0, "end_ms": 1000})]),
+        _reply(calls=[_call("s", "submit_dub", {"items": []})]),
+        _reply(calls=[_call("m2", "measure_tts", {"text": "y", "start_ms": 0, "end_ms": 1000})]),
+        _reply(content="done"),
+    ]
+    for r in replies:
+        r["usage"] = {"prompt_tokens": 30_000, "completion_tokens": 10, "cached_tokens": 25_000}
+    client = ScriptedClient(replies)
+    workbench = StubWorkbench(tmp_path)
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", compact_after_tokens=20_000)
+    assert summary["compactions"] >= 1
+    assert summary["tokens"]["cached"] == 5 * 25_000
+    last_view = client.seen[-1]
+    assert not any(m.get("tool_call_id") == "m" for m in last_view)          # the superseded measurement step is gone
+
+
+def test_slim_submit_hides_noise_but_the_harness_keeps_the_full_result():
+    from mathula_tv.dub_agent import slim_submit
+
+    full = {"accepted": True, "warnings": [], "gates": {"required_literals": [], "restated_reference": ["u3"]},
+            "headline": {"residual_dead_air_pct": 3.1, "groups_rushed": 0, "gate_failures": 1, "tokens_in": 0, "review_rate": 0.0,
+                         "mean_rush_pct": 0.0, "speed_policy": "natural", "group_count": 12},
+            "turn_padding": [{"turn_id": "a", "residual_ms": 0}, {"turn_id": "b", "residual_ms": 900}],
+            "flagged_units": [{"item_id": "u3", "gates": ["restated_reference"], "flags": []}]}
+    slim = slim_submit(full)
+    assert slim["gates"] == {"restated_reference": ["u3"]} and "tokens_in" not in slim["headline"]
+    assert [t["turn_id"] for t in slim["turns_ending_early"]] == ["b"] and "warnings" not in slim
+    assert slim_submit({"accepted": False, "errors": ["x"]}) == {"accepted": False, "errors": ["x"]}
+    assert "tokens_in" in full["headline"]                                   # the original is untouched
+
+
+def test_prompt_tells_the_agent_that_history_costs_tokens():
+    from mathula_tv.dub_agent import SYSTEM_PROMPT
+
+    assert "re-sends your whole history" in SYSTEM_PROMPT and "trimmed from your history" in SYSTEM_PROMPT

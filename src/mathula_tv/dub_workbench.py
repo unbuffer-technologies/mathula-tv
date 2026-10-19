@@ -90,6 +90,10 @@ class Workbench:
             result["fits_naturally"] = result["overrun_pct"] == 0 and result.get("direction") != "expand"
             result.pop("speed_fit_mode", None)
             result.pop("rank", None)
+            # Fields the agent never needs: the voice is fixed, the ms duplicates the pct, the tolerance
+            # is already folded into overrun_pct.
+            for key in ("voice", "late_tolerance_ms", "shortfall_ms", "residual_shortfall_ms"):
+                result.pop(key, None)
         return result
 
     # -- tools --------------------------------------------------------------------

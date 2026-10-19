@@ -60,6 +60,12 @@ You work through tools and decide your own method. You are scored on:
    So first make sure no unit overruns (overrun_pct must be 0), and only then shorten the dead air
    that is left. Never accept an overrun to remove a shortfall.
 
+Economy: every tool call re-sends your whole history, so each extra turn costs more than the last.
+Measure candidates in batches (up to 12 per call), run check_text only on near-final text, and submit
+only after changing something that should improve the score. After you submit, your earlier working
+steps (drafts, measurements, checks) are trimmed from your history: the clip, your latest submission
+and its result are always kept, so keep any lesson you need in your next draft, not in old steps.
+
 The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so):
 no unit overruns, no hard-gate failures, and residual_dead_air_pct at or below
 {max_dead_air}. If you stop while a submission is still
@@ -171,7 +177,10 @@ class ChatClient:
                 continue
             if response.status_code >= 400:
                 raise RuntimeError(f"model HTTP {response.status_code}: {response.text[:600]}")
-            return response.json()
+            payload = response.json()
+            usage = payload.get("usage") or {}
+            usage["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+            return payload
         raise RuntimeError("model call failed")
 
 
@@ -229,7 +238,10 @@ class ResponsesClient:
         usage = response.get("usage") or {}
         return {
             "choices": [{"message": message, "finish_reason": "tool_calls" if calls else response.get("status")}],
-            "usage": {"prompt_tokens": usage.get("input_tokens", 0), "completion_tokens": usage.get("output_tokens", 0)},
+            "usage": {
+                "prompt_tokens": usage.get("input_tokens", 0), "completion_tokens": usage.get("output_tokens", 0),
+                "cached_tokens": (usage.get("input_tokens_details") or {}).get("cached_tokens", 0),
+            },
         }
 
     def complete(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None,
@@ -276,6 +288,82 @@ def _clip(text: str) -> str:
     return text[:MAX_TOOL_RESULT_CHARS] + f"\n...[truncated {len(text) - MAX_TOOL_RESULT_CHARS} chars]"
 
 
+COMPACT_AFTER_TOKENS = 15_000
+_KEEP_STEP_TOOLS = frozenset({"open_clip", "recall_lessons"})
+COMPACTION_NOTE = (
+    "[Earlier working steps (drafts, measurements, checks, past feedback) were removed to save tokens. Your latest "
+    "submission and its result are below and supersede them; the opened clip above is unchanged.]"
+)
+
+
+def _step_tools(messages: list[dict[str, Any]], index: int) -> set[str]:
+    return {c["function"]["name"] for c in messages[index].get("tool_calls") or []}
+
+
+def compact_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Drop the working steps a newer submission has superseded. Returns (messages, dropped_count).
+
+    A step is an assistant message plus the tool results that answer it; dropping whole steps keeps
+    every remaining tool call paired with its result. What stays: the system prompt, the task, the
+    steps that opened the clip and recalled lessons, the LATEST submit_dub step, and everything after
+    it. What goes: every step and every user note between them (earlier drafts, measurements, checks,
+    old pushbacks). Idempotent: a second pass over a compacted history changes nothing.
+    """
+    last_submit = None
+    for index, message in enumerate(messages):
+        if message.get("role") == "assistant" and "submit_dub" in _step_tools(messages, index):
+            last_submit = index
+    if last_submit is None:
+        return messages, 0
+    keep = {0, 1}
+    index = 2
+    while index < last_submit:
+        message = messages[index]
+        if message.get("role") == "assistant":
+            end = index + 1
+            while end < len(messages) and messages[end].get("role") == "tool":
+                end += 1
+            if _step_tools(messages, index) & _KEEP_STEP_TOOLS:
+                keep.update(range(index, end))
+            index = end
+        else:
+            index += 1
+    dropped = [i for i in range(2, last_submit) if i not in keep and messages[i].get("content") != COMPACTION_NOTE]
+    if not dropped:
+        return messages, 0
+    kept = [m for i, m in enumerate(messages) if i not in dropped and m.get("content") != COMPACTION_NOTE]
+    position = next(i for i, m in enumerate(kept) if m is messages[last_submit])
+    kept.insert(position, {"role": "user", "content": COMPACTION_NOTE})
+    return kept, sum(1 for i in dropped if messages[i].get("role") == "assistant")
+
+
+_SLIM_HEADLINE = (
+    "group_count", "dead_air_pct", "turn_shortfall_pct", "silence_padded_pct", "residual_dead_air_pct",
+    "groups_dead_air", "groups_rushed", "gate_failures", "worst_turn_shortfall_pct",
+)
+
+
+def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
+    """The model-facing view of a submit_dub result (the harness keeps the full one)."""
+    if not result.get("accepted"):
+        return result
+    slim: dict[str, Any] = {
+        "accepted": True,
+        "headline": {k: result["headline"][k] for k in _SLIM_HEADLINE if k in result["headline"]},
+    }
+    gates = {k: v for k, v in (result.get("gates") or {}).items() if v}
+    if gates:
+        slim["gates"] = gates
+    padding = [t for t in result.get("turn_padding", []) if t.get("residual_ms", 0) > 0]
+    if padding:
+        slim["turns_ending_early"] = padding
+    if result.get("flagged_units"):
+        slim["flagged_units"] = result["flagged_units"]
+    if result.get("warnings"):
+        slim["warnings"] = result["warnings"]
+    return slim
+
+
 def build_dispatch(
     workbench: Workbench, *, clip_id: str, run_id: str, tts_budget: int, speed_policy: str = "natural",
     repeat: int = 1,
@@ -298,7 +386,7 @@ def build_dispatch(
         "measure_tts_batch": workbench.measure_tts_batch,
         "check_text": workbench.check_text,
         "preview_turn_padding": workbench.preview_turn_padding,
-        "submit_dub": workbench.submit_dub,
+        "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
     }
 
 
@@ -358,6 +446,7 @@ def run_agent(
     system_prompt: str = SYSTEM_PROMPT, speed_policy: str = "natural",
     max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, max_pushbacks: int = DEFAULT_MAX_PUSHBACKS,
     task_message: str | None = None, trace_dir: Path | None = None,
+    compact_after_tokens: int = COMPACT_AFTER_TOKENS,
 ) -> dict[str, Any]:
     directory = Path(trace_dir) if trace_dir else workbench.store.repeat_dir(run_id, clip_id, repeat)
     trace = Trace(directory / "trace.jsonl")
@@ -369,7 +458,9 @@ def run_agent(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task_message or f"Dub clip {clip_id!r}. Start by opening it."},
     ]
-    tokens = {"in": 0, "out": 0}
+    tokens = {"in": 0, "out": 0, "cached": 0}
+    last_prompt_tokens = 0
+    compactions = 0
     tool_counts: dict[str, int] = {}
     stop_reason = "max_turns"
     nudged = False
@@ -381,10 +472,19 @@ def run_agent(
         return bool(workbench.episode and workbench.episode.get("submissions"))
 
     for turn in range(1, max_turns + 1):
+        if compact_after_tokens and last_prompt_tokens >= compact_after_tokens:
+            compacted, dropped_steps = compact_history(messages)
+            if dropped_steps:
+                trace.log("compact", turn=turn, dropped_steps=dropped_steps, messages_before=len(messages),
+                          messages_after=len(compacted), prompt_tokens_before=last_prompt_tokens)
+                messages[:] = compacted
+                compactions += 1
         response = client.complete(messages, tools=TOOL_SPECS)
         usage = response.get("usage") or {}
-        tokens["in"] += int(usage.get("prompt_tokens") or 0)
+        last_prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        tokens["in"] += last_prompt_tokens
         tokens["out"] += int(usage.get("completion_tokens") or 0)
+        tokens["cached"] += int(usage.get("cached_tokens") or 0)
         choice = (response.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         calls = message.get("tool_calls") or []
@@ -433,7 +533,7 @@ def run_agent(
     summary = {
         "mode": "agent", "clip_id": clip_id, "run_id": run_id, "stop_reason": stop_reason, "turns": turn,
         "tokens": tokens, "tool_calls": tool_counts, "speed_policy": speed_policy,
-        "pushbacks": pushbacks, "unmet_at_end": unmet,
+        "pushbacks": pushbacks, "unmet_at_end": unmet, "compactions": compactions,
         "tts_used": (workbench.episode or {}).get("tts_used"), "submissions": (workbench.episode or {}).get("submissions"),
         "model": client.config.deployment,
     }
@@ -502,6 +602,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-pushbacks", type=int, default=DEFAULT_MAX_PUSHBACKS,
                         help="times the harness sends the agent back when its last score misses the bar")
     parser.add_argument("--max-dead-air", type=float, default=DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT)
+    parser.add_argument("--compact-after", type=int, default=COMPACT_AFTER_TOKENS,
+                        help="prompt-token size above which superseded working steps are dropped (0 = never)")
     args = parser.parse_args(argv)
 
     from .cli import create_tts_backend
@@ -521,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
         summary = run_agent(client, workbench, clip_id=args.clip, run_id=args.run_id, repeat=args.repeat,
                             max_turns=args.max_turns, max_total_tokens=args.max_tokens, tts_budget=args.tts_budget,
                             speed_policy=args.speed_policy, max_dead_air_pct=args.max_dead_air,
-                            max_pushbacks=args.max_pushbacks)
+                            max_pushbacks=args.max_pushbacks, compact_after_tokens=args.compact_after)
     print(json.dumps(summary, indent=2))
     scorecard = workbench.store.repeat_dir(args.run_id, args.clip, args.repeat) / "scorecard.json"
     if scorecard.is_file():
