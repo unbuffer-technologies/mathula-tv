@@ -1,0 +1,119 @@
+{
+  "approach_notes": "Ngisebenzise isiZulu semvelo sombiko wezindaba nenkulumo yezepolitiki, ngagcina wonke amagama, izinombolo, izinhlangano nezindawo. Zonke izingxenye zihlolwe nge-TTS ukuze zihambisane namawindi. Ngilungise ingxenye yesibili ukuze igcine ukuphindaphinda komqondo womthombo ngaphandle kokuphinda ibizo elifanayo ngendlela engadingekile.",
+  "clip_id": "fb3d08b6",
+  "items": [
+    {
+      "end_ms": 18350,
+      "item_id": "item-00001",
+      "source_segment_ids": [
+        "seg-00001"
+      ],
+      "source_text": "Despite the cold and wet weather, Mpumalanga residents turned out in numbers to hear the EFF's plans ahead of the November 4th local government elections. Residents also highlighted some of the challenges they want the party's Mbombela mayoral candidate, Godrich Gardee, to address.",
+      "speaker_id": "SPEAKER_00",
+      "start_ms": 270,
+      "zulu_text": "Naphezu kwamakhaza nemvula, izakhamuzi zaseMpumalanga ziphume ngobuningi ukuzozwa izinhlelo ze-EFF ngaphambi kokhetho lohulumeni basekhaya lwangomhla ka-4 kuNovemba. Ziphinde zaveza izinselelo ezifuna zilungiswe ozongenela ubumeya waseMbombela kuleli qembu, uGodrich Gardee."
+    },
+    {
+      "end_ms": 30350,
+      "item_id": "item-00002",
+      "source_segment_ids": [
+        "seg-00002"
+      ],
+      "source_text": "Work, there's lots of racism, so we like EFF to be the party to rule this country. We are tired of racism, we are tired of unemployment.",
+      "speaker_id": "SPEAKER_01",
+      "start_ms": 19310,
+      "zulu_text": "Sifuna umsebenzi. Kugcwele i-racism, ngakho sifisa ukuthi kube yi-EFF ebusa leli zwe. I-racism kanye nokungaqashwa sekusiqede nya amandla."
+    },
+    {
+      "end_ms": 43470,
+      "item_id": "item-00003",
+      "source_segment_ids": [
+        "seg-00003"
+      ],
+      "source_text": "To benefit from permanent job with people with disability and to work very, very permanent in municipality at Lekwa Municipality.",
+      "speaker_id": "SPEAKER_02",
+      "start_ms": 30670,
+      "zulu_text": "Ngifuna abantu abakhubazekile bahlomule ngokuthola imisebenzi egcwele nengunomphela, ukuze bakwazi ukuziphilisa kahle, basebenze isikhathi eside unomphela ngaphansi kukaMasipala waseLekwa."
+    },
+    {
+      "end_ms": 72030,
+      "item_id": "item-00004",
+      "source_segment_ids": [
+        "seg-00004"
+      ],
+      "source_text": "Malema says it is unfair for poor households to receive social grants, but still face municipal bills they cannot afford. He says if elected, the EFF would scrap the outstanding municipal debt of indigent households and introduce a fresh start. Malema also says residents of eMalahleni should benefit from lower electricity costs, considering the health impact of coal mining and electricity generation in the area.",
+      "speaker_id": "SPEAKER_00",
+      "start_ms": 43470,
+      "zulu_text": "UMalema uthi akulungile ukuba imindeni empofu ithole izibonelelo zenhlalakahle, kodwa ikhokhiswe izikweletu zikamasipala engakwazi ukuzimela. Uthi uma i-EFF ikhethwa, izosula izikweletu zikamasipala ezisilele zemindeni empofu, ukuze iqale kabusha. Uthi nezakhamuzi zase-eMalahleni kufanele zithole ugesi oshibhile ngenxa yomonakalo wezempilo odalwa ukumbiwa kwamalahle nokuphehlwa kukagesi kule ndawo."
+    },
+    {
+      "end_ms": 89790,
+      "item_id": "item-00005",
+      "source_segment_ids": [
+        "seg-00005"
+      ],
+      "source_text": "You can be poor during SASSA and be rich when it's time to pay water and electricity. Those ANC fools must know when we get in Mbombela, we are going to scrap all the debt of the poor.",
+      "speaker_id": "SPEAKER_03",
+      "start_ms": 72270,
+      "zulu_text": "Ungaba mpofu uma sekufanele uthole imali ye-SASSA, kodwa kuthi uma sekuyisikhathi sokukhokhela amanzi nogesi kuthiwe usuyisicebi. Lezo zilima ze-ANC mazazi kahle ukuthi uma singena eMbombela, sizosula siphele sonke isikweletu sabantu abampofu."
+    },
+    {
+      "end_ms": 111390,
+      "item_id": "item-00006",
+      "source_segment_ids": [
+        "seg-00006"
+      ],
+      "source_text": "Malema also launched a scathing attack on President Cyril Ramaphosa, accusing him of corruption and comparing him to Colombian drug lord Pablo Escobar over allegations involving cash allegedly found at the President's Phala Phala farm.",
+      "speaker_id": "SPEAKER_00",
+      "start_ms": 95230,
+      "zulu_text": "UMalema uphinde wahlasela kabuhlungu uMongameli uCyril Ramaphosa, wamsola ngenkohlakalo futhi wamfanisa nesigebengu sezidakamizwa saseColombia, uPablo Escobar, ngenxa yezinsolo zemali okuthiwa yatholakala epulazini likaMongameli iPhala Phala."
+    },
+    {
+      "end_ms": 113070,
+      "item_id": "item-00007",
+      "source_segment_ids": [
+        "seg-00007"
+      ],
+      "source_text": "They are packed with money.",
+      "speaker_id": "SPEAKER_03",
+      "start_ms": 111710,
+      "zulu_text": "Zigcwele phama yimali."
+    },
+    {
+      "end_ms": 118710,
+      "item_id": "item-00008",
+      "source_segment_ids": [
+        "seg-00008"
+      ],
+      "source_text": "Like a fridge, this American body, unpacked.",
+      "speaker_id": "SPEAKER_03",
+      "start_ms": 115150,
+      "zulu_text": "Njengefriji, lo mzimba waseMelika, awupakishiwe."
+    },
+    {
+      "end_ms": 140350,
+      "item_id": "item-00009",
+      "source_segment_ids": [
+        "seg-00009"
+      ],
+      "source_text": "Fridge. Ramaphosa ke Pablo Escobar. Kitso T. I'm more natural. Lamotivi or T. T. T. This man is a criminal. So comrades. To stop Ramaphosa and his corruption, wake up on the 4th.",
+      "speaker_id": "SPEAKER_03",
+      "start_ms": 120750,
+      "zulu_text": "Ifriji. URamaphosa unguPablo Escobar. Kitso T. Mina ngingokwemvelo kakhulu impela. Lamotivi noma T. T. T. Le ndoda iyisigebengu sangempela. Ngakho-ke maqabane, ukuze simise uRamaphosa kanye nayo yonke inkohlakalo yakhe, vukani nonke niyovota ngomhlaka-4."
+    },
+    {
+      "end_ms": 163390,
+      "item_id": "item-00010",
+      "source_segment_ids": [
+        "seg-00010"
+      ],
+      "source_text": "The EFF's provincial manifesto also identifies health care, jobs and agriculture among its priorities. The party wants mines to provide 24-hour clinics and hospitals, create employment opportunities for young people in eMalahleni, and address racism on farms. Ofentse Timo, SABC News, eMalahleni.",
+      "speaker_id": "SPEAKER_00",
+      "start_ms": 140590,
+      "zulu_text": "I-manifesto yesifundazwe ye-EFF ibeka ezempilo, imisebenzi nezolimo phambili. Iqembu lifuna izimayini zibe nemitholampilo nezibhedlela ezisebenza amahora angama-24, zivulele intsha yase-eMalahleni amathuba emisebenzi, futhi zilwe ne-racism emapulazini. UOfentse Timo, SABC News, eMalahleni."
+    }
+  ],
+  "repeat": 1,
+  "run_id": "agent-v1",
+  "schema_version": "mathula-dub-submission-v1"
+}

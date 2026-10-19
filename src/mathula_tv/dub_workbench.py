@@ -1,0 +1,217 @@
+"""The dubbing agent's environment: real Azure TTS measurement and deterministic isiZulu checks.
+
+A ``Workbench`` is plain Python with no transport. The hand-written agent loop
+(``dub_agent``) calls its methods as tools directly, and the MCP server
+(``dub_workbench_mcp``) exposes the very same methods to any other agent -- so
+what an agent measures here is what ``submit_dub`` grades it on (both go through
+``dub_fit.measure_text_fit``).
+
+It prescribes no dubbing method. One-shot, candidate search, anything: the agent
+chooses, then submits units.
+"""
+from __future__ import annotations
+
+import os
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any, Callable
+
+from .atomic_io import atomic_write_json, read_json
+from .dub_fit import measure_text_fit
+from .dub_submission import score_submission_dir, validate_submission, write_submission
+from .episode_scoring import (
+    GATE_NAMES, _known_entity_tokens, english_leakage, find_fabricated_entities,
+    find_restated_references, find_unsupported_doubling,
+)
+from .experience_store import ExperienceStore
+
+DEFAULT_TTS_BUDGET = 800
+
+
+class BudgetExhausted(RuntimeError):
+    """Raised when the agent asks for more measurements than its episode budget allows."""
+
+
+class Workbench:
+    def __init__(self, store: ExperienceStore, tts_factory: Callable[[], Any]) -> None:
+        self.store = store
+        self._tts_factory = tts_factory
+        self._tts: Any = None
+        self.episode: dict[str, Any] | None = None
+
+    # -- plumbing -----------------------------------------------------------------
+    @property
+    def tts(self) -> Any:
+        if self._tts is None:
+            self._tts = self._tts_factory()
+        return self._tts
+
+    def _episode(self) -> dict[str, Any]:
+        if not self.episode:
+            raise RuntimeError("No clip is open. Call open_clip first.")
+        return self.episode
+
+    def _spend(self, count: int) -> int:
+        episode = self._episode()
+        budget = int(episode["tts_budget"])
+        if episode["tts_used"] + count > budget:
+            raise BudgetExhausted(
+                f"TTS measurement budget exhausted ({episode['tts_used']}/{budget}). "
+                "Submit with what you have."
+            )
+        episode["tts_used"] += count
+        atomic_write_json(Path(episode["dir"]) / "episode.json", dict(episode))
+        return budget - episode["tts_used"]
+
+    def _present(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Show timing the way this episode's speed policy sees it.
+
+        Under "natural" there is no speed-up to lean on, so the agent is shown an overrun,
+        not a "required speed", and none of the speed-rescue bookkeeping."""
+        result.pop("audio_path", None)
+        if self._episode().get("speed_policy") == "natural":
+            result["overrun_pct"] = result.pop("required_speed_percent", 0.0)
+            result.pop("speed_fit_mode", None)
+            result.pop("rank", None)
+        return result
+
+    # -- tools --------------------------------------------------------------------
+    def list_clips(self) -> dict[str, Any]:
+        corpus = self.store.load_corpus()["clips"]
+        return {"clips": [
+            {"clip_id": cid, **{k: v[k] for k in ("duration_s", "segment_count", "notes")}}
+            for cid, v in corpus.items()
+        ]}
+
+    def open_clip(
+        self, clip_id: str, run_id: str, repeat: int = 1, tts_budget: int | None = None,
+        speed_policy: str = "natural",
+    ) -> dict[str, Any]:
+        if clip_id not in self.store.load_corpus()["clips"]:
+            raise ValueError(f"unknown clip {clip_id!r}; call list_clips")
+        native = self.store.clip_dir(clip_id) / "native_dub"
+        directory = self.store.repeat_dir(run_id, clip_id, repeat)
+        directory.mkdir(parents=True, exist_ok=True)
+        previous = read_json(directory / "episode.json") if (directory / "episode.json").is_file() else {}
+        budget = int(tts_budget or os.getenv("MATHULA_DUB_TTS_BUDGET", DEFAULT_TTS_BUDGET))
+        self.episode = {
+            "clip_id": clip_id, "run_id": run_id, "repeat": int(repeat), "dir": str(directory),
+            "native": str(native), "tts_budget": budget, "tts_used": int(previous.get("tts_used", 0)),
+            "submissions": int(previous.get("submissions", 0)), "speed_policy": speed_policy,
+        }
+        if not self.store.read_run(run_id):
+            self.store.write_run(run_id, parameters={"approach": "agent", "tts_budget": budget, "speed_policy": speed_policy})
+        pass1 = read_json(native / "pass1_restored_transcript.json")
+        glossary_doc = read_json(native / "zulu_terminology_glossary.json")
+        ledger_doc = read_json(native / "context_ledger.json")
+        modes_path = native / "speaker_seriousness_modes.json"
+        modes = read_json(modes_path).get("modes", {}) if modes_path.is_file() else {}
+        return {
+            "clip_id": clip_id,
+            "segments": [
+                {"segment_id": s["segment_id"], "speaker_id": s.get("speaker_id"), "start_ms": s["start_ms"],
+                 "end_ms": s["end_ms"], "english": s.get("restored_text") or s.get("source_text")}
+                for s in pass1["segments"]
+            ],
+            "context_ledger": ledger_doc.get("context_ledger", ledger_doc),
+            "glossary": glossary_doc.get("zulu_terminology_glossary", glossary_doc),
+            "speaker_modes": modes,
+            "tts_budget_remaining": budget - self.episode["tts_used"],
+        }
+
+    def measure_tts(
+        self, text: str, start_ms: int, end_ms: int, next_start_ms: int | None = None,
+        speaker_id: str = "SPEAKER_00", source_text: str = "",
+    ) -> dict[str, Any]:
+        remaining = self._spend(1)
+        result = measure_text_fit(
+            self.tts, text=text, start_ms=start_ms, end_ms=end_ms, next_start_ms=next_start_ms,
+            speaker_id=speaker_id, source_text=source_text,
+            output_root=Path(self._episode()["dir"]) / "measure",
+        )
+        result = self._present(result)
+        result["tts_budget_remaining"] = remaining
+        return result
+
+    def measure_tts_batch(self, requests: list[dict[str, Any]]) -> dict[str, Any]:
+        if not 1 <= len(requests) <= 12:
+            raise ValueError("send between 1 and 12 requests")
+        remaining = self._spend(len(requests))
+        root = Path(self._episode()["dir"]) / "measure"
+        tts = self.tts
+
+        def _one(request: dict[str, Any]) -> dict[str, Any]:
+            out = measure_text_fit(
+                tts, text=request["text"], start_ms=request["start_ms"], end_ms=request["end_ms"],
+                next_start_ms=request.get("next_start_ms"), speaker_id=request.get("speaker_id", "SPEAKER_00"),
+                source_text=request.get("source_text", ""), output_root=root,
+            )
+            return out
+
+        with ThreadPoolExecutor(max_workers=min(6, len(requests))) as pool:
+            results = [self._present(r) for r in pool.map(_one, requests)]
+        return {"results": results, "tts_budget_remaining": remaining}
+
+    def check_text(self, zulu_text: str, source_text: str) -> dict[str, Any]:
+        from .native_dub import _missing_required_literals
+
+        native = Path(self._episode()["native"])
+        glossary_doc = read_json(native / "zulu_terminology_glossary.json")
+        ledger_doc = read_json(native / "context_ledger.json")
+        known = _known_entity_tokens(
+            source_text, glossary_doc.get("zulu_terminology_glossary", glossary_doc),
+            ledger_doc.get("context_ledger", ledger_doc),
+        )
+        missing = _missing_required_literals(source_text=source_text, candidate_text=zulu_text)
+        restated = find_restated_references(zulu_text)
+        fabricated = find_fabricated_entities(zulu_text, known)
+        problems: list[dict[str, Any]] = []
+        if missing:
+            problems.append({"gate": "required_literals", "evidence": [f"{m['literal']} x{m['required_count']}" for m in missing]})
+        if restated:
+            problems.append({"gate": "restated_reference", "evidence": [f"{h['first']} / {h['second']}" for h in restated]})
+        if fabricated:
+            problems.append({"gate": "fabricated_entity", "evidence": fabricated})
+        doubled = find_unsupported_doubling(zulu_text, source_text)
+        if doubled:
+            problems.append({"flag": "unsupported_doubling", "evidence": doubled})
+        if english_leakage(zulu_text) >= 0.2:
+            problems.append({"flag": "english_leakage"})
+        return {"ok": not any("gate" in p for p in problems), "problems": problems, "gates_checked": list(GATE_NAMES)}
+
+    def recall_lessons(self, limit: int = 25) -> dict[str, Any]:
+        lessons: list[dict[str, Any]] = []
+        for clip_id in self.store.clip_ids():
+            for label in self.store.load_labels(clip_id):
+                if label.get("verdict") == "bad":
+                    lessons.append({k: label.get(k) for k in (
+                        "clip_id", "tags", "english", "zulu", "bad_substring", "corrected_zulu", "note")})
+        lessons.sort(key=lambda item: item.get("clip_id") or "")
+        return {"count": len(lessons), "lessons": lessons[-int(limit):]}
+
+    def submit_dub(self, items: list[dict[str, Any]], approach_notes: str = "") -> dict[str, Any]:
+        episode = self._episode()
+        native = Path(episode["native"])
+        segments = read_json(native / "pass1_restored_transcript.json")["segments"]
+        submission = {"clip_id": episode["clip_id"], "run_id": episode["run_id"], "repeat": episode["repeat"],
+                      "approach_notes": approach_notes, "items": items}
+        errors, warnings = validate_submission(submission, segments)
+        if errors:
+            return {"accepted": False, "errors": errors, "warnings": warnings}
+        directory = Path(episode["dir"])
+        write_submission(directory / "submission.json", submission)
+        episode["submissions"] += 1
+        card = score_submission_dir(
+            native, submission, tts=self.tts, measure_root=directory / "measure",
+            labels=self.store.load_labels(episode["clip_id"]),
+            usage={"tts_measurements": episode["tts_used"]},
+            speed_policy=episode.get("speed_policy", "pipeline"),
+        )
+        atomic_write_json(directory / "scorecard.json", card)
+        return {
+            "accepted": True, "warnings": warnings, "headline": card["headline"], "gates": card["gates"],
+            "flagged_units": [
+                {"item_id": g["group_id"], "gates": [n for n, v in g["gates"].items() if v["failed"]], "flags": g["flags"]}
+                for g in card["groups"] if g["flags"] or any(v["failed"] for v in g["gates"].values())
+            ],
+        }

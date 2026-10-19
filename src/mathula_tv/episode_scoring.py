@@ -260,6 +260,7 @@ def _score_group(
     known_tokens: set[str],
     labels: Sequence[Mapping[str, Any]],
     rush_flag_pct: float,
+    speed_policy: str = "pipeline",
 ) -> dict[str, Any]:
     from .native_dub import _missing_required_literals
 
@@ -307,7 +308,11 @@ def _score_group(
     flags: list[str] = []
     if shortfall_pct >= SHORTFALL_FLAG_PCT:
         flags.append("dead_air")
-    if rush_pct >= rush_flag_pct:
+    if speed_policy == "natural":
+        # No speed-up exists in this world: any unit that does not fit at natural speed overruns.
+        if rush_pct > 0 and item.get("fits_naturally") is not True:
+            flags.append("overrun")
+    elif rush_pct >= rush_flag_pct:
         flags.append("rushed")
     if item.get("requires_review"):
         flags.append("needs_review")
@@ -398,8 +403,13 @@ def score_items(
     approach: str = "unknown",
     render: Mapping[str, Any] | None = None,
     timing_plan: Mapping[str, Any] | None = None,
+    speed_policy: str = "pipeline",
 ) -> dict[str, Any]:
     """Score normalized items -- the approach-agnostic core.
+
+    ``speed_policy``: "pipeline" tolerates the renderer's bounded speed-up (flag at the
+    natural-speed ceiling); "natural" allows none -- a unit that cannot finish inside its
+    allowance at natural speed is an ``overrun``.
 
     An item is one dubbed unit: window, English source, final Zulu text, and the
     real Azure measurement of that text. Where it came from (the candidate-pool
@@ -418,6 +428,7 @@ def score_items(
         group_labels = [*labels_by_group.get(str(item.get("group_id")), []), *all_bad_substrings]
         groups.append(_score_group(
             item, known_tokens=known, labels=group_labels, rush_flag_pct=float(DEFAULT_MAX_NATURAL_SPEED_PERCENT),
+            speed_policy=speed_policy,
         ))
 
     render_info: dict[str, Any] = dict(render or {"available": False})
@@ -438,7 +449,8 @@ def score_items(
         "worst_turn_shortfall_pct": max((t["shortfall_pct"] for t in turns), default=0.0),
         "mean_rush_pct": round(sum(g["rush_pct"] for g in groups) / len(groups), 2) if groups else 0.0,
         "worst_rush_pct": max((g["rush_pct"] for g in groups), default=0.0),
-        "groups_rushed": sum(1 for g in groups if "rushed" in g["flags"]),
+        "groups_rushed": sum(1 for g in groups if "rushed" in g["flags"] or "overrun" in g["flags"]),
+        "speed_policy": speed_policy,
         "review_rate": round(sum(1 for g in groups if g["requires_review"]) / len(groups), 3) if groups else 0.0,
         "gate_failures": sum(len(ids) for ids in gate_summary.values()),
         "tokens_in": int(usage.get("input_tokens") or 0),

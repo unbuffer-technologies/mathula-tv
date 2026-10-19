@@ -98,6 +98,7 @@ def score_submission_dir(
     measure_root: Path,
     labels: Sequence[Mapping[str, Any]] = (),
     usage: Mapping[str, Any] | None = None,
+    speed_policy: str = "pipeline",
 ) -> dict[str, Any]:
     """Re-measure and score an agent submission against the frozen clip inputs."""
     from .native_dub import _build_speaker_turns
@@ -142,13 +143,14 @@ def score_submission_dir(
             "measured_ms": fit["measured_ms"],
             "direction": fit["direction"],
             "required_speed_percent": fit["required_speed_percent"],
+            "fits_naturally": fit["fits_naturally"],
             "variant_id": "agent",
             "candidate_id": str(item["item_id"]),
             "requires_review": bool(item.get("needs_review")),
         })
     card = score_items(
         items, glossary=glossary, ledger=ledger, labels=labels, usage=usage,
-        approach="agent_submission",
+        approach="agent_submission", speed_policy=speed_policy,
     )
     card["submission"] = {
         "approach_notes": str(submission.get("approach_notes") or ""),

@@ -1,0 +1,109 @@
+{
+  "approach_notes": "one-shot baseline: single call, no tools",
+  "clip_id": "fb3d08b6",
+  "items": [
+    {
+      "end_ms": 18350,
+      "item_id": "u1",
+      "source_segment_ids": [
+        "seg-00001"
+      ],
+      "speaker_id": "SPEAKER_00",
+      "start_ms": 270,
+      "zulu_text": "Naphezu kwamakhaza nemvula, izakhamuzi zaseMpumalanga ziphume ngobuningi zizolalela izinhlelo ze-EFF ngaphambi kokhetho lohulumeni basekhaya lwangomhla ka-4 kuNovemba. Ziphinde zaveza izinkinga ezifuna zilungiswe uGodrich Gardee, ozongenela ubumeya baseMbombela nge-EFF."
+    },
+    {
+      "end_ms": 30350,
+      "item_id": "u2",
+      "source_segment_ids": [
+        "seg-00002"
+      ],
+      "speaker_id": "SPEAKER_01",
+      "start_ms": 19310,
+      "zulu_text": "Sidinga imisebenzi. I-racism yimbi kakhulu, ngakho sifuna i-EFF kube yiyo ebusa leli zwe. Sesikhathele i-racism, sesikhathele nawukungaqashiwa."
+    },
+    {
+      "end_ms": 43470,
+      "item_id": "u3",
+      "source_segment_ids": [
+        "seg-00003"
+      ],
+      "speaker_id": "SPEAKER_02",
+      "start_ms": 30670,
+      "zulu_text": "Sifuna abantu abakhubazekile bathole imisebenzi eq permanent, basebenze ngokugcwele nangokuqhubekayo kuMasipala waseLekwa."
+    },
+    {
+      "end_ms": 72030,
+      "item_id": "u4",
+      "source_segment_ids": [
+        "seg-00004"
+      ],
+      "speaker_id": "SPEAKER_00",
+      "start_ms": 43470,
+      "zulu_text": "UMalema uthi akulungile ukuthi imindeni empofu ithole izibonelelo zenhlalakahle, kodwa iphinde ikhokhiswe izikweletu zikamasipala engenamandla okuzikhokha. Uthi uma i-EFF ikhethwa, izochitha izikweletu zikamasipala ezisasele zemindeni empofu, iyinike isiqalo esisha. UMalema uthi nezakhamuzi zase eMalahleni kufanele zikhokhe imali ephansi kagesi, ngenxa yomonakalo wezempilo odalwa ukwembiwa kwamalahle nokukhiqizwa kukagesi kule ndawo."
+    },
+    {
+      "end_ms": 89790,
+      "item_id": "u5",
+      "source_segment_ids": [
+        "seg-00005"
+      ],
+      "speaker_id": "SPEAKER_03",
+      "start_ms": 72270,
+      "zulu_text": "Uma sekuyi-SASSA kuthiwa umpofu, kodwa uma sekufanele ukhokhele amanzi nogesi kuthiwa ucebile. Lezo ziphukuphuku ze-ANC mazazi ukuthi uma singena eMbombela, sizochitha zonke izikweletu zabampofu."
+    },
+    {
+      "end_ms": 111390,
+      "item_id": "u6",
+      "source_segment_ids": [
+        "seg-00006"
+      ],
+      "speaker_id": "SPEAKER_00",
+      "start_ms": 95230,
+      "zulu_text": "UMalema uphinde wagxeka kakhulu uMongameli uCyril Ramaphosa, emsola ngenkohlakalo futhi emfanisa nomshushumbisi wezidakamizwa waseColombia, uPablo Escobar. Lokhu kumayelana nezinsolo zemali okuthiwa yatholakala epulazini likaMongameli iPhala Phala."
+    },
+    {
+      "end_ms": 113070,
+      "item_id": "u7",
+      "source_segment_ids": [
+        "seg-00007"
+      ],
+      "speaker_id": "SPEAKER_03",
+      "start_ms": 111710,
+      "zulu_text": "Kugcwele imali ngaphakathi."
+    },
+    {
+      "end_ms": 118710,
+      "item_id": "u8",
+      "source_segment_ids": [
+        "seg-00008"
+      ],
+      "speaker_id": "SPEAKER_03",
+      "start_ms": 115150,
+      "zulu_text": "Njengefriji, lo mzimba waseMelika, wavulwa."
+    },
+    {
+      "end_ms": 140350,
+      "item_id": "u9",
+      "source_segment_ids": [
+        "seg-00009"
+      ],
+      "speaker_id": "SPEAKER_03",
+      "start_ms": 120750,
+      "zulu_text": "Ifriji. URamaphosa nguPablo Escobar. Kitso T. Mina ngingowemvelo kakhulu. Lamotivi or T. T. T. Le ndoda iyisigebengu. Ngakho-ke maqabane, ukuze simise uRamaphosa nenkohlakalo yakhe, vukani ngomhlaka-4."
+    },
+    {
+      "end_ms": 163390,
+      "item_id": "u10",
+      "source_segment_ids": [
+        "seg-00010"
+      ],
+      "speaker_id": "SPEAKER_00",
+      "start_ms": 140590,
+      "zulu_text": "I-manifesto yesifundazwe ye-EFF iphinde ibeke ezempilo, imisebenzi nezolimo phakathi kwezinto eziza kuqala. Iqembu lifuna izimayini zihlinzeke ngemitholampilo nezibhedlela ezisebenza amahora angama-24, zivulele intsha yase eMalahleni amathuba emisebenzi, kuphinde kubhekwane ne-racism emapulazini. UOfentse Timo, SABC News, eMalahleni."
+    }
+  ],
+  "repeat": 1,
+  "run_id": "oneshot-v1",
+  "schema_version": "mathula-dub-submission-v1"
+}
