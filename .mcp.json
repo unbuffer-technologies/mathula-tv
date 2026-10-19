@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mathula-dub-workbench": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["-m", "mathula_tv.dub_workbench_mcp"]
+    }
+  }
+}

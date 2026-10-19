@@ -755,6 +755,9 @@ def parser() -> argparse.ArgumentParser:
     submit.add_argument("--force", action="store_true")
 
     job_commands = {}
+    from . import experience_cli
+
+    experience_cli.add_parser(commands)
     for name in ("process", "transcribe", "diarize", "retry", "validate", "inspect"):
         job_commands[name] = _add_job_command(commands, name)
     job_commands["process"].add_argument(
@@ -1596,6 +1599,10 @@ def main(argv: list[str] | None = None) -> int:
     phase_timing: _PhaseDurationTracker | None = None
     phase_timing_reported = False
     try:
+    if args.command == "experience":
+        from . import experience_cli
+
+        return experience_cli.run(args, settings)
         if args.command == "submit":
             if is_youtube_url(args.video):
                 maximum_minutes = float(getattr(settings, "max_source_duration_minutes", 240))
