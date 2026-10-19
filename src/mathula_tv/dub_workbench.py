@@ -38,6 +38,7 @@ class Workbench:
         self._tts_factory = tts_factory
         self._tts: Any = None
         self.episode: dict[str, Any] | None = None
+        self.last_submit: dict[str, Any] | None = None   # the latest accepted submit_dub result, for the harness
 
     # -- plumbing -----------------------------------------------------------------
     @property
@@ -227,7 +228,7 @@ class Workbench:
             speed_policy=episode.get("speed_policy", "pipeline"),
         )
         atomic_write_json(directory / "scorecard.json", card)
-        return {
+        self.last_submit = {
             "accepted": True, "warnings": warnings, "headline": card["headline"], "gates": card["gates"],
             "turn_padding": [
                 {"turn_id": t["turn_id"], "units": t["group_ids"], "shortfall_ms": t["shortfall_ms"],
@@ -240,3 +241,4 @@ class Workbench:
                 for g in card["groups"] if g["flags"] or any(v["failed"] for v in g["gates"].values())
             ],
         }
+        return self.last_submit

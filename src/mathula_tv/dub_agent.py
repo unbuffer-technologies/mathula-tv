@@ -31,9 +31,11 @@ import requests
 
 from .dub_workbench import BudgetExhausted, Workbench
 
+DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT = 2.0
+DEFAULT_MAX_PUSHBACKS = 2
 MAX_TOOL_RESULT_CHARS = 60000   # a 28-segment clip with ledger + glossary is ~19k; this is a runaway ceiling
 
-SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert English-to-isiZulu news dubbing agent working for Mathula TV.
 
 Goal: dub ONE complete news clip. Produce isiZulu speech that a native speaker would find
@@ -57,6 +59,11 @@ You work through tools and decide your own method. You are scored on:
    window collides with the next speaker and breaks sync, while a little silence is only a pause.
    So first make sure no unit overruns (overrun_pct must be 0), and only then shorten the dead air
    that is left. Never accept an overrun to remove a shortfall.
+
+The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so):
+no unit overruns, no hard-gate failures, and residual_dead_air_pct at or below
+{max_dead_air}. If you stop while a submission is still
+below that bar and you have budget left, you will be sent back to the specific units to fix.
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word
    transfer. Use the whole clip's context.
 
@@ -68,6 +75,8 @@ function, so what you measure is what you are graded on. Measurements are budget
 When you are satisfied, call submit_dub (it returns your score and which units are flagged; you
 may revise and resubmit). Then reply with a short plain-text summary of your approach and stop.
 """
+
+SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.replace("{max_dead_air}", f"{DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT}%")
 
 _UNIT_SCHEMA = {
     "type": "object",
@@ -308,10 +317,46 @@ def execute_tool(dispatch: dict[str, Callable[..., Any]], name: str, raw_argumen
         return json.dumps({"error": type(exc).__name__, "detail": str(exc)[:600]}), False
 
 
+def unmet_targets(result: dict[str, Any] | None, *, max_dead_air_pct: float) -> list[str]:
+    """What is still wrong with the last accepted submission, judged by the harness from its own score."""
+    headline = (result or {}).get("headline")
+    if not headline:
+        return []
+    unmet = []
+    if headline.get("groups_rushed", 0) > 0:
+        unmet.append(f"{headline['groups_rushed']} unit(s) overrun their window")
+    if headline.get("gate_failures", 0) > 0:
+        unmet.append(f"{headline['gate_failures']} hard-gate failure(s)")
+    residual = headline.get("residual_dead_air_pct")
+    if residual is not None and residual > max_dead_air_pct:
+        unmet.append(f"residual dead air is {residual}% (bar: {max_dead_air_pct}% or less)")
+    return unmet
+
+
+def pushback_message(result: dict[str, Any], unmet: list[str], *, tts_left: int) -> str:
+    lines = ["Not done yet. Your last submission misses the bar: " + "; ".join(unmet) + "."]
+    short = sorted((t for t in result.get("turn_padding", []) if t.get("residual_ms", 0) > 0),
+                   key=lambda t: -t["residual_ms"])[:6]
+    if short:
+        lines.append("Turns still ending early after silence padding: " + "; ".join(
+            f"{t['turn_id']} ({t['residual_ms'] / 1000:.1f} s of dead air, units {', '.join(t['units'])})" for t in short) + ".")
+    flagged = result.get("flagged_units", [])[:10]
+    if flagged:
+        lines.append("Flagged units: " + "; ".join(
+            f"{f['item_id']} [{', '.join(f['gates'] + f['flags'])}]" for f in flagged) + ".")
+    lines.append(
+        f"You still have {tts_left} measurements. Fix these units and resubmit: where speech is short, restore faithful "
+        "content from the English you compressed or dropped (never filler); where it overruns, tighten. "
+        "Overruns come first. If you truly cannot meet the bar, resubmit your best and say exactly which units and why."
+    )
+    return " ".join(lines)
+
+
 def run_agent(
     client: ChatClient, workbench: Workbench, *, clip_id: str, run_id: str, repeat: int = 1,
     max_turns: int = 40, max_total_tokens: int = 500_000, tts_budget: int = 300,
     system_prompt: str = SYSTEM_PROMPT, speed_policy: str = "natural",
+    max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, max_pushbacks: int = DEFAULT_MAX_PUSHBACKS,
 ) -> dict[str, Any]:
     directory = workbench.store.repeat_dir(run_id, clip_id, repeat)
     trace = Trace(directory / "trace.jsonl")
@@ -327,6 +372,8 @@ def run_agent(
     tool_counts: dict[str, int] = {}
     stop_reason = "max_turns"
     nudged = False
+    pushbacks = 0
+    unmet: list[str] = []
     turn = 0
 
     def accepted() -> bool:
@@ -352,7 +399,21 @@ def run_agent(
                 messages.append({"role": "user", "content": nudge})
                 trace.log("nudge", turn=turn, text=nudge)
                 continue
-            stop_reason = "agent_finished" if accepted() else "finished_without_submission"
+            if not accepted():
+                stop_reason = "finished_without_submission"
+                break
+            # The agent says it is done. The harness checks that against its own score instead of
+            # taking its word for it -- bounded, and only while budget remains to act on it.
+            unmet = unmet_targets(getattr(workbench, "last_submit", None), max_dead_air_pct=max_dead_air_pct)
+            tts_left = int((workbench.episode or {}).get("tts_budget", tts_budget)) - int((workbench.episode or {}).get("tts_used", 0))
+            if (unmet and pushbacks < max_pushbacks and tts_left > 0
+                    and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens):
+                pushbacks += 1
+                text = pushback_message(workbench.last_submit, unmet, tts_left=tts_left)
+                messages.append({"role": "user", "content": text})
+                trace.log("pushback", turn=turn, number=pushbacks, unmet=unmet, text=text)
+                continue
+            stop_reason = "finished_below_target" if unmet else "agent_finished"
             break
 
         for call in calls:
@@ -371,6 +432,7 @@ def run_agent(
     summary = {
         "mode": "agent", "clip_id": clip_id, "run_id": run_id, "stop_reason": stop_reason, "turns": turn,
         "tokens": tokens, "tool_calls": tool_counts, "speed_policy": speed_policy,
+        "pushbacks": pushbacks, "unmet_at_end": unmet,
         "tts_used": (workbench.episode or {}).get("tts_used"), "submissions": (workbench.episode or {}).get("submissions"),
         "model": client.config.deployment,
     }
@@ -436,6 +498,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-turns", type=int, default=40)
     parser.add_argument("--max-tokens", type=int, default=500_000)
     parser.add_argument("--tts-budget", type=int, default=300)
+    parser.add_argument("--max-pushbacks", type=int, default=DEFAULT_MAX_PUSHBACKS,
+                        help="times the harness sends the agent back when its last score misses the bar")
+    parser.add_argument("--max-dead-air", type=float, default=DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT)
     args = parser.parse_args(argv)
 
     from .cli import create_tts_backend
@@ -454,7 +519,8 @@ def main(argv: list[str] | None = None) -> int:
         client = ResponsesClient(config) if args.api == "responses" else ChatClient(config)
         summary = run_agent(client, workbench, clip_id=args.clip, run_id=args.run_id, repeat=args.repeat,
                             max_turns=args.max_turns, max_total_tokens=args.max_tokens, tts_budget=args.tts_budget,
-                            speed_policy=args.speed_policy)
+                            speed_policy=args.speed_policy, max_dead_air_pct=args.max_dead_air,
+                            max_pushbacks=args.max_pushbacks)
     print(json.dumps(summary, indent=2))
     scorecard = workbench.store.repeat_dir(args.run_id, args.clip, args.repeat) / "scorecard.json"
     if scorecard.is_file():

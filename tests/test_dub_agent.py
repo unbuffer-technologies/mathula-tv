@@ -217,3 +217,95 @@ def test_a_long_clip_open_result_is_not_truncated_but_a_runaway_result_is(tmp_pa
     assert ok and "truncated" not in text
     text, ok = execute_tool({"t": lambda: {"blob": "y" * 200_000}}, "t", "{}")
     assert ok and "[truncated" in text
+
+
+# ---- the harness verifies "done" against the agent's own score -------------------------------
+
+def _score(residual, overrun=0, gates=0, turns=()):
+    return {"accepted": True, "headline": {"residual_dead_air_pct": residual, "groups_rushed": overrun,
+                                          "gate_failures": gates},
+            "turn_padding": list(turns), "flagged_units": []}
+
+
+class ScoringWorkbench(StubWorkbench):
+    """Stub whose successive submit_dub calls return scripted scores."""
+
+    def __init__(self, root, scores, budget=50):
+        super().__init__(root, budget)
+        self.scores = list(scores)
+        self.last_submit = None
+
+    def open_clip(self, clip_id, run_id, repeat=1, tts_budget=None, speed_policy="natural"):
+        out = super().open_clip(clip_id, run_id, repeat, tts_budget, speed_policy)
+        self.episode.update(tts_budget=tts_budget or 100)
+        return out
+
+    def submit_dub(self, items, approach_notes=""):
+        self.episode["submissions"] += 1
+        self.last_submit = self.scores.pop(0)
+        return self.last_submit
+
+
+def _agent_script(*finishes):
+    """open_clip, submit, 'done' text; then for each further round: submit again, 'done' text."""
+    replies = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]),
+               _reply(calls=[_call("s0", "submit_dub", {"items": []})]), _reply(content="done")]
+    for i in range(finishes[0] if finishes else 0):
+        replies += [_reply(calls=[_call(f"s{i + 1}", "submit_dub", {"items": []})]), _reply(content="done again")]
+    return replies
+
+
+def test_unmet_targets_reads_the_harness_score_not_the_agents_claim():
+    from mathula_tv.dub_agent import unmet_targets
+
+    assert unmet_targets(_score(1.0), max_dead_air_pct=2.0) == []
+    assert unmet_targets(None, max_dead_air_pct=2.0) == []
+    unmet = unmet_targets(_score(9.3, overrun=2, gates=1), max_dead_air_pct=2.0)
+    assert len(unmet) == 3 and any("9.3%" in u for u in unmet)
+
+
+def test_agent_that_stops_below_the_bar_is_sent_back_and_can_fix_it(tmp_path):
+    workbench = ScoringWorkbench(tmp_path, [_score(9.0, turns=[{"turn_id": "dub-04", "units": ["dub-04"], "residual_ms": 12000}]),
+                                            _score(1.0)])
+    client = ScriptedClient(_agent_script(1))
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", tts_budget=50)
+    assert summary["pushbacks"] == 1 and summary["stop_reason"] == "agent_finished" and summary["unmet_at_end"] == []
+    pushed = [m["content"] for m in client.seen[3] if m["role"] == "user" and "Not done yet" in str(m.get("content"))]
+    assert pushed and "dub-04" in pushed[0] and "12.0 s" in pushed[0]
+
+
+def test_pushbacks_are_bounded_and_the_run_ends_below_target(tmp_path):
+    workbench = ScoringWorkbench(tmp_path, [_score(9.0), _score(8.0), _score(7.0)])
+    client = ScriptedClient(_agent_script(2))
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", tts_budget=50, max_pushbacks=2)
+    assert summary["pushbacks"] == 2 and summary["stop_reason"] == "finished_below_target"
+    assert summary["unmet_at_end"]
+
+
+def test_no_pushback_when_the_bar_is_met_or_pushbacks_are_disabled(tmp_path):
+    met = run_agent(ScriptedClient(_agent_script(0)), ScoringWorkbench(tmp_path / "a", [_score(0.5)]),
+                    clip_id="c1", run_id="r", tts_budget=50)
+    assert met["pushbacks"] == 0 and met["stop_reason"] == "agent_finished"
+    off = run_agent(ScriptedClient(_agent_script(0)), ScoringWorkbench(tmp_path / "b", [_score(9.0)]),
+                    clip_id="c1", run_id="r", tts_budget=50, max_pushbacks=0)
+    assert off["pushbacks"] == 0 and off["stop_reason"] == "finished_below_target"
+
+
+def test_no_pushback_when_the_measurement_budget_is_spent(tmp_path):
+    workbench = ScoringWorkbench(tmp_path, [_score(9.0)])
+    original_open = workbench.open_clip
+
+    def spent(*a, **k):
+        out = original_open(*a, **k)
+        workbench.episode["tts_used"] = workbench.episode["tts_budget"]
+        return out
+
+    workbench.open_clip = spent
+    summary = run_agent(ScriptedClient(_agent_script(0)), workbench, clip_id="c1", run_id="r", tts_budget=50)
+    assert summary["pushbacks"] == 0 and summary["stop_reason"] == "finished_below_target"
+
+
+def test_the_bar_is_in_the_system_prompt():
+    from mathula_tv.dub_agent import SYSTEM_PROMPT
+
+    assert "residual_dead_air_pct at or below" in SYSTEM_PROMPT and "{max_dead_air}" not in SYSTEM_PROMPT
