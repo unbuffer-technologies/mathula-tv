@@ -33,10 +33,20 @@ class BudgetExhausted(RuntimeError):
 
 
 class Workbench:
-    def __init__(self, store: ExperienceStore, tts_factory: Callable[[], Any]) -> None:
+    def __init__(
+        self, store: ExperienceStore, tts_factory: Callable[[], Any], *,
+        scope: dict[str, Any] | None = None, subdir: str | None = None, measure_root: Path | None = None,
+    ) -> None:
+        """``scope`` ({segment_ids, next_start_ms}) narrows this workbench to one speaker turn of the
+        clip; ``subdir`` puts its episode files under ``<episode>/turns/<subdir>``; ``measure_root``
+        shares one synthesis cache across workbenches (same text -> same audio file)."""
         self.store = store
         self._tts_factory = tts_factory
         self._tts: Any = None
+        self.scope = scope
+        self.subdir = subdir
+        self._measure_root = Path(measure_root) if measure_root else None
+        self.last_items: list[dict[str, Any]] | None = None
         self.episode: dict[str, Any] | None = None
         self.last_submit: dict[str, Any] | None = None   # the latest accepted submit_dub result, for the harness
 
@@ -51,6 +61,9 @@ class Workbench:
         if not self.episode:
             raise RuntimeError("No clip is open. Call open_clip first.")
         return self.episode
+
+    def _measure_dir(self) -> Path:
+        return self._measure_root or Path(self._episode()["dir"]) / "measure"
 
     def _spend(self, count: int) -> int:
         episode = self._episode()
@@ -95,6 +108,8 @@ class Workbench:
             raise ValueError(f"unknown clip {clip_id!r}; call list_clips")
         native = self.store.clip_dir(clip_id) / "native_dub"
         directory = self.store.repeat_dir(run_id, clip_id, repeat)
+        if self.subdir:
+            directory = directory / "turns" / self.subdir
         directory.mkdir(parents=True, exist_ok=True)
         previous = read_json(directory / "episode.json") if (directory / "episode.json").is_file() else {}
         budget = int(tts_budget or os.getenv("MATHULA_DUB_TTS_BUDGET", DEFAULT_TTS_BUDGET))
@@ -110,11 +125,13 @@ class Workbench:
         ledger_doc = read_json(native / "context_ledger.json")
         modes_path = native / "speaker_seriousness_modes.json"
         modes = read_json(modes_path).get("modes", {}) if modes_path.is_file() else {}
-        return {
+        mine = set(self.scope["segment_ids"]) if self.scope else None
+        opened = {
             "clip_id": clip_id,
             "segments": [
                 {"segment_id": s["segment_id"], "speaker_id": s.get("speaker_id"), "start_ms": s["start_ms"],
-                 "end_ms": s["end_ms"], "english": s.get("restored_text") or s.get("source_text")}
+                 "end_ms": s["end_ms"], "english": s.get("restored_text") or s.get("source_text"),
+                 **({"yours": s["segment_id"] in mine} if mine is not None else {})}
                 for s in pass1["segments"]
             ],
             "context_ledger": ledger_doc.get("context_ledger", ledger_doc),
@@ -122,6 +139,13 @@ class Workbench:
             "speaker_modes": modes,
             "tts_budget_remaining": budget - self.episode["tts_used"],
         }
+        if mine is not None:
+            opened["your_scope"] = (
+                "You dub ONLY the segments marked yours:true (one speaker turn). The rest of the clip is "
+                "context so your retelling fits the whole story. submit_dub covers just your segments; "
+                f"the next speech after your turn starts at {self.scope.get('next_start_ms')} ms."
+            )
+        return opened
 
     def measure_tts(
         self, text: str, start_ms: int, end_ms: int, next_start_ms: int | None = None,
@@ -131,7 +155,7 @@ class Workbench:
         result = measure_text_fit(
             self.tts, text=text, start_ms=start_ms, end_ms=end_ms, next_start_ms=next_start_ms,
             speaker_id=speaker_id, source_text=source_text,
-            output_root=Path(self._episode()["dir"]) / "measure",
+            output_root=self._measure_dir(),
         )
         result = self._present(result)
         result["tts_budget_remaining"] = remaining
@@ -141,7 +165,7 @@ class Workbench:
         if not 1 <= len(requests) <= 12:
             raise ValueError("send between 1 and 12 requests")
         remaining = self._spend(len(requests))
-        root = Path(self._episode()["dir"]) / "measure"
+        root = self._measure_dir()
         tts = self.tts
 
         def _one(request: dict[str, Any]) -> dict[str, Any]:
@@ -213,6 +237,9 @@ class Workbench:
         episode = self._episode()
         native = Path(episode["native"])
         segments = read_json(native / "pass1_restored_transcript.json")["segments"]
+        if self.scope:
+            mine = set(self.scope["segment_ids"])
+            segments = [s for s in segments if s["segment_id"] in mine]
         submission = {"clip_id": episode["clip_id"], "run_id": episode["run_id"], "repeat": episode["repeat"],
                       "approach_notes": approach_notes, "items": items}
         errors, warnings = validate_submission(submission, segments)
@@ -222,12 +249,15 @@ class Workbench:
         write_submission(directory / "submission.json", submission)
         episode["submissions"] += 1
         card = score_submission_dir(
-            native, submission, tts=self.tts, measure_root=directory / "measure",
+            native, submission, tts=self.tts, measure_root=self._measure_dir(),
             labels=self.store.load_labels(episode["clip_id"]),
             usage={"tts_measurements": episode["tts_used"]},
             speed_policy=episode.get("speed_policy", "pipeline"),
+            segments=segments if self.scope else None,
+            next_start_after_ms=self.scope.get("next_start_ms") if self.scope else None,
         )
         atomic_write_json(directory / "scorecard.json", card)
+        self.last_items = [dict(i) for i in items]
         self.last_submit = {
             "accepted": True, "warnings": warnings, "headline": card["headline"], "gates": card["gates"],
             "turn_padding": [

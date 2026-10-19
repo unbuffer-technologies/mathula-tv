@@ -357,8 +357,9 @@ def run_agent(
     max_turns: int = 40, max_total_tokens: int = 500_000, tts_budget: int = 300,
     system_prompt: str = SYSTEM_PROMPT, speed_policy: str = "natural",
     max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, max_pushbacks: int = DEFAULT_MAX_PUSHBACKS,
+    task_message: str | None = None, trace_dir: Path | None = None,
 ) -> dict[str, Any]:
-    directory = workbench.store.repeat_dir(run_id, clip_id, repeat)
+    directory = Path(trace_dir) if trace_dir else workbench.store.repeat_dir(run_id, clip_id, repeat)
     trace = Trace(directory / "trace.jsonl")
     dispatch = build_dispatch(
         workbench, clip_id=clip_id, run_id=run_id, tts_budget=tts_budget, speed_policy=speed_policy,
@@ -366,7 +367,7 @@ def run_agent(
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Dub clip {clip_id!r}. Start by opening it."},
+        {"role": "user", "content": task_message or f"Dub clip {clip_id!r}. Start by opening it."},
     ]
     tokens = {"in": 0, "out": 0}
     tool_counts: dict[str, int] = {}

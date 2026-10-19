@@ -99,13 +99,19 @@ def score_submission_dir(
     labels: Sequence[Mapping[str, Any]] = (),
     usage: Mapping[str, Any] | None = None,
     speed_policy: str = "pipeline",
+    segments: Sequence[Mapping[str, Any]] | None = None,
+    next_start_after_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Re-measure and score an agent submission against the frozen clip inputs."""
+    """Re-measure and score an agent submission against the frozen clip inputs.
+
+    ``segments`` restricts coverage to a subset (one speaker turn handled by a worker) and
+    ``next_start_after_ms`` is when the next speech after that subset starts, so the last
+    unit's free gap is measured exactly as it would be inside the whole clip."""
     from .native_dub import _build_speaker_turns
 
     native = Path(native_dub_dir)
     pass1 = read_json(native / "pass1_restored_transcript.json")
-    segments = list(pass1.get("segments") or [])
+    segments = list(segments) if segments is not None else list(pass1.get("segments") or [])
     errors, warnings = validate_submission(submission, segments)
     if errors:
         raise ValueError("invalid submission: " + "; ".join(errors[:8]))
@@ -125,7 +131,10 @@ def score_submission_dir(
 
     items = []
     for index, item in enumerate(raw_items):
-        next_start = int(raw_items[index + 1]["start_ms"]) if index + 1 < len(raw_items) else None
+        next_start = (
+            int(raw_items[index + 1]["start_ms"]) if index + 1 < len(raw_items)
+            else (int(next_start_after_ms) if next_start_after_ms is not None else None)
+        )
         source_text = _source_text(item, segments_by_id)
         fit = measure_text_fit(
             tts, text=str(item["zulu_text"]), start_ms=int(item["start_ms"]), end_ms=int(item["end_ms"]),
