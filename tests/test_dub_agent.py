@@ -209,3 +209,11 @@ def test_system_prompt_ranks_overrun_above_dead_air():
     from mathula_tv.dub_agent import SYSTEM_PROMPT
 
     assert "overrun is WORSE than dead air" in SYSTEM_PROMPT
+
+
+def test_a_long_clip_open_result_is_not_truncated_but_a_runaway_result_is(tmp_path):
+    big = {"segments": ["x" * 40] * 450}                      # ~19k chars, like a 28-segment clip's open_clip
+    text, ok = execute_tool({"t": lambda: big}, "t", "{}")
+    assert ok and "truncated" not in text
+    text, ok = execute_tool({"t": lambda: {"blob": "y" * 200_000}}, "t", "{}")
+    assert ok and "[truncated" in text

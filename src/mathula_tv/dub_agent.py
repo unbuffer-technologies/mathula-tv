@@ -31,7 +31,7 @@ import requests
 
 from .dub_workbench import BudgetExhausted, Workbench
 
-MAX_TOOL_RESULT_CHARS = 14000
+MAX_TOOL_RESULT_CHARS = 60000   # a 28-segment clip with ledger + glossary is ~19k; this is a runaway ceiling
 
 SYSTEM_PROMPT = """\
 You are an expert English-to-isiZulu news dubbing agent working for Mathula TV.
