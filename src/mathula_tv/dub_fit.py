@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from .dub_padding import tail_pad_ms
+
 
 def _group(
     *, item_id: str, speaker_id: str, start_ms: int, end_ms: int, source_text: str,
@@ -87,6 +89,8 @@ def measure_text_fit(
     window_ms = geometry["source_window_ms"]
     measured_ms = int(measured["measured_ms"])
     shortfall_ms = max(0, window_ms - measured_ms) if measured["direction"] == "expand" else 0
+    free_gap_ms = int(geometry["free_gap_ms"])
+    pad_ms = tail_pad_ms(shortfall_ms, free_gap_ms)
     return {
         "measured_ms": measured_ms,
         "window_ms": window_ms,
@@ -94,10 +98,14 @@ def measure_text_fit(
         "fits_naturally": bool(measured["fit"]),
         "shortfall_ms": shortfall_ms,
         "shortfall_pct": round(shortfall_ms / window_ms * 100.0, 2) if window_ms else 0.0,
+        # The renderer closes a small shortfall with real trailing silence (see dub_padding).
+        "tail_pad_ms": pad_ms,
+        "residual_shortfall_ms": shortfall_ms - pad_ms,
+        "residual_shortfall_pct": round((shortfall_ms - pad_ms) / window_ms * 100.0, 2) if window_ms else 0.0,
         "required_speed_percent": float(measured["required_speed_percent"]),
         "speed_fit_mode": measured["speed_fit_mode"],
         "rank": list(measured["rank"]),
-        "free_gap_after_ms": int(geometry["free_gap_ms"]),
+        "free_gap_after_ms": free_gap_ms,
         "late_tolerance_ms": int(geometry["mouth_close_late_tolerance_ms"]),
         "audio_path": measured["path"],
         "voice": voice_info["selected_voice"],

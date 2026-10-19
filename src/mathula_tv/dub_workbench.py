@@ -155,6 +155,22 @@ class Workbench:
             results = [self._present(r) for r in pool.map(_one, requests)]
         return {"results": results, "tts_budget_remaining": remaining}
 
+    def preview_turn_padding(
+        self, members: list[dict[str, Any]], last_free_gap_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Free arithmetic: if a speaker turn of these units finishes early, how much silence does the
+        renderer add, and how much is left as dead air? members: {start_ms, end_ms, measured_ms}."""
+        from .dub_padding import plan_turn_padding
+
+        if not members:
+            raise ValueError("members is empty")
+        ordered = sorted(members, key=lambda m: int(m["start_ms"]))
+        window = max(int(m["end_ms"]) for m in ordered) - int(ordered[0]["start_ms"])
+        measured = sum(int(m["measured_ms"]) for m in ordered)
+        plan = plan_turn_padding(ordered, shortfall_ms=max(0, window - measured), last_free_gap_ms=int(last_free_gap_ms))
+        plan.update(window_ms=window, measured_ms=measured)
+        return plan
+
     def check_text(self, zulu_text: str, source_text: str) -> dict[str, Any]:
         from .native_dub import _missing_required_literals
 
@@ -213,6 +229,12 @@ class Workbench:
         atomic_write_json(directory / "scorecard.json", card)
         return {
             "accepted": True, "warnings": warnings, "headline": card["headline"], "gates": card["gates"],
+            "turn_padding": [
+                {"turn_id": t["turn_id"], "units": t["group_ids"], "shortfall_ms": t["shortfall_ms"],
+                 "mechanism": t["padding"]["mechanism"], "padded_ms": t["padding"]["padded_ms"],
+                 "residual_ms": t["padding"]["residual_ms"]}
+                for t in card["turns"] if t["shortfall_ms"]
+            ],
             "flagged_units": [
                 {"item_id": g["group_id"], "gates": [n for n, v in g["gates"].items() if v["failed"]], "flags": g["flags"]}
                 for g in card["groups"] if g["flags"] or any(v["failed"] for v in g["gates"].values())

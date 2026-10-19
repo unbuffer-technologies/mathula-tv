@@ -144,6 +144,8 @@ def score_submission_dir(
             "direction": fit["direction"],
             "required_speed_percent": fit["required_speed_percent"],
             "fits_naturally": fit["fits_naturally"],
+            "free_gap_ms": fit["free_gap_after_ms"],
+            "tail_pad_ms": fit["tail_pad_ms"],
             "variant_id": "agent",
             "candidate_id": str(item["item_id"]),
             "requires_review": bool(item.get("needs_review")),

@@ -39,6 +39,9 @@ class StubWorkbench:
     def measure_tts_batch(self, requests):
         return {}
 
+    def preview_turn_padding(self, members, last_free_gap_ms=0):
+        return {"mechanism": "none"}
+
     def check_text(self, zulu_text, source_text):
         return {"ok": True}
 

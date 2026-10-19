@@ -28,7 +28,9 @@ What matters, in the order you will be judged:
    English survives; no name that is not in the English/glossary/ledger; the same place or
    entity is never stated twice for one English mention; no untranslated English.
 2. TIMING: speech is played at natural speed and is never sped up, so wording alone controls
-   timing. Each unit's Zulu must occupy its source window: dead air (finishing well short while
+   timing. The renderer pads small shortfalls with silence (<=150 ms tail pad; larger ones are spread
+   over a turn's real inter-sentence gaps, <=1.5 s each) -- a fallback, so prefer wording; see
+   preview_turn_padding. Each unit's Zulu must occupy its source window: dead air (finishing well short while
    the speaker is still talking on screen) and overrun (spilling past the window) both count.
    Measure with measure_tts -- the scorer re-measures your final text with the same function,
    so what you measure is what you are graded on.
@@ -74,7 +76,8 @@ def measure_tts(
 ) -> dict[str, Any]:
     """Synthesize `text` with Azure and report how it sits in the window [start_ms, end_ms].
     `next_start_ms` is when the next speech starts (bounds how much trailing gap may be borrowed).
-    Returns measured_ms, shortfall_pct (dead air), overrun_pct (how far past its allowance it runs),
+    Returns measured_ms, shortfall_pct (speech missing), tail_pad_ms (trailing silence the renderer adds
+    when the gap is tiny), residual_shortfall_pct (left as dead air), overrun_pct (how far past its allowance it runs),
     direction ('expand' = too short, 'compress' = too long, null = fits), fits_naturally."""
     return _workbench().measure_tts(text, start_ms, end_ms, next_start_ms, speaker_id, source_text)
 
@@ -84,6 +87,15 @@ def measure_tts_batch(requests: list[dict[str, Any]]) -> dict[str, Any]:
     """Measure up to 12 texts at once (each: text, start_ms, end_ms, optional next_start_ms,
     speaker_id, source_text). Measurements run in parallel."""
     return _workbench().measure_tts_batch(requests)
+
+
+@server.tool()
+def preview_turn_padding(members: list[dict[str, Any]], last_free_gap_ms: int = 0) -> dict[str, Any]:
+    """Free arithmetic (no TTS). If a speaker turn of these units finishes early, how much silence does
+    the renderer add, and how much is left as dead air? Mechanisms in order: a tail pad of up to 150 ms
+    when it fits the free gap, else the shortfall is spread over the turn's real inter-sentence gaps
+    (each widened at most 1500 ms). members: {start_ms, end_ms, measured_ms}."""
+    return _workbench().preview_turn_padding(members, last_free_gap_ms)
 
 
 @server.tool()

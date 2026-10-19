@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .atomic_io import read_json
+from .dub_padding import plan_turn_padding
 from .experience_store import text_hash
 
 SCORECARD_SCHEMA = "mathula-episode-scorecard-v1"
@@ -273,6 +274,9 @@ def _score_group(
     measured_ms = int(item.get("measured_ms") or 0)
     shortfall_ms = max(0, window_ms - measured_ms) if item.get("direction") == "expand" else 0
     shortfall_pct = (shortfall_ms / window_ms * 100.0) if window_ms else 0.0
+    # What the renderer closes with trailing silence is not dead air (see dub_padding).
+    tail_pad = min(shortfall_ms, max(0, int(item.get("tail_pad_ms") or 0)))
+    residual_pct = ((shortfall_ms - tail_pad) / window_ms * 100.0) if window_ms else 0.0
     rush_pct = float(item.get("required_speed_percent") or 0.0)
 
     gates: dict[str, Any] = {}
@@ -306,7 +310,7 @@ def _score_group(
     }
 
     flags: list[str] = []
-    if shortfall_pct >= SHORTFALL_FLAG_PCT:
+    if residual_pct >= SHORTFALL_FLAG_PCT:
         flags.append("dead_air")
     if speed_policy == "natural":
         # No speed-up exists in this world: a unit that needs ANY speed-up to finish inside its
@@ -336,6 +340,8 @@ def _score_group(
         "measured_ms": measured_ms,
         "shortfall_ms": shortfall_ms,
         "shortfall_pct": round(shortfall_pct, 2),
+        "tail_pad_ms": tail_pad,
+        "free_gap_ms": int(item.get("free_gap_ms") or 0),
         "rush_pct": round(rush_pct, 2),
         "variant": variant,
         "candidate_id": item.get("candidate_id"),
@@ -360,6 +366,9 @@ def _turn_rollup(groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         window = max(m["end_ms"] for m in members) - min(m["start_ms"] for m in members)
         measured = sum(m["measured_ms"] for m in members)
         shortfall = max(0, window - measured) if any(m["shortfall_ms"] for m in members) else 0
+        ordered = sorted(members, key=lambda m: m["start_ms"])
+        last = max(members, key=lambda m: m["end_ms"])
+        padding = plan_turn_padding(ordered, shortfall_ms=shortfall, last_free_gap_ms=int(last.get("free_gap_ms") or 0))
         rollup.append({
             "turn_id": turn_id,
             "group_ids": [m["group_id"] for m in members],
@@ -367,6 +376,8 @@ def _turn_rollup(groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             "measured_ms": measured,
             "shortfall_ms": shortfall,
             "shortfall_pct": round(shortfall / window * 100.0, 2) if window else 0.0,
+            "padding": padding,
+            "residual_pct": round(padding["residual_ms"] / window * 100.0, 2) if window else 0.0,
         })
     return rollup
 
@@ -442,6 +453,10 @@ def score_items(
     }
     window_total = sum(g["window_ms"] for g in groups)
     turns = _turn_rollup(groups)
+    turn_window_total = sum(t["window_ms"] for t in turns)
+    padded_total = sum(t["padding"]["padded_ms"] for t in turns)
+    residual_total = sum(t["padding"]["residual_ms"] for t in turns)
+    shortfall_total = sum(t["shortfall_ms"] for t in turns)
     usage = usage or {}
     headline = {
         "group_count": len(groups),
@@ -449,6 +464,12 @@ def score_items(
         "worst_shortfall_pct": max((g["shortfall_pct"] for g in groups), default=0.0),
         "groups_dead_air": sum(1 for g in groups if "dead_air" in g["flags"]),
         "worst_turn_shortfall_pct": max((t["shortfall_pct"] for t in turns), default=0.0),
+        # Turn-level view after the renderer's silence padding (tail pad, then gap widening).
+        # turn_shortfall = how early turns end; silence_padded = what padding absorbs;
+        # residual_dead_air = what a viewer still sees as the speaker talking over silence.
+        "turn_shortfall_pct": round(shortfall_total / turn_window_total * 100.0, 2) if turn_window_total else 0.0,
+        "silence_padded_pct": round(padded_total / turn_window_total * 100.0, 2) if turn_window_total else 0.0,
+        "residual_dead_air_pct": round(residual_total / turn_window_total * 100.0, 2) if turn_window_total else 0.0,
         "mean_rush_pct": round(sum(g["rush_pct"] for g in groups) / len(groups), 2) if groups else 0.0,
         "worst_rush_pct": max((g["rush_pct"] for g in groups), default=0.0),
         "groups_rushed": sum(1 for g in groups if "rushed" in g["flags"] or "overrun" in g["flags"]),

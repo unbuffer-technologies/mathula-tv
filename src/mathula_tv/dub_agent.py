@@ -46,6 +46,12 @@ You work through tools and decide your own method. You are scored on:
    down -- so the words you choose are the only thing that controls timing. The speech should
    fill its source window: too short = dead air while the speaker is still on screen; too long =
    an overrun that spills past its window into the next speaker.
+
+   Silence padding: the renderer closes a shortfall of up to 150 ms with trailing silence, and for
+   a speaker turn of several consecutive units it can spread a larger shortfall over the real gaps
+   between them (each gap widened by at most 1.5 s; nothing if the units are back to back). That is
+   a fallback, not a goal: a viewer hears padding as a pause, so prefer wording that fills the time,
+   and use preview_turn_padding to see how much silence a turn would be left with.
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word
    transfer. Use the whole clip's context.
 
@@ -95,13 +101,23 @@ TOOL_SPECS = [
     _tool("recall_lessons", "Mistakes native-speaker reviewers marked 'bad' in earlier clips, with corrections "
           "where given. Cross-clip memory.", {"limit": {"type": "integer"}}, []),
     _tool("measure_tts", "Synthesize text with Azure TTS at natural speed and report how it sits in "
-          "[start_ms, end_ms]: measured_ms, shortfall_pct (dead air), overrun_pct (how far past its "
-          "allowance it runs), direction ('expand' too short, 'compress' too long, null fits), "
-          "fits_naturally. Costs 1 measurement.",
+          "[start_ms, end_ms]: measured_ms, shortfall_pct (speech missing), tail_pad_ms (trailing silence the "
+          "renderer adds itself when the gap is tiny), residual_shortfall_pct (what is left as dead air), "
+          "overrun_pct (how far past its allowance it runs), direction ('expand' too short, 'compress' too "
+          "long, null fits), fits_naturally. Costs 1 measurement.",
           _MEASURE_PROPS, ["text", "start_ms", "end_ms"]),
     _tool("measure_tts_batch", "Measure up to 12 texts at once; same fields as measure_tts. Costs 1 per text.",
           {"requests": {"type": "array", "items": {"type": "object", "properties": _MEASURE_PROPS,
                                                     "required": ["text", "start_ms", "end_ms"]}}}, ["requests"]),
+    _tool("preview_turn_padding", "Free arithmetic (no TTS). If a speaker turn made of these units finishes early, "
+          "how much silence does the renderer add, and how much remains as dead air? Mechanisms in order: a "
+          "tail pad of up to 150 ms when it fits the free gap, else the shortfall is spread over the turn's real "
+          "inter-sentence gaps (each gap widened at most 1500 ms). members: {start_ms, end_ms, measured_ms}.",
+          {"members": {"type": "array", "items": {"type": "object", "properties": {
+              "start_ms": {"type": "integer"}, "end_ms": {"type": "integer"}, "measured_ms": {"type": "integer"}},
+              "required": ["start_ms", "end_ms", "measured_ms"]}},
+           "last_free_gap_ms": {"type": "integer", "description": "free_gap_after_ms of the turn's last unit."}},
+          ["members"]),
     _tool("check_text", "Free deterministic checks on one unit (no TTS): required literals, restated references, "
           "invented names, doubling, English leakage.",
           {"zulu_text": {"type": "string"}, "source_text": {"type": "string"}}, ["zulu_text", "source_text"]),
@@ -267,6 +283,7 @@ def build_dispatch(
         "measure_tts": workbench.measure_tts,
         "measure_tts_batch": workbench.measure_tts_batch,
         "check_text": workbench.check_text,
+        "preview_turn_padding": workbench.preview_turn_padding,
         "submit_dub": workbench.submit_dub,
     }
 
