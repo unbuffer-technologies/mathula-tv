@@ -52,6 +52,11 @@ You work through tools and decide your own method. You are scored on:
    between them (each gap widened by at most 1.5 s; nothing if the units are back to back). That is
    a fallback, not a goal: a viewer hears padding as a pause, so prefer wording that fills the time,
    and use preview_turn_padding to see how much silence a turn would be left with.
+
+   Priority when timing trades off: an overrun is WORSE than dead air. Speech that spills past its
+   window collides with the next speaker and breaks sync, while a little silence is only a pause.
+   So first make sure no unit overruns (overrun_pct must be 0), and only then shorten the dead air
+   that is left. Never accept an overrun to remove a shortfall.
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word
    transfer. Use the whole clip's context.
 

@@ -203,3 +203,9 @@ def test_repeat_index_reaches_the_environment_so_parallel_repeats_do_not_collide
     run_agent(client, workbench, clip_id="c1", run_id="r", repeat=3)
     assert workbench.opened_repeat == 3
     assert (tmp_path / "r" / "c1" / "r3" / "trace.jsonl").is_file()
+
+
+def test_system_prompt_ranks_overrun_above_dead_air():
+    from mathula_tv.dub_agent import SYSTEM_PROMPT
+
+    assert "overrun is WORSE than dead air" in SYSTEM_PROMPT
