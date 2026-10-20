@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 
 from .atomic_io import atomic_write_json, read_json
 from .dub_fit import measure_text_fit
+from .dub_voices import pick_voice_info
 from .episode_scoring import _load_context, score_items
 
 SUBMISSION_SCHEMA = "mathula-dub-submission-v1"
@@ -101,6 +102,7 @@ def score_submission_dir(
     speed_policy: str = "pipeline",
     segments: Sequence[Mapping[str, Any]] | None = None,
     next_start_after_ms: int | None = None,
+    voices: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Re-measure and score an agent submission against the frozen clip inputs.
 
@@ -140,6 +142,8 @@ def score_submission_dir(
             tts, text=str(item["zulu_text"]), start_ms=int(item["start_ms"]), end_ms=int(item["end_ms"]),
             next_start_ms=next_start, speaker_id=str(item["speaker_id"]), source_text=source_text,
             output_root=measure_root,
+            voice_info=pick_voice_info(voices or {}, str(item["speaker_id"]), int(item["start_ms"]),
+                                       int(item["end_ms"]), segments),
         )
         items.append({
             "group_id": str(item["item_id"]),

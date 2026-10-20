@@ -163,10 +163,14 @@ def prepare_render_root(
     atomic_write_json(native / "pass1_sentences.json", {
         "schema_version": "mathula-native-pass1-sentences-v1", "sentence_count": len(records), "records": records})
 
-    voice_source = original / "direct_dub" / "voice_resolution.json"
+    from .dub_voices import load_clip_voices
+
+    load_clip_voices(store, clip_id)                       # freezes the clip's voices into the corpus on first use
+    frozen_voices = store.clip_dir(clip_id) / "voice_resolution.json"
+    voice_source = frozen_voices if frozen_voices.is_file() else original / "direct_dub" / "voice_resolution.json"
     voice_target = root / "direct_dub" / "voice_resolution.json"
     if not _copy_if_exists(voice_source, voice_target):
-        raise RenderAdapterError(f"the original job has no voice resolution at {voice_source}")
+        raise RenderAdapterError(f"no voice resolution found for the clip (looked at {voice_source})")
 
     committed = build_committed_translation(submission, records)
     atomic_write_json(native / "pass2_natural_translation.json", committed)

@@ -68,6 +68,7 @@ def measure_text_fit(
     item_id: str = "measure",
     output_root: Path,
     voice: str | None = None,
+    voice_info: Mapping[str, Any] | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     """Synthesize ``text`` for real and report how it sits in ``[start_ms, end_ms]``.
@@ -110,7 +111,9 @@ def measure_text_fit(
         ),
         min_protected_pause_ms=DEFAULT_MIN_PROTECTED_PAUSE_MS,
     )
-    voice_info = {"selected_voice": str(voice or tts.default_voice), "base_prosody": {}}
+    # The renderer speaks each unit with its speaker's assigned voice and prosody; pass that assignment here so the
+    # measured duration is the rendered duration. Without one, fall back to the generic default voice.
+    voice_info = dict(voice_info) if voice_info else {"selected_voice": str(voice or tts.default_voice), "base_prosody": {}}
     measured = with_transient_retry(lambda: _measure_temporal_candidate(
         tts=tts, group=group, voice_info=voice_info,
         candidate={"candidate_id": "measure", "spoken_text": text},

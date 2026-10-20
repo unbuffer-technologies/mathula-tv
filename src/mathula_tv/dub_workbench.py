@@ -23,6 +23,7 @@ from .episode_scoring import (
     GATE_NAMES, _known_entity_tokens, english_leakage, find_fabricated_entities,
     find_restated_references, find_unsupported_doubling,
 )
+from .dub_voices import load_clip_voices, pick_voice_info
 from .experience_store import ExperienceStore
 
 DEFAULT_TTS_BUDGET = 800
@@ -103,7 +104,7 @@ class Workbench:
     def __init__(
         self, store: ExperienceStore, tts_factory: Callable[[], Any], *,
         scope: dict[str, Any] | None = None, subdir: str | None = None, measure_root: Path | None = None,
-        timing_ratchet: bool = True,
+        timing_ratchet: bool = True, voices: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """``scope`` ({segment_ids, next_start_ms}) narrows this workbench to one speaker turn of the
         clip; ``subdir`` puts its episode files under ``<episode>/turns/<subdir>``; ``measure_root``
@@ -115,6 +116,8 @@ class Workbench:
         self.subdir = subdir
         self._measure_root = Path(measure_root) if measure_root else None
         self.last_items: list[dict[str, Any]] | None = None
+        self.voices: dict[str, dict[str, Any]] = dict(voices or {})
+        self.segments: list[dict[str, Any]] = []
         # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
         # keep fitting. A submission that breaks one is rejected, so fixing one unit can never silently
         # break another, and the clip's flow only ever improves.
@@ -198,6 +201,9 @@ class Workbench:
         if not self.store.read_run(run_id):
             self.store.write_run(run_id, parameters={"approach": "agent", "tts_budget": budget, "speed_policy": speed_policy})
         pass1 = read_json(native / "pass1_restored_transcript.json")
+        self.segments = list(pass1["segments"])
+        if not self.voices:
+            self.voices = load_clip_voices(self.store, clip_id)
         glossary_doc = read_json(native / "zulu_terminology_glossary.json")
         ledger_doc = read_json(native / "context_ledger.json")
         modes_path = native / "speaker_seriousness_modes.json"
@@ -215,6 +221,8 @@ class Workbench:
             "glossary": glossary_doc.get("zulu_terminology_glossary", glossary_doc),
             "speaker_modes": modes,
             "tts_budget_remaining": budget - self.episode["tts_used"],
+            # Measurements use each speaker's assigned voice, the one the renderer will use.
+            "voices": {sid: v.get("selected_voice") for sid, v in self.voices.items()},
         }
         if mine is not None:
             opened["your_scope"] = (
@@ -233,6 +241,7 @@ class Workbench:
             self.tts, text=text, start_ms=start_ms, end_ms=end_ms, next_start_ms=next_start_ms,
             speaker_id=speaker_id, source_text=source_text,
             output_root=self._measure_dir(),
+            voice_info=pick_voice_info(self.voices, speaker_id, start_ms, end_ms, self.segments),
         )
         result = self._present(result)
         result["tts_budget_remaining"] = remaining
@@ -250,6 +259,8 @@ class Workbench:
                 tts, text=request["text"], start_ms=request["start_ms"], end_ms=request["end_ms"],
                 next_start_ms=request.get("next_start_ms"), speaker_id=request.get("speaker_id", "SPEAKER_00"),
                 source_text=request.get("source_text", ""), output_root=root,
+                voice_info=pick_voice_info(self.voices, request.get("speaker_id"), request["start_ms"],
+                                           request["end_ms"], self.segments),
             )
             return out
 
@@ -357,6 +368,7 @@ class Workbench:
             speed_policy=episode.get("speed_policy", "pipeline"),
             segments=segments if self.scope else None,
             next_start_after_ms=self.scope.get("next_start_ms") if self.scope else None,
+            voices=self.voices,
         )
         status = segment_timing_status(card, items)
         regressions = ratchet_regressions(self.locked_segments, status) if self.timing_ratchet else []
