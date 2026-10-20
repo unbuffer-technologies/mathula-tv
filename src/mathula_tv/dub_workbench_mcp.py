@@ -84,7 +84,7 @@ def measure_tts(
 
 @server.tool()
 def measure_tts_batch(requests: list[dict[str, Any]]) -> dict[str, Any]:
-    """Measure up to 12 texts at once (each: text, start_ms, end_ms, optional next_start_ms,
+    """Measure up to 40 texts at once (each: text, start_ms, end_ms, optional next_start_ms,
     speaker_id, source_text). Measurements run in parallel."""
     return _workbench().measure_tts_batch(requests)
 

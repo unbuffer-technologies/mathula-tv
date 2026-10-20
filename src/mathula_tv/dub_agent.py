@@ -135,7 +135,7 @@ TOOL_SPECS = [
           "overrun_pct (how far past its allowance it runs), direction ('expand' too short, 'compress' too "
           "long, null fits), fits_naturally. Costs 1 measurement.",
           _MEASURE_PROPS, ["text", "start_ms", "end_ms"]),
-    _tool("measure_tts_batch", "Measure up to 12 texts at once; same fields as measure_tts. Costs 1 per text.",
+    _tool("measure_tts_batch", "Measure up to 40 texts at once; same fields as measure_tts. Costs 1 per text.",
           {"requests": {"type": "array", "items": {"type": "object", "properties": _MEASURE_PROPS,
                                                     "required": ["text", "start_ms", "end_ms"]}}}, ["requests"]),
     _tool("preview_turn_padding", "Free arithmetic (no TTS). If a speaker turn made of these units finishes early, "

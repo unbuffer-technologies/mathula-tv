@@ -26,6 +26,7 @@ from .episode_scoring import (
 from .experience_store import ExperienceStore
 
 DEFAULT_TTS_BUDGET = 800
+MAX_MEASURE_BATCH = 40     # a whole clip's worth of units; the pool measures them six at a time
 
 
 _BAD_TIMING_FLAGS = frozenset({"overrun", "rushed", "dead_air"})
@@ -217,8 +218,8 @@ class Workbench:
         return result
 
     def measure_tts_batch(self, requests: list[dict[str, Any]]) -> dict[str, Any]:
-        if not 1 <= len(requests) <= 12:
-            raise ValueError("send between 1 and 12 requests")
+        if not 1 <= len(requests) <= MAX_MEASURE_BATCH:
+            raise ValueError(f"send between 1 and {MAX_MEASURE_BATCH} requests (you sent {len(requests)})")
         remaining = self._spend(len(requests))
         root = self._measure_dir()
         tts = self.tts
