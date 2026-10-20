@@ -37,7 +37,7 @@ def test_no_assignments_means_use_the_default_voice():
 def test_measure_text_fit_hands_the_assignment_to_the_synthesis_step(tmp_path, monkeypatch):
     captured = {}
 
-    def fake_measure(*, tts, group, voice_info, candidate, geometry, output_root, round_number, force):
+    def fake_measure(*, tts, group, voice_info, candidate, geometry, output_root, round_number, force, job_root=None):
         captured["voice_info"] = voice_info
         return {"measured_ms": 3000, "direction": None, "fit": True, "required_speed_percent": 0.0,
                 "speed_fit_mode": "x", "rank": [0], "path": "p"}

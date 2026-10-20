@@ -69,6 +69,7 @@ def measure_text_fit(
     output_root: Path,
     voice: str | None = None,
     voice_info: Mapping[str, Any] | None = None,
+    pronunciation_root: Path | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     """Synthesize ``text`` for real and report how it sits in ``[start_ms, end_ms]``.
@@ -118,6 +119,7 @@ def measure_text_fit(
         tts=tts, group=group, voice_info=voice_info,
         candidate={"candidate_id": "measure", "spoken_text": text},
         geometry=geometry, output_root=Path(output_root), round_number=0, force=force,
+        job_root=pronunciation_root,
     ))
     window_ms = geometry["source_window_ms"]
     measured_ms = int(measured["measured_ms"])

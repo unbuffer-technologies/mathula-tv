@@ -23,6 +23,7 @@ from .episode_scoring import (
     GATE_NAMES, _known_entity_tokens, english_leakage, find_fabricated_entities,
     find_restated_references, find_unsupported_doubling,
 )
+from .dub_pronunciation import register_clip_pronunciation
 from .dub_voices import load_clip_voices, pick_voice_info
 from .experience_store import ExperienceStore
 
@@ -117,6 +118,7 @@ class Workbench:
         self._measure_root = Path(measure_root) if measure_root else None
         self.last_items: list[dict[str, Any]] | None = None
         self.voices: dict[str, dict[str, Any]] = dict(voices or {})
+        self.pronunciation_root: Path | None = None
         self.segments: list[dict[str, Any]] = []
         # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
         # keep fitting. A submission that breaks one is rejected, so fixing one unit can never silently
@@ -204,6 +206,9 @@ class Workbench:
         self.segments = list(pass1["segments"])
         if not self.voices:
             self.voices = load_clip_voices(self.store, clip_id)
+        # The renderer applies the job's pronunciation dictionary; measure with the same one so what is measured
+        # is what is rendered.
+        self.pronunciation_root = register_clip_pronunciation(self.store, clip_id)
         glossary_doc = read_json(native / "zulu_terminology_glossary.json")
         ledger_doc = read_json(native / "context_ledger.json")
         modes_path = native / "speaker_seriousness_modes.json"
@@ -242,6 +247,7 @@ class Workbench:
             speaker_id=speaker_id, source_text=source_text,
             output_root=self._measure_dir(),
             voice_info=pick_voice_info(self.voices, speaker_id, start_ms, end_ms, self.segments),
+            pronunciation_root=self.pronunciation_root,
         )
         result = self._present(result)
         result["tts_budget_remaining"] = remaining
@@ -261,6 +267,7 @@ class Workbench:
                 source_text=request.get("source_text", ""), output_root=root,
                 voice_info=pick_voice_info(self.voices, request.get("speaker_id"), request["start_ms"],
                                            request["end_ms"], self.segments),
+                pronunciation_root=self.pronunciation_root,
             )
             return out
 
@@ -368,7 +375,7 @@ class Workbench:
             speed_policy=episode.get("speed_policy", "pipeline"),
             segments=segments if self.scope else None,
             next_start_after_ms=self.scope.get("next_start_ms") if self.scope else None,
-            voices=self.voices,
+            voices=self.voices, pronunciation_root=self.pronunciation_root,
         )
         status = segment_timing_status(card, items)
         regressions = ratchet_regressions(self.locked_segments, status) if self.timing_ratchet else []

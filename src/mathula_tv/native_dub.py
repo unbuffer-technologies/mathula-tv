@@ -4373,14 +4373,20 @@ def _measure_temporal_candidate(
     output_root: Path,
     round_number: int,
     force: bool,
+    job_root: Path | None = None,
 ) -> dict[str, Any]:
     text = str(candidate["spoken_text"])
-    digest = _hash_payload({
+    digest_inputs = {
         "group_id": str(group["group_id"]),
         "voice": str(voice_info.get("selected_voice") or ""),
         "text": text,
         "round": int(round_number),
-    })[:12]
+    }
+    if job_root is not None:
+        # A job-specific pronunciation dictionary changes the audio, so it must change the cache key; with no
+        # job_root the key is byte-identical to before.
+        digest_inputs["pronunciation_dictionary_job"] = str(job_root)
+    digest = _hash_payload(digest_inputs)[:12]
     candidate_id = str(candidate["candidate_id"])
     output_path = Path(output_root) / str(group["group_id"]) / f"r{int(round_number)}_{candidate_id}_{digest}.wav"
     candidate_group = _temporal_candidate_group(group, text)
@@ -4392,6 +4398,7 @@ def _measure_temporal_candidate(
         preferred_ms=int(geometry["preferred_raw_ms"]),
         maximum_ms=max(int(geometry["preferred_raw_ms"]), int(geometry["maximum_usable_raw_ms"])),
         force=force,
+        job_root=job_root,
     )
     measured_ms = int(result.duration_ms)
     source_for_guard = str(group.get("source_text") or _group_source_english(group))

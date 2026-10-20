@@ -202,7 +202,47 @@ def unreachable_windows(runs: Sequence[Mapping[str, Any]], *, tolerance_ms: int 
     return findings
 
 
-DETECTORS = (repeated_tool_errors, rejection_trap, invalid_submissions, declined_to_submit, budget_exhaustion, ceiling_stops,
+RENDER_GAP_PCT = 2.0
+RENDER_GAP_MS = 150
+
+
+def measurement_render_gap(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Units whose rendered audio is a different length from what the agent was shown when it measured.
+
+    A gap means the yardstick is wrong, not the agent: measurement and renderer disagree about the same text
+    (a different voice, a pronunciation substitution, a prosody setting). Only runs that have been rendered can be
+    checked, so this is the check that makes a render worth doing.
+    """
+    findings = []
+    for run in runs:
+        plan_path = Path(run["dir"]) / "render" / "native_dub" / "timing_plan.json"
+        card_path = Path(run["dir"]) / "scorecard.json"
+        if not (plan_path.is_file() and card_path.is_file()):
+            continue
+        measured = {g["group_id"]: g for g in json.loads(card_path.read_text(encoding="utf-8")).get("groups", [])}
+        gaps = []
+        for group in json.loads(plan_path.read_text(encoding="utf-8")).get("groups", []):
+            scored = measured.get(group["group_id"])
+            natural = group.get("natural_tts_duration_ms")
+            if not scored or not natural or not scored.get("measured_ms"):
+                continue
+            diff = int(natural) - int(scored["measured_ms"])
+            pct = diff / int(scored["measured_ms"]) * 100.0
+            if abs(diff) > RENDER_GAP_MS and abs(pct) > RENDER_GAP_PCT:
+                gaps.append((group["group_id"], diff, pct))
+        if gaps:
+            worst = max(gaps, key=lambda g: abs(g[1]))
+            findings.append(_finding(
+                "measurement_render_gap", "high",
+                f"{_label(run)}: {len(gaps)} unit(s) rendered a different length than measured; worst {worst[0]} "
+                f"{worst[1]:+d} ms ({worst[2]:+.1f}%)",
+                [_label(run)], "The agent optimised against a measurement that does not match the render (voice, "
+                               "pronunciation dictionary or prosody). Fix the measurement path so what is measured is "
+                               "what is rendered."))
+    return findings
+
+
+DETECTORS = (repeated_tool_errors, measurement_render_gap, rejection_trap, invalid_submissions, declined_to_submit, budget_exhaustion, ceiling_stops,
              token_blowup, compaction_missing, unreachable_windows)
 
 

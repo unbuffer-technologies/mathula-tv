@@ -103,6 +103,7 @@ def score_submission_dir(
     segments: Sequence[Mapping[str, Any]] | None = None,
     next_start_after_ms: int | None = None,
     voices: Mapping[str, Mapping[str, Any]] | None = None,
+    pronunciation_root: Path | None = None,
 ) -> dict[str, Any]:
     """Re-measure and score an agent submission against the frozen clip inputs.
 
@@ -144,6 +145,7 @@ def score_submission_dir(
             output_root=measure_root,
             voice_info=pick_voice_info(voices or {}, str(item["speaker_id"]), int(item["start_ms"]),
                                        int(item["end_ms"]), segments),
+            pronunciation_root=pronunciation_root,
         )
         items.append({
             "group_id": str(item["item_id"]),
