@@ -114,12 +114,20 @@ def recall_lessons(limit: int = 25) -> dict[str, Any]:
 
 
 @server.tool()
-def submit_dub(items: list[dict[str, Any]], approach_notes: str = "") -> dict[str, Any]:
+def get_submission(unit_ids: list[str] | None = None) -> dict[str, Any]:
+    """The units currently accepted (all, or only unit_ids), with text and any flags from the last score."""
+    return _workbench().get_submission(unit_ids)
+
+
+@server.tool()
+def submit_dub(items: list[dict[str, Any]], approach_notes: str = "", partial: bool = False) -> dict[str, Any]:
     """Submit the dub. items: ordered, non-overlapping units, each
     {item_id, start_ms, end_ms, speaker_id, zulu_text, source_segment_ids:[...],
      optional source_text (required only if two items share a segment), optional turn_id}.
-    Every Pass-1 segment must be covered. Returns the score; you may resubmit to improve it."""
-    return _workbench().submit_dub(items, approach_notes)
+    Every Pass-1 segment must be covered. Returns the score; you may resubmit to improve it.
+    With partial=true send only the units you changed: each replaces the current unit(s) with the same item_id or
+    covering any of the same segments, and the rest carry over (needs a previous accepted submission)."""
+    return _workbench().submit_dub(items, approach_notes, partial)
 
 
 def main() -> None:

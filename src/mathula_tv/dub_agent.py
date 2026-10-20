@@ -72,7 +72,12 @@ what you measure is what you are graded on. Measurements are budgeted.
 
 Every tool call re-sends your whole history, so each extra turn costs more than the last. After you
 submit, your earlier working steps (drafts, measurements, checks) are trimmed from your history: the clip,
-your latest submission and its result are always kept.
+your latest submit_dub call and its result are always kept.
+
+submit_dub takes the full set of units, or, with partial=true, only the units you changed: each replaces the
+current unit(s) with the same item_id or covering any of the same segments, and the rest carry over. Sending
+only what changed is much cheaper than rewriting the whole clip. get_submission shows your current units
+(all, or just the ones you ask for), so you never have to rewrite from memory.
 
 The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so): no unit
 overruns or runs into another unit's speech (collisions), no hard-gate failures, and
@@ -151,8 +156,14 @@ TOOL_SPECS = [
           "invented names, doubling, English leakage.",
           {"zulu_text": {"type": "string"}, "source_text": {"type": "string"}}, ["zulu_text", "source_text"]),
     _tool("submit_dub", "Submit the dub as ordered, non-overlapping units covering every English segment. "
-          "Returns the official score and flagged units. You may resubmit.",
-          {"items": {"type": "array", "items": _UNIT_SCHEMA}, "approach_notes": {"type": "string"}}, ["items"]),
+          "Returns the official score and flagged units. You may resubmit. With partial=true, send ONLY the units you "
+          "changed: each replaces the current unit(s) with the same item_id or covering any of the same segments, and "
+          "every other current unit carries over (needs a previous accepted submission).",
+          {"items": {"type": "array", "items": _UNIT_SCHEMA}, "approach_notes": {"type": "string"},
+           "partial": {"type": "boolean", "description": "true = update only the units you send."}}, ["items"]),
+    _tool("get_submission", "The units currently accepted (all, or only unit_ids), with their text and any flags from "
+          "the last score. Use it to see your own current state, e.g. after your history was trimmed.",
+          {"unit_ids": {"type": "array", "items": {"type": "string"}}}, []),
 ]
 
 
@@ -300,8 +311,9 @@ def _clip(text: str) -> str:
 COMPACT_AFTER_TOKENS = 15_000
 _KEEP_STEP_TOOLS = frozenset({"open_clip", "recall_lessons"})
 COMPACTION_NOTE = (
-    "[Earlier working steps (drafts, measurements, checks, past feedback) were removed to save tokens. Your latest "
-    "submission and its result are below and supersede them; the opened clip above is unchanged.]"
+    "[Earlier working steps (drafts, measurements, checks, past feedback) were removed to save tokens. The harness "
+    "holds your accepted submission: call get_submission to see the current units. Your latest submit_dub call and "
+    "its result are below; the opened clip above is unchanged.]"
 )
 
 
@@ -361,6 +373,8 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
         "accepted": True,
         "headline": {k: result["headline"][k] for k in _SLIM_HEADLINE if k in result["headline"]},
     }
+    if result.get("merged"):
+        slim["merged"] = result["merged"]
     if result.get("timing_lock"):
         slim["timing_lock"] = result["timing_lock"]
     if result.get("regressions_accepted"):
@@ -402,6 +416,7 @@ def build_dispatch(
         "check_text": workbench.check_text,
         "preview_turn_padding": workbench.preview_turn_padding,
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
+        "get_submission": workbench.get_submission,
     }
 
 

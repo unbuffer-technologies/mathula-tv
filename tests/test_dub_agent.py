@@ -42,6 +42,9 @@ class StubWorkbench:
     def preview_turn_padding(self, members, last_free_gap_ms=0):
         return {"mechanism": "none"}
 
+    def get_submission(self, unit_ids=None):
+        return {"units": [], "count": 0}
+
     def check_text(self, zulu_text, source_text):
         return {"ok": True}
 

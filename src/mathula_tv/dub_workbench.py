@@ -54,6 +54,27 @@ def segment_timing_status(card: dict[str, Any], items: list[dict[str, Any]]) -> 
     return status
 
 
+def merge_partial(
+    previous: list[dict[str, Any]], update: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Fold a partial update into the last accepted submission.
+
+    A previous unit is replaced if an updated unit has its item_id or covers any of its source segments;
+    every other previous unit carries over untouched. Returns (merged units in time order, replaced ids).
+    """
+    new_ids = {str(u["item_id"]) for u in update}
+    new_segments = {str(s) for u in update for s in u.get("source_segment_ids") or []}
+    kept, replaced = [], []
+    for unit in previous:
+        covers = {str(s) for s in unit.get("source_segment_ids") or []}
+        if str(unit["item_id"]) in new_ids or covers & new_segments:
+            replaced.append(str(unit["item_id"]))
+        else:
+            kept.append(unit)
+    merged = sorted([*kept, *update], key=lambda u: int(u["start_ms"]))
+    return merged, replaced
+
+
 def timing_key(headline: dict[str, Any]) -> tuple[float, float, float]:
     """Lower is better: cross-speaker collisions, then collisions, then overruns."""
     return (
@@ -289,7 +310,31 @@ class Workbench:
         lessons.sort(key=lambda item: item.get("clip_id") or "")
         return {"count": len(lessons), "lessons": lessons[-int(limit):]}
 
-    def submit_dub(self, items: list[dict[str, Any]], approach_notes: str = "") -> dict[str, Any]:
+    def get_submission(self, unit_ids: list[str] | None = None) -> dict[str, Any]:
+        """The current accepted units (all, or just ``unit_ids``), with any timing/gate flags from the last score."""
+        if not self.last_items:
+            return {"units": [], "count": 0, "note": "nothing has been accepted yet"}
+        flags = {f["item_id"]: {"gates": f.get("gates"), "flags": f.get("flags")}
+                 for f in (self.last_submit or {}).get("flagged_units", [])}
+        wanted = set(unit_ids) if unit_ids else None
+        units = [
+            {k: u.get(k) for k in ("item_id", "start_ms", "end_ms", "speaker_id", "zulu_text", "source_segment_ids")}
+            | ({"flagged": flags[str(u["item_id"])]} if str(u["item_id"]) in flags else {})
+            for u in self.last_items if wanted is None or str(u["item_id"]) in wanted
+        ]
+        return {"units": units, "count": len(units)}
+
+    def submit_dub(
+        self, items: list[dict[str, Any]], approach_notes: str = "", partial: bool = False,
+    ) -> dict[str, Any]:
+        replaced: list[str] = []
+        sent = len(items)
+        if partial:
+            if not self.last_items:
+                return {"accepted": False, "errors": [
+                    "partial=true updates your last accepted submission, but none has been accepted yet: send the "
+                    "full set of units first (partial is false)."]}
+            items, replaced = merge_partial(self.last_items, items)
         episode = self._episode()
         native = Path(episode["native"])
         segments = read_json(native / "pass1_restored_transcript.json")["segments"]
@@ -300,6 +345,9 @@ class Workbench:
                       "approach_notes": approach_notes, "items": items}
         errors, warnings = validate_submission(submission, segments)
         if errors:
+            if partial:
+                errors = [*errors, f"(partial update: it replaced your current unit(s) {replaced or 'none'}; every "
+                                   "segment those covered must be covered again by your update)"]
             return {"accepted": False, "errors": errors, "warnings": warnings}
         directory = Path(episode["dir"])
         card = score_submission_dir(
@@ -337,6 +385,7 @@ class Workbench:
         self.last_items = [dict(i) for i in items]
         self.last_submit = {
             "accepted": True, "warnings": warnings, "headline": card["headline"], "gates": card["gates"],
+            **({"merged": {"sent": sent, "replaced": replaced, "units_now": len(items)}} if partial else {}),
             **({"regressions_accepted": regressions[:12],
                 "note": "This submission broke segments that had fitted before but is better overall, so it was "
                         "accepted; fix those segments next."} if regressions else {}),
