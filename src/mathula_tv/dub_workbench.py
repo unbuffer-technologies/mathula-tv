@@ -53,6 +53,18 @@ def segment_timing_status(card: dict[str, Any], items: list[dict[str, Any]]) -> 
     return status
 
 
+def timing_key(headline: dict[str, Any]) -> tuple[float, float, float]:
+    """Lower is better: cross-speaker collisions, then collisions, then overruns."""
+    return (
+        float(headline.get("cross_speaker_collisions", 0)), float(headline.get("collisions", 0)),
+        float(headline.get("groups_rushed", 0)),
+    )
+
+
+def _timing_summary(headline: dict[str, Any]) -> dict[str, Any]:
+    return {k: headline.get(k) for k in ("cross_speaker_collisions", "collisions", "groups_rushed", "residual_dead_air_pct")}
+
+
 def ratchet_regressions(locked: set[str], status: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Segments that fitted before and no longer do."""
     return [
@@ -298,25 +310,35 @@ class Workbench:
             next_start_after_ms=self.scope.get("next_start_ms") if self.scope else None,
         )
         status = segment_timing_status(card, items)
-        if self.timing_ratchet:
-            regressions = ratchet_regressions(self.locked_segments, status)
-            if regressions:
+        regressions = ratchet_regressions(self.locked_segments, status) if self.timing_ratchet else []
+        key = timing_key(card["headline"])
+        if regressions:
+            # A submission that breaks segments which had fitted is rejected -- unless it is clearly better
+            # overall (fewer collisions, then overruns). A strict ratchet can freeze a bad first draft: a rewrite
+            # that repairs many units but breaks a few is a step forward, not something to block.
+            previous = timing_key((self.last_submit or {}).get("headline") or {})
+            if self.last_submit is None or key >= previous:
                 return {
                     "accepted": False,
                     "errors": [
                         f"timing regression: {len(regressions)} segment(s) fitted their time frame in your previous "
-                        "submission but no longer do, so this submission was not accepted. Fix these and resubmit "
-                        "(the earlier submission still stands)."
+                        "submission but no longer do, and this submission is not better overall, so it was not "
+                        "accepted. Fix these and resubmit (the earlier submission still stands)."
                     ],
                     "regressions": regressions[:12],
+                    "this_submission": _timing_summary(card["headline"]),
+                    "previous_submission": _timing_summary((self.last_submit or {}).get("headline") or {}),
                 }
         write_submission(directory / "submission.json", submission)
         episode["submissions"] += 1
-        self.locked_segments |= {sid for sid, entry in status.items() if entry["ok"]}
+        self.locked_segments = {sid for sid, entry in status.items() if entry["ok"]}
         atomic_write_json(directory / "scorecard.json", card)
         self.last_items = [dict(i) for i in items]
         self.last_submit = {
             "accepted": True, "warnings": warnings, "headline": card["headline"], "gates": card["gates"],
+            **({"regressions_accepted": regressions[:12],
+                "note": "This submission broke segments that had fitted before but is better overall, so it was "
+                        "accepted; fix those segments next."} if regressions else {}),
             "timing_lock": {"fitting_segments": len(self.locked_segments), "total_segments": len(segments)},
             "turn_padding": [
                 {"turn_id": t["turn_id"], "units": t["group_ids"], "shortfall_ms": t["shortfall_ms"],

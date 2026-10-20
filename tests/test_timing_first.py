@@ -124,11 +124,13 @@ def _workbench(tmp_path, cards):
     return wb, fake_score
 
 
-def _full_card(*units):
+def _full_card(*units, **headline):
     card = _card(*units)
     for group in card["groups"]:
         group["gates"] = {}
-    card.update(headline={"gate_failures": 0}, gates={}, turns=[])
+    base = {"gate_failures": 0, "groups_rushed": sum(1 for _, f, _ in units if "overrun" in f),
+            "collisions": sum(1 for _, _, c in units if c), "cross_speaker_collisions": 0}
+    card.update(headline={**base, **headline}, gates={}, turns=[])
     return card
 
 
@@ -138,10 +140,10 @@ ITEMS = [
 ]
 
 
-def test_submit_rejects_a_submission_that_breaks_a_segment_that_fitted(tmp_path, monkeypatch):
+def test_submit_rejects_a_submission_that_breaks_a_fitting_segment_without_being_better(tmp_path, monkeypatch):
     wb, fake = _workbench(tmp_path, [
         _full_card(("u1", [], 0), ("u2", ["overrun"], 0)),          # s1 fits, s2 does not
-        _full_card(("u1", ["overrun"], 0), ("u2", [], 0)),          # fixes s2 but breaks s1 -> rejected
+        _full_card(("u1", ["overrun"], 0), ("u2", [], 0)),          # swaps the problem: same score, breaks s1 -> rejected
         _full_card(("u1", [], 0), ("u2", [], 0)),                   # fixes both -> accepted
     ])
     monkeypatch.setattr(dub_workbench, "score_submission_dir", fake)
@@ -149,9 +151,22 @@ def test_submit_rejects_a_submission_that_breaks_a_segment_that_fitted(tmp_path,
     assert first["accepted"] and first["timing_lock"]["fitting_segments"] == 1
     rejected = wb.submit_dub(ITEMS)
     assert not rejected["accepted"] and rejected["regressions"][0]["segment"] == "s1"
+    assert rejected["this_submission"]["groups_rushed"] == 1 and rejected["previous_submission"]["groups_rushed"] == 1
     assert wb.episode["submissions"] == 1 and wb.last_submit is first          # the earlier submission still stands
     third = wb.submit_dub(ITEMS)
     assert third["accepted"] and third["timing_lock"]["fitting_segments"] == 2 and wb.episode["submissions"] == 2
+
+
+def test_a_net_better_submission_is_accepted_even_if_it_breaks_something_and_says_so(tmp_path, monkeypatch):
+    wb, fake = _workbench(tmp_path, [
+        _full_card(("u1", [], 0), ("u2", ["overrun"], 300)),        # one overrun that collides with the next speech
+        _full_card(("u1", ["overrun"], 0), ("u2", [], 0)),          # no collision any more, though s1 now overruns
+    ])
+    monkeypatch.setattr(dub_workbench, "score_submission_dir", fake)
+    wb.submit_dub(ITEMS)
+    second = wb.submit_dub(ITEMS)
+    assert second["accepted"] and second["regressions_accepted"][0]["segment"] == "s1" and "fix those" in second["note"]
+    assert second["timing_lock"]["fitting_segments"] == 1                       # s2 now fits; s1 is owed
 
 
 def test_the_ratchet_can_be_turned_off(tmp_path, monkeypatch):

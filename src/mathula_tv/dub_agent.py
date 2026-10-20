@@ -42,53 +42,56 @@ Goal: dub ONE complete news clip. Produce isiZulu speech that a native speaker w
 natural, faithful to the English, and that fits the time the English speaker occupies on screen.
 
 You work through tools and decide your own method. You are scored on:
+
 1. Hard gates (a failure is a defect): every name, number and date survives; no invented names;
    the same entity is not stated twice for one English mention; nothing left untranslated.
-2. Timing: each unit's Zulu is played at its natural speed -- it is NEVER sped up or slowed
-   down -- so the words you choose are the only thing that controls timing. The speech should
-   fill its source window: too short = dead air while the speaker is still on screen; too long =
-   an overrun that spills past its window into the next speaker.
 
-   Silence padding: the renderer closes a shortfall of up to 150 ms with trailing silence, and for
-   a speaker turn of several consecutive units it can spread a larger shortfall over the real gaps
-   between them (each gap widened by at most 1.5 s; nothing if the units are back to back). That is
-   a fallback, not a goal: a viewer hears padding as a pause, so prefer wording that fills the time,
-   and use preview_turn_padding to see how much silence a turn would be left with.
-
+2. Timing. Each unit's Zulu is played at its natural speed -- it is NEVER sped up or slowed down -- so the
+   words you choose are the only thing that controls timing. The speech should fill its source window:
+   too short = dead air while the speaker is still on screen; too long = an overrun that spills past its
+   window into the next speaker.
    FIT FIRST. Fitting every unit into its time frame is the first job, because that is what keeps speakers
-from talking over each other and lets a multi-speaker clip flow from start to finish. Do it before any
-polishing. The harness locks timing as you go: once a segment has fitted in an accepted submission, a
-later submission that breaks it is rejected. So work toward a first submission that fits everywhere, then
-improve wording only in ways you have measured still fit.
+   from talking over each other and lets a multi-speaker clip flow from start to finish. The harness locks
+   timing as you go: once a segment has fitted in an accepted submission, a later submission that breaks
+   it is rejected unless it is clearly better overall.
+   Priority when timing trades off: an overrun is WORSE than dead air. Speech that spills past its window
+   collides with the next speaker and breaks sync, while a little silence is only a pause. So first make
+   sure no unit overruns (overrun_pct must be 0), and only then shorten the dead air that is left. Never
+   accept an overrun to remove a shortfall.
+   Silence padding: the renderer closes a shortfall of up to 150 ms with trailing silence, and for a
+   speaker turn of several consecutive units it can spread a larger shortfall over the real gaps between
+   them (each gap widened by at most 1.5 s; nothing if the units are back to back). That is a fallback,
+   not a goal: a viewer hears padding as a pause, so prefer wording that fills the time.
 
-Priority when timing trades off: an overrun is WORSE than dead air. Speech that spills past its
-   window collides with the next speaker and breaks sync, while a little silence is only a pause.
-   So first make sure no unit overruns (overrun_pct must be 0), and only then shorten the dead air
-   that is left. Never accept an overrun to remove a shortfall.
+3. Naturalness: retell the way a person would say it informally. This is not a word-for-word transfer.
+   Use the whole clip's context.
 
-Economy: every tool call re-sends your whole history, so each extra turn costs more than the last.
-Measure candidates in batches (up to 12 per call), run check_text only on near-final text, and submit
-only after changing something that should improve the score. After you submit, your earlier working
-steps (drafts, measurements, checks) are trimmed from your history: the clip, your latest submission
-and its result are always kept, so keep any lesson you need in your next draft, not in old steps.
+Tools give you real measurements. Azure TTS timing is not predictable from word counts, and with no speed
+control you must get the wording right. The scorer re-measures your final text with the same function, so
+what you measure is what you are graded on. Measurements are budgeted.
 
-The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so):
-no unit overruns or runs into another unit's speech (collisions), no hard-gate failures, and residual_dead_air_pct at or below
-{max_dead_air}. If you stop while a submission is still
-below that bar and you have budget left, you will be sent back to the specific units to fix.
-3. Naturalness: retell the way a person would say it informally. This is not a word-for-word
-   transfer. Use the whole clip's context.
+Every tool call re-sends your whole history, so each extra turn costs more than the last. After you
+submit, your earlier working steps (drafts, measurements, checks) are trimmed from your history: the clip,
+your latest submission and its result are always kept.
 
-Tools give you real measurements. Use them to check your work rather than guess: Azure TTS
-timing is not predictable from word counts, and with no speed control you must get the wording
-right. The scorer re-measures your final text with the same
-function, so what you measure is what you are graded on. Measurements are budgeted.
+The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so): no unit
+overruns or runs into another unit's speech (collisions), no hard-gate failures, and
+residual_dead_air_pct at or below {max_dead_air}. If you stop while a submission is still below that bar and you have budget left,
+you will be sent back to the specific units to fix.
 
-When you are satisfied, call submit_dub (it returns your score and which units are flagged; you
-may revise and resubmit). Then reply with a short plain-text summary of your approach and stop.
+When you are satisfied, call submit_dub (it returns your score and which units are flagged; you may revise
+and resubmit). Then reply with a short plain-text summary of your approach and stop.
 """
 
 SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.replace("{max_dead_air}", f"{DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT}%")
+
+
+def build_system_prompt(playbook: dict | None = None, *, max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT) -> str:
+    """The rules (always) plus the learned strategy notes (if a playbook is given)."""
+    from .playbook import render_section
+
+    base = _SYSTEM_PROMPT_TEMPLATE.replace("{max_dead_air}", f"{max_dead_air_pct}%")
+    return base + render_section(playbook)
 
 _UNIT_SCHEMA = {
     "type": "object",
@@ -360,6 +363,9 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
     }
     if result.get("timing_lock"):
         slim["timing_lock"] = result["timing_lock"]
+    if result.get("regressions_accepted"):
+        slim["regressions_accepted"] = result["regressions_accepted"]
+        slim["note"] = result.get("note")
     gates = {k: v for k, v in (result.get("gates") or {}).items() if v}
     if gates:
         slim["gates"] = gates
@@ -465,7 +471,7 @@ def run_agent(
     system_prompt: str = SYSTEM_PROMPT, speed_policy: str = "natural",
     max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, max_pushbacks: int = DEFAULT_MAX_PUSHBACKS,
     task_message: str | None = None, trace_dir: Path | None = None,
-    compact_after_tokens: int = COMPACT_AFTER_TOKENS,
+    compact_after_tokens: int = COMPACT_AFTER_TOKENS, playbook_version: str | None = None,
 ) -> dict[str, Any]:
     directory = Path(trace_dir) if trace_dir else workbench.store.repeat_dir(run_id, clip_id, repeat)
     trace = Trace(directory / "trace.jsonl")
@@ -553,6 +559,7 @@ def run_agent(
         "mode": "agent", "clip_id": clip_id, "run_id": run_id, "stop_reason": stop_reason, "turns": turn,
         "tokens": tokens, "tool_calls": tool_counts, "speed_policy": speed_policy,
         "pushbacks": pushbacks, "unmet_at_end": unmet, "compactions": compactions,
+        "playbook": playbook_version,
         "tts_used": (workbench.episode or {}).get("tts_used"), "submissions": (workbench.episode or {}).get("submissions"),
         "model": client.config.deployment,
     }
@@ -621,6 +628,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-pushbacks", type=int, default=DEFAULT_MAX_PUSHBACKS,
                         help="times the harness sends the agent back when its last score misses the bar")
     parser.add_argument("--max-dead-air", type=float, default=DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT)
+    parser.add_argument("--playbook", default=None,
+                        help="playbook version to load into the system prompt ('current' = the adopted one, "
+                             "'none' = rules only; default: current)")
     parser.add_argument("--compact-after", type=int, default=COMPACT_AFTER_TOKENS,
                         help="prompt-token size above which superseded working steps are dropped (0 = never)")
     args = parser.parse_args(argv)
@@ -639,10 +649,18 @@ def main(argv: list[str] | None = None) -> int:
                                tts_budget=args.tts_budget, speed_policy=args.speed_policy)
     else:
         client = ResponsesClient(config) if args.api == "responses" else ChatClient(config)
+        from .playbook import current_playbook, load_playbook
+
+        choice = args.playbook or "current"
+        playbook = None if choice == "none" else (
+            current_playbook(workbench.store) if choice == "current" else load_playbook(workbench.store, choice))
+        system_prompt = build_system_prompt(playbook, max_dead_air_pct=args.max_dead_air)
+        print(f"playbook: {playbook['version'] if playbook else 'none'}")
         summary = run_agent(client, workbench, clip_id=args.clip, run_id=args.run_id, repeat=args.repeat,
                             max_turns=args.max_turns, max_total_tokens=args.max_tokens, tts_budget=args.tts_budget,
                             speed_policy=args.speed_policy, max_dead_air_pct=args.max_dead_air,
-                            max_pushbacks=args.max_pushbacks, compact_after_tokens=args.compact_after)
+                            max_pushbacks=args.max_pushbacks, compact_after_tokens=args.compact_after,
+                            system_prompt=system_prompt, playbook_version=playbook["version"] if playbook else None)
     print(json.dumps(summary, indent=2))
     scorecard = workbench.store.repeat_dir(args.run_id, args.clip, args.repeat) / "scorecard.json"
     if scorecard.is_file():
