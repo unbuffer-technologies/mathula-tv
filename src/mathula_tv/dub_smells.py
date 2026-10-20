@@ -75,19 +75,40 @@ def repeated_tool_errors(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, An
     return findings
 
 
+def _rejections(run: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [r for r in _trace(run) if r["kind"] == "tool" and r["name"] == "submit_dub"
+            and '"accepted": false' in r.get("result", "").lower()]
+
+
 def rejection_trap(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Timing-regression rejections that left a run stuck: two or more, or one that froze a first draft."""
     findings = []
     for run in runs:
-        rejected = [r for r in _trace(run) if r["kind"] == "tool" and r["name"] == "submit_dub"
-                    and '"accepted": false' in r.get("result", "").lower()]
-        if len(rejected) >= 2 and run["stop_reason"] != "agent_finished":
-            reasons = Counter(_normalise_error(r["result"])[:90] for r in rejected)
+        rejected = [r for r in _rejections(run) if "timing regression" in r["result"]]
+        accepted = _summary(run).get("submissions") or 0
+        stuck = len(rejected) >= 2 or (len(rejected) == 1 and accepted <= 1)
+        if stuck and run["stop_reason"] != "agent_finished":
             findings.append(_finding(
                 "rejection_trap", "high",
-                f"{_label(run)} had {len(rejected)} rejected submissions and ended {run['stop_reason']}; "
-                f"most common: {reasons.most_common(1)[0][0]}",
-                [_label(run)], "A rule that blocks repeated attempts can freeze a bad state; check whether the "
-                               "rejected submissions were net improvements."))
+                f"{_label(run)} had {len(rejected)} timing-regression rejection(s), only {accepted} accepted "
+                f"submission(s), and ended {run['stop_reason']}",
+                [_label(run)], "A rule that blocks the agent after a weak first draft can freeze a bad state; check "
+                               "whether the rejected submissions were net improvements."))
+    return findings
+
+
+def invalid_submissions(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Submissions rejected as malformed or incomplete (coverage, overlap), not for timing."""
+    findings = []
+    for run in runs:
+        invalid = [r for r in _rejections(run) if "timing regression" not in r["result"]]
+        if len(invalid) >= 2:
+            kind = "coverage (segments left out)" if any("not covered" in r["result"] for r in invalid) else "validation"
+            findings.append(_finding(
+                "invalid_submissions", "medium",
+                f"{_label(run)} had {len(invalid)} submissions rejected for {kind}",
+                [_label(run)], "The agent keeps resubmitting incomplete units. Consider letting submit_dub merge a partial "
+                               "update into the last accepted submission (also cuts output tokens)."))
     return findings
 
 
@@ -181,7 +202,7 @@ def unreachable_windows(runs: Sequence[Mapping[str, Any]], *, tolerance_ms: int 
     return findings
 
 
-DETECTORS = (repeated_tool_errors, rejection_trap, declined_to_submit, budget_exhaustion, ceiling_stops,
+DETECTORS = (repeated_tool_errors, rejection_trap, invalid_submissions, declined_to_submit, budget_exhaustion, ceiling_stops,
              token_blowup, compaction_missing, unreachable_windows)
 
 

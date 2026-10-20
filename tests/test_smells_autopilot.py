@@ -158,3 +158,67 @@ def test_autopilot_counts_what_each_round_spends_and_records_itself(tmp_path, mo
     assert summary["tokens_spent"] == 2 * (3000 + 700 + 900_000)
     history = (store.root / "playbooks" / "history.jsonl").read_text(encoding="utf-8").splitlines()
     assert json.loads(history[-1])["decisions"] == ["adopted", "adopted"]
+
+
+# ---- sharper rejection detectors (patterns seen in real runs) -----------------------------------------------------
+
+def _rej(text):
+    return {"t": 5, "kind": "tool", "name": "submit_dub", "ok": True, "result": json.dumps({"accepted": False, "errors": [text]})}
+
+
+def test_one_timing_rejection_that_froze_a_first_draft_is_a_trap(tmp_path):
+    run = _run(tmp_path, "t", stop="finished_below_target", records=[_rej("timing regression: 3 segment(s)")], summary={"submissions": 1})
+    assert "rejection_trap" in _smells([run])
+    recovered = _run(tmp_path, "ok", stop="finished_below_target", records=[_rej("timing regression: 3 segment(s)")], summary={"submissions": 4})
+    assert "rejection_trap" not in _smells([recovered])
+
+
+def test_repeated_coverage_rejections_are_invalid_submissions_not_a_timing_trap(tmp_path):
+    coverage = _rej("source segment 'seg-00001' is not covered by any item (untranslated content)")
+    run = _run(tmp_path, "c", stop="finished_below_target", records=[coverage, coverage, coverage], summary={"submissions": 2})
+    found = _smells([run])
+    assert "invalid_submissions" in found and "coverage" in found["invalid_submissions"]["evidence"]
+    assert "rejection_trap" not in found
+    assert "invalid_submissions" not in _smells([_run(tmp_path, "one", records=[coverage])])
+
+
+# ---- transient Azure failures are retried, boundedly ----------------------------------------------------------------------
+
+def test_a_rate_limit_is_retried_with_backoff_and_then_succeeds():
+    from mathula_tv.dub_fit import with_transient_retry
+
+    calls, naps = [], []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("Azure TTS synthesis HTTP 429")
+        return "audio"
+
+    assert with_transient_retry(flaky, sleep=naps.append, jitter=lambda: 0.5) == "audio"
+    assert len(calls) == 3 and naps == [2.0, 4.0]                      # 2**attempt, jitter factor 1.0
+
+
+def test_non_transient_errors_are_raised_immediately_and_retries_are_bounded():
+    import pytest
+
+    from mathula_tv.dub_fit import with_transient_retry
+
+    calls = []
+
+    def bad_request():
+        calls.append(1)
+        raise RuntimeError("Azure TTS synthesis HTTP 400")
+
+    with pytest.raises(RuntimeError):
+        with_transient_retry(bad_request, sleep=lambda s: None)
+    assert len(calls) == 1
+    always = []
+
+    def always_limited():
+        always.append(1)
+        raise RuntimeError("Azure TTS synthesis HTTP 429")
+
+    with pytest.raises(RuntimeError):
+        with_transient_retry(always_limited, attempts=4, sleep=lambda s: None)
+    assert len(always) == 4

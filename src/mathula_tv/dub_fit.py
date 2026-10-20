@@ -16,6 +16,36 @@ from typing import Any, Mapping
 from .dub_padding import tail_pad_ms
 
 
+TRANSIENT_ATTEMPTS = 5
+_TRANSIENT_MARKERS = ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504", "timed out", "Timeout", "Connection")
+
+
+def _is_transient(error: Exception) -> bool:
+    text = str(error)
+    return any(marker in text for marker in _TRANSIENT_MARKERS)
+
+
+def with_transient_retry(call: Any, *, attempts: int = TRANSIENT_ATTEMPTS, sleep: Any = None, jitter: Any = None) -> Any:
+    """Run ``call()``, retrying Azure rate limits and server hiccups with exponential backoff and jitter.
+
+    A 429 is the service saying "too many at once", which parallel runs cause routinely; failing the whole
+    measurement batch for it wastes a turn and its tokens. Non-transient errors are raised at once, and the
+    last transient error is raised after ``attempts`` tries -- the retry is bounded.
+    """
+    import random
+    import time
+
+    sleep = sleep or time.sleep
+    jitter = jitter or random.random
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except Exception as error:  # noqa: BLE001 - classified below
+            if attempt == attempts or not _is_transient(error):
+                raise
+            sleep(min(30.0, 2.0 ** attempt) * (0.5 + jitter()))
+
+
 def _group(
     *, item_id: str, speaker_id: str, start_ms: int, end_ms: int, source_text: str,
 ) -> dict[str, Any]:
@@ -81,11 +111,11 @@ def measure_text_fit(
         min_protected_pause_ms=DEFAULT_MIN_PROTECTED_PAUSE_MS,
     )
     voice_info = {"selected_voice": str(voice or tts.default_voice), "base_prosody": {}}
-    measured = _measure_temporal_candidate(
+    measured = with_transient_retry(lambda: _measure_temporal_candidate(
         tts=tts, group=group, voice_info=voice_info,
         candidate={"candidate_id": "measure", "spoken_text": text},
         geometry=geometry, output_root=Path(output_root), round_number=0, force=force,
-    )
+    ))
     window_ms = geometry["source_window_ms"]
     measured_ms = int(measured["measured_ms"])
     shortfall_ms = max(0, window_ms - measured_ms) if measured["direction"] == "expand" else 0
