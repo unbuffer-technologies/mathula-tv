@@ -57,19 +57,20 @@ def segment_timing_status(card: dict[str, Any], items: list[dict[str, Any]]) -> 
 
 
 def merge_partial(
-    previous: list[dict[str, Any]], update: list[dict[str, Any]],
+    previous: list[dict[str, Any]], update: list[dict[str, Any]], remove: list[str] | tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Fold a partial update into the last accepted submission.
 
-    A previous unit is replaced if an updated unit has its item_id or covers any of its source segments;
-    every other previous unit carries over untouched. Returns (merged units in time order, replaced ids).
+    A current unit is replaced only if an updated unit has its item_id, or its id is in ``remove``; every other
+    current unit carries over untouched. (Matching on shared source segments was too aggressive: units may
+    legitimately share a boundary segment, and sending one of them silently dropped its neighbours.)
+    Returns (merged units in time order, ids replaced or removed).
     """
     new_ids = {str(u["item_id"]) for u in update}
-    new_segments = {str(s) for u in update for s in u.get("source_segment_ids") or []}
+    removed = {str(r) for r in remove}
     kept, replaced = [], []
     for unit in previous:
-        covers = {str(s) for s in unit.get("source_segment_ids") or []}
-        if str(unit["item_id"]) in new_ids or covers & new_segments:
+        if str(unit["item_id"]) in new_ids or str(unit["item_id"]) in removed:
             replaced.append(str(unit["item_id"]))
         else:
             kept.append(unit)
@@ -344,6 +345,7 @@ class Workbench:
 
     def submit_dub(
         self, items: list[dict[str, Any]], approach_notes: str = "", partial: bool = False,
+        remove: list[str] | None = None,
     ) -> dict[str, Any]:
         replaced: list[str] = []
         sent = len(items)
@@ -352,7 +354,10 @@ class Workbench:
                 return {"accepted": False, "errors": [
                     "partial=true updates your last accepted submission, but none has been accepted yet: send the "
                     "full set of units first (partial is false)."]}
-            items, replaced = merge_partial(self.last_items, items)
+            unknown = sorted({str(r) for r in remove or []} - {str(u["item_id"]) for u in self.last_items})
+            if unknown:
+                return {"accepted": False, "errors": [f"remove: no current unit(s) {unknown}; see get_submission"]}
+            items, replaced = merge_partial(self.last_items, items, remove or ())
         episode = self._episode()
         native = Path(episode["native"])
         segments = read_json(native / "pass1_restored_transcript.json")["segments"]
@@ -364,8 +369,9 @@ class Workbench:
         errors, warnings = validate_submission(submission, segments)
         if errors:
             if partial:
-                errors = [*errors, f"(partial update: it replaced your current unit(s) {replaced or 'none'}; every "
-                                   "segment those covered must be covered again by your update)"]
+                errors = [*errors, f"(partial update: it replaced your current unit(s) {replaced or 'none'} by item_id; "
+                                   "units are replaced only by the same item_id or listed in remove. To change how "
+                                   "units are split, send the new units and put the old ids in remove.)"]
             return {"accepted": False, "errors": errors, "warnings": warnings}
         directory = Path(episode["dir"])
         card = score_submission_dir(

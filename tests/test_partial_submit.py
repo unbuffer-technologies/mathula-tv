@@ -17,17 +17,28 @@ def _u(uid, start, end, *segments, text="zulu", speaker="S1"):
 PREVIOUS = [_u("a", 0, 4000, "s1"), _u("b", 4200, 8000, "s2", "s3"), _u("c", 8200, 12000, "s4")]
 
 
-def test_a_unit_is_replaced_by_item_id_or_by_covering_the_same_segments():
+def test_a_unit_is_replaced_by_its_item_id_and_nothing_else():
     merged, replaced = merge_partial(PREVIOUS, [_u("a", 0, 4000, "s1", text="new")])
     assert replaced == ["a"] and [u["item_id"] for u in merged] == ["a", "b", "c"] and merged[0]["zulu_text"] == "new"
-    merged, replaced = merge_partial(PREVIOUS, [_u("renamed", 4200, 6000, "s2")])       # overlaps b through s2
-    assert replaced == ["b"] and {u["item_id"] for u in merged} == {"a", "renamed", "c"}
+
+
+def test_a_shared_boundary_segment_does_not_drop_the_neighbouring_units():
+    # The real trap: units legitimately share a boundary segment (seg-6 and seg-10 here). Sending only the middle
+    # unit must not silently delete the units on either side of it.
+    previous = [_u("u3", 0, 4000, "s4", "s5", "s6"), _u("u4", 4200, 8000, "s6", "s7", "s10"), _u("u5", 8200, 12000, "s10")]
+    merged, replaced = merge_partial(previous, [_u("u4", 4200, 8000, "s6", "s7", "s10", text="edited")])
+    assert replaced == ["u4"] and [u["item_id"] for u in merged] == ["u3", "u4", "u5"]
+
+
+def test_remove_deletes_units_the_agent_has_re_split():
+    merged, replaced = merge_partial(PREVIOUS, [_u("b1", 4200, 6000, "s2"), _u("b2", 6100, 8000, "s3")], remove=["b"])
+    assert replaced == ["b"] and [u["item_id"] for u in merged] == ["a", "b1", "b2", "c"]
 
 
 def test_untouched_units_carry_over_and_the_result_is_in_time_order():
-    merged, replaced = merge_partial(PREVIOUS, [_u("z", 100, 3900, "s1", text="early")])
-    assert replaced == ["a"] and [u["start_ms"] for u in merged] == sorted(u["start_ms"] for u in merged)
-    assert [u["item_id"] for u in merged if u["item_id"] in ("b", "c")] == ["b", "c"]
+    merged, replaced = merge_partial(PREVIOUS, [_u("c", 100, 3900, "s4", text="moved earlier")])
+    assert replaced == ["c"] and [u["start_ms"] for u in merged] == sorted(u["start_ms"] for u in merged)
+    assert [u["item_id"] for u in merged] == ["a", "c", "b"]
 
 
 def _workbench(tmp_path):
@@ -114,3 +125,20 @@ def test_the_agent_is_told_about_both_and_the_compaction_note_points_at_get_subm
     submit = next(t for t in TOOL_SPECS if t["function"]["name"] == "submit_dub")["function"]["parameters"]["properties"]
     assert submit["partial"]["type"] == "boolean"
     assert "partial=true" in SYSTEM_PROMPT and "get_submission" in SYSTEM_PROMPT and "get_submission" in COMPACTION_NOTE
+
+
+def test_remove_with_an_unknown_id_is_rejected_before_scoring(tmp_path, monkeypatch):
+    wb = _workbench(tmp_path)
+    monkeypatch.setattr(dub_workbench, "score_submission_dir", _fake_score([]))
+    wb.submit_dub(FULL)
+    result = wb.submit_dub([_u("c", 12600, 16600, "s4")], partial=True, remove=["nope"])
+    assert not result["accepted"] and "nope" in result["errors"][0]
+
+
+def test_a_partial_update_can_re_split_units_using_remove(tmp_path, monkeypatch):
+    wb = _workbench(tmp_path)
+    seen = []
+    monkeypatch.setattr(dub_workbench, "score_submission_dir", _fake_score(seen))
+    wb.submit_dub(FULL)
+    result = wb.submit_dub([_u("b1", 4200, 6000, "s2"), _u("b2", 6200, 8200, "s3")], partial=True, remove=["b"])
+    assert result["accepted"] and seen[1] == ["a", "b1", "b2", "c"] and result["merged"]["replaced"] == ["b"]

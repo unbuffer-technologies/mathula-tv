@@ -128,11 +128,20 @@ def split_restatements(spoken_text: str, source_text: str) -> tuple[list[dict[st
     return gate, soft
 
 
-def normalise_number_format(text: str, *, source: bool) -> str:
-    """Zulu groups thousands with a space ("7 000"), English with a comma ("7,000")."""
-    if source:
-        return re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", str(text or ""))
-    return re.sub(r"(?<=\d)[   ](?=\d{3}(?!\d))", "", str(text or ""))
+def normalise_number_format(text: str, *, source: bool = False) -> str:
+    """Write every thousands-grouped number without its separator, on either side.
+
+    English groups with a comma ("7,000"), isiZulu text may group with a space ("7 000") or a comma, and a
+    faithful dub mirrors the English. The required-literal check compares plain digit strings, so BOTH texts must be
+    normalised the same way; normalising only one side made a correct "7,000" in the Zulu unmatchable.
+    ``source`` is kept for call compatibility and no longer changes the result.
+    """
+    value = str(text or "")
+    previous = None
+    while previous != value:                      # "1,234,567" needs more than one pass
+        previous = value
+        value = re.sub(r"(?<=\d)[, \u00a0\u202f](?=\d{3}(?!\d))", "", value)
+    return value
 
 
 def find_unsupported_doubling(spoken_text: str, source_text: str) -> list[str]:

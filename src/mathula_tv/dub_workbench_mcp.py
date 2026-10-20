@@ -120,14 +120,15 @@ def get_submission(unit_ids: list[str] | None = None) -> dict[str, Any]:
 
 
 @server.tool()
-def submit_dub(items: list[dict[str, Any]], approach_notes: str = "", partial: bool = False) -> dict[str, Any]:
+def submit_dub(items: list[dict[str, Any]], approach_notes: str = "", partial: bool = False,
+               remove: list[str] | None = None) -> dict[str, Any]:
     """Submit the dub. items: ordered, non-overlapping units, each
     {item_id, start_ms, end_ms, speaker_id, zulu_text, source_segment_ids:[...],
      optional source_text (required only if two items share a segment), optional turn_id}.
     Every Pass-1 segment must be covered. Returns the score; you may resubmit to improve it.
-    With partial=true send only the units you changed: each replaces the current unit(s) with the same item_id or
-    covering any of the same segments, and the rest carry over (needs a previous accepted submission)."""
-    return _workbench().submit_dub(items, approach_notes, partial)
+    With partial=true send only the units you changed: each replaces the current unit with the same item_id, ids in
+    `remove` are deleted, and the rest carry over (needs a previous accepted submission)."""
+    return _workbench().submit_dub(items, approach_notes, partial, remove)
 
 
 def main() -> None:

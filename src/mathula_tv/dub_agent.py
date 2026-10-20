@@ -75,8 +75,8 @@ submit, your earlier working steps (drafts, measurements, checks) are trimmed fr
 your latest submit_dub call and its result are always kept.
 
 submit_dub takes the full set of units, or, with partial=true, only the units you changed: each replaces the
-current unit(s) with the same item_id or covering any of the same segments, and the rest carry over. Sending
-only what changed is much cheaper than rewriting the whole clip. get_submission shows your current units
+current unit with the same item_id (ids in remove are deleted) and the rest carry over. Sending only what
+changed is much cheaper than rewriting the whole clip. get_submission shows your current units
 (all, or just the ones you ask for), so you never have to rewrite from memory.
 
 The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so): no unit
@@ -157,10 +157,13 @@ TOOL_SPECS = [
           {"zulu_text": {"type": "string"}, "source_text": {"type": "string"}}, ["zulu_text", "source_text"]),
     _tool("submit_dub", "Submit the dub as ordered, non-overlapping units covering every English segment. "
           "Returns the official score and flagged units. You may resubmit. With partial=true, send ONLY the units you "
-          "changed: each replaces the current unit(s) with the same item_id or covering any of the same segments, and "
-          "every other current unit carries over (needs a previous accepted submission).",
+          "changed: each replaces the current unit with the same item_id, ids listed in remove are deleted, and every "
+          "other current unit carries over (needs a previous accepted submission). To re-split units, send the new "
+          "units and list the old ids in remove.",
           {"items": {"type": "array", "items": _UNIT_SCHEMA}, "approach_notes": {"type": "string"},
-           "partial": {"type": "boolean", "description": "true = update only the units you send."}}, ["items"]),
+           "partial": {"type": "boolean", "description": "true = update only the units you send."},
+           "remove": {"type": "array", "items": {"type": "string"},
+                      "description": "partial only: ids of current units to delete (e.g. units you re-split)."}}, ["items"]),
     _tool("get_submission", "The units currently accepted (all, or only unit_ids), with their text and any flags from "
           "the last score. Use it to see your own current state, e.g. after your history was trimmed.",
           {"unit_ids": {"type": "array", "items": {"type": "string"}}}, []),

@@ -222,3 +222,44 @@ def test_non_transient_errors_are_raised_immediately_and_retries_are_bounded():
     with pytest.raises(RuntimeError):
         with_transient_retry(always_limited, attempts=4, sleep=lambda s: None)
     assert len(always) == 4
+
+
+# ---- a gate no wording can clear is a scorer problem (the "7,000" false positive) -------------------------------------
+
+def _gate_run(tmp_path, name, repeat, evidence, clip="c"):
+    run = _run(tmp_path, name, repeat=repeat, clip=clip, stop="finished_below_target")
+    groups = [{"group_id": "u1", "flags": [], "gates": {"required_literals": {"failed": bool(evidence), "evidence": evidence}}}]
+    (run["dir"] / "scorecard.json").write_text(json.dumps({"headline": {}, "groups": groups}), encoding="utf-8")
+    return run
+
+
+def test_the_same_gate_evidence_surviving_in_several_runs_points_at_the_scorer(tmp_path):
+    runs = [_gate_run(tmp_path, "a", 1, ["7000 x1"]), _gate_run(tmp_path, "b", 2, ["7000 x1"]), _gate_run(tmp_path, "c", 3, [])]
+    found = _smells(runs)["persistent_gate_failure"]
+    assert found["severity"] == "high" and found["runs"] == ["c:r1", "c:r2"] and "7000 x1" in found["evidence"]
+    assert "Suspect the scorer" in found["suggestion"]
+
+
+def test_different_gate_failures_or_a_single_run_are_not_flagged(tmp_path):
+    differing = [_gate_run(tmp_path, "a", 1, ["7000 x1"]), _gate_run(tmp_path, "b", 2, ["NPA x1"])]
+    assert "persistent_gate_failure" not in _smells(differing)
+    assert "persistent_gate_failure" not in _smells([_gate_run(tmp_path, "solo", 1, ["7000 x1"])])
+
+
+def test_number_grouping_is_normalised_the_same_way_on_both_sides():
+    from mathula_tv.episode_scoring import normalise_number_format as norm
+
+    assert norm("about 7,000 rand") == "about 7000 rand"                       # English comma
+    assert norm("amarandi ayizi-7,000 kuphela") == "amarandi ayizi-7000 kuphela"   # the Zulu comma that was missed
+    assert norm("u-7 000 rand") == "u-7000 rand" and norm("7\u00a0000") == "7000" and norm("1,234,567") == "1234567"
+    assert norm("2,5 kg") == "2,5 kg" and norm("10, 20 and 30") == "10, 20 and 30"    # not thousands groups
+    assert norm("a", source=True) == norm("a", source=False)
+
+
+def test_a_zulu_unit_that_mirrors_the_english_number_passes_the_literal_gate():
+    from mathula_tv.episode_scoring import _score_group
+
+    group = _score_group({"group_id": "u", "source_text": "He received about 7,000 rand.",
+                          "spoken_text": "Kusolwa ukuthi wathola cishe amarandi ayizi-7,000 kuphela.", "start_ms": 0, "end_ms": 1000,
+                          "measured_ms": 1000, "variant_id": "agent"}, known_tokens=set(), labels=[], rush_flag_pct=10.0)
+    assert group["gates"]["required_literals"]["failed"] is False

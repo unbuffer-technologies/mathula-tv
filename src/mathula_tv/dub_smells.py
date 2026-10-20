@@ -242,7 +242,35 @@ def measurement_render_gap(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, 
     return findings
 
 
-DETECTORS = (repeated_tool_errors, measurement_render_gap, rejection_trap, invalid_submissions, declined_to_submit, budget_exhaustion, ceiling_stops,
+def persistent_gate_failure(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The same gate, with the same evidence, failing in the final result of several runs of one clip.
+
+    Independent runs rarely make the identical mistake, so when they do the suspect is the scorer (a literal it
+    cannot match however the agent words it), not the agent. This is how a normaliser bug that marked a correctly
+    written "7,000" as missing showed up: two runs spent most of their turns on a gate no wording could clear.
+    """
+    seen: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for run in runs:
+        path = Path(run["dir"]) / "scorecard.json"
+        if not path.is_file():
+            continue
+        card = json.loads(path.read_text(encoding="utf-8"))
+        for group in card.get("groups", []):
+            for name, gate in (group.get("gates") or {}).items():
+                if gate.get("failed") and gate.get("evidence"):
+                    seen[(str(run.get("clip", "")), name, "; ".join(map(str, gate["evidence"])))].append(_label(run))
+    findings = []
+    for (clip, gate, evidence), labels in seen.items():
+        if len(set(labels)) >= 2:
+            findings.append(_finding(
+                "persistent_gate_failure", "high",
+                f"gate {gate} ({evidence}) still failed at the end of {len(set(labels))} runs of the same clip",
+                labels, "Suspect the scorer: check whether the agent's wording actually satisfies this gate (number "
+                        "formats, spellings, a literal rendered in words) before treating it as a strategy problem."))
+    return findings
+
+
+DETECTORS = (repeated_tool_errors, persistent_gate_failure, measurement_render_gap, rejection_trap, invalid_submissions, declined_to_submit, budget_exhaustion, ceiling_stops,
              token_blowup, compaction_missing, unreachable_windows)
 
 
