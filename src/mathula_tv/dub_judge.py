@@ -1,0 +1,152 @@
+"""An independent fidelity judge for the agent's isiZulu.
+
+The scorer measures timing and hard gates; it cannot tell whether the Zulu *means* what the English meant.
+This judge is a screen for that, not ground truth. It works in two blind-then-compare passes so the verdict
+is not anchored on the English:
+
+1. back-translate: a model sees only the Zulu and writes plain English for it (marking what it cannot read);
+2. compare: a model sees the source English, the back-translation and the Zulu, and scores meaning
+   preserved 0-3 with typed issues (omission / addition / distortion / unclear).
+
+It is the same model family as the agent, so its errors correlate with the agent's. Treat the output as a
+way to rank units for the human reviewers (and, later, calibrate it against their verdicts), never as a
+reason to skip them. Nothing here feeds the agent or the improvement gate.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+CHUNK = 10
+ISSUE_KINDS = ("omission", "addition", "distortion", "unclear")
+
+BACK_TRANSLATE_PROMPT = """\
+You translate isiZulu news speech into plain, literal English so a reviewer can see exactly what the Zulu says.
+You are NOT given the original English: do not guess it, do not smooth over problems, do not add what is not
+there. Keep every name, number and date as written. If a word or phrase is not understandable, write [unclear]
+in its place.
+Reply with JSON only: {"items":[{"id":"...","english":"..."}]} with one entry per input id.
+"""
+
+COMPARE_PROMPT = """\
+You check whether an isiZulu dub preserves the meaning of the English it was made from.
+For each item you get: the SOURCE English, the DUB (isiZulu) and BACK (a blind English back-translation of the
+dub). Judge meaning, not word order: a good dub may reorder, merge or retell, but must not lose, add or change
+facts, who did what, negation, quantities, names, dates or attitude.
+Score meaning_preserved:
+  3 = same meaning, nothing material lost or added
+  2 = same facts, minor nuance or emphasis lost
+  1 = a material omission, addition or distortion
+  0 = wrong or unrelated meaning
+List each problem in issues as {"kind":"omission|addition|distortion|unclear","detail":"<=20 words"}.
+Spoken delivery may legitimately drop filler ("um", repeated words); do not count that. Be strict about facts.
+Reply with JSON only: {"items":[{"id":"...","meaning_preserved":0-3,"issues":[...]}]} with one entry per input id.
+"""
+
+
+def _parse_items(text: str) -> dict[str, dict[str, Any]]:
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip())
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    items = data.get("items") if isinstance(data, dict) else None
+    return {str(i["id"]): i for i in items or [] if isinstance(i, dict) and "id" in i}
+
+
+def _call(client: Any, system: str, payload: Sequence[Mapping[str, Any]], usage: dict[str, int]) -> dict[str, dict[str, Any]]:
+    response = client.complete(
+        [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(list(payload), ensure_ascii=False)}],
+        json_mode=True, max_output_tokens=8000)
+    for key in ("prompt_tokens", "completion_tokens"):
+        usage[key] = usage.get(key, 0) + int((response.get("usage") or {}).get(key) or 0)
+    message = (response.get("choices") or [{}])[0].get("message") or {}
+    return _parse_items(message.get("content") or "")
+
+
+def _clean_issues(raw: Any) -> list[dict[str, str]]:
+    issues = []
+    for issue in raw if isinstance(raw, list) else []:
+        if isinstance(issue, dict):
+            kind = str(issue.get("kind", "")).lower()
+            issues.append({"kind": kind if kind in ISSUE_KINDS else "distortion", "detail": str(issue.get("detail", ""))[:200]})
+    return issues
+
+
+def judge_units(client: Any, units: Sequence[Mapping[str, str]], *, chunk: int = CHUNK) -> dict[str, Any]:
+    """Judge ``units`` ({"id","source","dub"}). Returns per-unit verdicts plus the token cost."""
+    usage: dict[str, int] = {}
+    verdicts: list[dict[str, Any]] = []
+    for start in range(0, len(units), chunk):
+        part = units[start:start + chunk]
+        back = _call(client, BACK_TRANSLATE_PROMPT, [{"id": u["id"], "zulu": u["dub"]} for u in part], usage)
+        compared = _call(client, COMPARE_PROMPT, [
+            {"id": u["id"], "source": u["source"], "dub": u["dub"], "back": (back.get(u["id"]) or {}).get("english", "")}
+            for u in part], usage)
+        for u in part:
+            result = compared.get(u["id"])
+            score = result.get("meaning_preserved") if result else None
+            verdicts.append({
+                "id": u["id"], "source": u["source"], "dub": u["dub"],
+                "back_translation": (back.get(u["id"]) or {}).get("english"),
+                "meaning_preserved": int(score) if isinstance(score, (int, float)) and 0 <= score <= 3 else None,
+                "issues": _clean_issues(result.get("issues") if result else None),
+            })
+    return {"verdicts": verdicts, "summary": summarise(verdicts), "usage": usage}
+
+
+def summarise(verdicts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    scored = [v for v in verdicts if v["meaning_preserved"] is not None]
+    words = lambda v: max(1, len(str(v["source"]).split()))  # noqa: E731 - weight by how much speech a unit carries
+    total = sum(words(v) for v in scored)
+    return {
+        "units": len(verdicts), "unjudged": len(verdicts) - len(scored),
+        "mean_score": round(sum(v["meaning_preserved"] for v in scored) / len(scored), 2) if scored else None,
+        "word_weighted_mean": round(sum(v["meaning_preserved"] * words(v) for v in scored) / total, 2) if total else None,
+        "pct_units_fully_faithful": round(100 * sum(v["meaning_preserved"] == 3 for v in scored) / len(scored), 1) if scored else None,
+        "units_with_material_problems": [v["id"] for v in scored if v["meaning_preserved"] <= 1],
+    }
+
+
+def units_from_scorecard(run_dir: Path) -> list[dict[str, str]]:
+    card = json.loads((Path(run_dir) / "scorecard.json").read_text(encoding="utf-8"))
+    return [{"id": str(g["group_id"]), "source": g["source_text"], "dub": g["spoken_text"]}
+            for g in card["groups"] if g.get("source_text") and g.get("spoken_text")]
+
+
+def judge_run(client: Any, run_dir: Path) -> dict[str, Any]:
+    result = judge_units(client, units_from_scorecard(run_dir))
+    (Path(run_dir) / "judge.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="mathula_tv.dub_judge")
+    parser.add_argument("--run", required=True, help="run id, e.g. base-v2")
+    parser.add_argument("--clip", required=True)
+    parser.add_argument("--repeats", type=int, nargs="+", default=[1, 2, 3])
+    args = parser.parse_args(argv)
+
+    from .config import load_settings
+    from .dub_agent import ChatClient
+    from .experience_store import ExperienceStore
+    from .foundry_grok import native_gpt_config_from_environment
+
+    store = ExperienceStore(load_settings().work_dir)
+    client = ChatClient(native_gpt_config_from_environment(dict(os.environ)))
+    for repeat in args.repeats:
+        run_dir = store.repeat_dir(args.run, args.clip, repeat)
+        if not (run_dir / "scorecard.json").is_file():
+            print(f"r{repeat}: no scorecard, skipped")
+            continue
+        result = judge_run(client, run_dir)
+        print(f"r{repeat}: {json.dumps(result['summary'], ensure_ascii=False)} tokens={result['usage']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
