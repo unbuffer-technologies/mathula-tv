@@ -64,3 +64,97 @@ def test_judge_run_reads_the_scorecard_and_writes_judge_json(tmp_path):
     client = FakeClient({"u1": "He was arrested on Monday."}, {"u1": {"meaning_preserved": 3, "issues": []}})
     judge_run(client, tmp_path)
     assert json.loads((tmp_path / "judge.json").read_text(encoding="utf-8"))["summary"]["mean_score"] == 3.0
+
+
+# ---- meaning as part of the bar -----------------------------------------------------------------------------------
+
+from mathula_tv.dub_agent import pushback_message, slim_submit, unmet_targets
+from mathula_tv.dub_improve import batch_stats, gate
+from mathula_tv.dub_judge import UnitJudge
+
+
+def test_a_unit_keeps_its_verdict_until_its_text_changes():
+    client = FakeClient({"a": "x", "b": "y"}, {})
+    # the fake scores by id, but UnitJudge labels units by text hash: answer whatever ids arrive
+    original = client.complete
+
+    def answer(messages, **kw):
+        payload = json.loads(messages[1]["content"])
+        if "translate isiZulu" in messages[0]["content"]:
+            items = [{"id": p["id"], "english": "back"} for p in payload]
+        else:
+            items = [{"id": p["id"], "meaning_preserved": 1 if "Wavuma" in p["dub"] else 3, "issues": []} for p in payload]
+        client.calls.append((messages[0]["content"][:12], payload))
+        return {"choices": [{"message": {"content": json.dumps({"items": items})}}], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}
+
+    client.complete = answer
+    judge = UnitJudge(client)
+    first = judge.judge(UNITS)
+    calls_after_first = len(client.calls)
+    again = judge.judge(UNITS)                                  # unchanged text -> no model call at all
+    assert len(client.calls) == calls_after_first and [v["meaning_preserved"] for v in again] == [3, 1]
+    assert [v["id"] for v in again] == ["a", "b"] and first[1]["meaning_preserved"] == 1
+    judge.judge([UNITS[0], {"id": "b", "source": UNITS[1]["source"], "dub": "Walile isicelo."}])
+    assert len(client.calls) == calls_after_first + 2           # only the edited unit was judged again
+
+
+def _result(loss):
+    return {"accepted": True, "headline": {"meaning_loss_units": len(loss), "residual_dead_air_pct": 0.5},
+            "meaning": {"loss": loss, "unjudged": 0}}
+
+
+LOSS = [{"item_id": "u7", "issues": ["this morning became tomorrow"], "reads_back_as": "tomorrow too"}]
+
+
+def test_material_meaning_loss_is_below_the_bar_and_shown_to_the_agent():
+    assert unmet_targets(_result([]), max_dead_air_pct=2.0) == []
+    unmet = unmet_targets(_result(LOSS), max_dead_air_pct=2.0)
+    assert len(unmet) == 1 and "lose material meaning" in unmet[0]
+    assert slim_submit(_result(LOSS))["meaning_loss"] == LOSS
+    assert "tomorrow too" in pushback_message(_result(LOSS), unmet, tts_left=10)
+
+
+def test_a_judge_outage_adds_no_bar_and_no_loss():
+    result = {"accepted": True, "headline": {"residual_dead_air_pct": 0.5}, "meaning": {"error": "boom"}}
+    assert unmet_targets(result, max_dead_air_pct=2.0) == [] and "meaning_loss" not in slim_submit(result)
+
+
+def test_the_adoption_gate_rejects_a_candidate_that_loses_more_meaning():
+    base = {"n": 3, "met_bar": 3, "meaning_loss_mean": 0.3}
+    ok, reasons = gate(base, {**base, "meaning_loss_mean": 1.0})
+    assert not ok and any("lose meaning" in r for r in reasons)
+    assert gate(base, dict(base))[0]
+    rows = [{"met_bar": True, "processed_tokens": 1, "headline": {"meaning_loss_units": 2}},
+            {"met_bar": True, "processed_tokens": 1, "headline": {}}]
+    assert batch_stats(rows)["meaning_loss_mean"] == 1.0
+
+
+def test_the_workbench_counts_loss_in_the_headline_and_survives_a_judge_outage(tmp_path):
+    from mathula_tv.dub_workbench import Workbench
+
+    class Judge:
+        usage = {"prompt_tokens": 1}
+
+        def judge(self, units):
+            return [{**u, "meaning_preserved": 1 if u["id"] == "bad" else 3, "back_translation": "tomorrow too",
+                     "issues": [{"kind": "distortion", "detail": "time changed"}] if u["id"] == "bad" else []} for u in units]
+
+    def card():
+        return {"headline": {}, "groups": [{"group_id": "ok", "source_text": "a", "spoken_text": "b"},
+                                            {"group_id": "bad", "source_text": "c", "spoken_text": "d"}]}
+
+    wb = Workbench(store=None, tts_factory=lambda: None, judge=Judge())
+    c = card()
+    meaning = wb._judge_meaning(c, tmp_path)
+    assert c["headline"]["meaning_loss_units"] == 1 and meaning["loss"][0]["item_id"] == "bad"
+    assert (tmp_path / "judge.json").is_file()
+
+    class Down:
+        usage = {}
+
+        def judge(self, units):
+            raise RuntimeError("503")
+
+    wb.judge, c = Down(), card()
+    assert "error" in wb._judge_meaning(c, tmp_path) and "meaning_loss_units" not in c["headline"]
+    assert Workbench(store=None, tts_factory=lambda: None)._judge_meaning(card(), tmp_path) is None

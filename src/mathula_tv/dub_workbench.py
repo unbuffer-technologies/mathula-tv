@@ -106,7 +106,7 @@ class Workbench:
     def __init__(
         self, store: ExperienceStore, tts_factory: Callable[[], Any], *,
         scope: dict[str, Any] | None = None, subdir: str | None = None, measure_root: Path | None = None,
-        timing_ratchet: bool = True, voices: dict[str, dict[str, Any]] | None = None,
+        timing_ratchet: bool = True, voices: dict[str, dict[str, Any]] | None = None, judge: Any = None,
     ) -> None:
         """``scope`` ({segment_ids, next_start_ms}) narrows this workbench to one speaker turn of the
         clip; ``subdir`` puts its episode files under ``<episode>/turns/<subdir>``; ``measure_root``
@@ -125,6 +125,7 @@ class Workbench:
         # keep fitting. A submission that breaks one is rejected, so fixing one unit can never silently
         # break another, and the clip's flow only ever improves.
         self.timing_ratchet = timing_ratchet
+        self.judge = judge        # a dub_judge.UnitJudge, or None for no meaning check
         self.locked_segments: set[str] = set()
         self.episode: dict[str, Any] | None = None
         self.last_submit: dict[str, Any] | None = None   # the latest accepted submit_dub result, for the harness
@@ -343,6 +344,30 @@ class Workbench:
         ]
         return {"units": units, "count": len(units)}
 
+    def _judge_meaning(self, card: dict[str, Any], directory: Path) -> dict[str, Any] | None:
+        """Ask the independent judge whether each unit keeps the English meaning (only changed units cost tokens).
+
+        Units it scores 0-1 are material meaning loss: they are counted in the scorecard headline so the harness can
+        hold the agent to them. A judge failure never blocks a submission; the headline simply carries no count.
+        """
+        if self.judge is None:
+            return None
+        units = [{"id": str(g["group_id"]), "source": g["source_text"], "dub": g["spoken_text"]}
+                 for g in card["groups"] if g.get("source_text") and g.get("spoken_text")]
+        try:
+            verdicts = self.judge.judge(units)
+        except Exception as exc:                      # a model outage must not lose the agent's work
+            return {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        from .dub_judge import summarise
+
+        loss = [v for v in verdicts if v["meaning_preserved"] is not None and v["meaning_preserved"] <= 1]
+        card["headline"]["meaning_loss_units"] = len(loss)
+        atomic_write_json(directory / "judge.json", {"verdicts": verdicts, "summary": summarise(verdicts),
+                                                      "usage": dict(self.judge.usage)})
+        return {"loss": [{"item_id": v["id"], "issues": [i["detail"] for i in v["issues"]][:3],
+                          "reads_back_as": (v.get("back_translation") or "")[:300]} for v in loss],
+                "unjudged": sum(1 for v in verdicts if v["meaning_preserved"] is None)}
+
     def submit_dub(
         self, items: list[dict[str, Any]], approach_notes: str = "", partial: bool = False,
         remove: list[str] | None = None,
@@ -403,6 +428,7 @@ class Workbench:
                     "this_submission": _timing_summary(card["headline"]),
                     "previous_submission": _timing_summary((self.last_submit or {}).get("headline") or {}),
                 }
+        meaning = self._judge_meaning(card, directory)
         write_submission(directory / "submission.json", submission)
         episode["submissions"] += 1
         self.locked_segments = {sid for sid, entry in status.items() if entry["ok"]}
@@ -414,6 +440,7 @@ class Workbench:
             **({"regressions_accepted": regressions[:12],
                 "note": "This submission broke segments that had fitted before but is better overall, so it was "
                         "accepted; fix those segments next."} if regressions else {}),
+            **({"meaning": meaning} if meaning else {}),
             "timing_lock": {"fitting_segments": len(self.locked_segments), "total_segments": len(segments)},
             "turn_padding": [
                 {"turn_id": t["turn_id"], "units": t["group_ids"], "shortfall_ms": t["shortfall_ms"],

@@ -56,7 +56,7 @@ def _clip(text: Any, limit: int) -> str:
 def _headline_line(headline: Mapping[str, Any]) -> str:
     return (f"residual_dead_air={headline.get('residual_dead_air_pct')}% overruns={headline.get('groups_rushed')} "
             f"collisions={headline.get('collisions')}/{headline.get('cross_speaker_collisions')}cross "
-            f"gates={headline.get('gate_failures')}")
+            f"gates={headline.get('gate_failures')} meaning_loss={headline.get('meaning_loss_units', 'n/a')}")
 
 
 def digest_run(run_dir: Path, *, max_chars: int = DIGEST_MAX_CHARS) -> str:

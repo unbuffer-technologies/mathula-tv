@@ -15,6 +15,7 @@ reason to skip them. Nothing here feeds the agent or the improvement gate.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -97,6 +98,42 @@ def judge_units(client: Any, units: Sequence[Mapping[str, str]], *, chunk: int =
                 "issues": _clean_issues(result.get("issues") if result else None),
             })
     return {"verdicts": verdicts, "summary": summarise(verdicts), "usage": usage}
+
+
+class UnitJudge:
+    """A judge that remembers its verdicts, keyed by the exact (source, dub) text pair.
+
+    The judge is a sampled model, so asking twice can give different scores. Inside one run the agent
+    resubmits mostly-unchanged units; re-judging them would turn that noise into a moving target the agent
+    chases. With the cache a unit keeps its verdict until its text changes, and only changed units cost tokens.
+    """
+
+    def __init__(self, client: Any, *, chunk: int = CHUNK) -> None:
+        self.client, self.chunk = client, chunk
+        self._cache: dict[str, dict[str, Any]] = {}
+        self.usage: dict[str, int] = {}
+
+    @staticmethod
+    def _key(unit: Mapping[str, str]) -> str:
+        return hashlib.sha1(f"{unit['source']}\x00{unit['dub']}".encode("utf-8")).hexdigest()
+
+    def judge(self, units: Sequence[Mapping[str, str]]) -> list[dict[str, Any]]:
+        fresh = {self._key(u): u for u in units if self._key(u) not in self._cache}
+        if fresh:
+            # Unit ids are only labels for the model; the cache is keyed by text, so two units with equal text share one call.
+            labelled = [{"id": key, "source": u["source"], "dub": u["dub"]} for key, u in fresh.items()]
+            result = judge_units(self.client, labelled, chunk=self.chunk)
+            for verdict in result["verdicts"]:
+                if verdict["meaning_preserved"] is not None:        # an unjudged unit is retried next time
+                    self._cache[verdict["id"]] = verdict
+            for key, value in result["usage"].items():
+                self.usage[key] = self.usage.get(key, 0) + value
+        out = []
+        for unit in units:
+            cached = self._cache.get(self._key(unit))
+            out.append({**(cached or {"meaning_preserved": None, "issues": [], "back_translation": None}), "id": unit["id"],
+                        "source": unit["source"], "dub": unit["dub"]})
+        return out
 
 
 def summarise(verdicts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

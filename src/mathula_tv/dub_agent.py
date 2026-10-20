@@ -80,8 +80,10 @@ changed is much cheaper than rewriting the whole clip. get_submission shows your
 (all, or just the ones you ask for), so you never have to rewrite from memory.
 
 The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so): no unit
-overruns or runs into another unit's speech (collisions), no hard-gate failures, and
-residual_dead_air_pct at or below {max_dead_air}. If you stop while a submission is still below that bar and you have budget left,
+overruns or runs into another unit's speech (collisions), no hard-gate failures, no unit
+whose meaning an independent reader finds materially changed from the English (submit_dub reports these as
+meaning_loss, with what your Zulu reads back as; a lost qualifier, a changed time or negation, a dropped clause that
+carried a fact), and residual_dead_air_pct at or below {max_dead_air}. If you stop while a submission is still below that bar and you have budget left,
 you will be sent back to the specific units to fix.
 
 When you are satisfied, call submit_dub (it returns your score and which units are flagged; you may revise
@@ -364,7 +366,7 @@ def compact_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
 _SLIM_HEADLINE = (
     "group_count", "dead_air_pct", "turn_shortfall_pct", "silence_padded_pct", "residual_dead_air_pct",
     "groups_dead_air", "groups_rushed", "gate_failures", "worst_turn_shortfall_pct",
-    "collisions", "cross_speaker_collisions", "worst_collision_ms",
+    "collisions", "cross_speaker_collisions", "worst_collision_ms", "meaning_loss_units",
 )
 
 
@@ -391,6 +393,8 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
         slim["turns_ending_early"] = padding
     if result.get("flagged_units"):
         slim["flagged_units"] = result["flagged_units"]
+    if (result.get("meaning") or {}).get("loss"):
+        slim["meaning_loss"] = result["meaning"]["loss"]
     if result.get("warnings"):
         slim["warnings"] = result["warnings"]
     return slim
@@ -452,6 +456,8 @@ def unmet_targets(result: dict[str, Any] | None, *, max_dead_air_pct: float) -> 
         unmet.append(f"{headline['groups_rushed']} unit(s) overrun their window")
     if headline.get("gate_failures", 0) > 0:
         unmet.append(f"{headline['gate_failures']} hard-gate failure(s)")
+    if headline.get("meaning_loss_units", 0) > 0:
+        unmet.append(f"{headline['meaning_loss_units']} unit(s) lose material meaning (see meaning_loss)")
     residual = headline.get("residual_dead_air_pct")
     if residual is not None and residual > max_dead_air_pct:
         unmet.append(f"residual dead air is {residual}% (bar: {max_dead_air_pct}% or less)")
@@ -469,6 +475,11 @@ def pushback_message(result: dict[str, Any], unmet: list[str], *, tts_left: int)
     if flagged:
         lines.append("Flagged units: " + "; ".join(
             f"{f['item_id']} [{', '.join(f['gates'] + f['flags'])}]" for f in flagged) + ".")
+    lost = (result.get("meaning") or {}).get("loss", [])[:6]
+    if lost:
+        lines.append("Meaning lost (an independent reader of your Zulu disagrees with the English): " + "; ".join(
+            f"{m['item_id']}: {'; '.join(m['issues']) or 'unclear'} (your Zulu reads back as: {m['reads_back_as']!r})"
+            for m in lost) + ".")
     lock = result.get("timing_lock")
     if lock and lock.get("fitting_segments"):
         lines.append(
@@ -578,6 +589,7 @@ def run_agent(
         "tokens": tokens, "tool_calls": tool_counts, "speed_policy": speed_policy,
         "pushbacks": pushbacks, "unmet_at_end": unmet, "compactions": compactions,
         "playbook": playbook_version,
+        **({"judge_tokens": dict(workbench.judge.usage)} if getattr(workbench, "judge", None) else {}),
         "tts_used": (workbench.episode or {}).get("tts_used"), "submissions": (workbench.episode or {}).get("submissions"),
         "model": client.config.deployment,
     }
@@ -649,6 +661,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--playbook", default=None,
                         help="playbook version to load into the system prompt ('current' = the adopted one, "
                              "'none' = rules only; default: current)")
+    parser.add_argument("--no-judge", action="store_true",
+                        help="skip the independent meaning check (it is part of the bar by default)")
     parser.add_argument("--compact-after", type=int, default=COMPACT_AFTER_TOKENS,
                         help="prompt-token size above which superseded working steps are dropped (0 = never)")
     args = parser.parse_args(argv)
@@ -659,8 +673,13 @@ def main(argv: list[str] | None = None) -> int:
     from .foundry_grok import native_gpt_config_from_environment
 
     settings = load_settings()
-    workbench = Workbench(ExperienceStore(settings.work_dir), lambda: create_tts_backend(settings))
     config = native_gpt_config_from_environment(dict(os.environ))
+    judge = None
+    if not args.no_judge and args.mode == "agent":
+        from .dub_judge import UnitJudge
+
+        judge = UnitJudge(ChatClient(config))
+    workbench = Workbench(ExperienceStore(settings.work_dir), lambda: create_tts_backend(settings), judge=judge)
     if args.mode == "oneshot":
         client: Any = ChatClient(config)
         summary = run_one_shot(client, workbench, clip_id=args.clip, run_id=args.run_id, repeat=args.repeat,

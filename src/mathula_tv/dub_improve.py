@@ -30,7 +30,8 @@ import statistics
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Mapping, Sequence
 
-from .dub_agent import build_system_prompt, run_agent
+from .dub_agent import ChatClient, build_system_prompt, run_agent
+from .dub_judge import UnitJudge
 from .dub_reflect import digest_run, reflect
 from .dub_smells import find_smells, render as render_smells
 from .dub_workbench import Workbench
@@ -89,6 +90,7 @@ def batch_stats(batch: list[dict[str, Any]]) -> dict[str, Any]:
             float(r["headline"].get("groups_rushed", 0)) + float(r["headline"].get("collisions", 0)) for r in batch),
         "residual_mean": statistics.mean(float(r["headline"].get("residual_dead_air_pct", 0)) for r in batch),
         "gate_failures_mean": statistics.mean(float(r["headline"].get("gate_failures", 0)) for r in batch),
+        "meaning_loss_mean": statistics.mean(float(r["headline"].get("meaning_loss_units", 0)) for r in batch),
     }
 
 
@@ -101,6 +103,8 @@ def gate(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> tuple[boo
         reasons.append(f"meets the bar less often ({candidate['met_bar']} vs {baseline['met_bar']})")
     if candidate.get("gate_failures_mean", 0) > baseline.get("gate_failures_mean", 0) + 1e-9:
         reasons.append("more hard-gate failures")
+    if candidate.get("meaning_loss_mean", 0) > baseline.get("meaning_loss_mean", 0) + 1e-9:
+        reasons.append(f"more units lose meaning ({candidate['meaning_loss_mean']:.2f} vs {baseline['meaning_loss_mean']:.2f})")
     if candidate.get("violations_mean", 0) > baseline.get("violations_mean", 0) + 1e-9:
         reasons.append(f"more overruns/collisions ({candidate['violations_mean']:.2f} vs {baseline['violations_mean']:.2f})")
     if candidate.get("met_bar", 0) <= baseline.get("met_bar", 0) and \
@@ -114,7 +118,7 @@ def gate(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> tuple[boo
 def run_batch(
     client: Any, store: Any, tts_factory: Callable[[], Any], *, run_id: str, playbook: Mapping[str, Any],
     clip_id: str | None = None, clip_ids: Sequence[str] | None = None, repeats: int = REPEATS,
-    tts_budget: int = 600, max_turns: int = 80, max_total_tokens: int = 2_000_000,
+    tts_budget: int = 600, max_turns: int = 80, max_total_tokens: int = 2_000_000, judge_meaning: bool = True,
 ) -> list[dict[str, Any]]:
     """Run the agent ``repeats`` times on each clip, in parallel, with one playbook, each in its own workbench."""
     clips = _clips(clip_id, clip_ids)
@@ -123,7 +127,9 @@ def run_batch(
 
     def one(job: tuple[str, int]) -> dict[str, Any]:
         clip, repeat = job
-        workbench = Workbench(store, lambda: shared_tts)
+        # each run gets its own judge (its own verdict cache), on the same model deployment as the agent
+        judge = UnitJudge(ChatClient(client.config)) if judge_meaning and hasattr(client, "config") else None
+        workbench = Workbench(store, lambda: shared_tts, judge=judge)
         return run_agent(
             client, workbench, clip_id=clip, run_id=run_id, repeat=repeat, max_turns=max_turns,
             max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=system_prompt,
