@@ -121,19 +121,23 @@ class ExperienceStore:
 
     def freeze_clip(
         self, job_root: Path, *, clip_id: str | None = None, notes: str = "", overwrite: bool = False,
+        require_baseline: bool = True,
     ) -> dict[str, Any]:
         """Copy a finished job's replay inputs and current outputs into the corpus.
 
         Inputs are what a replay needs to re-run the candidate-pool stage with different
         code; the baseline snapshot is the job's committed state, scored as run
         ``baseline`` so every later run has something real to be compared against.
+
+        ``require_baseline=False`` freezes a *new* clip that has only been through Pass 1 (production use): there is no
+        committed translation to compare against, only the inputs the agent needs.
         """
         job_root = Path(job_root)
         native = job_root / "native_dub"
         missing = [name for name in REQUIRED_INPUTS if not (native / name).is_file()]
         if missing:
             raise FileNotFoundError(f"{job_root.name} is missing required replay inputs: {missing}")
-        if not (native / "pass2_candidate_pool.json").is_file():
+        if require_baseline and not (native / "pass2_candidate_pool.json").is_file():
             raise FileNotFoundError(f"{job_root.name} has no pass2_candidate_pool.json to baseline against")
 
         clip_id = clip_id or job_root.name[:8]
