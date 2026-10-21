@@ -109,7 +109,7 @@ _UNIT_SCHEMA = {
         "speaker_id": {"type": "string"},
         "zulu_text": {"type": "string"},
         "source_segment_ids": {"type": "array", "items": {"type": "string"}},
-        "source_text": {"type": "string", "description": "Only needed when two units share a source segment."},
+        "source_text": {"type": "string", "description": "Only for units that share a source segment: the exact English excerpt this unit covers, copied from the segment (checked; a paraphrase is rejected). Ignored for other units."},
     },
     "required": ["item_id", "start_ms", "end_ms", "speaker_id", "zulu_text", "source_segment_ids"],
 }

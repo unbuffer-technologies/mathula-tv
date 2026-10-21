@@ -9,6 +9,7 @@ server exposes), so an agent cannot claim a fit it did not achieve.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -69,26 +70,59 @@ def validate_submission(
     for segment_id in sorted(segment_ids - set(covered)):
         errors.append(f"source segment {segment_id!r} is not covered by any item (untranslated content)")
     shared = {sid for sid, count in covered.items() if count > 1}
+    by_id = {str(s["segment_id"]): s for s in segments}
+    excerpts: dict[str, list[str]] = {sid: [] for sid in shared}
     for index, item in enumerate(items):
-        if shared.intersection(item.get("source_segment_ids") or []) and not str(item.get("source_text") or "").strip():
-            errors.append(
-                f"item[{index}] ({item.get('item_id')}): shares a source segment with another item, so it "
-                "must carry an explicit source_text (the English it actually covers)"
-            )
+        ids = [str(v) for v in item.get("source_segment_ids") or []]
+        if not shared.intersection(ids):
+            continue          # an unshared unit's English always comes from its segments; any source_text is ignored
+        label = f"item[{index}] ({item.get('item_id')})"
+        explicit = str(item.get("source_text") or "").strip()
+        if not explicit:
+            errors.append(f"{label}: shares a source segment with another item, so it must carry an explicit "
+                          "source_text (the English it actually covers)")
+            continue
+        english = _norm_words(" ".join(_segment_english(by_id[sid]) for sid in ids if sid in by_id))
+        if f" {_norm_words(explicit)} " not in f" {english} ":
+            errors.append(f"{label}: source_text must be copied exactly from the English of its segments; it is "
+                          "checked against them, so a paraphrase or shortened version is rejected")
+            continue
+        for sid in shared.intersection(ids):
+            excerpts[sid].append(_norm_words(explicit))
+    for sid, pieces in excerpts.items():
+        if sid in by_id and pieces:
+            carried = set(" ".join(pieces).split())
+            missing = [w for w in _norm_words(_segment_english(by_id[sid])).split() if w not in carried]
+            if missing:
+                errors.append(f"units sharing segment {sid!r} must together carry all of its English; "
+                              f"not carried by any unit's source_text: {' '.join(missing[:8])}")
     if shared:
         warnings.append(f"{len(shared)} source segment(s) are split across several items: {sorted(shared)}")
     return errors, warnings
 
 
-def _source_text(item: Mapping[str, Any], segments_by_id: Mapping[str, Mapping[str, Any]]) -> str:
+def _norm_words(text: str) -> str:
+    return re.sub(r"[\W_]+", " ", str(text or "").casefold()).strip()
+
+
+def _segment_english(segment: Mapping[str, Any]) -> str:
+    return str(segment.get("restored_text") or segment.get("source_text") or "")
+
+
+def _source_text(item: Mapping[str, Any], segments_by_id: Mapping[str, Mapping[str, Any]],
+                 shared: set[str] = frozenset()) -> str:
+    """The English a unit is scored against: always read from its source segments by the harness.
+
+    The one exception is a unit that shares a segment with another unit, which may carry the excerpt it covers
+    (validate_submission has already checked that excerpt is copied from the segments). Everywhere else an
+    agent-supplied source_text is ignored: every gate and the meaning judge measure against this text, so the
+    agent must not be able to choose it.
+    """
+    ids = [str(v) for v in item.get("source_segment_ids") or []]
     explicit = str(item.get("source_text") or "").strip()
-    if explicit:
+    if explicit and shared.intersection(ids):
         return explicit
-    return " ".join(
-        str(segments_by_id[str(sid)].get("restored_text") or segments_by_id[str(sid)].get("source_text") or "")
-        for sid in item.get("source_segment_ids") or []
-        if str(sid) in segments_by_id
-    ).strip()
+    return " ".join(_segment_english(segments_by_id[sid]) for sid in ids if sid in segments_by_id).strip()
 
 
 def score_submission_dir(
@@ -122,6 +156,11 @@ def score_submission_dir(
     glossary, ledger = _load_context(native)
 
     raw_items = list(submission["items"])
+    seen_once: set[str] = set()
+    shared_ids: set[str] = set()
+    for raw in raw_items:
+        for sid in map(str, raw.get("source_segment_ids") or []):
+            (shared_ids if sid in seen_once else seen_once).add(sid)
     turn_groups = [
         {"group_id": str(i["item_id"]), "speaker_id": str(i["speaker_id"]),
          "start_ms": int(i["start_ms"]), "source_end_ms": int(i["end_ms"])}
@@ -138,7 +177,7 @@ def score_submission_dir(
             int(raw_items[index + 1]["start_ms"]) if index + 1 < len(raw_items)
             else (int(next_start_after_ms) if next_start_after_ms is not None else None)
         )
-        source_text = _source_text(item, segments_by_id)
+        source_text = _source_text(item, segments_by_id, shared_ids)
         fit = measure_text_fit(
             tts, text=str(item["zulu_text"]), start_ms=int(item["start_ms"]), end_ms=int(item["end_ms"]),
             next_start_ms=next_start, speaker_id=str(item["speaker_id"]), source_text=source_text,
