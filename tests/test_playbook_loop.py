@@ -242,3 +242,21 @@ def test_no_valid_edits_means_no_trial_and_no_change(tmp_path, monkeypatch):
     store, client = _step_env(tmp_path, monkeypatch, bad, _stats())
     record = improvement_step(client, store, lambda: None, baseline_run="base", trial_run="trial", clip_id="clip")
     assert record["decision"] == "no_change" and record["rejected"] and "candidate_playbook" not in record
+
+
+def test_a_saved_candidate_can_be_trialled_without_a_new_reflection(tmp_path, monkeypatch):
+    from mathula_tv import dub_improve
+
+    saved = {}
+    monkeypatch.setattr(dub_improve, "current_playbook", lambda store: {"version": "pb-cur", "notes": []})
+    monkeypatch.setattr(dub_improve, "load_playbook", lambda store, v: {"version": v, "notes": []})
+    monkeypatch.setattr(dub_improve, "reflect_on_batch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no reflection")))
+    batch = [{"met_bar": True, "processed_tokens": 100, "headline": {}}] * 3
+    monkeypatch.setattr(dub_improve, "collect_batches", lambda *a, **k: batch)
+    monkeypatch.setattr(dub_improve, "run_batch", lambda *a, **k: batch)
+    monkeypatch.setattr(dub_improve, "set_current", lambda store, v, reason: saved.update(adopted=v))
+    monkeypatch.setattr(dub_improve, "append_history", lambda store, rec: saved.update(record=rec))
+
+    record = dub_improve.improvement_step(None, None, lambda: None, baseline_run="b", trial_run="t", clip_ids=["c"],
+                                          candidate_version="pb-saved")
+    assert record["decision"] == "adopted" and saved["adopted"] == "pb-saved" and record["resumed_candidate"] == "pb-saved"

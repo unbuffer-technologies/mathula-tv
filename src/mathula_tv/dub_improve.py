@@ -177,9 +177,26 @@ def reflect_on_batch(
 def improvement_step(
     client: Any, store: Any, tts_factory: Callable[[], Any], *, baseline_run: str, trial_run: str,
     clip_id: str | None = None, clip_ids: Sequence[str] | None = None, repeats: int = REPEATS, run_trial: bool = True,
+    candidate_version: str | None = None,
 ) -> dict[str, Any]:
+    """Reflect -> candidate -> trial -> gate. With ``candidate_version`` an already-saved candidate is trialled
+    as it is (no new reflection): this is how an interrupted round is finished without paying for it twice."""
     clips = _clips(clip_id, clip_ids)
     playbook = current_playbook(store)
+    if candidate_version:
+        candidate = load_playbook(store, candidate_version)
+        baseline = batch_stats(collect_batches(store, baseline_run, clips))
+        record = {"baseline_run": baseline_run, "clips": clips, "from_playbook": playbook["version"],
+                  "resumed_candidate": candidate_version, "baseline_stats": baseline, "applied": [], "rejected": [],
+                  "candidate_playbook": candidate_version}
+        trial = run_batch(client, store, tts_factory, clip_ids=clips, run_id=trial_run, playbook=candidate, repeats=repeats)
+        stats = batch_stats(trial)
+        adopt, reasons = gate(baseline, stats)
+        record.update(candidate_stats=stats, trial_run=trial_run, decision="adopted" if adopt else "rejected", reasons=reasons)
+        if adopt:
+            set_current(store, candidate["version"], reason=f"passed trial {trial_run}")
+        append_history(store, record)
+        return record
     outcome = reflect_on_batch(client, store, baseline_run, clips, playbook)
     baseline = batch_stats(outcome["batch"])
     record: dict[str, Any] = {
@@ -272,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--clip", action="append", required=True, help="repeat for several clips")
         if name == "step":
             p.add_argument("--trial-run", required=True)
+            p.add_argument("--candidate", default=None, help="trial this saved playbook version instead of reflecting anew")
         if name in ("step", "autopilot"):
             p.add_argument("--repeats", type=int, default=REPEATS)
         if name == "autopilot":
@@ -307,7 +325,8 @@ def main(argv: list[str] | None = None) -> int:
                        "reflection_tokens": outcome["reflection"].get("usage")})
     elif args.command == "step":
         _print_record(improvement_step(client, store, tts_factory, baseline_run=args.baseline, trial_run=args.trial_run,
-                                       clip_ids=args.clip, repeats=args.repeats))
+                                       clip_ids=args.clip, repeats=args.repeats,
+                                       candidate_version=args.candidate))
     else:
         _print_record(autopilot(client, store, tts_factory, clip_ids=args.clip, baseline_run=args.baseline,
                                 run_prefix=args.run_prefix, max_rounds=args.max_rounds, patience=args.patience,
