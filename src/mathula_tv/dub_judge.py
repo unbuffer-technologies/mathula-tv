@@ -48,6 +48,34 @@ Spoken delivery may legitimately drop filler ("um", repeated words); do not coun
 Reply with JSON only: {"items":[{"id":"...","meaning_preserved":0-3,"issues":[...]}]} with one entry per input id.
 """
 
+CONFIRM_PROMPT = """A reviewer flagged each item below as losing material meaning. Check that claim strictly; flags are often wrong,
+especially on long units, where a dub that follows the source clause by clause gets described as "adding"
+things that the source already says.
+For each item re-read SOURCE, DUB and BACK. List only problems you can prove with exact words:
+  {"kind":"omission|distortion|addition","source_quote":"<exact words copied from SOURCE>",
+   "dub_quote":"<exact words copied from BACK showing what the dub says instead, or empty for an omission>","detail":"<=20 words"}
+An omission needs a source_quote that the dub genuinely does not carry; a distortion needs both quotes; an addition
+needs a dub_quote that the source does not support. Retelling, reordering and dropping filler are not problems.
+Then score meaning_preserved 0-3 as before (3 = nothing material lost). If you cannot quote a real problem, score 2 or 3.
+Reply with JSON only: {"items":[{"id":"...","meaning_preserved":0-3,"issues":[...]}]}
+"""
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^\w]+", " ", str(text or "").lower()).strip()
+
+
+def _grounded(issue: Mapping[str, Any], source: str, back: str) -> bool:
+    """A confirmed issue must quote real words: the source quote from the source, the dub quote from the dub's reading."""
+    kind, sq, dq = issue.get("kind"), _norm(issue.get("source_quote")), _norm(issue.get("dub_quote"))
+    if kind == "omission":
+        return bool(sq) and sq in _norm(source)
+    if kind == "distortion":
+        return bool(sq) and sq in _norm(source) and bool(dq) and dq in _norm(back)
+    if kind == "addition":
+        return bool(dq) and dq in _norm(back)
+    return False
+
 
 def _parse_items(text: str) -> dict[str, dict[str, Any]]:
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip())
@@ -88,6 +116,18 @@ def judge_units(client: Any, units: Sequence[Mapping[str, str]], *, chunk: int =
         compared = _call(client, COMPARE_PROMPT, [
             {"id": u["id"], "source": u["source"], "dub": u["dub"], "back": (back.get(u["id"]) or {}).get("english", "")}
             for u in part], usage)
+        doubtful = [u for u in part if (compared.get(u["id"]) or {}).get("meaning_preserved") in (0, 1)]
+        confirmed = _call(client, CONFIRM_PROMPT, [
+            {"id": u["id"], "source": u["source"], "dub": u["dub"], "back": (back.get(u["id"]) or {}).get("english", "")}
+            for u in doubtful], usage) if doubtful else {}
+        for u in doubtful:
+            second = confirmed.get(u["id"]) or {}
+            proven = [i for i in second.get("issues") or [] if isinstance(i, dict)
+                      and _grounded(i, u["source"], (back.get(u["id"]) or {}).get("english", ""))]
+            if second.get("meaning_preserved") in (0, 1) and proven:
+                compared[u["id"]] = {**second, "issues": proven}
+            else:                                         # not provable with quotes: a doubt, not a defect
+                compared[u["id"]] = {"meaning_preserved": 2, "issues": compared[u["id"]].get("issues"), "unconfirmed": True}
         for u in part:
             result = compared.get(u["id"])
             score = result.get("meaning_preserved") if result else None
@@ -96,6 +136,7 @@ def judge_units(client: Any, units: Sequence[Mapping[str, str]], *, chunk: int =
                 "back_translation": (back.get(u["id"]) or {}).get("english"),
                 "meaning_preserved": int(score) if isinstance(score, (int, float)) and 0 <= score <= 3 else None,
                 "issues": _clean_issues(result.get("issues") if result else None),
+                **({"unconfirmed": True} if result and result.get("unconfirmed") else {}),
             })
     return {"verdicts": verdicts, "summary": summarise(verdicts), "usage": usage}
 

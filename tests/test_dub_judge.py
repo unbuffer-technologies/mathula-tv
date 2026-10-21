@@ -14,6 +14,9 @@ class FakeClient:
         self.calls.append((system[:12], payload))
         if "translate isiZulu" in system:
             items = [{"id": p["id"], "english": self.back[p["id"]]} for p in payload]
+        elif system.startswith("A reviewer flagged"):         # the confirmation pass: answer from the "confirm" entry
+            items = [{"id": p["id"], **(self.scores[p["id"]].get("confirm") or {"meaning_preserved": 2, "issues": []})}
+                     for p in payload]
         else:
             items = [{"id": p["id"], **self.scores[p["id"]]} for p in payload if p["id"] in self.scores]
         return {"choices": [{"message": {"content": json.dumps({"items": items})}}],
@@ -27,12 +30,14 @@ UNITS = [{"id": "a", "source": "He was arrested on Monday.", "dub": "Waboshwa ng
 def test_the_back_translation_is_blind_to_the_source():
     client = FakeClient({"a": "He was arrested on Monday.", "b": "She accepted the request."},
                         {"a": {"meaning_preserved": 3, "issues": []},
-                         "b": {"meaning_preserved": 0, "issues": [{"kind": "distortion", "detail": "denial became acceptance"}]}})
+                         "b": {"meaning_preserved": 0, "issues": [{"kind": "distortion", "detail": "denial became acceptance"}],
+                               "confirm": {"meaning_preserved": 0, "issues": [
+                                   {"kind": "distortion", "source_quote": "denied the claim", "dub_quote": "accepted the request"}]}}})
     out = judge_units(client, UNITS)
     blind = client.calls[0][1]
     assert all(set(p) == {"id", "zulu"} for p in blind)                   # no English source reaches pass 1
     assert [v["meaning_preserved"] for v in out["verdicts"]] == [3, 0]
-    assert out["summary"]["units_with_material_problems"] == ["b"] and out["usage"]["prompt_tokens"] == 20
+    assert out["summary"]["units_with_material_problems"] == ["b"] and out["usage"]["prompt_tokens"] == 30
 
 
 def test_missing_or_malformed_verdicts_are_unjudged_not_zero_or_full():
@@ -82,6 +87,9 @@ def test_a_unit_keeps_its_verdict_until_its_text_changes():
         payload = json.loads(messages[1]["content"])
         if "translate isiZulu" in messages[0]["content"]:
             items = [{"id": p["id"], "english": "back"} for p in payload]
+        elif messages[0]["content"].startswith("A reviewer flagged"):
+            items = [{"id": p["id"], "meaning_preserved": 1, "issues": [
+                {"kind": "omission", "source_quote": "denied the claim", "dub_quote": ""}]} for p in payload]
         else:
             items = [{"id": p["id"], "meaning_preserved": 1 if "Wavuma" in p["dub"] else 3, "issues": []} for p in payload]
         client.calls.append((messages[0]["content"][:12], payload))
@@ -158,3 +166,29 @@ def test_the_workbench_counts_loss_in_the_headline_and_survives_a_judge_outage(t
     wb.judge, c = Down(), card()
     assert "error" in wb._judge_meaning(c, tmp_path) and "meaning_loss_units" not in c["headline"]
     assert Workbench(store=None, tts_factory=lambda: None)._judge_meaning(card(), tmp_path) is None
+
+
+def test_a_flag_with_quotes_that_are_not_in_the_text_is_downgraded_to_a_doubt():
+    client = FakeClient({"b": "She denied the claim."},
+                        {"b": {"meaning_preserved": 0, "issues": [{"kind": "addition", "detail": "adds everything"}],
+                               "confirm": {"meaning_preserved": 0, "issues": [
+                                   {"kind": "omission", "source_quote": "the minister resigned", "dub_quote": ""}]}}})
+    v = judge_units(client, [UNITS[1]])["verdicts"][0]
+    assert v["meaning_preserved"] == 2 and v["unconfirmed"] is True            # the quote is not in the source
+
+
+def test_a_flag_the_confirmer_no_longer_stands_behind_is_downgraded():
+    client = FakeClient({"b": "She denied the claim."},
+                        {"b": {"meaning_preserved": 1, "issues": [], "confirm": {"meaning_preserved": 3, "issues": []}}})
+    assert judge_units(client, [UNITS[1]])["verdicts"][0]["meaning_preserved"] == 2
+
+
+def test_each_issue_kind_is_checked_against_the_right_text():
+    from mathula_tv.dub_judge import _grounded
+
+    src, back = "He was arrested on Monday, police said.", "He was arrested on Tuesday."
+    assert _grounded({"kind": "omission", "source_quote": "police said"}, src, back)
+    assert not _grounded({"kind": "omission", "source_quote": "the court heard"}, src, back)
+    assert _grounded({"kind": "distortion", "source_quote": "arrested on Monday", "dub_quote": "arrested on Tuesday"}, src, back)
+    assert not _grounded({"kind": "distortion", "source_quote": "arrested on Monday"}, src, back)     # needs both quotes
+    assert _grounded({"kind": "addition", "dub_quote": "on Tuesday"}, src, back) and not _grounded({"kind": "unclear"}, src, back)
