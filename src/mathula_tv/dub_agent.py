@@ -172,6 +172,34 @@ TOOL_SPECS = [
 ]
 
 
+REQUEST_TIMEOUT_SECONDS = 420.0      # one model turn; the provider default (900 s) lets a dropped connection stall a run for 15 minutes
+
+
+def post_with_retry(url: str, headers: dict[str, str], body: dict[str, Any], *, timeout: float, retries: int,
+                    sleep: Callable[[float], None]) -> dict[str, Any]:
+    """POST once, retrying transient failures a bounded number of times.
+
+    Transient = HTTP 429/5xx, a read timeout or a dropped connection. Each is retried with backoff up to
+    ``retries`` times; anything else (a 4xx, bad JSON) is raised at once. A model call that hangs must cost a
+    bounded delay, never a whole batch.
+    """
+    for attempt in range(1, retries + 2):
+        try:
+            response = requests.post(url, headers=headers, json=body, timeout=timeout)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            if attempt <= retries:
+                sleep(min(2 ** attempt, 20))
+                continue
+            raise RuntimeError(f"model call failed after {attempt} attempts: {type(exc).__name__}") from exc
+        if response.status_code in (429, 500, 502, 503, 504) and attempt <= retries:
+            sleep(min(2 ** attempt, 20))
+            continue
+        if response.status_code >= 400:
+            raise RuntimeError(f"model HTTP {response.status_code}: {response.text[:600]}")
+        return response.json()
+    raise RuntimeError("model call failed")
+
+
 class ChatClient:
     """One chat-completions call with tools, over plain HTTP. No SDK, no hidden retries beyond transport."""
 
@@ -195,18 +223,11 @@ class ChatClient:
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         headers = {"api-key": self.config.api_key, "Content-Type": "application/json"}
-        for attempt in range(1, self.retries + 2):
-            response = requests.post(self.url, headers=headers, json=body, timeout=self.config.timeout_seconds)
-            if response.status_code in (429, 500, 502, 503, 504) and attempt <= self.retries:
-                self.sleep(min(2 ** attempt, 20))
-                continue
-            if response.status_code >= 400:
-                raise RuntimeError(f"model HTTP {response.status_code}: {response.text[:600]}")
-            payload = response.json()
-            usage = payload.get("usage") or {}
-            usage["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-            return payload
-        raise RuntimeError("model call failed")
+        payload = post_with_retry(self.url, headers, body, timeout=min(self.config.timeout_seconds, REQUEST_TIMEOUT_SECONDS),
+                                  retries=self.retries, sleep=self.sleep)
+        usage = payload.get("usage") or {}
+        usage["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        return payload
 
 
 class ResponsesClient:
@@ -282,15 +303,9 @@ class ResponsesClient:
         if json_mode:
             body["text"] = {"format": {"type": "json_object"}}
         headers = {"api-key": self.config.api_key, "Content-Type": "application/json"}
-        for attempt in range(1, self.retries + 2):
-            response = requests.post(self.url, headers=headers, json=body, timeout=self.config.timeout_seconds)
-            if response.status_code in (429, 500, 502, 503, 504) and attempt <= self.retries:
-                self.sleep(min(2 ** attempt, 20))
-                continue
-            if response.status_code >= 400:
-                raise RuntimeError(f"model HTTP {response.status_code}: {response.text[:600]}")
-            return self.to_chat_shape(response.json())
-        raise RuntimeError("model call failed")
+        return self.to_chat_shape(post_with_retry(
+            self.url, headers, body, timeout=min(self.config.timeout_seconds, REQUEST_TIMEOUT_SECONDS),
+            retries=self.retries, sleep=self.sleep))
 
 
 class Trace:

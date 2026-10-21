@@ -428,3 +428,71 @@ def test_prompt_tells_the_agent_that_history_costs_tokens():
     from mathula_tv.dub_agent import SYSTEM_PROMPT
 
     assert "re-sends your whole history" in SYSTEM_PROMPT and "trimmed from your history" in SYSTEM_PROMPT
+
+
+# ---- transient network failures are retried, bounded; a crashed run does not end a batch --------------------------------
+
+def test_a_read_timeout_is_retried_then_succeeds(monkeypatch):
+    import requests
+
+    from mathula_tv import dub_agent
+
+    class Ok:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"ok": True}
+
+    outcomes = [requests.exceptions.ReadTimeout("hung"), requests.exceptions.ConnectionError("reset"), Ok()]
+    sleeps = []
+
+    def fake_post(*a, **kw):
+        out = outcomes.pop(0)
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    monkeypatch.setattr(dub_agent.requests, "post", fake_post)
+    assert dub_agent.post_with_retry("u", {}, {}, timeout=1, retries=3, sleep=sleeps.append) == {"ok": True}
+    assert len(sleeps) == 2
+
+
+def test_timeouts_stop_after_the_retry_ceiling(monkeypatch):
+    import pytest
+    import requests
+
+    from mathula_tv import dub_agent
+
+    calls = []
+
+    def always_hangs(*a, **kw):
+        calls.append(1)
+        raise requests.exceptions.ReadTimeout("hung")
+
+    monkeypatch.setattr(dub_agent.requests, "post", always_hangs)
+    with pytest.raises(RuntimeError, match="ReadTimeout"):
+        dub_agent.post_with_retry("u", {}, {}, timeout=1, retries=2, sleep=lambda s: None)
+    assert len(calls) == 3                                          # one try plus two retries, then it gives up
+
+
+def test_a_crashed_run_is_recorded_as_failed_and_the_batch_continues(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from mathula_tv import dub_improve
+
+    class Store:
+        def repeat_dir(self, run_id, clip, repeat):
+            return Path(tmp_path) / run_id / clip / f"r{repeat}"
+
+    def flaky(client, workbench, *, repeat, **kw):
+        if repeat == 2:
+            raise RuntimeError("model call failed after 4 attempts: ReadTimeout")
+        return {"stop_reason": "agent_finished"}
+
+    monkeypatch.setattr(dub_improve, "run_agent", flaky)
+    monkeypatch.setattr(dub_improve, "collect_batches", lambda *a, **k: [])
+    dub_improve.run_batch(object(), Store(), lambda: None, run_id="t", playbook={"version": "pb-x", "notes": []},
+                          clip_ids=["c"], repeats=3, judge_meaning=False)
+    failed = json.loads((tmp_path / "t" / "c" / "r2" / "agent_summary.json").read_text(encoding="utf-8"))
+    assert failed["stop_reason"] == "crashed" and "ReadTimeout" in failed["error"]

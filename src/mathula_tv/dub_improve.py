@@ -130,11 +130,19 @@ def run_batch(
         # each run gets its own judge (its own verdict cache), on the same model deployment as the agent
         judge = UnitJudge(ChatClient(client.config)) if judge_meaning and hasattr(client, "config") else None
         workbench = Workbench(store, lambda: shared_tts, judge=judge)
-        return run_agent(
-            client, workbench, clip_id=clip, run_id=run_id, repeat=repeat, max_turns=max_turns,
-            max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=system_prompt,
-            playbook_version=playbook["version"],
-        )
+        try:
+            return run_agent(
+                client, workbench, clip_id=clip, run_id=run_id, repeat=repeat, max_turns=max_turns,
+                max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=system_prompt,
+                playbook_version=playbook["version"],
+            )
+        except Exception as exc:       # one crashed run is a failed run in the batch, not the end of the autopilot
+            directory = store.repeat_dir(run_id, clip, repeat)
+            directory.mkdir(parents=True, exist_ok=True)
+            failure = {"mode": "agent", "clip_id": clip, "run_id": run_id, "stop_reason": "crashed",
+                       "error": f"{type(exc).__name__}: {str(exc)[:300]}", "tokens": {}, "playbook": playbook["version"]}
+            (directory / "agent_summary.json").write_text(json.dumps(failure, indent=2), encoding="utf-8")
+            return failure
 
     jobs = [(clip, repeat) for clip in clips for repeat in range(1, repeats + 1)]
     with ThreadPoolExecutor(max_workers=min(len(jobs), MAX_PARALLEL_RUNS)) as pool:
