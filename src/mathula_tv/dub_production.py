@@ -66,6 +66,52 @@ def queue_lessons(store: Any, *, run_id: str, clip_id: str, playbook: Mapping[st
     return entries
 
 
+def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -> dict[str, Any]:
+    """Produce the inputs the agent and the renderer need that Pass 1 does not: glossary, pronunciation research,
+    speaker prosody modes and the per-speaker voices.
+
+    These come from the existing pipeline's own functions (same prompts, same checksum caches), so a clip prepared
+    here is measured and rendered exactly as the pipeline would. None of them translates anything: the old
+    candidate-pool translation stage is not run. Each step is cached; calling this twice costs nothing.
+    """
+    from .atomic_io import read_json
+    from .cli import create_native_gpt_backend, create_speech_backend, create_tts_backend
+    from .native_dub import (
+        _ensure_native_pronunciation_research, _ensure_speaker_seriousness_modes, _ensure_zulu_glossary,
+        _load_existing_context_ledger, ensure_native_voice_assignments, native_dub_paths,
+    )
+    from .orchestrator import Orchestrator
+
+    job_root = Path(settings.work_dir) / "jobs" / job_id
+    paths = native_dub_paths(job_root)
+    if not paths.pass1.is_file():
+        raise FileNotFoundError("run `native-translate --pass 1` first: pass1_restored_transcript.json is missing")
+    pass1 = read_json(paths.pass1)
+    segments = list(pass1.get("segments") or [])
+    provider = create_native_gpt_backend(None, progress=progress)
+
+    ledger, _ = _load_existing_context_ledger(job_root=job_root, pass1=pass1, segments=segments, progress=progress)
+    if ledger is None:
+        raise FileNotFoundError("the context ledger is missing; Pass 1 should have written it")
+    glossary, _ = _ensure_zulu_glossary(job_root=job_root, provider=provider, pass1=pass1, segments=segments,
+                                        context_ledger=ledger, progress=progress)
+    try:
+        stt = create_speech_backend(settings)
+    except Exception as exc:             # the round-trip check is optional, as in the pipeline
+        progress(f"[prepare] speech credentials unavailable ({exc}); pronunciation round-trip check skipped")
+        stt = None
+    _ensure_native_pronunciation_research(
+        job_root=job_root, context_ledger=ledger, glossary=glossary, progress=progress, tts=create_tts_backend(settings),
+        stt_backend=stt, skip_round_trip_verification=stt is None, grok_provider=provider,
+        pass1_corrections=pass1.get("corrections") or ())
+    _ensure_speaker_seriousness_modes(job_root=job_root, provider=provider, segments=segments, progress=progress)
+    job = Orchestrator(settings).jobs.load(job_id)
+    voices = ensure_native_voice_assignments(job=job, job_root=job_root, segments=segments, context_ledger=ledger,
+                                             provider=provider, progress=progress)
+    return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices),
+            "glossary": paths.zulu_glossary.is_file(), "pronunciation_research": paths.pronunciation_research.is_file()}
+
+
 def ensure_frozen(store: Any, job_root: Path, clip_id: str) -> dict[str, Any]:
     """Freeze the job's Pass-1 inputs as a clip, once. A new clip has no baseline translation to compare with."""
     existing = store.load_corpus()["clips"].get(clip_id)
@@ -145,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clip", default=None, help="clip id (default: first 8 characters of the job id)")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--playbook", default=None, help="playbook version (default: the adopted one)")
+    parser.add_argument("--prepare-only", action="store_true",
+                        help="make the glossary, pronunciation research, prosody modes and voices, then stop")
     parser.add_argument("--no-render", action="store_true")
     parser.add_argument("--no-reflect", action="store_true")
     parser.add_argument("--no-judge", action="store_true")
@@ -155,9 +203,14 @@ def main(argv: list[str] | None = None) -> int:
     from .dub_agent import ResponsesClient
     from .foundry_grok import native_gpt_config_from_environment
 
+    settings = load_settings()
+    prepared = prepare_agent_inputs(settings, args.job)
+    if args.prepare_only:
+        print(json.dumps(prepared, indent=2))
+        return 0
     client = ResponsesClient(native_gpt_config_from_environment(dict(os.environ)))
     report = run_production(
-        load_settings(), client, job_id=args.job, clip_id=args.clip, run_id=args.run_id, playbook_version=args.playbook,
+        settings, client, job_id=args.job, clip_id=args.clip, run_id=args.run_id, playbook_version=args.playbook,
         render=not args.no_render, reflect_after=not args.no_reflect, judge_meaning=not args.no_judge,
         max_total_tokens=args.max_tokens)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
