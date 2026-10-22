@@ -516,6 +516,30 @@ def test_jacob_zuma_uses_the_human_approved_respelling():
     assert "Jeyikab" not in result.tts_text and "Jacob" not in result.tts_text
 
 
+def test_isizulu_prefixed_ordinal_digits_are_spoken_as_english_number_words():
+    # Human-approved by ear (job a537c3077a094523b7c15056ccc556a5): "that's how people code switch".
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    text = "Angaba ngowesi-7, owesi-10, owesi-11, noma ngisho owesi-12 osusiwe."
+    result = dictionary.apply(text)
+
+    assert result.spoken_text == text                                   # display text and the numbers check keep the digits
+    assert result.tts_text == "Angaba ngowesi-seven, owesi-ten, owesi-eleven, noma ngisho owesi-twelve osusiwe."
+
+
+def test_ordinal_rule_covers_compound_numbers_and_leaves_other_text_alone():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    assert dictionary.apply("Uzoba ngowesi-21 ohlwini.").tts_text.count("twenty-one") == 1
+    assert dictionary.apply("kuphela ngowesi-105.").tts_text == "kuphela ngowesi-one hundred and five."
+    assert dictionary.apply("Basebenzise owesikhombisa kanye nabayi-18.").tts_text == "Basebenzise owesikhombisa kanye nabayi-18."
+    assert dictionary.apply("lowesi-21").tts_text == "lowesi-21"                 # not a recognised ordinal concord
+    english = with_default_organisation_initialisms(PronunciationDictionary("v1", language="en-US", job_id="job-123"))
+    assert english.apply("owesi-10").tts_text == "owesi-10"                      # only isiZulu text is touched
+
+
 def test_organisation_defaults_do_not_leak_into_unsupported_locales():
     dictionary = PronunciationDictionary("v1", language="en-US", job_id="job-123")
     assert with_default_organisation_initialisms(dictionary) is dictionary

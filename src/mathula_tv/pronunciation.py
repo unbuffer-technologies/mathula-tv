@@ -32,6 +32,7 @@ ZU_RAND_MILLION_CODE_SWITCH_VERSION = "mathula-zu-rand-million-code-switch-v1-v1
 ZU_SPACE_GROUPED_THOUSAND_CODE_SWITCH_VERSION = "mathula-zu-space-grouped-thousand-code-switch-v1"
 ZU_ENGLISH_REFERENCE_NUMBER_CODE_SWITCH_VERSION = "mathula-zu-english-reference-number-code-switch-v1-v13.19.20"
 ZU_VOICE_SPECIFIC_PRONUNCIATION_VERSION = "mathula-zu-voice-specific-pronunciation-v1"
+ZU_ENGLISH_ORDINAL_CODE_SWITCH_VERSION = "mathula-zu-english-ordinal-code-switch-v1-2026-10-22"
 PRONUNCIATION_KINDS = {
     "personal_name",
     "place_name",
@@ -998,6 +999,66 @@ def _zulu_dynamic_reference_number_candidates(
     return candidates
 
 
+# An ordinal written as an isiZulu concord glued to digits ("owesi-10", "ngowesi-7") is spoken the way people
+# code-switch from English into isiZulu: the isiZulu prefix followed by the ENGLISH number word ("owesi-ten").
+# Human-approved by ear (job a537c3077a094523b7c15056ccc556a5, 2026-10-22: "that's how people code switch"):
+# of four candidate readings -- raw digits, isiZulu number words, English number words, English ordinals -- the English
+# number words won. Left to itself the voice reads the raw digits unpredictably. The English word is plain spelling:
+# this voice applies its own English handling to Latin-script words, and <lang>/<phoneme> tags are ignored (see the
+# digit-by-digit notes above). Display text and the numeric-literal guard keep the digits.
+_ZU_ORDINAL_DIGITS = re.compile(
+    r"(?<![\w-])(?P<prefix>(?:ng|ka|na|ne)?o?wesi)\s*-\s*(?P<number>[0-9]{1,3})(?!\w)",
+    re.IGNORECASE | re.UNICODE,
+)
+_EN_UNITS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+             "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen")
+_EN_TENS = {2: "twenty", 3: "thirty", 4: "forty", 5: "fifty", 6: "sixty", 7: "seventy", 8: "eighty", 9: "ninety"}
+
+
+def _english_cardinal_word(value: int) -> str:
+    if value < 20:
+        return _EN_UNITS[value]
+    if value < 100:
+        tens, unit = divmod(value, 10)
+        return _EN_TENS[tens] + (f"-{_EN_UNITS[unit]}" if unit else "")
+    hundreds, rest = divmod(value, 100)
+    return f"{_EN_UNITS[hundreds]} hundred" + (f" and {_english_cardinal_word(rest)}" if rest else "")
+
+
+def _zulu_dynamic_ordinal_candidates(
+    text: str,
+    *,
+    language: str,
+) -> list[tuple[int, int, PronunciationEntry]]:
+    if language.casefold() != "zu-za":
+        return []
+    candidates: list[tuple[int, int, PronunciationEntry]] = []
+    for match in _ZU_ORDINAL_DIGITS.finditer(text):
+        before = match.group(0)
+        after = f"{match.group('prefix')}-{_english_cardinal_word(int(match.group('number')))}"
+        candidates.append(
+            (
+                match.start(),
+                match.end(),
+                PronunciationEntry(
+                    display_text=before,
+                    spoken_text=before,
+                    tts_text=after,
+                    language=language,
+                    source="application_default",
+                    confidence=1.0,
+                    kind="english_code_switch",
+                    notes=(
+                        "Application-controlled isiZulu-prefixed English ordinal code switch",
+                        ZU_ENGLISH_ORDINAL_CODE_SWITCH_VERSION,
+                        "Approved/display digits remain immutable",
+                    ),
+                ),
+            )
+        )
+    return candidates
+
+
 def _zulu_date_subject_day(day: int) -> str:
     """Return the fully inflected day after ``mhla`` for days 1 through 31."""
 
@@ -1725,6 +1786,12 @@ class PronunciationDictionary:
                 candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
         if kinds is None or "english_code_switch" in kinds or "number" in kinds:
             for start, end, entry in _zulu_dynamic_reference_number_candidates(
+                text,
+                language=self.language,
+            ):
+                candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
+        if kinds is None or "english_code_switch" in kinds or "number" in kinds:
+            for start, end, entry in _zulu_dynamic_ordinal_candidates(
                 text,
                 language=self.language,
             ):
