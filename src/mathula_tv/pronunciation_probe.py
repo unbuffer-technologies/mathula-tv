@@ -15,9 +15,11 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+# Short on purpose: an English recogniser garbles surrounding isiZulu ("Gabango", "demand execution"), and that
+# noise buries the one word being tested. Only the prefix and the number are spoken.
 CARRIERS = {
-    "ordinal": "Angaba ngowesi-{x} osusiwe.",
-    "date": "Isitatimende sikhishwe ngo-{x} October.",
+    "ordinal": "ngowesi-{x}.",
+    "date": "ngo-{x} October.",
 }
 _UNITS = {w: i for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen "
@@ -110,7 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--voice", default="zu-ZA-ThembaNeural")
     parser.add_argument("--from", dest="first", type=int, default=1)
     parser.add_argument("--to", dest="last", type=int, default=31)
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int, default=1,
+                        help="samples per candidate; identical text synthesises identically, so 1 is enough")
     parser.add_argument("--out", default="pronunciation_probe")
     args = parser.parse_args(argv)
 
