@@ -10,6 +10,8 @@ def test_numbers_are_read_from_digits_and_english_words():
     assert numbers_in("ngo twenty-one") == [21]
     assert numbers_in("owesi 12") == [12]
     assert numbers_in("twenty twenty six") == [20, 26] and numbers_in("owesi free") == []
+    assert numbers_in("go to October") == [2] and numbers_in("before 20 October for") == [20, 4] and numbers_in("ate") == [8]
+    assert numbers_in("20 to October") == [22] and numbers_in("20 on October") == [20] and numbers_in("20 fever") == [20]
 
 
 def _fakes(heard_for):

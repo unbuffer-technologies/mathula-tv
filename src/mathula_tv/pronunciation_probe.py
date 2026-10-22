@@ -24,6 +24,9 @@ CARRIERS = {
 _UNITS = {w: i for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen "
     "eighteen nineteen".split())}
+# A recogniser that writes a number's homophone ("go to October", "for", "ate") heard the right sound; only the
+# spelling differs. Counting these as misses scored "two" and "four" as failures for sounding correct.
+_HOMOPHONES = {"won": 1, "to": 2, "too": 2, "for": 4, "fore": 4, "ate": 8}
 _TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
 
 
@@ -35,7 +38,14 @@ def numbers_in(text: str) -> list[int]:
     while i < len(tokens):
         token = tokens[i]
         if token.isdigit():
-            found.append(int(token))
+            value = int(token)
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+            unit = _UNITS.get(nxt) if nxt else None
+            unit = _HOMOPHONES.get(nxt) if unit is None else unit
+            if value in _TENS.values() and unit is not None and 1 <= unit <= 9:     # "20 to" -> 22
+                value += unit
+                i += 1
+            found.append(value)
         elif token in _TENS:
             value = _TENS[token]
             if i + 1 < len(tokens) and tokens[i + 1] in _UNITS and 1 <= _UNITS[tokens[i + 1]] <= 9:
@@ -44,6 +54,8 @@ def numbers_in(text: str) -> list[int]:
             found.append(value)
         elif token in _UNITS:
             found.append(_UNITS[token])
+        elif token in _HOMOPHONES:
+            found.append(_HOMOPHONES[token])
         i += 1
     return found
 
