@@ -472,6 +472,10 @@ _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS = {
     # same lesson as "Talisha Naidoo" above: a speech-to-text round trip is lenient and cannot judge a respelling.
     # Six takes were played back to back and "Jeykhob" was scored 10/10. This entry is hardcoded so research skips it.
     "Jacob Zuma": ("Jeykhob Zuma", "personal_name", ()),
+    # Human-approved by ear (job a537c3077a094523b7c15056ccc556a5, 2026-10-23). Web research respelled it "Em Khey
+    # Phaati" (round trip 1.0 against 0.25 for the raw name) but a listener heard "MK part": the voice swallowed the
+    # final soft vowel. Of seven takes in the clip's own sentences, "Em Kay Phaathi" was chosen.
+    "MK Party": ("Em Kay Phaathi", "organisation_name", ()),
     # Generic English-origin code-switched word ("i-racism"/"ne-racism"), not a
     # name -- confirmed via real Azure TTS+STT round-trip testing (2026-09-12,
     # job fb3d08b63fed4d90922b08f7e325b906, user-reported live: "second turn

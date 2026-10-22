@@ -551,6 +551,18 @@ def test_ordinal_rule_covers_compound_numbers_and_leaves_other_text_alone():
     assert english.apply("owesi-10").tts_text == "owesi-10"                      # only isiZulu text is touched
 
 
+def test_mk_party_uses_the_human_approved_respelling_everywhere_it_appears():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    text = "Izindaba: i-MK Party ishintshe ubuholi; ongumengameli we MK Party, amemezele; ne-MK Party; kweMK Party."
+    result = dictionary.apply(text)
+
+    assert result.spoken_text == text
+    assert result.tts_text.count("Em Kay Phaathi") == 4
+    assert "Phaati " not in result.tts_text and "Khey" not in result.tts_text
+
+
 def test_organisation_defaults_do_not_leak_into_unsupported_locales():
     dictionary = PronunciationDictionary("v1", language="en-US", job_id="job-123")
     assert with_default_organisation_initialisms(dictionary) is dictionary
