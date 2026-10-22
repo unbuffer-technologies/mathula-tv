@@ -57,7 +57,10 @@ def probe_candidate(
     for repeat in range(repeats):
         path = audio_dir / f"{tag}n{number:02d}_{re.sub(r'[^a-z0-9]+', '-', candidate.lower())}_{repeat}.wav"
         synthesize(text, path)
-        heard = transcribe(path)
+        try:
+            heard = transcribe(path)
+        except Exception as exc:      # a recogniser that hears nothing is a result (an empty transcript), not a crash
+            heard = f"(nothing recognised: {type(exc).__name__})"
         samples.append({"heard": heard, "ok": number in numbers_in(heard)})
     return {"number": number, "candidate": candidate, "text": text,
             "score": sum(s["ok"] for s in samples) / len(samples), "samples": samples}

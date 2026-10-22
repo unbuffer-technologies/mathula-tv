@@ -58,3 +58,14 @@ def test_every_day_of_the_month_is_code_switched_like_an_ordinal():
         if day in expected:
             assert f"ngo-{expected[day]} October" in tts
     assert dictionary.apply("ngomhla ka-22 Okthoba 2026").tts_text.startswith("mhla zingamashumi")   # explicit isiZulu construction kept
+
+
+def test_a_recogniser_that_hears_nothing_scores_zero_instead_of_crashing(tmp_path):
+    from mathula_tv.pronunciation_probe import probe_candidate
+
+    def silent(path):
+        raise RuntimeError("Azure Speech returned an empty transcription")
+
+    result = probe_candidate(lambda text, path: None, silent, number=3, candidate="three", carrier="x {x}",
+                             audio_dir=tmp_path, repeats=2)
+    assert result["score"] == 0.0 and "nothing recognised" in result["samples"][0]["heard"]
