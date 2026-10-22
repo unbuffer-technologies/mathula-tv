@@ -52,7 +52,7 @@ def test_on_a_tie_the_shipped_word_is_kept(tmp_path):
 
 def test_every_day_of_the_month_is_code_switched_like_an_ordinal():
     dictionary = with_default_organisation_initialisms(PronunciationDictionary("v1", language="zu-ZA", job_id="job-1"))
-    expected = {1: "one", 10: "ten", 12: "twelve", 22: "twenty-two", 31: "thirty-one"}
+    expected = {1: "wan", 10: "ten", 12: "twelve", 22: "twenty-two", 31: "thirty-wan"}     # 1 and 31 use the approved respellings
     for day in range(1, 32):
         tts = dictionary.apply(f"kusukela ngo-{day} October 2026, ngokwesitatimende").tts_text
         assert tts.startswith("kusukela ngo-") and " October 2026, ngokwesitatimende" in tts

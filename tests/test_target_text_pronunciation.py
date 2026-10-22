@@ -525,14 +525,25 @@ def test_isizulu_prefixed_ordinal_digits_are_spoken_as_english_number_words():
     result = dictionary.apply(text)
 
     assert result.spoken_text == text                                   # display text and the numbers check keep the digits
-    assert result.tts_text == "Angaba ngowesi-seven, owesi-ten, owesi-eleven, noma ngisho owesi-twelve osusiwe."
+    assert result.tts_text == "Angaba ngowesi-seven, owesi-ten, owesi-eleven, noma ngisho owesi-twelve osusiwe."   # plain: heard right
+
+
+def test_numbers_the_voice_mispronounces_use_the_human_approved_respelling():
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    assert dictionary.apply("ngowesi-1, owesi-2, owesi-5, owesi-8").tts_text == "ngowesi-wan, owesi-tuu, owesi-fayiv, owesi-eyt"
+    assert dictionary.apply("owesi-3 ngowesi-4").tts_text == "owesi-three ngowesi-four"       # the plain word was already right
+    assert dictionary.apply("kusukela ngo-21 October").tts_text == "kusukela ngo-twenty-wan October"
+    assert dictionary.apply("kusukela ngo-31 October").tts_text == "kusukela ngo-thirty-wan October"
+    assert dictionary.apply("kusukela ngo-22 October").tts_text == "kusukela ngo-twenty-two October"     # unchanged
 
 
 def test_ordinal_rule_covers_compound_numbers_and_leaves_other_text_alone():
     dictionary = with_default_organisation_initialisms(
         PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
     )
-    assert dictionary.apply("Uzoba ngowesi-21 ohlwini.").tts_text.count("twenty-one") == 1
+    assert dictionary.apply("Uzoba ngowesi-21 ohlwini.").tts_text == "Uzoba ngowesi-twenty-wan ohlwini."      # respelled by ear
     assert dictionary.apply("kuphela ngowesi-105.").tts_text == "kuphela ngowesi-one hundred and five."
     assert dictionary.apply("Basebenzise owesikhombisa kanye nabayi-18.").tts_text == "Basebenzise owesikhombisa kanye nabayi-18."
     assert dictionary.apply("lowesi-21").tts_text == "lowesi-21"                 # not a recognised ordinal concord

@@ -1025,6 +1025,22 @@ def _english_cardinal_word(value: int) -> str:
     return f"{_EN_UNITS[hundreds]} hundred" + (f" and {_english_cardinal_word(rest)}" if rest else "")
 
 
+# How the isiZulu voice must be fed the English number words 1-31 so they are heard as those words. Human-approved by
+# ear (job a537c3077a094523b7c15056ccc556a5, 2026-10-23): the plain spellings below were played against these respellings
+# and the respellings were chosen. They were found by looping candidates through TTS and the English recogniser
+# (pronunciation_probe.py) and then confirmed by a native listener; the recogniser alone is not enough. Numbers not
+# listed (3, 4, 7, 10-12, 14-17, 20, 22-25, 27 and everything above 31) keep the plain English word.
+_ZU_CODE_SWITCH_NUMBER_RESPELLINGS = {
+    1: "wan", 2: "tuu", 5: "fayiv", 6: "seeks", 8: "eyt", 9: "nayn", 13: "thurteen", 18: "eyteen", 19: "naynteen",
+    21: "twenty-wan", 26: "twenty-seeks", 28: "twenty-eyt", 29: "twenty-nayn", 30: "thurty", 31: "thirty-wan",
+}
+
+
+def _code_switch_number_word(value: int) -> str:
+    """The text that makes the isiZulu voice say the English number ``value``, for an ordinal or a day of the month."""
+    return _ZU_CODE_SWITCH_NUMBER_RESPELLINGS.get(value) or _english_cardinal_word(value)
+
+
 def _zulu_dynamic_ordinal_candidates(
     text: str,
     *,
@@ -1035,7 +1051,7 @@ def _zulu_dynamic_ordinal_candidates(
     candidates: list[tuple[int, int, PronunciationEntry]] = []
     for match in _ZU_ORDINAL_DIGITS.finditer(text):
         before = match.group(0)
-        after = f"{match.group('prefix')}-{_english_cardinal_word(int(match.group('number')))}"
+        after = f"{match.group('prefix')}-{_code_switch_number_word(int(match.group('number')))}"
         candidates.append(
             (
                 match.start(),
@@ -1214,7 +1230,7 @@ def _zulu_native_date_tts(match: re.Match[str]) -> str:
         # with no "first"/"second". An explicit construction (ngomhla ka-22 ..., umhla ..., mhla ...) keeps the
         # native isiZulu reading above.
         english_month = _ZU_MONTH_ENGLISH_CODE_SWITCH_BY_ALIAS.get(match.group("month").casefold(), match.group("month"))
-        date = f"{_english_cardinal_word(day)} {english_month}"
+        date = f"{_code_switch_number_word(day)} {english_month}"
     else:
         date = f"mhla {_zulu_date_subject_day(day)} ku{month}"
     # A day+month+year date's own trailing year is deliberately left as raw
