@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="pronunciation_probe")
     args = parser.parse_args(argv)
 
-    from .azure_stt import normalize_stt_response
+    from .azure_stt import normalize as normalize_stt_response
     from .azure_tts import AzureTTSRequest
     from .cli import create_speech_backend, create_tts_backend
     from .config import load_settings
