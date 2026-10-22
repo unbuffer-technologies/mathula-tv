@@ -38,8 +38,10 @@ def _dictionary(locale: str = "zu-ZA") -> PronunciationDictionary:
             "Sihlehlisele umhla wesithathu kuMashi.",
         ),
         (
+            # Superseded 2026-10-23 by the user's by-ear decision: a day-first date with no isiZulu date construction is
+            # code-switched like an ordinal (English number word, English month), not read in isiZulu number words.
             "19 Agasti. Icala liyaqhubeka.",
-            "mhla ziyishumi nesishiyagalolunye kuAgasti. Icala liyaqhubeka.",
+            "nineteen August. Icala liyaqhubeka.",
         ),
         (
             "Mhla ziyi-1 kuNhlangulana.",
@@ -111,7 +113,7 @@ def test_direct_dub_rebuilds_every_variant_from_native_date_policy() -> None:
     assert [variant.tts_text for variant in segments[0].variants] == [
         "Icala lihlehliselwe umhla weshumi nesishiyagalolunye kuAgasti.",
         "Lihlehliselwe mhla ziyishumi nesishiyagalolunye kuAgasti.",
-        "mhla ziyishumi nesishiyagalolunye kuAgasti.",
+        "nineteen August.",
     ]
     assert [variant.spoken_text for variant in segments[0].variants] == [
         "Icala lihlehliselwe umhla ka-19 Agasti.",
@@ -146,7 +148,7 @@ def test_date_normalizer_is_isolated_from_other_locales_and_month_mentions() -> 
         "Sahlangana ngo-Okthoba."
     )
     result = normalise_dates_for_tts("19 Agasti", _dictionary())
-    assert "kuAgasti" in result.tts_text
+    assert result.tts_text == "nineteen August"
     assert ZU_NATIVE_DATE_PRONUNCIATION_VERSION.startswith(
         "mathula-zu-native-calendar-date"
     )

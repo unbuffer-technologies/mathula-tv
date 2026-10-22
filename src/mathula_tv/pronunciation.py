@@ -1207,6 +1207,14 @@ def _zulu_native_date_tts(match: re.Match[str]) -> str:
         date = f"ngumhla {_zulu_date_ordinal_day(day)} ku{month}"
     elif prefix.startswith("umhla"):
         date = f"umhla {_zulu_date_ordinal_day(day)} ku{month}"
+    elif not prefix:
+        # A day-first date with no isiZulu date construction ("ngo-22 October 2026", "19 August"): human-approved by ear
+        # (job a537c3077a094523b7c15056ccc556a5, 2026-10-23) to be code-switched exactly like an ordinal -- the
+        # English number word after whatever isiZulu prefix the text already carries ("ngo-twenty-two October"),
+        # with no "first"/"second". An explicit construction (ngomhla ka-22 ..., umhla ..., mhla ...) keeps the
+        # native isiZulu reading above.
+        english_month = _ZU_MONTH_ENGLISH_CODE_SWITCH_BY_ALIAS.get(match.group("month").casefold(), match.group("month"))
+        date = f"{_english_cardinal_word(day)} {english_month}"
     else:
         date = f"mhla {_zulu_date_subject_day(day)} ku{month}"
     # A day+month+year date's own trailing year is deliberately left as raw
