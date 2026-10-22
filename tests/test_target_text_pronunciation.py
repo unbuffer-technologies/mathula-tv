@@ -503,6 +503,19 @@ def test_talisha_naidoo_uses_reviewed_hidden_code_switch():
     assert {item.kind for item in result.substitutions} & {"personal_name"}
 
 
+def test_jacob_zuma_uses_the_human_approved_respelling():
+    # Job a537c3077a094523b7c15056ccc556a5: web research respelled the name "Jeyikab", which a native listener heard as
+    # "Jakab" although its own TTS+STT round trip passed. Of six takes played back to back, "Jeykhob" scored 10/10.
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    result = dictionary.apply("Ungumsekeli wesikhathi eside wowayengumengameli uJacob Zuma.")
+
+    assert result.spoken_text == "Ungumsekeli wesikhathi eside wowayengumengameli uJacob Zuma."
+    assert "uJeykhob Zuma" in result.tts_text
+    assert "Jeyikab" not in result.tts_text and "Jacob" not in result.tts_text
+
+
 def test_organisation_defaults_do_not_leak_into_unsupported_locales():
     dictionary = PronunciationDictionary("v1", language="en-US", job_id="job-123")
     assert with_default_organisation_initialisms(dictionary) is dictionary

@@ -466,6 +466,11 @@ _ZU_REVIEWED_CODE_SWITCH_PRONUNCIATIONS = {
     # tool if more drag is wanted, not another respelling guess. This is a
     # TTS-only alias and never changes captions.
     "Talisha Naidoo": ("Taleesha Nai-dooo", "personal_name", ()),
+    # Human-approved by ear (job a537c3077a094523b7c15056ccc556a5, 2026-10-22). Web research respelled the name
+    # "Jeyikab Zuma" (IPA /dZeIk@b/) and passed its own TTS+STT round trip, yet a native listener heard "Jakab" -- the
+    # same lesson as "Talisha Naidoo" above: a speech-to-text round trip is lenient and cannot judge a respelling.
+    # Six takes were played back to back and "Jeykhob" was scored 10/10. This entry is hardcoded so research skips it.
+    "Jacob Zuma": ("Jeykhob Zuma", "personal_name", ()),
     # Generic English-origin code-switched word ("i-racism"/"ne-racism"), not a
     # name -- confirmed via real Azure TTS+STT round-trip testing (2026-09-12,
     # job fb3d08b63fed4d90922b08f7e325b906, user-reported live: "second turn
