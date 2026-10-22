@@ -60,6 +60,28 @@ def numbers_in(text: str) -> list[int]:
     return found
 
 
+# Respelling candidates for the numbers whose plain English word is not recognised. The units come from the pipeline's
+# hand-tuned digit words; compounds are a tens word plus a tuned unit; the rest are spelling variants of the vowel or
+# consonant that the recogniser got wrong. They are guesses for the probe to rank, not decisions.
+_EXTRA_ALTERNATIVES = {
+    3: ["thriy", "three"], 4: ["fowr", "foar"], 6: ["siks", "sicks"], 9: ["nain", "nayn"],
+    13: ["thurteen", "therteen"], 18: ["eyteen", "ayteen"], 19: ["nayniteen", "naynteen"],
+    30: ["thurty", "therty"],
+}
+
+
+def alternatives_for(number: int, tuned_units: Mapping[str, str], tens_words: Mapping[int, str]) -> list[str]:
+    """Candidate respellings for ``number``: the tuned digit word (1-9), tens+tuned-unit compounds, spelling variants."""
+    out: list[str] = []
+    if 1 <= number <= 9:
+        out.append(tuned_units[str(number)])
+    tens, unit = divmod(number, 10)
+    if tens >= 2 and unit:
+        out.append(f"{tens_words[tens * 10]}-{tuned_units[str(unit)]}")
+    out.extend(_EXTRA_ALTERNATIVES.get(number, []))
+    return list(dict.fromkeys(out))
+
+
 def probe_candidate(
     synthesize: Callable[[str, Path], None], transcribe: Callable[[Path], str], *, number: int, candidate: str,
     carrier: str, audio_dir: Path, repeats: int = 3, tag: str = "",
@@ -127,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeats", type=int, default=1,
                         help="samples per candidate; identical text synthesises identically, so 1 is enough")
     parser.add_argument("--out", default="pronunciation_probe")
+    parser.add_argument("--only", type=int, nargs="*", default=None, help="probe just these numbers")
     args = parser.parse_args(argv)
 
     from .azure_stt import normalize as normalize_stt_response
@@ -149,9 +172,11 @@ def main(argv: list[str] | None = None) -> int:
         data = normalize_stt_response(stt.transcribe(path, locale="en-ZA"))
         return " ".join(str(w.get("text") or "") for w in data.get("words") or ())
 
-    alternatives = {n: [_ZU_ENGLISH_DIGIT_WORDS[str(n)]] for n in range(1, 10)}      # the pipeline's hand-tuned digit words
+    tens_words = {20: "twenty", 30: "thirty"}
+    alternatives = {n: alternatives_for(n, _ZU_ENGLISH_DIGIT_WORDS, tens_words) for n in range(1, 32)}
     out = Path(args.out)
-    rows = probe_numbers(synthesize, transcribe, numbers=range(args.first, args.last + 1), word_for=_english_cardinal_word,
+    numbers = args.only if args.only else range(args.first, args.last + 1)
+    rows = probe_numbers(synthesize, transcribe, numbers=numbers, word_for=_english_cardinal_word,
                          alternatives=alternatives, audio_dir=out / "audio", repeats=args.repeats)
     (out / "rows.json").write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
     for number, pick in sorted(best_per_number(rows).items()):

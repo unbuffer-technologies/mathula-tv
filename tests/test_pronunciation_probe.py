@@ -71,3 +71,14 @@ def test_a_recogniser_that_hears_nothing_scores_zero_instead_of_crashing(tmp_pat
     result = probe_candidate(lambda text, path: None, silent, number=3, candidate="three", carrier="x {x}",
                              audio_dir=tmp_path, repeats=2)
     assert result["score"] == 0.0 and "nothing recognised" in result["samples"][0]["heard"]
+
+
+def test_alternatives_cover_units_compounds_and_teens():
+    from mathula_tv.pronunciation_probe import alternatives_for
+
+    tuned = {"1": "wan", "2": "tuu", "5": "fayiv", "6": "seeks", "8": "eyt", "9": "nayn", "3": "triiy", "4": "four", "7": "seven"}
+    tens = {20: "twenty", 30: "thirty"}
+    assert alternatives_for(5, tuned, tens)[0] == "fayiv"
+    assert alternatives_for(21, tuned, tens) == ["twenty-wan"]
+    assert alternatives_for(29, tuned, tens) == ["twenty-nayn"] and alternatives_for(31, tuned, tens) == ["thirty-wan"]
+    assert "thurteen" in alternatives_for(13, tuned, tens) and alternatives_for(12, tuned, tens) == []
