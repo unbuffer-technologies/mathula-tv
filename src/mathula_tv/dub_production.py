@@ -110,20 +110,33 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
                                              provider=provider, progress=progress)
     names = None
     try:
-        import json as _json
         import os as _os
 
         from .pronunciation_names_job import plan_job_names
 
-        assignments = _json.loads(Path(voices).read_text(encoding="utf-8"))
-        first = next(iter((assignments.get("speakers") or assignments).values()), {})
-        voice = str((first or {}).get("selected_voice") or "zu-ZA-ThembaNeural")
         names = plan_job_names(job_root, key=_os.environ["AZURE_SPEECH_KEY"],
-                               region=_os.environ["AZURE_SPEECH_REGION"].strip().lower(), voice=voice, progress=progress)
+                               region=_os.environ["AZURE_SPEECH_REGION"].strip().lower(), voice=primary_voice(Path(voices)),
+                               progress=progress)
     except Exception as exc:        # a names-stage problem must never block the dub; the pipeline's own readings still apply
         progress(f"[prepare] names stage skipped: {type(exc).__name__}: {str(exc)[:200]}")
     return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices), "names_lexicon": str(names) if names else None,
             "glossary": paths.zulu_glossary.is_file(), "pronunciation_research": paths.pronunciation_research.is_file()}
+
+
+def primary_voice(voice_resolution: Path, default: str = "zu-ZA-ThembaNeural") -> str:
+    """The first speaker's assigned voice from a job's voice_resolution.json ({"assignments": {speaker: {selected_voice}}})."""
+    import json
+
+    try:
+        data = json.loads(Path(voice_resolution).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+    assignments = data.get("assignments", data) if isinstance(data, dict) else data
+    entries = assignments.values() if isinstance(assignments, dict) else assignments
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("selected_voice"):
+            return str(entry["selected_voice"])
+    return default
 
 
 def ensure_frozen(store: Any, job_root: Path, clip_id: str) -> dict[str, Any]:

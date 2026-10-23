@@ -56,3 +56,16 @@ def test_a_reflection_with_no_edits_queues_nothing(tmp_path):
     store = ExperienceStore(tmp_path)
     assert queue_lessons(store, run_id="r", clip_id="c", playbook=seed_playbook(), reflection={"edits": []}) == []
     assert load_queue(store) == []
+
+
+def test_the_primary_voice_is_read_from_the_real_voice_resolution_layout(tmp_path):
+    from mathula_tv.dub_production import primary_voice
+
+    path = tmp_path / "voice_resolution.json"
+    path.write_text(json.dumps({"job_id": "j", "assignments": {
+        "SPEAKER_00": {"speaker_id": "SPEAKER_00", "selected_voice": "zu-ZA-ThandoNeural"},
+        "SPEAKER_01": {"speaker_id": "SPEAKER_01", "selected_voice": "zu-ZA-ThembaNeural"}}}), encoding="utf-8")
+    assert primary_voice(path) == "zu-ZA-ThandoNeural"
+    assert primary_voice(tmp_path / "missing.json") == "zu-ZA-ThembaNeural"                       # falls back, never raises
+    path.write_text("not json", encoding="utf-8")
+    assert primary_voice(path) == "zu-ZA-ThembaNeural"
