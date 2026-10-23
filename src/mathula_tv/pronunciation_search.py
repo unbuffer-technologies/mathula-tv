@@ -96,6 +96,18 @@ class Context:
                 f"{self._sep(candidate)}{self.after}").strip()
 
 
+def _render_marked_words(context: "Context", candidate: "Candidate") -> str:
+    """The sentence with a bookmark before and after EACH word of the name (t0s, t0e, t1s, ...)."""
+    if context.before == "" or context.before.endswith(" "):
+        head, glue = context.before, ""
+    else:
+        head, _, glue = context.before.rpartition(" ")
+        head = f"{head} " if head else ""
+    words = candidate.spelling.split(" ")
+    marked = " ".join(f'<bookmark mark="t{i}s"/>{glue if i == 0 else ""}{w}<bookmark mark="t{i}e"/>' for i, w in enumerate(words))
+    return f"{head}{marked}{context._sep(candidate)}{context.after}".strip()
+
+
 def neighbours(spelling: str) -> list[str]:
     """Every distinct spelling one edit away (and within a sane length), most conservative edits first."""
     seen: dict[str, None] = {}
@@ -143,6 +155,25 @@ class NameWindows:
             marks_file.write_text(json.dumps(marks), encoding="utf-8")
             self.syntheses += 1
         return slice_wav(wav, marks["n0"] - LEAD_MS, marks["n1"] + TRAIL_MS, self.work_dir / f"{key}.name.wav")
+
+    def word_audios(self, context: Context, candidate: Candidate) -> list[Path]:
+        """One audio slice per word of the name, cut with a bookmark pair around each word."""
+        marked = _render_marked_words(context, candidate)
+        key = hashlib.sha1(f"{context.pitch}|{marked}".encode("utf-8")).hexdigest()[:16]
+        wav, marks_file = self.work_dir / f"{key}.words.wav", self.work_dir / f"{key}.words.json"
+        if wav.is_file() and marks_file.is_file():
+            marks = json.loads(marks_file.read_text(encoding="utf-8"))
+        else:
+            self.work_dir.mkdir(parents=True, exist_ok=True)
+            marks = dict(self.synthesize(marked, context.pitch, wav))
+            marks_file.write_text(json.dumps(marks), encoding="utf-8")
+            self.syntheses += 1
+        words = candidate.spelling.split(" ")
+        pieces = []
+        for i in range(len(words)):
+            trail = TRAIL_MS if i == len(words) - 1 else 30        # do not bleed into the next word
+            pieces.append(slice_wav(wav, marks[f"t{i}s"] - 30, marks[f"t{i}e"] + trail, self.work_dir / f"{key}.w{i}.wav"))
+        return pieces
 
     def phones(self, context: Context, candidate: Candidate) -> tuple[str, ...]:
         memo_key = (candidate, context)
@@ -220,6 +251,62 @@ def search(
     return sorted(((score, c) for c, score in scorer._cache.items()), key=lambda item: -item[0])
 
 
+@dataclass
+class WordScorer:
+    """Scores each word of a name on its own audio against that word's expected sounds (higher is better, 0-1)."""
+    windows: NameWindows
+    goodness: Callable[[Path, str], float]            # (word audio, expected IPA of that word) -> 0..1
+    expected_words: Sequence[str]
+    contexts: Sequence[Context]
+    evaluations: int = 0
+    _cache: dict = field(default_factory=dict)
+
+    def word_scores(self, spelling: str) -> list[float]:
+        if spelling not in self._cache:
+            self.evaluations += 1
+            candidate = Candidate(spelling)
+            per_context = [[self.goodness(path, ipa) for path, ipa in zip(self.windows.word_audios(c, candidate), self.expected_words)]
+                           for c in self.contexts]
+            self._cache[spelling] = [sum(col) / len(col) for col in zip(*per_context)]
+        return self._cache[spelling]
+
+
+def respell_words(scorer: WordScorer, spelling: str, *, margin: float = 0.15, width: int = 2, depth: int = 3,
+                  budget: int = 24) -> list[dict[str, Any]]:
+    """Decide word by word: keep the plain spelling unless a respelling beats it by ``margin`` (0-1 goodness).
+
+    A South African name is often half English and half isiZulu ("Jacob Zuma"). The voice already says the isiZulu
+    words correctly, so the burden of proof is on changing a word; only the words that fall short are searched.
+    """
+    words = spelling.split(" ")
+    decisions: list[dict[str, Any]] = []
+    for i, word in enumerate(words):
+        def goodness_of(variant: str, i: int = i) -> float:
+            return scorer.word_scores(" ".join([*words[:i], variant, *words[i + 1:]]))[i]
+
+        plain = goodness_of(word)
+        best, best_score, spent = word, plain, 0
+        frontier = [word]
+        for _ in range(depth):
+            fresh: list[str] = []
+            for parent in sorted(frontier, key=goodness_of, reverse=True)[:width]:
+                for variant in neighbours(parent):
+                    if variant == word or variant in fresh or spent >= budget:
+                        continue
+                    spent += 1
+                    score = goodness_of(variant)
+                    fresh.append(variant)
+                    if score > best_score:
+                        best, best_score = variant, score
+            if not fresh:
+                break
+            frontier = [best, *fresh]
+        changed = best != word and best_score >= plain + margin
+        decisions.append({"word": word, "plain": round(plain, 3), "best": best, "best_score": round(best_score, 3),
+                          "decision": best if changed else word, "changed": changed})
+    return decisions
+
+
 def agreement(scorer: Scorer, pairs: Sequence[tuple[Candidate, Candidate]]) -> dict[str, Any]:
     """How often the score prefers the listener's choice (first of each pair) over what they rejected (second)."""
     rows = []
@@ -250,7 +337,7 @@ def bookmark_synthesizer(voice: str, key: str, region: str) -> SynthesizeMarked:
         marks: dict[str, float] = {}
         synth.bookmark_reached.connect(lambda event: marks.__setitem__(event.text, event.audio_offset / 10_000))
         result = synth.speak_ssml_async(ssml).get()
-        if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted or not {"n0", "n1"} <= set(marks):
+        if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted or not marks:
             raise RuntimeError(f"synthesis failed or returned no bookmarks: {result.reason}")
         wav.write_bytes(result.audio_data)
         return marks

@@ -151,3 +151,15 @@ def test_the_speakers_audio_picks_the_vowel_they_said():
     said = [vocab[t] for t in ["dʒ", "eɪ", "k", "o", "b"]]            # the speaker says a full "o"
     picked = choose_expected(_peaked(said, vocab_size=20), phone_tokens("dʒeɪkəb", vocab), vocab, blank=1)
     assert picked["chosen"] == "dʒeɪkob" and picked["chosen_excess"] < picked["base_excess"]
+
+
+def test_a_chosen_token_sequence_is_regrouped_into_the_words_of_the_name():
+    from mathula_tv.pronunciation_assess import regroup
+
+    assert regroup(["dʒ", "eɪ", "k", "o", "b", "z", "uː", "m", "a"], "dʒeɪkəb zuːmə", VOCAB) == ["dʒeɪkob", "zuːma"]
+
+
+def test_a_research_pronunciation_note_is_cleaned_to_the_models_symbols():
+    from mathula_tv.pronunciation_assess import sanitize_ipa
+
+    assert sanitize_ipa("/ˈkʰeɪ.ɪʱ zuː/", {"k": 1, "kʰ": 2, "eɪ": 3, "ɪ": 4, "z": 5, "uː": 6}) == "kʰeɪɪ zuː"

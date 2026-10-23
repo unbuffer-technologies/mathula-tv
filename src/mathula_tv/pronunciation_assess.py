@@ -79,7 +79,9 @@ def choose_expected(log_probs: Any, base_tokens: Sequence[str], vocab: Mapping[s
     scored.sort()
     base = "".join(base_tokens)
     base_excess = next(e for e, v in scored if v == base)
-    return {"chosen": scored[0][1], "chosen_excess": scored[0][0], "base": base, "base_excess": base_excess,
+    chosen_tokens = next(v for v in ipa_variants(base_tokens, limit) if "".join(v) == scored[0][1])
+    return {"chosen": scored[0][1], "chosen_tokens": chosen_tokens, "chosen_excess": scored[0][0], "base": base,
+            "base_excess": base_excess,
             "runners_up": [(round(e, 3), v) for e, v in scored[1:4]]}
 
 
@@ -258,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--assessors", nargs="*", default=["azure-en-GB", "azure-en-US", "local-gop"])
     parser.add_argument("--search", action="store_true", help="search with Azure en-US + GOP combined, write takes for listening")
     parser.add_argument("--budget", type=int, default=50, help="candidates the search may score per entity")
+    parser.add_argument("--words", action="store_true", help="respell word by word, leaving words untouched unless a change clearly helps")
     args = parser.parse_args(argv)
     if args.search:
         args.assessors = ["azure-en-US", "local-gop"]
@@ -269,7 +272,9 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     synthesize = ps.bookmark_synthesizer(config.get("voice", "zu-ZA-ThembaNeural"), key, region)
-    gop = LocalGop() if "local-gop" in args.assessors else None
+    gop = LocalGop() if ("local-gop" in args.assessors or args.words) else None
+    if args.words:
+        return _run_words(args, config, ps, gop, synthesize, job_root, out)
 
     if args.search:
         _derive_expected(config, ps, gop, job_root, out)
@@ -314,6 +319,67 @@ def main(argv: list[str] | None = None) -> int:
     print("\n== overall agreement with the listener")
     for assessor, (agree, total) in totals.items():
         print(f"   {assessor:<12} {agree}/{total}" + (f" = {agree / total:.0%}" if total else ""))
+    return 0
+
+
+def sanitize_ipa(ipa: str, vocab: Mapping[str, int]) -> str:
+    """Strip the stress marks, slashes and syllable dots a pronunciation note carries, and drop symbols the model lacks."""
+    text = re.sub(r"[/\[\]ˈˌ.]", "", ipa)
+    known = {ch for token in vocab for ch in token}
+    return " ".join("".join(ch for ch in word if ch in known) for word in text.split())
+
+
+def regroup(tokens: Sequence[str], base_ipa: str, vocab: Mapping[str, int]) -> list[str]:
+    """Split a chosen token sequence back into words using the word lengths of ``base_ipa`` (variants swap 1:1)."""
+    lengths = [len(phone_tokens(word, vocab)) for word in base_ipa.split()]
+    words, at = [], 0
+    for n in lengths:
+        words.append("".join(tokens[at:at + n]))
+        at += n
+    return words
+
+
+def _run_words(args: Any, config: Mapping[str, Any], ps: Any, gop: "LocalGop", synthesize: Any, job_root: Path, out: Path) -> int:
+    """Word-by-word respelling of the names in ``word_entities``: untouched unless a change clearly helps."""
+    from .native_dub import _extract_entity_english_source_clip
+
+    research = json.loads((job_root / "native_dub" / "pronunciation_research.json").read_text(encoding="utf-8"))
+    by_name = {c["canonical_text"]: c for c in research.get("accepted_corrections", [])}
+    report: dict[str, Any] = {}
+    gop._load()
+    for entity in config["word_entities"]:
+        name = entity["name"]
+        slug = re.sub(r"\W+", "_", name.lower())
+        base = entity.get("ipa") or sanitize_ipa(by_name[name]["pronunciation_ipa"], gop._vocab)
+        clip = _extract_entity_english_source_clip(job_root=job_root, entity_id=slug, canonical_text=name, audio_dir=out / "reference")
+        if clip is None:
+            print(f"\n== {name}: no source clip; skipped")
+            continue
+        picked = gop.choose_expected(clip, base)
+        words = regroup(picked["chosen_tokens"], base, gop._vocab)
+        name_words = name.split()
+        if len(words) != len(name_words):
+            print(f"\n== {name}: {len(words)} sound groups for {len(name_words)} words; skipped")
+            continue
+        contexts = [ps.Context(**c) for c in entity.get("contexts", config["default_contexts"])]
+        windows = ps.NameWindows(synthesize, lambda wav: (), out / slug)
+        memo: dict[tuple[str, str], float] = {}
+
+        def goodness(wav: Path, ipa: str) -> float:
+            if (wav.name, ipa) not in memo:
+                memo[(wav.name, ipa)] = gop_goodness(gop.assess(wav, ipa)["score"])
+            return memo[(wav.name, ipa)]
+
+        scorer = ps.WordScorer(windows, goodness, words, contexts)
+        decisions = ps.respell_words(scorer, name, margin=float(config.get("margin", 0.15)), budget=int(config.get("word_budget", 24)))
+        final = " ".join(d["decision"] for d in decisions)
+        print(f"\n== {name}  (speaker's sounds: {' | '.join(words)};  base from research: {base!r})")
+        for d in decisions:
+            verdict = f"CHANGED to {d['decision']!r}" if d["changed"] else "kept untouched"
+            print(f"   {d['word']:<14} plain {d['plain']:.3f}   best found {d['best']!r} {d['best_score']:.3f}   -> {verdict}")
+        print(f"   result: {final!r}   ({scorer.evaluations} spellings scored)")
+        report[name] = {"expected_words": words, "decisions": decisions, "result": final}
+    (out / "word_report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     return 0
 
 

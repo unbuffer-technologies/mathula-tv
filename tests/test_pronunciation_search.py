@@ -116,3 +116,58 @@ def test_slice_wav_clamps_to_the_file(tmp_path):
     out = slice_wav(wav, -500, 99_999, tmp_path / "all.wav")
     with wave.open(str(out), "rb") as w:
         assert w.getnframes() == 48000
+
+
+# ---- word by word: leave what is already right alone --------------------------------------------------------------
+
+def _word_fixture(tmp_path, ideal):
+    import difflib
+    import re
+    import wave
+
+    from mathula_tv.pronunciation_search import WordScorer
+
+    texts = {}
+
+    def synthesize(marked, pitch, wav):
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(b"\x00\x00" * 96000)
+        texts[wav.name.split(".")[0]] = marked
+        marks = {}
+        for i, _ in enumerate(re.findall(r'mark="t(\d+)s"', marked)):
+            marks[f"t{i}s"] = 500.0 + i * 1000
+            marks[f"t{i}e"] = 1300.0 + i * 1000
+        return marks
+
+    def goodness(piece, ipa):
+        key, index = piece.name.split(".")[0], int(piece.name.split(".w")[1].split(".")[0])
+        word = re.findall(rf'mark="t{index}s"/>(.*?)<bookmark mark="t{index}e"', texts[key])[0]
+        return difflib.SequenceMatcher(None, word.lower().lstrip("u"), ipa).ratio()
+
+    windows = NameWindows(synthesize, lambda wav: (), tmp_path)
+    return WordScorer(windows, goodness, ideal, [Context("a ", " b")])
+
+
+def test_the_english_word_is_respelled_and_the_zulu_word_is_left_untouched(tmp_path):
+    from mathula_tv.pronunciation_search import respell_words
+
+    scorer = _word_fixture(tmp_path, ["jeykhob", "zuma"])
+    decisions = respell_words(scorer, "Jacob Zuma", margin=0.15)
+    jacob, zuma = decisions
+    assert jacob["changed"] and jacob["decision"] != "Jacob" and jacob["best_score"] >= jacob["plain"] + 0.15
+    assert zuma["changed"] is False and zuma["decision"] == "Zuma"            # already right: no change, whatever the search found
+
+
+def test_a_small_gain_is_not_enough_to_change_a_word(tmp_path):
+    from mathula_tv.pronunciation_search import respell_words
+
+    scorer = _word_fixture(tmp_path, ["jeykhob", "zuma"])
+    decisions = respell_words(scorer, "Jacob Zuma", margin=0.95)           # an unreachable margin: nothing may change
+    assert [d["decision"] for d in decisions] == ["Jacob", "Zuma"] and not any(d["changed"] for d in decisions)
+
+
+def test_each_word_gets_its_own_window_and_the_scores_are_per_word(tmp_path):
+    scorer = _word_fixture(tmp_path, ["jeykhob", "zuma"])
+    scores = scorer.word_scores("Jeykhob Zuma")
+    assert len(scores) == 2 and scores[0] == 1.0 and scores[1] == 1.0
+    assert scorer.word_scores("Jacob Zuma")[0] < scores[0] and scorer.word_scores("Jacob Zuma")[1] == 1.0
