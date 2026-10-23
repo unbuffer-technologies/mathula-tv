@@ -20,3 +20,15 @@ def test_the_lean_reading_does_not_use_the_research_respelling_for_an_english_wo
 def test_a_verdict_needs_a_clear_gap():
     assert verdict(0.3, 0.5) == "lean better" and verdict(0.5, 0.3) == "current better"
     assert verdict(0.40, 0.45) == "about equal"
+
+
+def test_the_scores_choose_the_lean_reading_only_when_one_improves_and_neither_gets_worse():
+    from mathula_tv.pronunciation_lean import decide
+
+    def scores(cg, lg, ca, la):
+        return {"current": {"gop": cg, "azure": ca}, "lean": {"gop": lg, "azure": la}}
+
+    assert decide(scores(0.285, 0.342, 0.825, 0.9)) == "lean"          # both improve
+    assert decide(scores(0.235, 0.27, 0.325, 0.325)) == "lean"          # one improves, one equal
+    assert decide(scores(0.172, 0.2, 0.0, 0.0)) == "current"           # gain too small to trust
+    assert decide(scores(0.3, 0.5, 0.8, 0.6)) == "current"             # one improves but the other gets worse
