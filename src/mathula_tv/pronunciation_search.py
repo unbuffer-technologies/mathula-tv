@@ -109,13 +109,37 @@ def _render_marked_words(context: "Context", candidate: "Candidate") -> str:
     return f'{head}<bookmark mark="b0"/>{marked}{context._sep(candidate)}{context.after}'.strip()
 
 
+_CLICK_LETTERS = "cqx"
+
+
+def _adds_click(before: str, after: str) -> bool:
+    """c, q and x are click consonants in isiZulu: a respelling must never introduce one the word did not already have."""
+    return any(after.lower().count(letter) > before.lower().count(letter) for letter in _CLICK_LETTERS)
+
+
+_VOWELS = "aeiou"
+
+
+def looks_isizulu(word: str) -> bool:
+    """A word with isiZulu shape: letters only, open syllables, ending in a vowel (Zuma, Maseko, Ntshalintshali).
+
+    English-origin names usually end in a consonant ("Jacob", "Moses") or double a consonant ("Brigitte"). This is a
+    prior, not a classifier: a Zulu name ending in a consonant ("Msimang") is not protected by it, and the margin that
+    any change must clear still applies to it.
+    """
+    w = re.sub(r"[^a-z]", "", word.lower())
+    if len(w) < 3 or w[-1] not in _VOWELS:
+        return False
+    return not re.search(r"([bcdfghjklmnpqrstvwxz])\1", w) and "ck" not in w
+
+
 def neighbours(spelling: str) -> list[str]:
     """Every distinct spelling one edit away (and within a sane length), most conservative edits first."""
     seen: dict[str, None] = {}
     for pattern, replacement in _EDITS:
         for match in re.finditer(pattern, spelling):
             out = spelling[:match.start()] + replacement + spelling[match.end():]
-            if out != spelling and _ALLOWED.match(out) and abs(len(out) - len(spelling)) <= 4:
+            if out != spelling and _ALLOWED.match(out) and abs(len(out) - len(spelling)) <= 4 and not _adds_click(spelling, out):
                 seen.setdefault(out, None)
     return list(seen)
 
@@ -273,8 +297,8 @@ class WordScorer:
         return self._cache[spelling]
 
 
-def respell_words(scorer: WordScorer, spelling: str, *, margin: float = 0.15, width: int = 2, depth: int = 3,
-                  budget: int = 24) -> list[dict[str, Any]]:
+def respell_words(scorer: WordScorer, spelling: str, *, margin: float = 0.15, protected_margin: float = 0.6,
+                  width: int = 2, depth: int = 3, budget: int = 24) -> list[dict[str, Any]]:
     """Decide word by word: keep the plain spelling unless a respelling beats it by ``margin`` (0-1 goodness).
 
     A South African name is often half English and half isiZulu ("Jacob Zuma"). The voice already says the isiZulu
@@ -303,9 +327,10 @@ def respell_words(scorer: WordScorer, spelling: str, *, margin: float = 0.15, wi
             if not fresh:
                 break
             frontier = [best, *fresh]
-        changed = best != word and best_score >= plain + margin
+        protected = looks_isizulu(word)
+        changed = best != word and best_score >= plain + (protected_margin if protected else margin)
         decisions.append({"word": word, "plain": round(plain, 3), "best": best, "best_score": round(best_score, 3),
-                          "decision": best if changed else word, "changed": changed})
+                          "decision": best if changed else word, "changed": changed, "isizulu_shape": protected})
     return decisions
 
 

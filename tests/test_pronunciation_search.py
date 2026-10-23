@@ -167,3 +167,28 @@ def test_each_word_gets_its_own_window_and_the_scores_are_per_word(tmp_path):
     scores = scorer.word_scores("Jeykhob Zuma")
     assert len(scores) == 2 and scores[0] == 1.0 and scores[1] == 1.0
     assert scorer.word_scores("Jacob Zuma")[0] < scores[0] and scorer.word_scores("Jacob Zuma")[1] == 1.0
+
+
+def test_a_respelling_never_introduces_a_click_letter():
+    from mathula_tv.pronunciation_search import neighbours
+
+    assert not any("c" in n.lower() for n in neighbours("Maseko"))
+    assert not any(set("qx") & set(n.lower()) for n in neighbours("Zuma"))
+    assert any("c" in n for n in neighbours("Jacob"))                     # a c that is already there may be edited
+
+
+def test_words_with_isizulu_shape_are_recognised():
+    from mathula_tv.pronunciation_search import looks_isizulu
+
+    for zulu in ("Zuma", "Maseko", "Samkele", "Ntshalintshali", "Mabhida", "Nkosinathi", "Makhanya", "eThekwini"):
+        assert looks_isizulu(zulu), zulu
+    for english in ("Jacob", "Moses", "Brigitte", "Party", "Lincoln", "Hawks"):
+        assert not looks_isizulu(english), english
+
+
+def test_an_isizulu_shaped_word_needs_a_much_bigger_gain_to_change(tmp_path):
+    from mathula_tv.pronunciation_search import respell_words
+
+    scorer = _word_fixture(tmp_path, ["jacob", "zumah"])                    # the target for the Zulu word differs a little
+    decisions = respell_words(scorer, "Jacob Zuma", margin=0.1, protected_margin=0.9)
+    assert decisions[1]["decision"] == "Zuma" and decisions[1]["isizulu_shape"] is True

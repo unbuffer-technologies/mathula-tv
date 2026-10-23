@@ -163,3 +163,9 @@ def test_a_research_pronunciation_note_is_cleaned_to_the_models_symbols():
     from mathula_tv.pronunciation_assess import sanitize_ipa
 
     assert sanitize_ipa("/ˈkʰeɪ.ɪʱ zuː/", {"k": 1, "kʰ": 2, "eɪ": 3, "ɪ": 4, "z": 5, "uː": 6}) == "kʰeɪɪ zuː"
+
+
+def test_phrase_final_lengthening_is_removed_from_expected_sounds():
+    from mathula_tv.pronunciation_assess import strip_length
+
+    assert strip_length("maseːko") == "maseko" and strip_length("pɑːti") == "pɑti"

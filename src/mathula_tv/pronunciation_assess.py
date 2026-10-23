@@ -329,6 +329,12 @@ def sanitize_ipa(ipa: str, vocab: Mapping[str, int]) -> str:
     return " ".join("".join(ch for ch in word if ch in known) for word in text.split())
 
 
+def strip_length(ipa: str) -> str:
+    """Remove vowel-length marks. isiZulu lengthens the second-to-last syllable of a phrase-final word ("Maseko" said as
+    "Maseːko" before a pause) but not mid-sentence, so a clip taken at a pause must not teach that length."""
+    return ipa.replace("ː", "").replace("ˑ", "")
+
+
 def regroup(tokens: Sequence[str], base_ipa: str, vocab: Mapping[str, int]) -> list[str]:
     """Split a chosen token sequence back into words using the word lengths of ``base_ipa`` (variants swap 1:1)."""
     lengths = [len(phone_tokens(word, vocab)) for word in base_ipa.split()]
@@ -370,6 +376,7 @@ def _run_words(args: Any, config: Mapping[str, Any], ps: Any, gop: "LocalGop", s
                 memo[(wav.name, ipa)] = gop_goodness(gop.assess(wav, ipa)["score"])
             return memo[(wav.name, ipa)]
 
+        words = [strip_length(w) if ps.looks_isizulu(word) else w for w, word in zip(words, name_words)]
         scorer = ps.WordScorer(windows, goodness, words, contexts)
         decisions = ps.respell_words(scorer, name, margin=float(config.get("margin", 0.15)), budget=int(config.get("word_budget", 24)))
         final = " ".join(d["decision"] for d in decisions)
