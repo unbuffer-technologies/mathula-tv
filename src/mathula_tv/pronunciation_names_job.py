@@ -22,13 +22,11 @@ def plan_job_names(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA
                    margin: float = 0.15, progress: Callable[[str], None] = print) -> Path | None:
     """Plan every researched name of a job and write ``native_dub/pronunciation_names.json``. Returns the path, or None."""
     from . import pronunciation_search as ps
-    from .native_dub import _extract_entity_english_source_clip
     from .pronunciation import (
         PronunciationDictionary, with_default_organisation_initialisms, with_web_researched_organisation_pronunciations,
     )
-    from .pronunciation_assess import (
-        LocalGop, english_reading, gop_goodness, phone_tokens, regroup, sanitize_ipa, strip_length,
-    )
+    from .pronunciation_assess import LocalGop, gop_goodness, phone_tokens, sanitize_ipa
+    from .pronunciation_evidence import speaker_sounds
 
     job_root = Path(job_root)
     research_path = job_root / "native_dub" / "pronunciation_research.json"
@@ -66,17 +64,15 @@ def plan_job_names(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA
                      f"{len(name.split())} words; left alone")
             continue
         slug = re.sub(r"\W+", "_", name.lower())
-        clip = _extract_entity_english_source_clip(job_root=job_root, entity_id=slug, canonical_text=name,
-                                                   audio_dir=work / "reference")
-        if clip is None:
-            clip = english_reading(name, "en-ZA-LukeNeural", key, region, work / "reference" / f"{slug}_en_tts.wav")
         try:
-            picked = gop.choose_expected(clip, base)
+            heard = speaker_sounds(job_root, name, base, gop, work / "reference" / slug, looks_isizulu=ps.looks_isizulu)
         except Exception as exc:            # one name that cannot be analysed must not stop the others
             progress(f"[names] {name}: could not be analysed ({type(exc).__name__}: {str(exc)[:80]}); left alone")
             continue
-        words = [strip_length(w) if ps.looks_isizulu(word) else w
-                 for w, word in zip(regroup(picked["chosen_tokens"], base, gop._vocab), name.split())]
+        if heard["words"] is None:
+            progress(f"[names] {name}: the speaker never says {', '.join(heard['missing'])} in the source audio; left alone")
+            continue
+        words = heard["words"]
         windows = ps.NameWindows(synthesize, lambda wav: (), work / slug)
         memo: dict[tuple[str, str], float] = {}
 

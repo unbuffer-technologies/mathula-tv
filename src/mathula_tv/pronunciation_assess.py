@@ -77,10 +77,16 @@ def ipa_variants(tokens: Sequence[str], limit: int = 600) -> list[list[str]]:
 
 def choose_expected(log_probs: Any, base_tokens: Sequence[str], vocab: Mapping[str, int], blank: int,
                     limit: int = 600) -> dict[str, Any]:
-    """The pronunciation variant that the speaker's audio (its log-probabilities) supports best, with the base for comparison."""
+    """The pronunciation variant that the speaker's audio (its log-probabilities) supports best, with the base for comparison.
+
+    ``log_probs`` is one clip's tensor, or a list of tensors (several occurrences of the same word): each variant is then
+    scored by its mean excess over the clips, so one badly recorded occurrence cannot decide the vowel alone.
+    """
+    clips = list(log_probs) if isinstance(log_probs, (list, tuple)) else [log_probs]
     scored = []
     for variant in (v for v in ipa_variants(base_tokens, limit) if all(t in vocab for t in v)):
-        excess = gop_excess(log_probs, [vocab[t] for t in variant], blank)
+        ids = [vocab[t] for t in variant]
+        excess = sum(gop_excess(clip, ids, blank) for clip in clips) / len(clips)
         scored.append((excess, "".join(variant)))
     scored.sort()
     base = "".join(base_tokens)
@@ -142,10 +148,13 @@ class LocalGop:
             logits = self._model(signal.unsqueeze(0)).logits[0]
         return torch.log_softmax(logits, dim=-1)
 
-    def choose_expected(self, wav: Path, base_ipa: str) -> dict[str, Any]:
-        """Decide how the speaker in ``wav`` pronounced the word, from the dictionary form and its reduced-vowel variants."""
+    def choose_expected(self, wav: "Path | Sequence[Path]", base_ipa: str) -> dict[str, Any]:
+        """Decide how the speaker in ``wav`` (or in several clips of the same word) pronounced it, from the dictionary form
+        and its reduced-vowel variants."""
         self._load()
-        return choose_expected(self.log_probs(wav), phone_tokens(base_ipa, self._vocab), self._vocab, self._vocab["<pad>"])
+        wavs = [wav] if isinstance(wav, (str, Path)) else list(wav)
+        return choose_expected([self.log_probs(w) for w in wavs], phone_tokens(base_ipa, self._vocab), self._vocab,
+                               self._vocab["<pad>"])
 
     def assess(self, wav: Path, ipa: str) -> dict[str, float]:
         self._load()

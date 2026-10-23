@@ -5,7 +5,7 @@ For every researched name in a job this compares two readings of the name:
   current  what the pipeline speaks today (built-in entries + this job's researched respellings)
   lean     what the names stage would speak if the research respelling did not exist: isiZulu-shaped words as written,
            acronyms and already-structured readings as they are, every other word spelt by rule from the sounds the
-           speaker in the source audio (or an English voice reading the name) actually used
+           speaker in the source audio actually used (a name with a word the speaker never says is not compared)
 
 and scores each on the name's own audio (GOP against the speaker-derived sounds, and Azure pronunciation assessment). It
 also writes takes of every name whose two readings differ so that a person can judge them by ear. The scores guide;
@@ -54,14 +54,13 @@ def verdict(current_score: float, lean_score: float, margin: float = 0.1) -> str
 def compare_job(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA-ThembaNeural", gop: Any = None,
                 progress: Callable[[str], None] = print) -> dict[str, Any]:
     from . import pronunciation_search as ps
-    from .native_dub import _extract_entity_english_source_clip
     from .pronunciation import (
         PronunciationDictionary, with_default_organisation_initialisms, with_web_researched_organisation_pronunciations,
     )
     from .pronunciation_assess import (
-        LocalGop, azure_assessor, azure_goodness, concatenate_takes, english_reading, gop_goodness, phone_tokens, regroup,
-        sanitize_ipa, strip_length,
+        LocalGop, azure_assessor, azure_goodness, concatenate_takes, gop_goodness, phone_tokens, sanitize_ipa,
     )
+    from .pronunciation_evidence import speaker_sounds
 
     job_root = Path(job_root)
     research = json.loads((job_root / "native_dub" / "pronunciation_research.json").read_text(encoding="utf-8"))
@@ -99,22 +98,21 @@ def compare_job(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA-Th
             if len(base.split()) != len(name.split()):
                 raise ValueError("sound groups do not match the words")
             slug = re.sub(r"\W+", "_", name.lower())
-            clip = _extract_entity_english_source_clip(job_root=job_root, entity_id=slug, canonical_text=name,
-                                                       audio_dir=work / "reference")
-            source = "speaker's audio"
-            if clip is None:
-                clip = english_reading(name, "en-ZA-LukeNeural", key, region, work / "reference" / f"{slug}_en_tts.wav")
-                source = "English voice reading"
-            picked = gop.choose_expected(clip, base)
-            words = [strip_length(w) if ps.looks_isizulu(word) else w
-                     for w, word in zip(regroup(picked["chosen_tokens"], base, gop._vocab), name.split())]
+            heard = speaker_sounds(job_root, name, base, gop, work / "reference" / slug, looks_isizulu=ps.looks_isizulu)
         except Exception as exc:
             row["note"] = f"could not analyse ({type(exc).__name__}: {str(exc)[:80]})"
             rows.append(row)
             continue
+        if heard["words"] is None:
+            row["note"] = f"no speaker audio for {', '.join(heard['missing'])}; the research reading is kept"
+            row["evidence"] = heard["evidence"]
+            rows.append(row)
+            continue
+        words = heard["words"]
         lean_words = lean_reading(name, words, current, lambda w: phone_tokens(w, gop._vocab), looks_isizulu=ps.looks_isizulu)
         lean_text = " ".join(w["lean"] for w in lean_words)
-        row.update(lean=lean_text, expected_from=source, expected_sounds=" ".join(words), lean_detail=lean_words)
+        row.update(lean=lean_text, expected_from="the speaker's audio, word by word", expected_sounds=" ".join(words),
+                   lean_detail=lean_words, evidence=heard["evidence"])
         if lean_text.casefold() == current_text.casefold():
             row["verdict"] = "same reading"
             rows.append(row)
