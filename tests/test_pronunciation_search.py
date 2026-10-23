@@ -133,15 +133,11 @@ def _word_fixture(tmp_path, ideal):
         with wave.open(str(wav), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(b"\x00\x00" * 96000)
         texts[wav.name.split(".")[0]] = marked
-        marks = {}
-        for i, _ in enumerate(re.findall(r'mark="t(\d+)s"', marked)):
-            marks[f"t{i}s"] = 500.0 + i * 1000
-            marks[f"t{i}e"] = 1300.0 + i * 1000
-        return marks
+        return {f"b{i}": 500.0 + i * 1000 for i in range(len(re.findall(r'mark="b\d+"', marked)))}
 
     def goodness(piece, ipa):
         key, index = piece.name.split(".")[0], int(piece.name.split(".w")[1].split(".")[0])
-        word = re.findall(rf'mark="t{index}s"/>(.*?)<bookmark mark="t{index}e"', texts[key])[0]
+        word = re.findall(rf'mark="b{index}"/>(.*?)<bookmark mark="b{index + 1}"', texts[key])[0].strip()
         return difflib.SequenceMatcher(None, word.lower().lstrip("u"), ipa).ratio()
 
     windows = NameWindows(synthesize, lambda wav: (), tmp_path)

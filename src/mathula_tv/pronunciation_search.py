@@ -104,8 +104,9 @@ def _render_marked_words(context: "Context", candidate: "Candidate") -> str:
         head, _, glue = context.before.rpartition(" ")
         head = f"{head} " if head else ""
     words = candidate.spelling.split(" ")
-    marked = " ".join(f'<bookmark mark="t{i}s"/>{glue if i == 0 else ""}{w}<bookmark mark="t{i}e"/>' for i, w in enumerate(words))
-    return f"{head}{marked}{context._sep(candidate)}{context.after}".strip()
+    # one bookmark per boundary (b0 before the first word, b{i+1} after word i): two bookmarks side by side are dropped
+    marked = "".join(f'{"" if i == 0 else " "}{glue if i == 0 else ""}{w}<bookmark mark="b{i + 1}"/>' for i, w in enumerate(words))
+    return f'{head}<bookmark mark="b0"/>{marked}{context._sep(candidate)}{context.after}'.strip()
 
 
 def neighbours(spelling: str) -> list[str]:
@@ -171,8 +172,9 @@ class NameWindows:
         words = candidate.spelling.split(" ")
         pieces = []
         for i in range(len(words)):
-            trail = TRAIL_MS if i == len(words) - 1 else 30        # do not bleed into the next word
-            pieces.append(slice_wav(wav, marks[f"t{i}s"] - 30, marks[f"t{i}e"] + trail, self.work_dir / f"{key}.w{i}.wav"))
+            start = marks[f"b{i}"] - (30 if i == 0 else 0)
+            end = marks[f"b{i + 1}"] + (TRAIL_MS if i == len(words) - 1 else 0)
+            pieces.append(slice_wav(wav, start, end, self.work_dir / f"{key}.w{i}.wav"))
         return pieces
 
     def phones(self, context: Context, candidate: Candidate) -> tuple[str, ...]:
