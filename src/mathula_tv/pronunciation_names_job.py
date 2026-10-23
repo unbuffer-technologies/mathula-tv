@@ -47,7 +47,12 @@ def plan_job_names(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA
         ipa = str(correction.get("pronunciation_ipa") or "")
         if not name or not ipa or name.casefold() in approved:
             continue
-        base = sanitize_ipa(ipa, gop._vocab)
+        try:
+            base = sanitize_ipa(ipa, gop._vocab)
+            phone_tokens(base, gop._vocab)
+        except ValueError as exc:
+            progress(f"[names] {name}: its pronunciation note cannot be read ({str(exc)[:80]}); left alone")
+            continue
         if len(base.split()) != len(name.split()):
             progress(f"[names] {name}: the pronunciation note has {len(base.split())} sound groups for "
                      f"{len(name.split())} words; left alone")
@@ -57,7 +62,11 @@ def plan_job_names(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA
                                                    audio_dir=work / "reference")
         if clip is None:
             clip = english_reading(name, "en-ZA-LukeNeural", key, region, work / "reference" / f"{slug}_en_tts.wav")
-        picked = gop.choose_expected(clip, base)
+        try:
+            picked = gop.choose_expected(clip, base)
+        except Exception as exc:            # one name that cannot be analysed must not stop the others
+            progress(f"[names] {name}: could not be analysed ({type(exc).__name__}: {str(exc)[:80]}); left alone")
+            continue
         words = [strip_length(w) if ps.looks_isizulu(word) else w
                  for w, word in zip(regroup(picked["chosen_tokens"], base, gop._vocab), name.split())]
         windows = ps.NameWindows(synthesize, lambda wav: (), work / slug)

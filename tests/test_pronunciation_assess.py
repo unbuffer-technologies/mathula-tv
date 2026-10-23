@@ -169,3 +169,11 @@ def test_phrase_final_lengthening_is_removed_from_expected_sounds():
     from mathula_tv.pronunciation_assess import strip_length
 
     assert strip_length("maseːko") == "maseko" and strip_length("pɑːti") == "pɑti"
+
+
+def test_a_stray_length_mark_is_skipped_but_a_real_unknown_phone_still_fails():
+    from mathula_tv.pronunciation_assess import phone_tokens
+
+    assert phone_tokens("zuːmːa", {"z": 1, "uː": 2, "m": 3, "a": 4}) == ["z", "uː", "m", "a"]      # the lone "ː" after m is dropped
+    with pytest.raises(ValueError):
+        phone_tokens("zxa", {"z": 1, "a": 4})

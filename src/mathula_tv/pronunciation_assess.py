@@ -23,6 +23,9 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
+_SKIPPABLE_MODIFIERS = frozenset("ːˑʰʲʷˠˤ̩̯̃̈̚")
+
+
 def phone_tokens(ipa: str, vocab: Mapping[str, int]) -> list[str]:
     """Greedy longest-match of an IPA string into the recogniser's phone vocabulary (spaces are ignored)."""
     text = re.sub(r"\s+", "", ipa)
@@ -37,6 +40,9 @@ def phone_tokens(ipa: str, vocab: Mapping[str, int]) -> list[str]:
                 i += width
                 break
         else:
+            if text[i] in _SKIPPABLE_MODIFIERS:        # a length or aspiration mark the model has no symbol for on its own
+                i += 1
+                continue
             raise ValueError(f"phone {text[i]!r} (position {i} of {ipa!r}) is not in the recogniser's vocabulary")
     return tokens
 
