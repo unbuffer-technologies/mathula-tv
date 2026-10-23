@@ -347,6 +347,8 @@ def regroup(tokens: Sequence[str], base_ipa: str, vocab: Mapping[str, int]) -> l
 
 def _run_words(args: Any, config: Mapping[str, Any], ps: Any, gop: "LocalGop", synthesize: Any, job_root: Path, out: Path) -> int:
     """Word-by-word respelling of the names in ``word_entities``: untouched unless a change clearly helps."""
+    import os
+
     from .native_dub import _extract_entity_english_source_clip
 
     research = json.loads((job_root / "native_dub" / "pronunciation_research.json").read_text(encoding="utf-8"))
@@ -358,9 +360,13 @@ def _run_words(args: Any, config: Mapping[str, Any], ps: Any, gop: "LocalGop", s
         slug = re.sub(r"\W+", "_", name.lower())
         base = entity.get("ipa") or sanitize_ipa(by_name[name]["pronunciation_ipa"], gop._vocab)
         clip = _extract_entity_english_source_clip(job_root=job_root, entity_id=slug, canonical_text=name, audio_dir=out / "reference")
+        source = "the speaker's audio"
         if clip is None:
-            print(f"\n== {name}: no source clip; skipped")
-            continue
+            # nobody says it in the clip: a South African English voice reading the name is the next best reference. Only the
+            # English-shaped words are ever changed, so its mangling of an isiZulu word cannot reach the result.
+            clip = english_reading(name, "en-ZA-LukeNeural", os.environ["AZURE_SPEECH_KEY"],
+                                   os.environ["AZURE_SPEECH_REGION"].strip().lower(), out / "reference" / f"{slug}_en_tts.wav")
+            source = "an English voice reading the name (no speaker said it)"
         picked = gop.choose_expected(clip, base)
         words = regroup(picked["chosen_tokens"], base, gop._vocab)
         name_words = name.split()
@@ -380,7 +386,7 @@ def _run_words(args: Any, config: Mapping[str, Any], ps: Any, gop: "LocalGop", s
         scorer = ps.WordScorer(windows, goodness, words, contexts)
         decisions = ps.respell_words(scorer, name, margin=float(config.get("margin", 0.15)), budget=int(config.get("word_budget", 24)))
         final = " ".join(d["decision"] for d in decisions)
-        print(f"\n== {name}  (speaker's sounds: {' | '.join(words)};  base from research: {base!r})")
+        print(f"\n== {name}  (expected sounds from {source}: {' | '.join(words)};  base from research: {base!r})")
         for d in decisions:
             verdict = f"CHANGED to {d['decision']!r}" if d["changed"] else "kept untouched"
             print(f"   {d['word']:<14} plain {d['plain']:.3f}   best found {d['best']!r} {d['best_score']:.3f}   -> {verdict}")
