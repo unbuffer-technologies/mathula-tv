@@ -46,16 +46,25 @@ def consensus(heard: Sequence[Sequence[str]]) -> list[str]:
 
 
 def heard_word(source: Path, transcript: Sequence[Mapping[str, Any]], word: str, gop: Any, work: Path, limit: int = 6,
-               pad_seconds: float = 0.04) -> dict[str, Any] | None:
-    """The phones the speaker used for ``word``, decoded straight from the audio of each occurrence (no dictionary)."""
+               context_seconds: float = 0.25, slack_seconds: float = 0.03) -> dict[str, Any] | None:
+    """The phones the speaker used for ``word``, decoded straight from the audio of each occurrence (no dictionary).
+
+    The clip carries ``context_seconds`` either side so the recogniser hears the word whole; only the phones whose middle
+    falls inside the transcript's own time span for the word are kept, so the neighbouring words do not leak in.
+    """
     from .media import extract_clip
 
     spans = word_spans(transcript, word, limit)
     if not spans:
         return None
-    decoded = [gop.decode(extract_clip(source, start, end, work / f"{_letters(word)}_{k}.wav", pad_seconds=pad_seconds))
-               for k, (start, end) in enumerate(spans)]
-    return {"phones": consensus(decoded), "decoded": decoded, "spans": spans}
+    decoded = []
+    for k, (start, end) in enumerate(spans):
+        lead = min(context_seconds, start)
+        clip = extract_clip(source, start, end, work / f"{_letters(word)}_{k}.wav", pad_seconds=context_seconds)
+        inside = [token for token, begin, finish in gop.decode_timed(clip)
+                  if lead - slack_seconds <= (begin + finish) / 2 <= lead + (end - start) + slack_seconds]
+        decoded.append(inside)
+    return {"phones": consensus([d for d in decoded if d] or decoded), "decoded": decoded, "spans": spans}
 
 
 def speaker_sounds(job_root: Path, name: str, base: str, gop: Any, work: Path, *, looks_isizulu: Callable[[str], bool],

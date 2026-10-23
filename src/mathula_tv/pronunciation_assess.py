@@ -191,6 +191,23 @@ class LocalGop:
             logits = self._model(signal.unsqueeze(0)).logits[0]
         return torch.log_softmax(logits, dim=-1)
 
+    FRAME_SECONDS = 0.02            # wav2vec 2.0 emits one frame per 20 ms
+
+    def decode_timed(self, wav: Path) -> list[tuple[str, float, float]]:
+        """The phones the recogniser hears in ``wav`` with their start and end seconds."""
+        inverse = {index: token for token, index in self._vocab.items()}
+        blank = self._vocab["<pad>"]
+        indices = self.log_probs(wav).argmax(dim=-1).tolist()
+        heard: list[tuple[str, float, float]] = []
+        start = 0
+        for frame in range(1, len(indices) + 1):
+            if frame == len(indices) or indices[frame] != indices[start]:
+                token = inverse[indices[start]]
+                if indices[start] != blank and not token.startswith("<"):
+                    heard.append((token, start * self.FRAME_SECONDS, frame * self.FRAME_SECONDS))
+                start = frame
+        return heard
+
     def decode(self, wav: Path) -> list[str]:
         """The phones the recogniser hears in ``wav``, with no expectation: its best path with repeats and blanks removed."""
         inverse = {index: token for token, index in self._vocab.items()}
