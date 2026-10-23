@@ -563,6 +563,20 @@ def test_mk_party_uses_the_human_approved_respelling_everywhere_it_appears():
     assert "Phaati " not in result.tts_text and "Em Kay" not in result.tts_text
 
 
+def test_a_respelled_name_is_separated_from_a_following_word_that_starts_with_the_same_vowel():
+    # "Em Khey Phaathi ishintshe": the final i and the next word's i fused, so "MK Party" was heard as "MK part".
+    dictionary = with_default_organisation_initialisms(
+        PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
+    )
+    assert dictionary.apply("Izindaba: i-MK Party ishintshe ubuholi.").tts_text == "Izindaba: i-Em Khey Phaathi, ishintshe ubuholi."
+    assert dictionary.apply("seqembu, MK Party inqume ukususa").tts_text == "seqembu, Em Khey Phaathi, inqume ukususa"
+    assert dictionary.apply("we MK Party amemezele").tts_text == "we Em Khey Phaathi amemezele"          # different vowel: no comma
+    assert dictionary.apply("we MK Party, inqume").tts_text == "we Em Khey Phaathi, inqume"              # already separated
+    assert dictionary.apply("kuMK Party.").tts_text == "kuEm Khey Phaathi."                                # nothing follows
+    assert dictionary.apply("uJacob Zuma akhulume").tts_text == "uJeykhob Zuma, akhulume"                    # same rule: a + a
+    assert dictionary.apply("ngowesi-ten izinsuku").tts_text == "ngowesi-ten izinsuku"                       # number words are never touched
+
+
 def test_organisation_defaults_do_not_leak_into_unsupported_locales():
     dictionary = PronunciationDictionary("v1", language="en-US", job_id="job-123")
     assert with_default_organisation_initialisms(dictionary) is dictionary

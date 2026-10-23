@@ -1046,6 +1046,24 @@ def _code_switch_number_word(value: int) -> str:
     return _ZU_CODE_SWITCH_NUMBER_RESPELLINGS.get(value) or _english_cardinal_word(value)
 
 
+# A respelled name that ends in a vowel, followed directly by an isiZulu word that begins with the same vowel
+# ("Em Khey Phaathi ishintshe"), is read with the two vowels fused into one -- "MK Party" came out as "MK part" -- because
+# nothing separates them. Human-diagnosed and human-approved by ear (job a537c3077a094523b7c15056ccc556a5, 2026-10-23):
+# a comma after the name (an 80 ms or 150 ms break and a dash were also played; the comma was chosen). Only entity-like
+# substitutions are separated, so number words and acronym letters are never touched.
+_HIATUS_SEPARATED_KINDS = frozenset({"personal_name", "organisation_name", "place_name", "english_code_switch"})
+_NEXT_WORD_INITIAL_VOWEL = re.compile(r"\s+([aeiou])", re.IGNORECASE)
+
+
+def _name_vowel_hiatus_separator(applied_tts_text: str, kind: str, following_text: str) -> str:
+    """A comma when ``applied_tts_text`` ends in the vowel that the next word starts with, else nothing."""
+    if kind not in _HIATUS_SEPARATED_KINDS or not applied_tts_text:
+        return ""
+    last = applied_tts_text[-1].casefold()
+    match = _NEXT_WORD_INITIAL_VOWEL.match(following_text)
+    return "," if match and last in "aeiou" and match.group(1).casefold() == last else ""
+
+
 def _zulu_dynamic_ordinal_candidates(
     text: str,
     *,
@@ -1864,6 +1882,7 @@ class PronunciationDictionary:
             applied_tts_text = entry.tts_text_for_voice(voice)
             output.append(text[cursor:start])
             output.append(applied_tts_text)
+            output.append(_name_vowel_hiatus_separator(applied_tts_text, entry.kind, text[end:]))
             before = text[start:end]
             substitutions.append(
                 PronunciationSubstitution(
