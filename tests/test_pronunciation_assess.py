@@ -130,3 +130,24 @@ def test_takes_are_joined_with_a_pause_after_each(tmp_path):
     out = concatenate_takes(paths, tmp_path / "all.wav", gap_s=0.5)
     with wave.open(str(out), "rb") as w:
         assert abs(w.getnframes() / w.getframerate() - 3.0) < 0.01          # two 1 s takes + two 0.5 s pauses
+
+
+def test_reduced_vowels_are_tried_as_every_full_vowel():
+    from mathula_tv.pronunciation_assess import ipa_variants, phone_tokens
+
+    tokens = phone_tokens("dʒeɪkəb", VOCAB)
+    assert tokens == ["dʒ", "eɪ", "k", "ə", "b"]
+    variants = ["".join(v) for v in ipa_variants(tokens)]
+    assert variants[0] == "dʒeɪkəb" and "dʒeɪkob" in variants and "dʒeɪkab" in variants
+    assert all(v.startswith("dʒeɪk") and v.endswith("b") for v in variants)           # only the reduced vowel changes
+    assert len(variants) == len(set(variants))
+
+
+def test_the_speakers_audio_picks_the_vowel_they_said():
+    pytest.importorskip("torch")
+    from mathula_tv.pronunciation_assess import choose_expected, phone_tokens
+
+    vocab = {**VOCAB, "o": 18, "a": 19}
+    said = [vocab[t] for t in ["dʒ", "eɪ", "k", "o", "b"]]            # the speaker says a full "o"
+    picked = choose_expected(_peaked(said, vocab_size=20), phone_tokens("dʒeɪkəb", vocab), vocab, blank=1)
+    assert picked["chosen"] == "dʒeɪkob" and picked["chosen_excess"] < picked["base_excess"]

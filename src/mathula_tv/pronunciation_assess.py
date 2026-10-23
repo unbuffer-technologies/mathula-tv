@@ -23,22 +23,64 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
-def phones_to_ids(ipa: str, vocab: Mapping[str, int]) -> list[int]:
+def phone_tokens(ipa: str, vocab: Mapping[str, int]) -> list[str]:
     """Greedy longest-match of an IPA string into the recogniser's phone vocabulary (spaces are ignored)."""
     text = re.sub(r"\s+", "", ipa)
     longest = max((len(token) for token in vocab), default=1)
-    ids: list[int] = []
+    tokens: list[str] = []
     i = 0
     while i < len(text):
         for width in range(min(longest, len(text) - i), 0, -1):
             token = text[i:i + width]
             if token in vocab and not token.startswith("<"):
-                ids.append(vocab[token])
+                tokens.append(token)
                 i += width
                 break
         else:
             raise ValueError(f"phone {text[i]!r} (position {i} of {ipa!r}) is not in the recogniser's vocabulary")
-    return ids
+    return tokens
+
+
+def phones_to_ids(ipa: str, vocab: Mapping[str, int]) -> list[int]:
+    return [vocab[token] for token in phone_tokens(ipa, vocab)]
+
+
+# A dictionary says "Jacob" ends in a reduced vowel (schwa); a South African speaker says a full "o", and a scorer told
+# to expect a schwa accepts the "a" of a wrong spelling. Reduced vowels are therefore tried as every full vowel, and the
+# speaker's own audio decides which one they said.
+REDUCED_VOWELS = frozenset({"ə", "ɐ", "ɪ"})
+FULL_VOWELS = ("a", "e", "i", "o", "u", "ɔ", "ɛ", "ʌ", "ɑ", "ɪ", "ə")
+
+
+def ipa_variants(tokens: Sequence[str], limit: int = 600) -> list[list[str]]:
+    """Every variant of ``tokens`` with each reduced vowel replaced by each full vowel (the original comes first)."""
+    positions = [i for i, token in enumerate(tokens) if token in REDUCED_VOWELS or (i == len(tokens) - 1 and token in {"a", "ə"})]
+    variants: list[list[str]] = [list(tokens)]
+    for position in positions:
+        grown = []
+        for variant in variants:
+            for vowel in FULL_VOWELS:
+                if vowel != variant[position]:
+                    grown.append([*variant[:position], vowel, *variant[position + 1:]])
+        variants = (variants + grown)[: limit * 4]
+    seen: dict[tuple[str, ...], None] = {}
+    for variant in variants:
+        seen.setdefault(tuple(variant), None)
+    return [list(v) for v in list(seen)[:limit]]
+
+
+def choose_expected(log_probs: Any, base_tokens: Sequence[str], vocab: Mapping[str, int], blank: int,
+                    limit: int = 600) -> dict[str, Any]:
+    """The pronunciation variant that the speaker's audio (its log-probabilities) supports best, with the base for comparison."""
+    scored = []
+    for variant in (v for v in ipa_variants(base_tokens, limit) if all(t in vocab for t in v)):
+        excess = gop_excess(log_probs, [vocab[t] for t in variant], blank)
+        scored.append((excess, "".join(variant)))
+    scored.sort()
+    base = "".join(base_tokens)
+    base_excess = next(e for e, v in scored if v == base)
+    return {"chosen": scored[0][1], "chosen_excess": scored[0][0], "base": base, "base_excess": base_excess,
+            "runners_up": [(round(e, 3), v) for e, v in scored[1:4]]}
 
 
 def gop_excess(log_probs: Any, target_ids: Sequence[int], blank: int) -> float:
@@ -91,6 +133,11 @@ class LocalGop:
         with torch.no_grad():
             logits = self._model(signal.unsqueeze(0)).logits[0]
         return torch.log_softmax(logits, dim=-1)
+
+    def choose_expected(self, wav: Path, base_ipa: str) -> dict[str, Any]:
+        """Decide how the speaker in ``wav`` pronounced the word, from the dictionary form and its reduced-vowel variants."""
+        self._load()
+        return choose_expected(self.log_probs(wav), phone_tokens(base_ipa, self._vocab), self._vocab, self._vocab["<pad>"])
 
     def assess(self, wav: Path, ipa: str) -> dict[str, float]:
         self._load()
@@ -225,7 +272,10 @@ def main(argv: list[str] | None = None) -> int:
     gop = LocalGop() if "local-gop" in args.assessors else None
 
     if args.search:
+        _derive_expected(config, ps, gop, job_root, out)
         return _run_search(args, config, ps, gop, synthesize, key, region, out)
+
+    _derive_expected(config, ps, gop, job_root, out)
 
     summary: dict[str, Any] = {}
     for entity in config["entities"]:
@@ -265,6 +315,25 @@ def main(argv: list[str] | None = None) -> int:
     for assessor, (agree, total) in totals.items():
         print(f"   {assessor:<12} {agree}/{total}" + (f" = {agree / total:.0%}" if total else ""))
     return 0
+
+
+def _derive_expected(config: Mapping[str, Any], ps: Any, gop: "LocalGop | None", job_root: Path, out: Path) -> None:
+    """Replace each entity's dictionary IPA with the variant the real speaker's audio supports best (when a clip exists)."""
+    from .native_dub import _extract_entity_english_source_clip
+
+    if gop is None or config.get("_expected_derived"):
+        return
+    for entity in config["entities"]:
+        slug = re.sub(r"\W+", "_", entity["name"].lower())
+        clip = _extract_entity_english_source_clip(job_root=job_root, entity_id=slug, canonical_text=entity["name"],
+                                                   audio_dir=out / "reference")
+        if clip is None:
+            continue
+        picked = gop.choose_expected(clip, entity["ipa"])
+        print(f"expected pronunciation for {entity['name']}: dictionary {picked['base']!r} (excess {picked['base_excess']:.3f}) "
+              f"-> the speaker's audio supports {picked['chosen']!r} (excess {picked['chosen_excess']:.3f}); next best {picked['runners_up'][:2]}")
+        entity["ipa"] = picked["chosen"]
+    config["_expected_derived"] = True  # type: ignore[index]
 
 
 def _run_search(args: Any, config: Mapping[str, Any], ps: Any, gop: "LocalGop | None", synthesize: Any,
