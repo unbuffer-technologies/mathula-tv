@@ -191,6 +191,18 @@ class LocalGop:
             logits = self._model(signal.unsqueeze(0)).logits[0]
         return torch.log_softmax(logits, dim=-1)
 
+    def decode(self, wav: Path) -> list[str]:
+        """The phones the recogniser hears in ``wav``, with no expectation: its best path with repeats and blanks removed."""
+        inverse = {index: token for token, index in self._vocab.items()}
+        blank = self._vocab["<pad>"]
+        heard: list[str] = []
+        previous = None
+        for index in self.log_probs(wav).argmax(dim=-1).tolist():
+            if index != previous and index != blank:
+                heard.append(inverse[index])
+            previous = index
+        return [token for token in heard if not token.startswith("<")]
+
     def choose_expected(self, wav: "Path | Sequence[Path]", base_ipa: str) -> dict[str, Any]:
         """Decide how the speaker in ``wav`` (or in several clips of the same word) pronounced it, from the dictionary form
         and its reduced-vowel variants."""

@@ -30,6 +30,34 @@ def word_spans(words: Sequence[Mapping[str, Any]], word: str, limit: int = 4) ->
     return [found[round(i * step)] for i in range(limit)]
 
 
+def edit_distance(a: Sequence[str], b: Sequence[str]) -> int:
+    previous = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        row = [i]
+        for j, y in enumerate(b, 1):
+            row.append(min(previous[j] + 1, row[-1] + 1, previous[j - 1] + (x != y)))
+        previous = row
+    return previous[-1]
+
+
+def consensus(heard: Sequence[Sequence[str]]) -> list[str]:
+    """The decoding closest to all the others (the medoid): one noisy occurrence cannot decide the word."""
+    return list(min(heard, key=lambda mine: sum(edit_distance(mine, other) for other in heard)))
+
+
+def heard_word(source: Path, transcript: Sequence[Mapping[str, Any]], word: str, gop: Any, work: Path, limit: int = 6,
+               pad_seconds: float = 0.04) -> dict[str, Any] | None:
+    """The phones the speaker used for ``word``, decoded straight from the audio of each occurrence (no dictionary)."""
+    from .media import extract_clip
+
+    spans = word_spans(transcript, word, limit)
+    if not spans:
+        return None
+    decoded = [gop.decode(extract_clip(source, start, end, work / f"{_letters(word)}_{k}.wav", pad_seconds=pad_seconds))
+               for k, (start, end) in enumerate(spans)]
+    return {"phones": consensus(decoded), "decoded": decoded, "spans": spans}
+
+
 def speaker_sounds(job_root: Path, name: str, base: str, gop: Any, work: Path, *, looks_isizulu: Callable[[str], bool],
                    limit: int = 4) -> dict[str, Any]:
     """Sounds each word of ``name`` had in the speaker's own audio.
