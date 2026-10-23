@@ -192,6 +192,15 @@ def run_production(
                 report["handoff"] = publish_handoff(Path(settings.work_dir), job_id=job_id, run_id=run_id, clip_id=clip_id)
         except Exception as exc:        # a render problem must not lose the dub, the report or the lessons
             report["render_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+        if "render" in report:
+            try:        # did the voice say every word? A report only: it never changes or blocks the dub
+                from .azure_stt import normalize as normalize_stt
+                from .cli import create_speech_backend
+                from .dub_intelligibility import check_run
+
+                report["intelligibility"] = check_run(run_dir, create_speech_backend(settings), normalize_stt)
+            except Exception as exc:
+                report["intelligibility_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
 
     if reflect_after and (run_dir / "trace.jsonl").is_file():
         try:
