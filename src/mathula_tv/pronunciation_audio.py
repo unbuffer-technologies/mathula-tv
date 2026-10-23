@@ -101,8 +101,9 @@ def audio_names(job_root: Path, *, voice: str = "zu-ZA-ThembaNeural", gop: Any =
             continue
         decisions = []
         for index, word in enumerate(words):
-            if ps.looks_isizulu(word) or (len(word) > 1 and word.isupper()):
-                decisions.append({"word": word, "decision": spoken[index], "why": "isiZulu shape or acronym: not respelt"})
+            if not word.isalpha() or ps.looks_isizulu(word) or (len(word) > 1 and word.isupper()):
+                decisions.append({"word": word, "decision": spoken[index],
+                                  "why": "isiZulu shape, acronym, title or compound: left to the existing rules"})
                 continue
             if word not in heard_cache:
                 heard_cache[word] = heard_word(job_root / "audio" / "analysis_mono.wav", transcript, word, gop,
