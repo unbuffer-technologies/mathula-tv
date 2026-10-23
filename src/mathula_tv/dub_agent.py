@@ -516,13 +516,29 @@ def run_agent(
     max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, max_pushbacks: int = DEFAULT_MAX_PUSHBACKS,
     task_message: str | None = None, trace_dir: Path | None = None,
     compact_after_tokens: int = COMPACT_AFTER_TOKENS, playbook_version: str | None = None,
+    seed_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """``seed_items`` starts a REPAIR run: the units of an earlier accepted submission are re-scored under today's rules
+    and the agent is told to change only what misses the bar, leaving every other unit exactly as it was."""
     directory = Path(trace_dir) if trace_dir else workbench.store.repeat_dir(run_id, clip_id, repeat)
     trace = Trace(directory / "trace.jsonl")
     dispatch = build_dispatch(
         workbench, clip_id=clip_id, run_id=run_id, tts_budget=tts_budget, speed_policy=speed_policy,
         repeat=repeat,
     )
+    if seed_items:
+        workbench.open_clip(clip_id, run_id, repeat=repeat, tts_budget=tts_budget, speed_policy=speed_policy)
+        seeded = workbench.submit_dub(list(seed_items), approach_notes="seeded from an earlier accepted submission")
+        trace.log("seed", accepted=seeded.get("accepted"), errors=seeded.get("errors"), headline=seeded.get("headline"))
+        if seeded.get("accepted"):
+            seed_unmet = unmet_targets(seeded, max_dead_air_pct=max_dead_air_pct)
+            tts_now = int((workbench.episode or {}).get("tts_budget", tts_budget)) - int((workbench.episode or {}).get("tts_used", 0))
+            task_message = task_message or (
+                f"Repair, do not redo. Clip {clip_id!r} already has an accepted submission (get_submission shows its units). "
+                f"Re-scored under the current pronunciation and timing rules it "
+                + ("misses the bar. " + pushback_message(seeded, seed_unmet, tts_left=tts_now) if seed_unmet else "meets the bar. ")
+                + "Change only the units that need it, send just those with submit_dub partial=true, leave every other unit "
+                  "exactly as it is, and stop once the bar is met.")
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task_message or f"Dub clip {clip_id!r}. Start by opening it."},

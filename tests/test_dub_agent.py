@@ -496,3 +496,33 @@ def test_a_crashed_run_is_recorded_as_failed_and_the_batch_continues(tmp_path, m
                           clip_ids=["c"], repeats=3, judge_meaning=False)
     failed = json.loads((tmp_path / "t" / "c" / "r2" / "agent_summary.json").read_text(encoding="utf-8"))
     assert failed["stop_reason"] == "crashed" and "ReadTimeout" in failed["error"]
+
+
+# ---- repair mode: start from an earlier submission and change only what misses the bar ------------------------------------
+
+def test_a_repair_run_scores_the_old_submission_and_tells_the_agent_what_to_fix(tmp_path):
+    workbench = ScoringWorkbench(tmp_path, [_score(1.0, overrun=1), _score(1.0)])
+    seen = []
+    original = workbench.submit_dub
+
+    def spy(items, approach_notes=""):
+        seen.append((items, approach_notes))
+        return original(items, approach_notes)
+
+    workbench.submit_dub = spy
+    client = ScriptedClient([_reply(calls=[_call("p", "submit_dub", {"items": [{"item_id": "u1"}]})]),
+                             _reply(content="fixed")])
+    old = [{"item_id": "u1", "zulu_text": "a"}, {"item_id": "u2", "zulu_text": "b"}]
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", tts_budget=50, seed_items=old)
+
+    assert seen[0][0] == old and "seeded" in seen[0][1]                          # the old units were re-scored first
+    task = client.seen[0][1]["content"]
+    assert "Repair, do not redo" in task and "overrun" in task and "partial=true" in task
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 2
+
+
+def test_a_repair_that_already_meets_the_bar_says_so_and_asks_for_no_changes(tmp_path):
+    workbench = ScoringWorkbench(tmp_path, [_score(0.5)])
+    client = ScriptedClient([_reply(content="nothing to change")])
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", tts_budget=50, seed_items=[{"item_id": "u1"}])
+    assert "meets the bar" in client.seen[0][1]["content"] and summary["stop_reason"] == "agent_finished"

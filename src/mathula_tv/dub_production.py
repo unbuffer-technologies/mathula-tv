@@ -150,7 +150,7 @@ def ensure_frozen(store: Any, job_root: Path, clip_id: str) -> dict[str, Any]:
 def run_production(
     settings: Any, client: Any, *, job_id: str, clip_id: str | None = None, run_id: str | None = None,
     playbook_version: str | None = None, render: bool = True, reflect_after: bool = True, judge_meaning: bool = True,
-    max_turns: int = 80, max_total_tokens: int = 2_000_000, tts_budget: int = 600,
+    max_turns: int = 80, max_total_tokens: int = 2_000_000, tts_budget: int = 600, repair_from: str | None = None,
 ) -> dict[str, Any]:
     from .cli import create_tts_backend
     from .dub_agent import ChatClient, build_system_prompt, run_agent
@@ -165,12 +165,15 @@ def run_production(
     frozen = ensure_frozen(store, job_root, clip_id)
     playbook = load_playbook(store, playbook_version) if playbook_version else current_playbook(store)
 
+    seed_items = None
+    if repair_from:
+        seed_items = json.loads((store.repeat_dir(repair_from, clip_id, 1) / "submission.json").read_text(encoding="utf-8"))["items"]
     judge = UnitJudge(ChatClient(client.config)) if judge_meaning and hasattr(client, "config") else None
     workbench = Workbench(store, lambda: create_tts_backend(settings), judge=judge)
     summary = run_agent(
         client, workbench, clip_id=clip_id, run_id=run_id, repeat=1, max_turns=max_turns,
         max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=build_system_prompt(playbook),
-        playbook_version=playbook["version"])
+        playbook_version=playbook["version"], seed_items=seed_items)
     run_dir = store.repeat_dir(run_id, clip_id, 1)
     met_bar = summary.get("stop_reason") == "agent_finished"
     report: dict[str, Any] = {
@@ -220,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--playbook", default=None, help="playbook version (default: the adopted one)")
     parser.add_argument("--prepare-only", action="store_true",
                         help="make the glossary, pronunciation research, prosody modes and voices, then stop")
+    parser.add_argument("--repair-from", default=None, help="run id whose accepted submission to repair instead of dubbing again")
     parser.add_argument("--no-render", action="store_true")
     parser.add_argument("--no-reflect", action="store_true")
     parser.add_argument("--no-judge", action="store_true")
@@ -239,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     report = run_production(
         settings, client, job_id=args.job, clip_id=args.clip, run_id=args.run_id, playbook_version=args.playbook,
         render=not args.no_render, reflect_after=not args.no_reflect, judge_meaning=not args.no_judge,
-        max_total_tokens=args.max_tokens)
+        max_total_tokens=args.max_tokens, repair_from=args.repair_from)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     return 0 if report["met_bar"] else 2
 
