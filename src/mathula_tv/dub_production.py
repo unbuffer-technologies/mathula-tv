@@ -110,9 +110,9 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
                                              provider=provider, progress=progress)
     names = None
     try:
-        from .pronunciation_lean import speaker_names
+        from .pronunciation_audio import audio_names
 
-        names = speaker_names(job_root, voice=primary_voice(Path(voices)), progress=progress)
+        names = audio_names(job_root, voice=primary_voice(Path(voices)), progress=progress)
     except Exception as exc:        # a names-stage problem must never block the dub; the pipeline's own readings still apply
         progress(f"[prepare] names stage skipped: {type(exc).__name__}: {str(exc)[:200]}")
     return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices), "names_lexicon": str(names) if names else None,
