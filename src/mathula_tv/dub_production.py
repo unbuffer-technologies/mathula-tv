@@ -151,6 +151,7 @@ def run_production(
     settings: Any, client: Any, *, job_id: str, clip_id: str | None = None, run_id: str | None = None,
     playbook_version: str | None = None, render: bool = True, reflect_after: bool = True, judge_meaning: bool = True,
     max_turns: int = 80, max_total_tokens: int = 2_000_000, tts_budget: int = 600, repair_from: str | None = None,
+    hook: bool = False,
 ) -> dict[str, Any]:
     from .cli import create_tts_backend
     from .dub_agent import ChatClient, build_system_prompt, run_agent
@@ -188,7 +189,11 @@ def run_production(
         try:
             from .dub_render import render_submission
 
-            report["render"] = render_submission(settings, run_id=run_id, clip_id=clip_id, repeat=1)
+            report["render"] = render_submission(settings, run_id=run_id, clip_id=clip_id, repeat=1, hook=hook)
+            if hook:
+                from .dub_publish import publish_handoff
+
+                report["handoff"] = publish_handoff(Path(settings.work_dir), job_id=job_id, run_id=run_id, clip_id=clip_id)
         except Exception as exc:        # a render problem must not lose the dub, the report or the lessons
             report["render_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
 
@@ -224,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-only", action="store_true",
                         help="make the glossary, pronunciation research, prosody modes and voices, then stop")
     parser.add_argument("--repair-from", default=None, help="run id whose accepted submission to repair instead of dubbing again")
+    parser.add_argument("--hook", action="store_true",
+                        help="render the hook edit and footer overlay and write the job-ID-named handoff files for posting")
     parser.add_argument("--no-render", action="store_true")
     parser.add_argument("--no-reflect", action="store_true")
     parser.add_argument("--no-judge", action="store_true")
@@ -243,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     report = run_production(
         settings, client, job_id=args.job, clip_id=args.clip, run_id=args.run_id, playbook_version=args.playbook,
         render=not args.no_render, reflect_after=not args.no_reflect, judge_meaning=not args.no_judge,
-        max_total_tokens=args.max_tokens, repair_from=args.repair_from)
+        max_total_tokens=args.max_tokens, repair_from=args.repair_from, hook=args.hook)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     return 0 if report["met_bar"] else 2
 
