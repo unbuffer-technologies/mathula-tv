@@ -18,9 +18,8 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .pronunciation_names import NAMES_FILE, approved_names, phones_to_spelling, write_lexicon
+from .pronunciation_names import approved_names, phones_to_spelling
 
-_KINDS = {"person": "personal_name", "organisation": "organisation_name", "place": "place_name"}
 _CONTEXTS = (
     {"before": "Manje sibuza ", "after": "ngalolu daba.", "pitch": "-6%"},
     {"before": "Kuthiwe ", "after": "ubekhona ngaleso sikhathi.", "pitch": "-6%"},
@@ -44,14 +43,6 @@ def lean_reading(name: str, word_ipas: Sequence[str], current: Sequence[str], to
     return out
 
 
-def decide(scores: Mapping[str, Mapping[str, float]], gain: float = 0.03, tolerance: float = 0.03) -> str:
-    """"lean" when at least one assessor clearly prefers the lean reading and neither prefers the current one; else "current"."""
-    change = {metric: scores["lean"][metric] - scores["current"][metric] for metric in ("gop", "azure")}
-    if all(v >= -tolerance for v in change.values()) and any(v >= gain for v in change.values()):
-        return "lean"
-    return "current"
-
-
 def verdict(current_score: float, lean_score: float, margin: float = 0.1) -> str:
     if lean_score >= current_score + margin:
         return "lean better"
@@ -61,8 +52,7 @@ def verdict(current_score: float, lean_score: float, margin: float = 0.1) -> str
 
 
 def compare_job(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA-ThembaNeural", gop: Any = None,
-                apply: bool = False, progress: Callable[[str], None] = print) -> dict[str, Any]:
-    """Compare every researched name; with ``apply`` the readings the scores prefer are written to the job's names lexicon."""
+                progress: Callable[[str], None] = print) -> dict[str, Any]:
     from . import pronunciation_search as ps
     from .pronunciation import (
         PronunciationDictionary, with_default_organisation_initialisms, with_web_researched_organisation_pronunciations,
@@ -139,22 +129,15 @@ def compare_job(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA-Th
                 azures.append(azure_goodness(azure(audio)["score"]))
             scores[label] = {"gop": round(sum(gops) / len(gops), 3), "azure": round(sum(azures) / len(azures), 3)}
         row.update(scores=scores, verdict={"gop": verdict(scores["current"]["gop"], scores["lean"]["gop"]),
-                                           "azure": verdict(scores["current"]["azure"], scores["lean"]["azure"])},
-                   chosen=decide(scores), kind=_KINDS.get(str(correction.get("entity_type") or ""), "personal_name"))
+                                           "azure": verdict(scores["current"]["azure"], scores["lean"]["azure"])})
         for text in (current_text, lean_text):
             audio = windows.audio(contexts[0], ps.Candidate(text))
             take_files.append(audio.with_name(audio.name.replace(".name.wav", ".wav")))
         take_labels.append(f"{name}: current {current_text!r} then lean {lean_text!r}")
         progress(f"[lean] {name}: current {current_text!r} | lean {lean_text!r} | GOP {scores['current']['gop']} vs "
-                 f"{scores['lean']['gop']} | Azure {scores['current']['azure']} vs {scores['lean']['azure']} -> {row['chosen']}")
+                 f"{scores['lean']['gop']} | Azure {scores['current']['azure']} vs {scores['lean']['azure']}")
         rows.append(row)
     report = {"job": job_root.name, "voice": voice, "rows": rows, "takes_order": take_labels}
-    if apply:
-        plans = [{"name": r["name"], "result": r["lean"], "changed": True,
-                  "decisions": [{"word": d["word"], "decision": d["lean"], "why": d["why"]} for d in r["lean_detail"]]}
-                 for r in rows if r.get("chosen") == "lean"]
-        report["lexicon"] = str(write_lexicon(job_root / "native_dub" / NAMES_FILE, plans, voice=voice,
-                                              kinds={r["name"]: r["kind"] for r in rows if r.get("kind")}))
     if take_files:
         report["takes"] = str(concatenate_takes(take_files, job_root / "native_dub" / "lean_takes.wav", gap_s=0.6))
     (job_root / "native_dub" / "lean_comparison.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -170,10 +153,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mathula_tv.pronunciation_lean")
     parser.add_argument("--job", required=True)
     parser.add_argument("--voice", default="zu-ZA-ThembaNeural")
-    parser.add_argument("--apply", action="store_true", help="write the readings the scores prefer to the job's names lexicon")
     args = parser.parse_args(argv)
     report = compare_job(Path(load_settings().work_dir) / "jobs" / args.job, key=os.environ["AZURE_SPEECH_KEY"],
-                         region=os.environ["AZURE_SPEECH_REGION"].strip().lower(), voice=args.voice, apply=args.apply)
+                         region=os.environ["AZURE_SPEECH_REGION"].strip().lower(), voice=args.voice)
     print(f"\n{'name':<40} {'current':<34} {'lean':<34} verdict")
     for row in report["rows"]:
         shown = row.get("verdict")
