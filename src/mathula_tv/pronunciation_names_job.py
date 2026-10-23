@@ -23,7 +23,9 @@ def plan_job_names(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA
     """Plan every researched name of a job and write ``native_dub/pronunciation_names.json``. Returns the path, or None."""
     from . import pronunciation_search as ps
     from .native_dub import _extract_entity_english_source_clip
-    from .pronunciation import PronunciationDictionary, with_default_organisation_initialisms
+    from .pronunciation import (
+        PronunciationDictionary, with_default_organisation_initialisms, with_web_researched_organisation_pronunciations,
+    )
     from .pronunciation_assess import (
         LocalGop, english_reading, gop_goodness, phone_tokens, regroup, sanitize_ipa, strip_length,
     )
@@ -38,8 +40,10 @@ def plan_job_names(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA
     gop._load()
     work = job_root / "native_dub" / "names_work"
     synthesize = ps.bookmark_synthesizer(voice, key, region)
-    approved = approved_names(with_default_organisation_initialisms(
-        PronunciationDictionary("v1", language="zu-ZA", job_id=str(job_root))))
+    builtin = with_default_organisation_initialisms(PronunciationDictionary("v1", language="zu-ZA", job_id=str(job_root)))
+    approved = approved_names(builtin)
+    # how the pipeline would speak each name today (built-in entries plus this job's researched readings)
+    current_dictionary = with_web_researched_organisation_pronunciations(builtin, research)
     contexts = [ps.Context(**c) for c in _DEFAULT_CONTEXTS]
     plans, kinds = [], {}
     for correction in research.get("accepted_corrections") or []:
@@ -52,6 +56,10 @@ def plan_job_names(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA
             phone_tokens(base, gop._vocab)
         except ValueError as exc:
             progress(f"[names] {name}: its pronunciation note cannot be read ({str(exc)[:80]}); left alone")
+            continue
+        current = current_dictionary.apply(name).tts_text.split()
+        if len(current) != len(name.split()):
+            progress(f"[names] {name}: already spoken as {' '.join(current)!r} (a different structure); left to the existing rules")
             continue
         if len(base.split()) != len(name.split()):
             progress(f"[names] {name}: the pronunciation note has {len(base.split())} sound groups for "
@@ -79,7 +87,7 @@ def plan_job_names(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA
 
         scorer = ps.WordScorer(windows, goodness, words, contexts)
         plan = plan_name(name, words, scorer, lambda w: phone_tokens(w, gop._vocab),
-                         looks_isizulu=ps.looks_isizulu, margin=margin)
+                         looks_isizulu=ps.looks_isizulu, margin=margin, current=current)
         plans.append(plan)
         kinds[name] = _KINDS.get(str(correction.get("entity_type") or ""), "personal_name")
         progress(f"[names] {name} -> {plan['result']!r}" + ("" if plan["changed"] else "  (unchanged)"))

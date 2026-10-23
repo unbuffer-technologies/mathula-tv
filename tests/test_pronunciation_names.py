@@ -96,3 +96,20 @@ def test_the_jobs_dictionary_picks_the_lexicon_up_for_both_measurement_and_rende
     _apply_native_pronunciation_research_to_job_cache(tmp_path, {"accepted_corrections": []})
     assert _native_dub_tts_ready_text("Kuthiwe uMoses Mabhida ubekhona", job_root=tmp_path) == "Kuthiwe uMowzes Mabhida ubekhona"
     assert json.loads((native / NAMES_FILE).read_text(encoding="utf-8"))["examined"][0]["name"] == "Moses Mabhida"
+
+
+def test_an_acronym_is_left_to_the_initialism_rules_and_an_existing_respelling_is_kept():
+    tokens = {"ɛseɪbiːsiː": ["ɛ", "s", "eɪ", "b", "iː", "s", "iː"], "njuːz": ["n", "j", "uː", "z"], "məʊzɪz": ["m", "əʊ", "z", "ɪ", "z"]}
+    plan = plan_name("SABC News", ["ɛseɪbiːsiː", "njuːz"], FakeScorer(["eseybiisii", "nyuuz"]), lambda ipa: tokens[ipa],
+                     looks_isizulu=looks_isizulu, current=["SABC", "News"])
+    assert plan["decisions"][0]["why"].startswith("acronym") and plan["decisions"][0]["decision"] == "SABC"
+    kept = plan_name("Moses", ["məʊzɪz"], FakeScorer(["mowzes"]), lambda ipa: tokens[ipa], looks_isizulu=looks_isizulu,
+                     current=["Moh-zez"])
+    assert kept["result"] == "Moh-zez" and kept["changed"] is False and "already respelt" in kept["decisions"][0]["why"]
+
+
+def test_a_respelling_must_beat_the_current_reading_not_just_the_raw_spelling():
+    tokens = {"dʒeɪkob": ["dʒ", "eɪ", "k", "o", "b"]}
+    plan = plan_name("Jacob", ["dʒeɪkob"], FakeScorer(["jeykhob"]), lambda ipa: tokens[ipa], looks_isizulu=looks_isizulu,
+                     current=["Jacob"], margin=0.15)
+    assert plan["result"] == "Jeykhob" and plan["changed"]

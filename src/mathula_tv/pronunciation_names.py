@@ -69,23 +69,36 @@ def phones_to_spelling(tokens: Sequence[str], like: str = "") -> tuple[str, list
 
 
 def plan_name(name: str, word_ipas: Sequence[str], scorer: Any, tokenise: Callable[[str], Sequence[str]], *,
-              looks_isizulu: Callable[[str], bool], margin: float = 0.15) -> dict[str, Any]:
-    """Decide each word of ``name``: protected, respelt by rule (and confirmed by its own audio), or left plain."""
+              looks_isizulu: Callable[[str], bool], margin: float = 0.15,
+              current: Sequence[str] | None = None) -> dict[str, Any]:
+    """Decide each word of ``name``: protected, respelt by rule (and confirmed by its own audio), or left as it is.
+
+    ``current`` is how the existing dictionary already speaks each word. The stage only acts on a word that is still
+    read as written: an acronym, an isiZulu-shaped word or a word the pipeline has already respelt is left exactly as
+    it is, and a respelling must beat the current reading, not merely the raw spelling.
+    """
     words = name.split()
+    spoken = list(current) if current is not None else list(words)
     decisions: list[dict[str, Any]] = []
     for i, word in enumerate(words):
         if looks_isizulu(word):
-            decisions.append({"word": word, "decision": word, "changed": False, "why": "isiZulu shape: left to the voice"})
+            decisions.append({"word": word, "decision": spoken[i], "changed": False, "why": "isiZulu shape: left to the voice"})
+            continue
+        if len(word) > 1 and word.isupper():
+            decisions.append({"word": word, "decision": spoken[i], "changed": False, "why": "acronym: left to the initialism rules"})
+            continue
+        if spoken[i] != word:
+            decisions.append({"word": word, "decision": spoken[i], "changed": False, "why": "already respelt by the pipeline: kept"})
             continue
         rule, unconfirmed = phones_to_spelling(tokenise(word_ipas[i]), like=word)
-        plain = scorer.word_scores(name)[i]
-        trial = scorer.word_scores(" ".join([*words[:i], rule, *words[i + 1:]]))[i] if rule and rule != word else plain
+        plain = scorer.word_scores(" ".join(spoken))[i]
+        trial = scorer.word_scores(" ".join([*spoken[:i], rule, *spoken[i + 1:]]))[i] if rule and rule != word else plain
         changed = bool(rule) and rule != word and trial >= plain + margin
-        decisions.append({"word": word, "decision": rule if changed else word, "changed": changed, "rule": rule,
+        decisions.append({"word": word, "decision": rule if changed else spoken[i], "changed": changed, "rule": rule,
                           "plain_score": round(plain, 3), "rule_score": round(trial, 3), "unconfirmed_rules": unconfirmed,
-                          "why": "respelt: beats the plain reading" if changed else "kept: no clear gain over the plain reading"})
+                          "why": "respelt: beats the current reading" if changed else "kept: no clear gain over the current reading"})
     result = " ".join(d["decision"] for d in decisions)
-    return {"name": name, "result": result, "changed": result != name, "decisions": decisions}
+    return {"name": name, "result": result, "changed": result != " ".join(spoken), "decisions": decisions}
 
 
 def approved_names(dictionary: Any) -> set[str]:
