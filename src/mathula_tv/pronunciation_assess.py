@@ -55,6 +55,9 @@ def phones_to_ids(ipa: str, vocab: Mapping[str, int]) -> list[int]:
 # to expect a schwa accepts the "a" of a wrong spelling. Reduced vowels are therefore tried as every full vowel, and the
 # speaker's own audio decides which one they said.
 REDUCED_VOWELS = frozenset({"ə", "ɐ", "ɪ"})
+# Provisional calibration, three words: the audio clearly decided the final "o" of Jacob (11% lower cost than the
+# dictionary form) but not "Moses" (6%, one short clip) or "Municipality" (2%).
+MIN_RELATIVE_GAIN = 0.08
 FULL_VOWELS = ("a", "e", "i", "o", "u", "ɔ", "ɛ", "ʌ", "ɑ", "ɪ", "ə")
 
 
@@ -91,9 +94,12 @@ def choose_expected(log_probs: Any, base_tokens: Sequence[str], vocab: Mapping[s
     scored.sort()
     base = "".join(base_tokens)
     base_excess = next(e for e, v in scored if v == base)
-    chosen_tokens = next(v for v in ipa_variants(base_tokens, limit) if "".join(v) == scored[0][1])
-    return {"chosen": scored[0][1], "chosen_tokens": chosen_tokens, "chosen_excess": scored[0][0], "base": base,
-            "base_excess": base_excess,
+    # the audio overrules the dictionary only when it clearly prefers another vowel: a gain within noise (a short clip,
+    # a vowel the recogniser cannot tell apart) keeps the dictionary form
+    best = scored[0] if base_excess - scored[0][0] >= MIN_RELATIVE_GAIN * abs(base_excess) else (base_excess, base)
+    chosen_tokens = next(v for v in ipa_variants(base_tokens, limit) if "".join(v) == best[1])
+    return {"chosen": best[1], "chosen_tokens": chosen_tokens, "chosen_excess": best[0], "base": base,
+            "base_excess": base_excess, "best_variant": scored[0][1],
             "runners_up": [(round(e, 3), v) for e, v in scored[1:4]]}
 
 

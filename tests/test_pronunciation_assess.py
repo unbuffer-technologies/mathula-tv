@@ -153,6 +153,23 @@ def test_the_speakers_audio_picks_the_vowel_they_said():
     assert picked["chosen"] == "dʒeɪkob" and picked["chosen_excess"] < picked["base_excess"]
 
 
+def test_audio_that_barely_prefers_another_vowel_keeps_the_dictionary_form():
+    pytest.importorskip("torch")
+    from mathula_tv import pronunciation_assess as pa
+    from mathula_tv.pronunciation_assess import choose_expected, phone_tokens
+
+    vocab = {**VOCAB, "o": 18, "a": 19}
+    said = [vocab[t] for t in ["dʒ", "eɪ", "k", "o", "b"]]
+    clip = _peaked(said, vocab_size=20)
+    strict = pa.MIN_RELATIVE_GAIN
+    try:
+        pa.MIN_RELATIVE_GAIN = 100.0                                   # a gain no clip can reach
+        picked = choose_expected(clip, phone_tokens("dʒeɪkəb", vocab), vocab, blank=1)
+    finally:
+        pa.MIN_RELATIVE_GAIN = strict
+    assert picked["chosen"] == picked["base"] == "dʒeɪkəb" and picked["best_variant"] == "dʒeɪkob"
+
+
 def test_a_chosen_token_sequence_is_regrouped_into_the_words_of_the_name():
     from mathula_tv.pronunciation_assess import regroup
 

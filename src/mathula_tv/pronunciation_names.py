@@ -45,6 +45,9 @@ def phones_to_spelling(tokens: Sequence[str], like: str = "") -> tuple[str, list
     """
     out: list[str] = []
     unconfirmed: list[str] = []
+    # the recogniser's vocabulary has joint symbols such as "mj"; spell any it has no rule for as its separate sounds
+    known = _STOPS.keys() | _VOWELS.keys() | _CONSONANTS.keys()
+    tokens = [part for token in tokens for part in ((token,) if token in known or len(token) == 1 else tuple(token))]
     for i, token in enumerate(tokens):
         previous = tokens[i - 1] if i else ""
         following = tokens[i + 1] if i + 1 < len(tokens) else ""

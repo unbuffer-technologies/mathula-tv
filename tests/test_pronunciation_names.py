@@ -113,3 +113,8 @@ def test_a_respelling_must_beat_the_current_reading_not_just_the_raw_spelling():
     plan = plan_name("Jacob", ["dʒeɪkob"], FakeScorer(["jeykhob"]), lambda ipa: tokens[ipa], looks_isizulu=looks_isizulu,
                      current=["Jacob"], margin=0.15)
     assert plan["result"] == "Jeykhob" and plan["changed"]
+
+
+def test_a_joint_recogniser_symbol_is_spelt_as_its_separate_sounds():
+    spelling, _ = phones_to_spelling(["mj", "u", "n", "ɪ"], like="Municipality")
+    assert spelling == "Myuni"
