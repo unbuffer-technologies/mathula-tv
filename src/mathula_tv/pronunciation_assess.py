@@ -15,7 +15,10 @@ listener chose over the ones they rejected. Nothing here is trusted until that a
 from __future__ import annotations
 
 import json
+import math
 import re
+import wave
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -146,6 +149,54 @@ def cached(name: str, assess: Callable[[Path], Mapping[str, Any]], store: Path) 
     return run
 
 
+def azure_goodness(score: float) -> float:
+    """Azure accuracy (0-1) spread over its useful range: below 0.8 is poor, and 0.93-0.99 is where the choices lie."""
+    return round(max(0.0, min(1.0, (score - 0.8) / 0.2)), 6)
+
+
+def gop_goodness(score: float) -> float:
+    """GOP score (minus the per-phone excess cost) as a 0-1 likelihood ratio: 1 means as good as the recogniser's own path."""
+    return math.exp(min(0.0, score))
+
+
+@dataclass
+class CombinedScorer:
+    """A spelling is only as good as its worst assessor: it must look right to every one of them.
+
+    The two assessors agreed with the listener 9 times in 11 when they agreed with each other, and were unreliable
+    when they did not, so the minimum (not the mean) is the objective: a candidate that fools one assessor does not rise.
+    """
+    parts: Sequence[tuple[Any, Callable[[float], float]]]          # (scorer, transform to a 0-1 goodness)
+    evaluations: int = 0
+    _cache: dict = field(default_factory=dict)
+    detail: dict = field(default_factory=dict)
+
+    def score(self, candidate: Any) -> float:
+        if candidate not in self._cache:
+            self.evaluations += 1
+            values = [transform(scorer.score(candidate)) for scorer, transform in self.parts]
+            self.detail[candidate] = values
+            self._cache[candidate] = min(values)
+        return self._cache[candidate]
+
+
+def concatenate_takes(wavs: Sequence[Path], target: Path, gap_s: float = 1.0) -> Path:
+    """Join wavs of one format into one file with a pause after each, for a listener to compare back to back."""
+    data, params = b"", None
+    for path in wavs:
+        with wave.open(str(path), "rb") as reader:
+            params = params or (reader.getnchannels(), reader.getsampwidth(), reader.getframerate())
+            data += reader.readframes(reader.getnframes())
+            data += b"\x00" * (params[1] * params[0] * int(params[2] * gap_s))
+    assert params is not None, "no takes to join"
+    with wave.open(str(target), "wb") as writer:
+        writer.setnchannels(params[0])
+        writer.setsampwidth(params[1])
+        writer.setframerate(params[2])
+        writer.writeframes(data)
+    return target
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import os
@@ -158,7 +209,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, help="JSON like the search config, plus per entity: reference_text, ipa")
     parser.add_argument("--out", default="pronunciation_assess")
     parser.add_argument("--assessors", nargs="*", default=["azure-en-GB", "azure-en-US", "local-gop"])
+    parser.add_argument("--search", action="store_true", help="search with Azure en-US + GOP combined, write takes for listening")
+    parser.add_argument("--budget", type=int, default=50, help="candidates the search may score per entity")
     args = parser.parse_args(argv)
+    if args.search:
+        args.assessors = ["azure-en-US", "local-gop"]
 
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
     settings = load_settings()
@@ -168,6 +223,9 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     synthesize = ps.bookmark_synthesizer(config.get("voice", "zu-ZA-ThembaNeural"), key, region)
     gop = LocalGop() if "local-gop" in args.assessors else None
+
+    if args.search:
+        return _run_search(args, config, ps, gop, synthesize, key, region, out)
 
     summary: dict[str, Any] = {}
     for entity in config["entities"]:
@@ -206,6 +264,50 @@ def main(argv: list[str] | None = None) -> int:
     print("\n== overall agreement with the listener")
     for assessor, (agree, total) in totals.items():
         print(f"   {assessor:<12} {agree}/{total}" + (f" = {agree / total:.0%}" if total else ""))
+    return 0
+
+
+def _run_search(args: Any, config: Mapping[str, Any], ps: Any, gop: "LocalGop | None", synthesize: Any,
+                key: str, region: str, out: Path) -> int:
+    report: dict[str, Any] = {}
+    for entity in config["entities"]:
+        name = entity["name"]
+        slug = re.sub(r"\W+", "_", name.lower())
+        contexts = [ps.Context(**c) for c in entity["contexts"]]
+        windows = ps.NameWindows(synthesize, lambda wav: (), out / slug)
+        store = out / slug / "assess"
+        azure = ps.AssessmentScorer(
+            windows, cached("azure-en-US", azure_assessor(key, region, "en-US", entity["reference_text"]), store), contexts)
+        local = ps.AssessmentScorer(
+            windows, cached("local-gop", lambda wav: gop.assess(wav, entity["ipa"]), store), contexts)
+        combined = CombinedScorer([(azure, azure_goodness), (local, gop_goodness)])
+        human = [ps._candidate(p["better"]) for p in entity.get("pairs", [])][:1]
+        ranked = ps.search(combined, entity["seeds"], width=3, depth=5, budget=args.budget)
+        top = [c for _, c in ranked[:5]]
+        for candidate in human:
+            combined.score(candidate)
+        print(f"\n== {name}: search with the combined score ({combined.evaluations} candidates scored)")
+        print(f"   {'combined':>8} {'azure':>7} {'gop':>7}   candidate")
+        for score, candidate in ranked[:8]:
+            a, g = combined.detail[candidate]
+            print(f"   {score:8.3f} {a:7.3f} {g:7.3f}   {candidate.label()!r}")
+        for candidate in human:
+            a, g = combined.detail[candidate]
+            print(f"   {combined.score(candidate):8.3f} {a:7.3f} {g:7.3f}   {candidate.label()!r}  <- your choice")
+        order = [*human, *[c for c in top if c not in human]][:6]
+        files = []
+        for candidate in order:
+            for context in contexts[:2]:
+                name_wav = windows.audio(context, candidate)
+                files.append(name_wav.with_name(name_wav.name.replace(".name.wav", ".wav")))
+        takes = concatenate_takes(files, out / f"takes_{slug}.wav")
+        print(f"   takes file {takes}: " + "; ".join(f"{i}: {c.label()}" for i, c in enumerate(order, 1))
+              + "   (two sentences per candidate)")
+        report[name] = {
+            "ranked": [{"candidate": c.label(), "combined": round(s, 3), "azure": round(combined.detail[c][0], 3),
+                        "gop": round(combined.detail[c][1], 3)} for s, c in ranked[:15]],
+            "takes": str(takes), "takes_order": [c.label() for c in order]}
+    (out / "search_report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     return 0
 
 

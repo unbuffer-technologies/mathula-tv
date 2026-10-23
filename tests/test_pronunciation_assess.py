@@ -86,3 +86,47 @@ def test_an_assessment_scorer_plugs_into_the_agreement_check(tmp_path):
     scorer = AssessmentScorer(NameWindows(synthesize, lambda wav: (), tmp_path), assess, [Context("a ", "b"), Context("c ", "d")])
     result = agreement(scorer, [(Candidate("good"), Candidate("bad")), (Candidate("bad"), Candidate("good"))])
     assert result["agreement"] == 0.5 and scorer.evaluations == 2
+
+
+def test_a_candidate_must_look_good_to_every_assessor():
+    from mathula_tv.pronunciation_assess import CombinedScorer, azure_goodness, gop_goodness
+
+    class Fixed:
+        def __init__(self, values):
+            self.values = values
+
+        def score(self, candidate):
+            return self.values[candidate]
+
+    azure = Fixed({"a": 0.99, "b": 0.99, "c": 0.80})
+    gop = Fixed({"a": -0.2, "b": -2.5, "c": -0.1})
+    combined = CombinedScorer([(azure, azure_goodness), (gop, gop_goodness)])
+    scores = {c: combined.score(c) for c in "abc"}
+    assert scores["a"] > scores["b"] and scores["a"] > scores["c"]      # b fools Azure only, c fools GOP only
+    assert combined.evaluations == 3 and abs(combined.detail["b"][0] - 0.95) < 1e-6
+
+
+def test_goodness_transforms_are_bounded():
+    from mathula_tv.pronunciation_assess import azure_goodness, gop_goodness
+
+    assert azure_goodness(1.0) == 1.0 and azure_goodness(0.5) == 0.0 and 0 < azure_goodness(0.9) < 1
+    assert gop_goodness(0.3) == 1.0 and 0 < gop_goodness(-2.0) < gop_goodness(-0.5) < 1
+
+
+def test_takes_are_joined_with_a_pause_after_each(tmp_path):
+    import wave
+
+    from mathula_tv.pronunciation_assess import concatenate_takes
+
+    paths = []
+    for i in range(2):
+        path = tmp_path / f"t{i}.wav"
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"\x01\x00" * 24000)                 # 1 s
+        paths.append(path)
+    out = concatenate_takes(paths, tmp_path / "all.wav", gap_s=0.5)
+    with wave.open(str(out), "rb") as w:
+        assert abs(w.getnframes() / w.getframerate() - 3.0) < 0.01          # two 1 s takes + two 0.5 s pauses
