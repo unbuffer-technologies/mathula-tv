@@ -18,8 +18,9 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .pronunciation_names import approved_names, phones_to_spelling
+from .pronunciation_names import NAMES_FILE, approved_names, phones_to_spelling, write_lexicon
 
+_KINDS = {"person": "personal_name", "organisation": "organisation_name", "place": "place_name"}
 _CONTEXTS = (
     {"before": "Manje sibuza ", "after": "ngalolu daba.", "pitch": "-6%"},
     {"before": "Kuthiwe ", "after": "ubekhona ngaleso sikhathi.", "pitch": "-6%"},
@@ -49,6 +50,65 @@ def verdict(current_score: float, lean_score: float, margin: float = 0.1) -> str
     if current_score >= lean_score + margin:
         return "current better"
     return "about equal"
+
+
+def speaker_names(job_root: Path, *, voice: str = "zu-ZA-ThembaNeural", gop: Any = None,
+                  progress: Callable[[str], None] = print) -> Path | None:
+    """Write the job's names lexicon from the speaker's own sounds: no scoring and no fallback.
+
+    Web research says which names the clip contains and how they are spelt; the sounds come only from the source audio.
+    Every name in a dubbing job is spoken in it, so a word the transcript does not contain under that spelling is a lookup
+    failure (reported), not a reason to trust the research respelling.
+    """
+    from . import pronunciation_search as ps
+    from .pronunciation import (
+        PronunciationDictionary, with_default_organisation_initialisms, with_web_researched_organisation_pronunciations,
+    )
+    from .pronunciation_assess import LocalGop, phone_tokens, sanitize_ipa
+    from .pronunciation_evidence import speaker_sounds
+
+    job_root = Path(job_root)
+    research_path = job_root / "native_dub" / "pronunciation_research.json"
+    if not research_path.is_file():
+        progress("[names] no pronunciation research for this job; names stage skipped")
+        return None
+    research = json.loads(research_path.read_text(encoding="utf-8"))
+    gop = gop or LocalGop()
+    gop._load()
+    builtin = with_default_organisation_initialisms(PronunciationDictionary("v1", language="zu-ZA", job_id=str(job_root)))
+    approved = approved_names(builtin)
+    current_dictionary = with_web_researched_organisation_pronunciations(builtin, research)
+    plans: list[dict[str, Any]] = []
+    kinds: dict[str, str] = {}
+    for correction in research.get("accepted_corrections") or []:
+        name = str(correction.get("canonical_text") or "").strip()
+        ipa = str(correction.get("pronunciation_ipa") or "")
+        if not name or not ipa or name.casefold() in approved:
+            continue
+        current = current_dictionary.apply(name).tts_text.split()
+        try:
+            base = sanitize_ipa(ipa, gop._vocab)
+            phone_tokens(base, gop._vocab)
+            if len(current) != len(name.split()) or len(base.split()) != len(name.split()):
+                progress(f"[names] {name}: structure differs from the words ({len(current)} spoken, {len(base.split())} sound groups); left to existing rules")
+                continue
+            slug = re.sub(r"\W+", "_", name.lower())
+            heard = speaker_sounds(job_root, name, base, gop, job_root / "native_dub" / "lean_work" / "reference" / slug,
+                                   looks_isizulu=ps.looks_isizulu)
+        except Exception as exc:        # one name that cannot be analysed must not stop the others
+            progress(f"[names] {name}: could not be analysed ({type(exc).__name__}: {str(exc)[:80]})")
+            continue
+        if heard["words"] is None:
+            progress(f"[names] {name}: {', '.join(heard['missing'])} not found in the transcript under that spelling (a lookup failure to fix)")
+            continue
+        detail = lean_reading(name, heard["words"], current, lambda w: phone_tokens(w, gop._vocab), looks_isizulu=ps.looks_isizulu)
+        reading = " ".join(d["lean"] for d in detail)
+        changed = reading.casefold() != " ".join(current).casefold()
+        plans.append({"name": name, "result": reading, "changed": changed,
+                      "decisions": [{"word": d["word"], "decision": d["lean"], "why": d["why"]} for d in detail]})
+        kinds[name] = _KINDS.get(str(correction.get("entity_type") or ""), "personal_name")
+        progress(f"[names] {name} -> {reading!r}" + ("" if changed else "  (unchanged)"))
+    return write_lexicon(job_root / "native_dub" / NAMES_FILE, plans, voice=voice, kinds=kinds)
 
 
 def compare_job(job_root: Path, *, key: str, region: str, voice: str = "zu-ZA-ThembaNeural", gop: Any = None,
@@ -153,7 +213,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mathula_tv.pronunciation_lean")
     parser.add_argument("--job", required=True)
     parser.add_argument("--voice", default="zu-ZA-ThembaNeural")
+    parser.add_argument("--write-names", action="store_true",
+                        help="write the job's names lexicon from the speaker's sounds (what production does) instead of comparing")
     args = parser.parse_args(argv)
+    if args.write_names:
+        print("lexicon:", speaker_names(Path(load_settings().work_dir) / "jobs" / args.job, voice=args.voice))
+        return 0
     report = compare_job(Path(load_settings().work_dir) / "jobs" / args.job, key=os.environ["AZURE_SPEECH_KEY"],
                          region=os.environ["AZURE_SPEECH_REGION"].strip().lower(), voice=args.voice)
     print(f"\n{'name':<40} {'current':<34} {'lean':<34} verdict")
