@@ -26,7 +26,7 @@ from .atomic_io import atomic_write_json, read_json
 
 COMMIT_SCHEMA = "mathula-agent-submission-commit-v1"
 _FROZEN_INPUTS = ("pass1_restored_transcript.json", "context_ledger.json", "zulu_terminology_glossary.json")
-_OPTIONAL_JOB_INPUTS = ("speaker_seriousness_modes.json", "pronunciation_research.json")
+_OPTIONAL_JOB_INPUTS = ("speaker_seriousness_modes.json", "pronunciation_research.json", "pronunciation_names.json")
 
 
 class RenderAdapterError(ValueError):

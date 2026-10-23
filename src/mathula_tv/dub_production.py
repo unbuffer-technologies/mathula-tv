@@ -108,7 +108,21 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
     job = Orchestrator(settings).jobs.load(job_id)
     voices = ensure_native_voice_assignments(job=job, job_root=job_root, segments=segments, context_ledger=ledger,
                                              provider=provider, progress=progress)
-    return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices),
+    names = None
+    try:
+        import json as _json
+        import os as _os
+
+        from .pronunciation_names_job import plan_job_names
+
+        assignments = _json.loads(Path(voices).read_text(encoding="utf-8"))
+        first = next(iter((assignments.get("speakers") or assignments).values()), {})
+        voice = str((first or {}).get("selected_voice") or "zu-ZA-ThembaNeural")
+        names = plan_job_names(job_root, key=_os.environ["AZURE_SPEECH_KEY"],
+                               region=_os.environ["AZURE_SPEECH_REGION"].strip().lower(), voice=voice, progress=progress)
+    except Exception as exc:        # a names-stage problem must never block the dub; the pipeline's own readings still apply
+        progress(f"[prepare] names stage skipped: {type(exc).__name__}: {str(exc)[:200]}")
+    return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices), "names_lexicon": str(names) if names else None,
             "glossary": paths.zulu_glossary.is_file(), "pronunciation_research": paths.pronunciation_research.is_file()}
 
 

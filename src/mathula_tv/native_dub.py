@@ -8825,6 +8825,14 @@ def _apply_native_pronunciation_research_to_job_cache(
                 ],
             }
     dictionary = with_web_researched_organisation_pronunciations(base, merged_research)
+    # The automatic names stage (isiZulu words untouched, English words respelt by rule and confirmed by audio). It can
+    # never override a name a person approved, and measurement and rendering both read it through this one dictionary.
+    from .pronunciation_names import NAMES_FILE, merge_into_dictionary
+
+    for candidate in (Path(job_root) / "native_dub" / NAMES_FILE, Path(job_root) / NAMES_FILE):
+        if candidate.is_file():
+            dictionary = merge_into_dictionary(dictionary, candidate, str(job_root))
+            break
     _NATIVE_DUB_PRONUNCIATION_DICTIONARY_BY_JOB[str(job_root)] = dictionary
     return dictionary
 

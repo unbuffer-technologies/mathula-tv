@@ -35,6 +35,7 @@ REQUIRED_INPUTS = (
 OPTIONAL_INPUTS = (
     "speaker_seriousness_modes.json",
     "pronunciation_research.json",
+    "pronunciation_names.json",
     "manual_web_overrides.json",
 )
 BASELINE_OUTPUTS = (
