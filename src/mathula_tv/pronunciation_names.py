@@ -28,7 +28,7 @@ SCHEMA = "mathula-pronunciation-names-v1"
 _STOPS = {"k": "kh", "p": "ph", "t": "th"}          # validated by ear: Jeykhob, Khey, Phaathi
 _VOWELS = {
     "eɪ": "ey", "aɪ": "ay", "ɔɪ": "oy", "oʊ": "ow", "əʊ": "ow", "aʊ": "aw",            # ey, ay: validated by ear
-    "ɑː": "aa", "uː": "uu", "iː": "ii", "ɜː": "ur", "ɔː": "o",                          # aa: validated by ear
+    "ɑː": "aa", "uː": "uu", "iː": "ii", "ɜː": "ur", "ɔː": "o", "oː": "o", "eː": "e", "aː": "aa",   # aa: validated by ear
     "ɑ": "a", "i": "i", "ɪ": "i", "ɛ": "e", "e": "e", "æ": "a", "a": "a", "ʌ": "a", "ə": "a",
     "o": "o", "ɔ": "o", "ɒ": "o", "u": "u", "ʊ": "u",
 }

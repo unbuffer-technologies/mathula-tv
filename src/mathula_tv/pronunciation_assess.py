@@ -94,13 +94,50 @@ def choose_expected(log_probs: Any, base_tokens: Sequence[str], vocab: Mapping[s
     scored.sort()
     base = "".join(base_tokens)
     base_excess = next(e for e, v in scored if v == base)
+    reduced_best = next(v for v in ipa_variants(base_tokens, limit) if "".join(v) == scored[0][1])
+    refined_tokens, refined_excess = refine_vowels(clips, reduced_best, vocab, blank)
     # the audio overrules the dictionary only when it clearly prefers another vowel: a gain within noise (a short clip,
     # a vowel the recogniser cannot tell apart) keeps the dictionary form
-    best = scored[0] if base_excess - scored[0][0] >= MIN_RELATIVE_GAIN * abs(base_excess) else (base_excess, base)
-    chosen_tokens = next(v for v in ipa_variants(base_tokens, limit) if "".join(v) == best[1])
-    return {"chosen": best[1], "chosen_tokens": chosen_tokens, "chosen_excess": best[0], "base": base,
-            "base_excess": base_excess, "best_variant": scored[0][1],
+    if base_excess - refined_excess >= MIN_RELATIVE_GAIN * abs(base_excess):
+        chosen_tokens, chosen_excess = refined_tokens, refined_excess
+    else:
+        chosen_tokens, chosen_excess = list(base_tokens), base_excess
+    return {"chosen": "".join(chosen_tokens), "chosen_tokens": chosen_tokens, "chosen_excess": chosen_excess, "base": base,
+            "base_excess": base_excess, "best_variant": "".join(refined_tokens),
             "runners_up": [(round(e, 3), v) for e, v in scored[1:4]]}
+
+
+# A dictionary's English diphthongs and vowel qualities are a hypothesis too: a Zulu speaker says "Moses" with a long
+# "oː", not the English "əʊ". After the reduced vowels are settled, every vowel may be replaced, one position at a time.
+_DIPHTHONGS = frozenset({"eɪ", "aɪ", "ɔɪ", "əʊ", "oʊ", "aʊ"})
+_LONG_VOWELS = frozenset({"iː", "uː", "ɑː", "ɔː", "ɜː", "oː", "eː", "aː"})
+VOWEL_ALTERNATIVES = ("a", "e", "i", "o", "u", "ɔ", "ɛ", "ʌ", "ɑ", "ɪ", "ə", "oː", "eː", "aː", "iː", "uː")
+
+
+def refine_vowels(clips: Sequence[Any], tokens: Sequence[str], vocab: Mapping[str, int], blank: int,
+                  sweeps: int = 2) -> tuple[list[str], float]:
+    """Coordinate descent over the vowel positions: each is replaced by whichever vowel the clips support best."""
+    current = list(tokens)
+
+    def cost(candidate: Sequence[str]) -> float:
+        ids = [vocab[t] for t in candidate]
+        return sum(gop_excess(clip, ids, blank) for clip in clips) / len(clips)
+
+    best = cost(current)
+    positions = [i for i, t in enumerate(current) if t in FULL_VOWELS or t in _DIPHTHONGS or t in _LONG_VOWELS]
+    for _ in range(sweeps):
+        improved = False
+        for position in positions:
+            for vowel in VOWEL_ALTERNATIVES:
+                if vowel == current[position] or vowel not in vocab:
+                    continue
+                trial = [*current[:position], vowel, *current[position + 1:]]
+                trial_cost = cost(trial)
+                if trial_cost < best - 1e-9:
+                    best, current, improved = trial_cost, trial, True
+        if not improved:
+            break
+    return current, best
 
 
 def gop_excess(log_probs: Any, target_ids: Sequence[int], blank: int) -> float:
