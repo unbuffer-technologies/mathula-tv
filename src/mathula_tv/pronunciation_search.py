@@ -129,10 +129,8 @@ class NameWindows:
     syntheses: int = 0
     _memo: dict[tuple[Candidate, Context], tuple[str, ...]] = field(default_factory=dict)
 
-    def phones(self, context: Context, candidate: Candidate) -> tuple[str, ...]:
-        memo_key = (candidate, context)
-        if memo_key in self._memo:
-            return self._memo[memo_key]
+    def audio(self, context: Context, candidate: Candidate) -> Path:
+        """The name's own audio (synthesised in its real sentence and cut out with the bookmarks)."""
         key = hashlib.sha1(f"{context.pitch}|{context.render_marked(candidate)}".encode("utf-8")).hexdigest()[:16]
         wav, marks_file = self.work_dir / f"{key}.wav", self.work_dir / f"{key}.json"
         if wav.is_file() and marks_file.is_file():
@@ -142,8 +140,12 @@ class NameWindows:
             marks = dict(self.synthesize(context.render_marked(candidate), context.pitch, wav))
             marks_file.write_text(json.dumps(marks), encoding="utf-8")
             self.syntheses += 1
-        piece = slice_wav(wav, marks["n0"] - LEAD_MS, marks["n1"] + TRAIL_MS, self.work_dir / f"{key}.name.wav")
-        self._memo[memo_key] = tuple(self.recognise(piece))
+        return slice_wav(wav, marks["n0"] - LEAD_MS, marks["n1"] + TRAIL_MS, self.work_dir / f"{key}.name.wav")
+
+    def phones(self, context: Context, candidate: Candidate) -> tuple[str, ...]:
+        memo_key = (candidate, context)
+        if memo_key not in self._memo:
+            self._memo[memo_key] = tuple(self.recognise(self.audio(context, candidate)))
         return self._memo[memo_key]
 
 
@@ -171,6 +173,23 @@ class Scorer:
     def name_phones(self, candidate: Candidate) -> str:
         """The first context's recognised phones for the name, for display."""
         return "".join(self.windows.phones(self.contexts[0], candidate))
+
+
+@dataclass
+class AssessmentScorer:
+    """Scores a candidate by passing the name's own audio to a pronunciation assessor (any ``wav -> float``, higher better)."""
+    windows: NameWindows
+    assess: Callable[[Path], float]
+    contexts: Sequence[Context]
+    evaluations: int = 0
+    _cache: dict[Candidate, float] = field(default_factory=dict)
+
+    def score(self, candidate: Candidate) -> float:
+        if candidate not in self._cache:
+            self.evaluations += 1
+            scores = [self.assess(self.windows.audio(context, candidate)) for context in self.contexts]
+            self._cache[candidate] = sum(scores) / len(scores)
+        return self._cache[candidate]
 
 
 def search(
@@ -215,6 +234,28 @@ def _candidate(raw: Mapping[str, Any]) -> Candidate:
     return Candidate(str(raw["spelling"]), str(raw.get("sep", " ")))
 
 
+def bookmark_synthesizer(voice: str, key: str, region: str) -> SynthesizeMarked:
+    """A synthesizer backed by the Azure Speech SDK that reports the audio offset of every SSML bookmark."""
+    import azure.cognitiveservices.speech as speechsdk
+
+    speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
+    speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Riff24Khz16BitMonoPcm)
+
+    def synthesize(marked: str, pitch: str, wav: Path) -> Mapping[str, float]:
+        ssml = (f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zu-ZA"><voice name="{voice}">'
+                f'<prosody rate="+0%" pitch="{pitch}" volume="+0%">{marked}</prosody></voice></speak>')
+        synth = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
+        marks: dict[str, float] = {}
+        synth.bookmark_reached.connect(lambda event: marks.__setitem__(event.text, event.audio_offset / 10_000))
+        result = synth.speak_ssml_async(ssml).get()
+        if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted or not {"n0", "n1"} <= set(marks):
+            raise RuntimeError(f"synthesis failed or returned no bookmarks: {result.reason}")
+        wav.write_bytes(result.audio_data)
+        return marks
+
+    return synthesize
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import os
@@ -242,20 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
-    speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Riff24Khz16BitMonoPcm)
-
-    def synthesize(marked: str, pitch: str, wav: Path) -> Mapping[str, float]:
-        ssml = (f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zu-ZA"><voice name="{voice}">'
-                f'<prosody rate="+0%" pitch="{pitch}" volume="+0%">{marked}</prosody></voice></speak>')
-        synth = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
-        marks: dict[str, float] = {}
-        synth.bookmark_reached.connect(lambda event: marks.__setitem__(event.text, event.audio_offset / 10_000))
-        result = synth.speak_ssml_async(ssml).get()
-        if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted or not {"n0", "n1"} <= set(marks):
-            raise RuntimeError(f"synthesis failed or returned no bookmarks: {result.reason}")
-        wav.write_bytes(result.audio_data)
-        return marks
+    synthesize = bookmark_synthesizer(voice, key, region)
 
     def english_reference(name: str) -> Sequence[str]:
         """The name read by a South African English voice: a clean reference, unlike a clip cut from a news broadcast."""

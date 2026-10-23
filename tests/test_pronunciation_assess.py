@@ -1,0 +1,88 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from mathula_tv.pronunciation_assess import cached, gop_excess, phones_to_ids
+from mathula_tv.pronunciation_search import AssessmentScorer, Candidate, Context, NameWindows, agreement
+
+VOCAB = {"<s>": 0, "<pad>": 1, "</s>": 2, "<unk>": 3, "k": 4, "kʰ": 5, "dʒ": 6, "d": 7, "ʒ": 8, "eɪ": 9, "e": 10,
+         "ɪ": 11, "ə": 12, "b": 13, "uː": 14, "u": 15, "z": 16, "m": 17}
+
+
+def test_phones_are_matched_longest_first_and_spaces_are_ignored():
+    assert phones_to_ids("dʒ eɪ k ə b", VOCAB) == [6, 9, 4, 12, 13]       # "dʒ" is one phone, not "d" + "ʒ"
+    assert phones_to_ids("kʰuːm", VOCAB) == [5, 14, 17]                      # "kʰ" and "uː" are single phones
+
+
+def test_an_unknown_phone_is_reported_not_silently_dropped():
+    with pytest.raises(ValueError, match="not in the recogniser's vocabulary"):
+        phones_to_ids("dʒeɪxb", VOCAB)
+
+
+def test_special_tokens_are_not_phones():
+    with pytest.raises(ValueError):
+        phones_to_ids("<pad>", VOCAB)
+
+
+def _peaked(sequence, vocab_size=18, frames_per_phone=3, blank=1):
+    """Log-probabilities that confidently spell out ``sequence`` (a blank frame between phones)."""
+    import torch
+
+    rows = []
+    for phone in sequence:
+        for _ in range(frames_per_phone):
+            rows.append(phone)
+        rows.append(blank)
+    probs = torch.full((len(rows), vocab_size), 0.002)
+    for t, phone in enumerate(rows):
+        probs[t, phone] = 1.0
+    return torch.log(probs / probs.sum(dim=-1, keepdim=True))
+
+
+def test_audio_that_says_the_expected_phones_has_a_smaller_excess_than_audio_that_says_something_else():
+    pytest.importorskip("torch")
+    expected = [6, 9, 4, 12, 13]
+    right = gop_excess(_peaked(expected), expected, blank=1)
+    wrong = gop_excess(_peaked([6, 10, 5, 11, 13]), expected, blank=1)      # different vowels, aspirated k
+    assert right < wrong and right < 0.5 and wrong > 2 * right
+
+
+def test_one_wrong_phone_costs_less_than_several():
+    pytest.importorskip("torch")
+    expected = [6, 9, 4, 12, 13]
+    one = gop_excess(_peaked([6, 9, 4, 11, 13]), expected, blank=1)
+    many = gop_excess(_peaked([7, 10, 5, 11, 15]), expected, blank=1)
+    assert one < many
+
+
+def test_the_cache_assesses_each_wav_once_and_keeps_the_details(tmp_path):
+    calls = []
+
+    def assess(wav):
+        calls.append(wav)
+        return {"score": 0.75, "text": "hello"}
+
+    run = cached("fake", assess, tmp_path / "store")
+    wav = tmp_path / "a.name.wav"
+    assert run(wav) == 0.75 and run(wav) == 0.75 and len(calls) == 1
+    assert json.loads((tmp_path / "store" / "a.name.fake.json").read_text(encoding="utf-8"))["text"] == "hello"
+
+
+def test_an_assessment_scorer_plugs_into_the_agreement_check(tmp_path):
+    import wave
+
+    texts = {}
+
+    def synthesize(marked, pitch, wav):
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(b"\x00\x00" * 48000)
+        texts[wav.stem] = marked
+        return {"n0": 500.0, "n1": 1500.0}
+
+    def assess(piece: Path) -> float:                      # a fake assessor that likes the spelling "good"
+        return 1.0 if "good" in texts[piece.stem.removesuffix(".name")] else 0.2
+
+    scorer = AssessmentScorer(NameWindows(synthesize, lambda wav: (), tmp_path), assess, [Context("a ", "b"), Context("c ", "d")])
+    result = agreement(scorer, [(Candidate("good"), Candidate("bad")), (Candidate("bad"), Candidate("good"))])
+    assert result["agreement"] == 0.5 and scorer.evaluations == 2
