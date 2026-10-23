@@ -47,6 +47,8 @@ _EDITS: tuple[tuple[str, str], ...] = (
     (r"c", "k"), (r"k", "c"), (r"j", "dj"), (r"dj", "j"), (r"j", "dzh"), (r"s", "z"), (r"z", "s"),
     (r"b\b", "bh"), (r"bh\b", "b"), (r"b\b", "p"), (r"th", "t"), (r"t(?!h)", "th"),
     (r"y", "ey"), (r"ey", "y"),
+    # moves between an English sound and how this voice spells it: the long A of "Jacob" is "ey", a hard C is "kh"
+    (r"a(?!a)", "ey"), (r"a(?!a)", "ay"), (r"c", "kh"), (r"c", "ck"), (r"ck", "k"), (r"o", "u"), (r"u", "o"),
 )
 _ALLOWED = re.compile(r"^[A-Za-z][A-Za-z -]{0,40}$")
 
