@@ -179,9 +179,14 @@ def prepare_render_root(
 
 def render_submission(
     settings: Any, *, run_id: str, clip_id: str, repeat: int = 1, force: bool = False, lite: bool = False,
-    progress: Any = None,
+    progress: Any = None, hook: bool = False,
 ) -> dict[str, Any]:
-    """Prepare the render root and run the production renderer without any hook work."""
+    """Prepare the render root and run the production renderer.
+
+    By default this is the plain dubbed master with no hook work. ``hook=True`` additionally runs the production
+    publication step on that master: an editorial model call picks the opening anchor, the footer title and the TikTok
+    caption and hashtags, then the opening cut and footer overlay are encoded. The picture is never retimed.
+    """
     from .cli import create_tts_backend
     from .experience_store import ExperienceStore
     from .native_dub import render_native_dub
@@ -190,9 +195,14 @@ def render_submission(
     store = ExperienceStore(settings.work_dir)
     root, info, voice_map = prepare_render_root(store, settings.work_dir, run_id=run_id, clip_id=clip_id, repeat=repeat)
     job = Orchestrator(settings).jobs.load(info["job_id"])               # read-only: used for the source video path
+    editorial = None
+    if hook:
+        from .cli import create_native_gpt_backend
+
+        editorial = create_native_gpt_backend(None, progress=progress)
     result = render_native_dub(
         job=job, job_root=root, tts=create_tts_backend(settings), force=force, lite=lite,
-        apply_opening_cut=False, render_hook_overlay=False,             # plain dubbed master only
+        apply_opening_cut=hook, render_hook_overlay=hook, editorial_provider=editorial,
         voice_map_path=voice_map, enable_island_timing=False,
         enable_sdk_group_synthesis=False, enable_turn_group_synthesis=False, progress=progress,
     )
@@ -205,6 +215,15 @@ def render_submission(
         "units_sped_up": sum(1 for g in groups if _speed(g) > 0),
         "max_speed_percent": max((_speed(g) for g in groups), default=0.0),
     }
+    if hook:
+        from .native_dub import native_dub_paths
+
+        paths = native_dub_paths(root)
+        for label, path in (("hook_text", paths.hook_text), ("caption", paths.seo_caption), ("hashtags", paths.seo_hashtags),
+                            ("search_keywords", paths.seo_search_keywords)):
+            summary[label] = path.read_text(encoding="utf-8").strip() if path.is_file() else None
+        summary["master_video"] = str(paths.video)
+        summary["publication_manifest"] = str(paths.publication_manifest) if paths.publication_manifest.is_file() else None
     atomic_write_json(root / "render_summary.json", summary)
     return summary
 
@@ -217,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--lite", action="store_true", help="cap ffmpeg CPU use")
     parser.add_argument("--prepare-only", action="store_true", help="build the committed translation, do not render")
+    parser.add_argument("--hook", action="store_true",
+                        help="also run the publication step: opening cut, footer hook overlay, TikTok caption and hashtags")
     args = parser.parse_args(argv)
 
     from .config import load_settings
@@ -229,7 +250,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"render_root": str(root), **info}, indent=2))
         return 0
     print(json.dumps(render_submission(settings, run_id=args.run, clip_id=args.clip, repeat=args.repeat,
-                                       force=args.force, lite=args.lite), indent=2))
+                                       force=args.force, lite=args.lite, hook=args.hook), indent=2,
+                     ensure_ascii=False))
     return 0
 
 
