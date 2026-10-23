@@ -559,8 +559,8 @@ def test_mk_party_uses_the_human_approved_respelling_everywhere_it_appears():
     result = dictionary.apply(text)
 
     assert result.spoken_text == text
-    assert result.tts_text.count("Em Kay Phaathi") == 4
-    assert "Phaati " not in result.tts_text and "Khey" not in result.tts_text
+    assert result.tts_text.count("Em Khey Phaathi") == 4
+    assert "Phaati " not in result.tts_text and "Em Kay" not in result.tts_text
 
 
 def test_organisation_defaults_do_not_leak_into_unsupported_locales():
