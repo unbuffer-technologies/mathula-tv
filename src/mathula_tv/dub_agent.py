@@ -132,7 +132,8 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
 
 TOOL_SPECS = [
     _tool("open_clip", "Open the clip: returns every English segment (id, speaker, start/end ms), the whole-clip "
-          "context ledger, glossary and speaker modes. Call this first.",
+          "context ledger, glossary and speaker modes. Call this first. If source_corrections is present, the English had "
+          "words the speaker's audio showed were misheard; the english already carries the fix, so translate that meaning.",
           {"clip_id": {"type": "string"}}, ["clip_id"]),
     _tool("recall_lessons", "Mistakes native-speaker reviewers marked 'bad' in earlier clips, with corrections "
           "where given. Cross-clip memory.", {"limit": {"type": "integer"}}, []),
@@ -509,6 +510,22 @@ def pushback_message(result: dict[str, Any], unmet: list[str], *, tts_left: int)
     return " ".join(lines)
 
 
+def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) -> str:
+    """In a repair run: the source corrections made since the earlier submission, and the units that carry those segments."""
+    corrections = getattr(workbench, "source_corrections", None) or []
+    if not corrections:
+        return ""
+    parts = []
+    for correction in corrections:
+        units = [str(item.get("item_id") or "?") for item in seed_items
+                 if correction["segment_id"] in [str(s) for s in item.get("source_segment_ids") or []]]
+        parts.append(f"segment {correction['segment_id']}: the transcript had {correction['token']!r} but the speaker said "
+                     f"{correction['replacement']!r}" + (f" (units: {', '.join(units)})" if units else ""))
+    return ("The English source was corrected after that submission, against the speaker's audio: " + "; ".join(parts) +
+            ". Re-translate the units that carry these segments so the Zulu says what the speaker meant, and treat them "
+            "as units that need change. ")
+
+
 def run_agent(
     client: ChatClient, workbench: Workbench, *, clip_id: str, run_id: str, repeat: int = 1,
     max_turns: int = 40, max_total_tokens: int = 500_000, tts_budget: int = 300,
@@ -537,6 +554,7 @@ def run_agent(
                 f"Repair, do not redo. Clip {clip_id!r} already has an accepted submission (get_submission shows its units). "
                 f"Re-scored under the current pronunciation and timing rules it "
                 + ("misses the bar. " + pushback_message(seeded, seed_unmet, tts_left=tts_now) if seed_unmet else "meets the bar. ")
+                + _source_correction_note(workbench, seed_items)
                 + "Change only the units that need it, send just those with submit_dub partial=true, leave every other unit "
                   "exactly as it is, and stop once the bar is met.")
     messages: list[dict[str, Any]] = [

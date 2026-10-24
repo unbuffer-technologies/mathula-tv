@@ -115,6 +115,12 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
         names = audio_names(job_root, voice=primary_voice(Path(voices)), progress=progress)
     except Exception as exc:        # a names-stage problem must never block the dub; the pipeline's own readings still apply
         progress(f"[prepare] names stage skipped: {type(exc).__name__}: {str(exc)[:200]}")
+    try:        # words the English transcript got wrong, checked against the speaker's audio (see source_suspects)
+        from .source_suspects import run as check_source
+
+        check_source(job_root, provider, progress=progress)
+    except Exception as exc:
+        progress(f"[prepare] source check skipped: {type(exc).__name__}: {str(exc)[:200]}")
     return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices), "names_lexicon": str(names) if names else None,
             "glossary": paths.zulu_glossary.is_file(), "pronunciation_research": paths.pronunciation_research.is_file()}
 
@@ -137,10 +143,13 @@ def primary_voice(voice_resolution: Path, default: str = "zu-ZA-ThembaNeural") -
 
 def ensure_frozen(store: Any, job_root: Path, clip_id: str) -> dict[str, Any]:
     """Freeze the job's Pass-1 inputs as a clip, once. A new clip has no baseline translation to compare with."""
+    from .experience_store import source_corrections_sha
+
     existing = store.load_corpus()["clips"].get(clip_id)
-    if existing:
+    if existing and existing.get("source_corrections_sha") == source_corrections_sha(Path(job_root) / "native_dub"):
         return {"clip_id": clip_id, **existing, "already_frozen": True}
-    return store.freeze_clip(job_root, clip_id=clip_id, notes="production", require_baseline=False)
+    # a new clip, or one frozen before its transcript corrections existed or changed: (re)freeze it
+    return store.freeze_clip(job_root, clip_id=clip_id, notes="production", require_baseline=False, overwrite=bool(existing))
 
 
 def run_production(

@@ -121,6 +121,7 @@ class Workbench:
         self.voices: dict[str, dict[str, Any]] = dict(voices or {})
         self.pronunciation_root: Path | None = None
         self.segments: list[dict[str, Any]] = []
+        self.source_corrections: list[dict[str, Any]] = []
         # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
         # keep fitting. A submission that breaks one is rejected, so fixing one unit can never silently
         # break another, and the clip's flow only ever improves.
@@ -216,6 +217,8 @@ class Workbench:
         modes_path = native / "speaker_seriousness_modes.json"
         modes = read_json(modes_path).get("modes", {}) if modes_path.is_file() else {}
         mine = set(self.scope["segment_ids"]) if self.scope else None
+        corrections_path = native / "source_corrections.json"
+        self.source_corrections = (read_json(corrections_path).get("corrections") or []) if corrections_path.is_file() else []
         opened = {
             "clip_id": clip_id,
             "segments": [
@@ -237,6 +240,14 @@ class Workbench:
                 "context so your retelling fits the whole story. submit_dub covers just your segments; "
                 f"the next speech after your turn starts at {self.scope.get('next_start_ms')} ms."
             )
+        if self.source_corrections:
+            opened["source_corrections"] = {
+                "note": ("The English below was corrected against the speaker's audio: the transcript had misheard these "
+                         "words. The segments' english already carries the correction; translate that meaning, never the "
+                         "misheard word."),
+                "corrections": [{"segment_id": c["segment_id"], "transcript_had": c["token"], "speaker_said": c["replacement"],
+                                 "why": c.get("reason", "")} for c in self.source_corrections],
+            }
         return opened
 
     def measure_tts(

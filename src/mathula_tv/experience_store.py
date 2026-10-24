@@ -24,6 +24,12 @@ from typing import Any, Iterable
 
 from .atomic_io import atomic_write_json, read_json
 
+def source_corrections_sha(native_dir: Path) -> str | None:
+    """Checksum of a job's source corrections, so a clip frozen before they existed (or with others) can be refrozen."""
+    path = Path(native_dir) / "source_corrections.json"
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
 CORPUS_SCHEMA = "mathula-experience-corpus-v1"
 RUN_SCHEMA = "mathula-experience-run-v1"
 
@@ -36,6 +42,7 @@ OPTIONAL_INPUTS = (
     "speaker_seriousness_modes.json",
     "pronunciation_research.json",
     "pronunciation_names.json",
+    "source_corrections.json",
     "manual_web_overrides.json",
 )
 BASELINE_OUTPUTS = (
@@ -165,8 +172,14 @@ class ExperienceStore:
             (clip_dir / "analysis").mkdir(parents=True, exist_ok=True)
             shutil.copy2(raw, clip_dir / "analysis" / raw.name)
 
+        # Words the English transcript got wrong (see source_suspects) are corrected in the FROZEN copy only: the agent, the
+        # gates, the meaning check and the renderer all read this copy, and the job's own Pass 1 keeps its checksum.
+        from .source_suspects import apply_to_frozen
+
+        apply_to_frozen(frozen / "pass1_restored_transcript.json", frozen / "source_corrections.json")
         segments = read_json(frozen / "pass1_restored_transcript.json").get("segments") or []
         entry = {
+            "source_corrections_sha": source_corrections_sha(native),
             "job_id": job_root.name,
             "frozen_at": _now(),
             "duration_s": round(max((int(s.get("end_ms") or 0) for s in segments), default=0) / 1000.0, 1),
