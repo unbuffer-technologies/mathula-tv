@@ -97,6 +97,22 @@ def add_to_lexicon(path: Path, fixes: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
+def remember_verified_fixes(work_dir: Path, job_id: str, fixes: list[dict[str, Any]], after_check: Mapping[str, Any]) -> list[str]:
+    """Put a repair in the shared memory only once the real render's check no longer finds that word swallowed."""
+    from .pronunciation_memory import memory_path, record_job_outcomes, remember
+
+    still = {re.sub(r"[^a-z]", "", w.casefold()) for unit in after_check.get("units") or [] for d in unit["dropped"] for w in d["words"]}
+    saved: list[str] = []
+    for fix in fixes:
+        bare = re.sub(r"[^A-Za-z]", "", fix["word"])
+        if fix.get("fixed") and bare.casefold() not in still:
+            remember(memory_path(work_dir), bare, fix["respelling"], source="repair", voice=fix.get("voice"), job_id=job_id,
+                     note=f"swallowed in unit {fix.get('unit')}; verified by the post-render check")
+            saved.append(bare)
+    record_job_outcomes(work_dir / "jobs" / job_id, after_check)
+    return saved
+
+
 def repair_run(settings: Any, *, job_id: str, run_id: str, clip_id: str | None = None, hook: bool = True,
                progress: Callable[[str], None] = print) -> dict[str, Any]:
     import os
@@ -127,6 +143,8 @@ def repair_run(settings: Any, *, job_id: str, run_id: str, clip_id: str | None =
             result = find_respelling(item, texts[unit["unit"]], ssml, transcribe,
                                      lambda text, path: synthesize_ssml(text, key, region, path), work / unit["unit"])
             result["unit"] = unit["unit"]
+            named = re.search(r'<voice[^>]*\bname="([^"]+)"', ssml)
+            result["voice"] = named.group(1) if named else None
             report["fixes"].append(result)
             progress(f"[repair] {unit['unit']} {result['word']!r}: " + (f"fixed with {result['respelling']!r}" if result["fixed"]
                                                                        else f"not fixed ({result.get('why')})"))
@@ -144,6 +162,7 @@ def repair_run(settings: Any, *, job_id: str, run_id: str, clip_id: str | None =
         after = check_run(run_dir, backend, normalize)
         report["dropped_after"] = after["dropped_total"]
         report["remaining"] = after["units"]
+        report["remembered"] = remember_verified_fixes(Path(settings.work_dir), job_id, report["fixes"], after)
     (run_dir / "repair.json").write_text(json.dumps(report, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
     return report
 

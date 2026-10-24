@@ -199,6 +199,9 @@ def run_production(
                 from .dub_intelligibility import check_run
 
                 report["intelligibility"] = check_run(run_dir, create_speech_backend(settings), normalize_stt)
+                from .pronunciation_memory import record_job_outcomes
+
+                report["intelligibility"]["memory_switched_off"] = record_job_outcomes(job_root, report["intelligibility"])
             except Exception as exc:
                 report["intelligibility_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
 

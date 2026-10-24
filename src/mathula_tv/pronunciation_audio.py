@@ -120,7 +120,16 @@ def audio_names(job_root: Path, *, voice: str = "zu-ZA-ThembaNeural", gop: Any =
         plans.append({"name": name, "result": reading, "changed": changed, "decisions": decisions})
         kinds[name] = _KINDS.get(str(correction.get("entity_type") or ""), "personal_name")
         progress(f"[names] {name} -> {reading!r}" + ("" if changed else "  (unchanged)"))
-    return write_lexicon(job_root / "native_dub" / NAMES_FILE, plans, voice=voice, kinds=kinds)
+    path = write_lexicon(job_root / "native_dub" / NAMES_FILE, plans, voice=voice, kinds=kinds)
+    try:        # what earlier jobs learned about this voice (verified repairs, readings a person approved)
+        from .pronunciation_memory import apply_for_job
+
+        remembered = apply_for_job(job_root)
+        if remembered:
+            progress(f"[names] from the shared memory: {', '.join(remembered)}")
+    except Exception as exc:
+        progress(f"[names] shared memory not applied: {type(exc).__name__}: {str(exc)[:120]}")
+    return path
 
 
 def main(argv: list[str] | None = None) -> int:
