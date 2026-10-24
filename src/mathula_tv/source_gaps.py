@@ -66,9 +66,13 @@ def insertion(segment_text: str, after_word: str, inserted: str) -> dict[str, st
     last = matches[-1]
     token = last.group(0)
     kept = token.rstrip(".,!?—–-")
-    tail = token[len(kept):]
-    ending = "." if tail.strip() in ("", "—", "–", "-") and token.endswith(("—", "–", "-")) else tail
-    return {"token": token, "replacement": f"{kept} {inserted.strip()}{ending}"}
+    inserted = inserted.strip()
+    cut_off = token.endswith(("—", "–", "-"))
+    closes_sentence = token.endswith((".", "!", "?")) and not cut_off
+    if cut_off or (closes_sentence and inserted[:1].islower()):
+        # the transcript broke the sentence off (or ended it too early): the missing words continue it
+        return {"token": token, "replacement": f"{kept} {inserted}" + ("" if inserted.endswith((".", "!", "?")) else ".")}
+    return {"token": token, "replacement": f"{token} {inserted}"}            # the missing words are a sentence of their own
 
 
 def find_missing_speech(

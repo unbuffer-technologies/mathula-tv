@@ -33,8 +33,12 @@ def test_only_pauses_of_a_second_or_more_are_gaps():
 
 
 def test_the_missing_words_are_inserted_after_the_word_the_speaker_was_in_the_middle_of():
-    change = insertion("But Leopard Creek will pay. Rupert is—", "is", "going to pay for water and electricity")
-    assert change == {"token": "is—", "replacement": "is going to pay for water and electricity."}
+    change = insertion("But Leopard Creek will pay. Rupert is—", "is", "going to pay for water and electricity.")
+    assert change == {"token": "is—", "replacement": "is going to pay for water and electricity."}       # no double full stop
+    assert insertion("A cleaner is a worker.", "worker", "to be guaranteed that if you become sick")["replacement"] == \
+        "worker to be guaranteed that if you become sick."                                              # a lowercase continuation
+    assert insertion("We need education.", "education", "Science and technology.")["replacement"] == \
+        "education. Science and technology."                                                           # a sentence of its own
     assert insertion("nothing here", "is", "x") is None
 
 
