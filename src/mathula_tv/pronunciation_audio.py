@@ -23,7 +23,6 @@ _HEARD_VOWELS = {
     "e": "e", "ɛ": "e", "eː": "e", "i": "i", "iː": "ii", "o": "o", "ɔ": "o", "oː": "o", "ɔː": "o", "u": "u", "ʊ": "u", "uː": "uu",
     "eɪ": "ey", "aɪ": "ay", "ɔɪ": "oy", "əʊ": "o", "oʊ": "o", "aʊ": "aw",
 }
-_VELAR_FRICATIVES = {"x", "χ", "ɣ"}
 _WEAK_VOWELS = {"ə", "ɐ", "ɪ", "ɜ", "ɜː", "ɨ"}
 _KINDS = {"person": "personal_name", "organisation": "organisation_name", "place": "place_name"}
 
@@ -38,7 +37,6 @@ def respell(word: str, heard: Sequence[str]) -> str:
     nuclei = parts[1::2]
     vowels = [token for token in heard if is_vowel(token)]
     use_audio = len(vowels) == len(nuclei)
-    velar = bool(heard) and heard[0] in _VELAR_FRICATIVES        # Pedi/Afrikaans "G": Gauteng is said /xauteŋ/
     out: list[str] = []
     for index, part in enumerate(parts):
         if index % 2:
@@ -50,9 +48,6 @@ def respell(word: str, heard: Sequence[str]) -> str:
             out.append(spoken if spoken and single else ("i" if written == "y" else written))
             continue
         following = parts[index + 1] if index + 1 < len(parts) else ""
-        if index == 0 and velar and part.startswith("g"):
-            out.append("kh" + _consonants(part[1:], following))        # heard /x/: isiZulu has no letter for it, kh is the nearest
-            continue
         out.append(_consonants(part, following))
     spelled = "".join(out)
     return spelled[:1].upper() + spelled[1:] if word[:1].isupper() else spelled
