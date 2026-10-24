@@ -30,6 +30,7 @@ ZU_WEB_RESEARCHED_ORGANISATION_PRONUNCIATION_VERSION = "mathula-zu-web-researche
 ZU_PREFIXED_CARDINAL_VERSION = "mathula-zu-prefixed-cardinal-v2-currency-safe-v13.18.62"
 ZU_RAND_MILLION_CODE_SWITCH_VERSION = "mathula-zu-rand-million-code-switch-v1-v13.18.62"
 ZU_SPACE_GROUPED_THOUSAND_CODE_SWITCH_VERSION = "mathula-zu-space-grouped-thousand-code-switch-v1"
+ZU_GROUPED_AMOUNT_CODE_SWITCH_VERSION = "mathula-zu-grouped-amount-english-v1"
 ZU_ENGLISH_REFERENCE_NUMBER_CODE_SWITCH_VERSION = "mathula-zu-english-reference-number-code-switch-v1-v13.19.20"
 ZU_VOICE_SPECIFIC_PRONUNCIATION_VERSION = "mathula-zu-voice-specific-pronunciation-v1"
 ZU_ENGLISH_ORDINAL_CODE_SWITCH_VERSION = "mathula-zu-english-ordinal-code-switch-v1-2026-10-22"
@@ -812,6 +813,18 @@ _ZU_SPACE_GROUPED_THOUSAND = re.compile(
 )
 
 
+# Real bug, found by ear (job 13eacc6f9ae64759981ae8910fc28776, "the salary is not pronounced correctly"): a COMMA-grouped
+# amount such as "u-4,500" was split at the comma. The leading "4" was left as a bare digit and the trailing "500" matched
+# the 3+ bare digits reference-number rule below, so the voice said "four, fayiv zeeroh zeeroh". An amount is one quantity:
+# it is read as the English number, the way people code-switch money ("four thousand five hundred rand"). Covers a comma
+# group ("4,500", "R19,500", "4,000") and a space group when it carries the R ("R4 500"); a plain space group with 000 is
+# the rule above, and anything with a further group (millions) is left alone.
+_ZU_GROUPED_AMOUNT = re.compile(
+    r"(?<![\d,.])(?P<rand>R\s?)?(?P<lead>[1-9][0-9]{0,2})(?P<sep>,|[  ])(?P<tail>[0-9]{3})(?![0-9]|,[0-9]{3})",
+    re.UNICODE,
+)
+
+
 def _zulu_class10_two_digit_cardinal(number: int) -> str:
     if not 20 <= number <= 99:
         raise ValueError("Reviewed isiZulu monetary cardinal range is 20--99")
@@ -886,7 +899,47 @@ def _zulu_dynamic_currency_candidates(
                 ),
             )
         )
+    for match in _ZU_GROUPED_AMOUNT.finditer(text):
+        comma = match.group("sep") == ","
+        if not comma and not match.group("rand"):
+            continue                                            # a bare space-grouped number is not necessarily an amount
+        if not comma and match.group("tail") == "000":
+            continue                                            # "10 000": the space-grouped thousand rule above
+        before = match.group(0)
+        after = _grouped_amount_words(int(match.group("lead")), int(match.group("tail"))) + (" rand" if match.group("rand") else "")
+        candidates.append(
+            (
+                match.start(),
+                match.end(),
+                PronunciationEntry(
+                    display_text=before,
+                    spoken_text=before,
+                    tts_text=after,
+                    language=language,
+                    source="application_default",
+                    confidence=1.0,
+                    kind="currency",
+                    notes=(
+                        "Application-controlled English reading of a grouped amount",
+                        ZU_GROUPED_AMOUNT_CODE_SWITCH_VERSION,
+                        "Approved/display digits remain immutable",
+                    ),
+                ),
+            )
+        )
     return candidates
+
+
+def _grouped_amount_words(lead: int, tail: int) -> str:
+    """4,500 -> "four thousand fayiv hundred": the English number, spelt so the isiZulu voice says the English words."""
+    leading = _code_switch_number_word(lead) if lead <= 31 else _english_cardinal_word(lead)
+    words = [f"{leading} thousand"]
+    hundreds, rest = divmod(tail, 100)
+    if hundreds:
+        words.append(f"{_code_switch_number_word(hundreds)} hundred")
+    if rest:
+        words.append("and " + (_code_switch_number_word(rest) if rest <= 31 else _english_cardinal_word(rest)))
+    return " ".join(words)
 
 
 def _zulu_dynamic_number_candidates(
