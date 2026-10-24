@@ -51,7 +51,7 @@ def respell(word: str, heard: Sequence[str]) -> str:
             continue
         following = parts[index + 1] if index + 1 < len(parts) else ""
         if index == 0 and velar and part.startswith("g"):
-            out.append("kh" + _consonants(part[1:], following))        # heard /x/: isiZulu has no letter for it, kh is the nearest
+            out.append("kg" + _consonants(part[1:], following))        # heard /x/: Sepedi/Setswana spell it kg (Kgosi, Kgalagadi); never x, a click in isiZulu
             continue
         out.append(_consonants(part, following))
     spelled = "".join(out)
