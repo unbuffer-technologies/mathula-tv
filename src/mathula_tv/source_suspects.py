@@ -107,7 +107,8 @@ def apply_corrections(pass1: dict[str, Any], corrections: Sequence[Mapping[str, 
     """Replace each corrected word in its segment's English (in place). Returns what actually changed."""
     changed = []
     for correction in corrections:
-        pattern = re.compile(rf"\b{re.escape(correction['token'])}\b")
+        # not \b: a token such as "is—" ends in punctuation, where \b would never match
+        pattern = re.compile(r"(?<![A-Za-z'])" + re.escape(correction["token"]) + r"(?![A-Za-z'])")
         for segment in pass1.get("segments") or []:
             if str(segment.get("segment_id")) != str(correction["segment_id"]):
                 continue
@@ -137,8 +138,35 @@ def apply_to_frozen(pass1_path: Path, corrections_path: Path) -> list[dict[str, 
     return changed
 
 
-def run(job_root: Path, provider: Any, *, gop: Any = None, progress: Callable[[str], None] = print) -> Path | None:
-    """Examine a job's transcript and write ``native_dub/source_corrections.json``. Never raises for one bad word."""
+def missed_speech(job_root: Path, pass1: Mapping[str, Any], speech_backend: Any, progress: Callable[[str], None]) -> list[dict[str, Any]]:
+    """Speech in the source audio that the transcript has no words for, transcribed again and added to its segment."""
+    import subprocess
+    import tempfile
+
+    from .azure_stt import normalize
+    from .source_gaps import find_missing_speech
+
+    transcript_path = Path(job_root) / "analysis" / "azure_diarization.json"
+    audio = Path(job_root) / "audio" / "analysis_mono.wav"
+    if not transcript_path.is_file() or not audio.is_file():
+        return []
+    words = json.loads(transcript_path.read_text(encoding="utf-8")).get("words") or []
+    scratch = Path(tempfile.mkdtemp(prefix="gaps_"))
+
+    def transcribe(source: Path, start: float, end: float) -> list[dict[str, Any]]:
+        clip = scratch / f"w_{start:.1f}.wav"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(source),
+                        "-ac", "1", "-ar", "16000", str(clip)], check=True, capture_output=True)
+        return normalize(speech_backend.transcribe(clip, locale="en-US")).get("words") or []
+
+    return find_missing_speech(pass1.get("segments") or [], words, audio, transcribe, progress=progress)
+
+
+def run(job_root: Path, provider: Any, *, gop: Any = None, speech_backend: Any = None,
+        progress: Callable[[str], None] = print) -> Path | None:
+    """Examine a job's transcript and write ``native_dub/source_corrections.json``. Never raises for one bad word.
+
+    With ``speech_backend`` it also looks for speech the transcript missed (see ``source_gaps``)."""
     from .pronunciation_assess import LocalGop
     from .pronunciation_evidence import heard_word
 
@@ -173,6 +201,11 @@ def run(job_root: Path, provider: Any, *, gop: Any = None, progress: Callable[[s
     corrections = corrections_from(suspects, verdicts)
     for item in corrections:
         progress(f"[source] {item['token']!r} is probably a misheard word -> {item['replacement']!r}  ({item['reason'][:100]})")
+    if speech_backend is not None:        # speech the transcript never wrote down (see source_gaps)
+        try:
+            corrections += missed_speech(job_root, pass1, speech_backend, progress)
+        except Exception as exc:
+            progress(f"[source] the missing-speech check could not run ({type(exc).__name__}: {str(exc)[:120]})")
     path = native / FILE
     path.write_text(json.dumps({"schema": SCHEMA, "corrections": corrections, "examined": [
         {"token": s["token"], "segment_id": s["segment_id"], "audio_phones": s.get("audio_phones"),

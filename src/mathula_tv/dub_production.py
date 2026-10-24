@@ -118,7 +118,7 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
     try:        # words the English transcript got wrong, checked against the speaker's audio (see source_suspects)
         from .source_suspects import run as check_source
 
-        check_source(job_root, provider, progress=progress)
+        check_source(job_root, provider, speech_backend=stt, progress=progress)
     except Exception as exc:
         progress(f"[prepare] source check skipped: {type(exc).__name__}: {str(exc)[:200]}")
     return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices), "names_lexicon": str(names) if names else None,
