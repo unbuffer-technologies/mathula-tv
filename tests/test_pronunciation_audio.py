@@ -16,3 +16,9 @@ def test_consonants_follow_isizulu_spelling():
     assert respell("Moses", []) == "Moses"
     assert respell("Floyd", []) == "Floyd"                       # a multi-letter vowel spelling is never replaced
     assert respell("Matthew", []) == "Mathew"                    # doubled letters collapse
+
+
+def test_a_word_the_speaker_starts_with_a_velar_fricative_is_spelt_with_kh_not_g():
+    assert respell("Gauteng", ["x", "aʊ", "t", "t", "ɪ", "ŋ"]) == "Khautheng"       # Pedi: /xauteŋ/, never the click letter x
+    assert respell("Gauteng", ["g", "aʊ", "t", "ɛ", "ŋ"]) == "Gautheng"             # a hard g heard stays g
+    assert respell("Agnes", ["x", "a", "g", "n", "ɪ", "s"]) == "Agnes"              # only a word-initial g is changed
