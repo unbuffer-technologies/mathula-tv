@@ -321,7 +321,10 @@ def concatenate_takes(wavs: Sequence[Path], target: Path, gap_s: float = 1.0) ->
     data, params = b"", None
     for path in wavs:
         with wave.open(str(path), "rb") as reader:
-            params = params or (reader.getnchannels(), reader.getsampwidth(), reader.getframerate())
+            this = (reader.getnchannels(), reader.getsampwidth(), reader.getframerate())
+            params = params or this
+            if this != params:      # joining 16 kHz and 24 kHz audio under one header plays one of them at the wrong speed and pitch
+                raise ValueError(f"{path} is {this} but the first take is {params}; convert them to one format first")
             data += reader.readframes(reader.getnframes())
             data += b"\x00" * (params[1] * params[0] * int(params[2] * gap_s))
     assert params is not None, "no takes to join"

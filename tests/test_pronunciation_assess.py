@@ -194,3 +194,20 @@ def test_a_stray_length_mark_is_skipped_but_a_real_unknown_phone_still_fails():
     assert phone_tokens("zuːmːa", {"z": 1, "uː": 2, "m": 3, "a": 4}) == ["z", "uː", "m", "a"]      # the lone "ː" after m is dropped
     with pytest.raises(ValueError):
         phone_tokens("zxa", {"z": 1, "a": 4})
+
+
+def test_takes_of_different_sample_rates_are_refused_not_joined_at_the_wrong_speed(tmp_path):
+    import wave
+
+    from mathula_tv.pronunciation_assess import concatenate_takes
+
+    paths = []
+    for name, rate in (("a.wav", 16000), ("b.wav", 24000)):
+        with wave.open(str(tmp_path / name), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"\x01\x00" * rate)
+        paths.append(tmp_path / name)
+    with pytest.raises(ValueError):
+        concatenate_takes(paths, tmp_path / "all.wav")
