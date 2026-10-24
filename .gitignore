@@ -62,3 +62,8 @@ checkpoints/
 model-assets/
 model_assets/
 huggingface/
+
+# YouTube login cookies for yt-dlp: never commit
+cookie.txt
+cookies.txt
+*.cookies.txt
