@@ -64,8 +64,14 @@ def check_run(run_dir: Path, backend: Any, normalize: Any, *, locale: str = "zu-
         for item in dropped:
             item["at_video_s"] = round(offset + item["at_s"], 2)
         units.append({"unit": unit, "speaker": group.get("speaker_id"), "dropped": dropped})
+    try:        # quantities that went to the voice digit by digit (see number_check)
+        from .number_check import check_numbers
+
+        number_flags = check_numbers(run_dir)
+    except Exception as exc:
+        number_flags = [{"problem": f"number check failed: {type(exc).__name__}: {str(exc)[:100]}"}]
     report = {"units_checked": len(units), "dropped_total": sum(len(u["dropped"]) for u in units),
-              "units": [u for u in units if u["dropped"]]}
+              "units": [u for u in units if u["dropped"]], "number_flags": number_flags}
     (run_dir / "intelligibility.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     return report
 
@@ -81,7 +87,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-dir", required=True, help="a rendered run directory (holds scorecard.json and render/)")
     args = parser.parse_args(argv)
     report = check_run(Path(args.run_dir), create_speech_backend(load_settings()), normalize)
-    print(f"{report['units_checked']} units checked, {report['dropped_total']} dropped word(s)")
+    print(f"{report['units_checked']} units checked, {report['dropped_total']} dropped word(s), "
+          f"{len(report['number_flags'])} number problem(s)")
+    for flag in report["number_flags"]:
+        print(f"  number {flag.get('number')} in {flag.get('unit')} ({flag.get('speaker')}): {flag['problem']}")
     for unit in report["units"]:
         for item in unit["dropped"]:
             print(f"  {unit['unit']} ({unit['speaker']}) at {item['at_video_s']}s: {' '.join(item['words'])!r} "
