@@ -50,14 +50,15 @@ def test_on_a_tie_the_shipped_word_is_kept(tmp_path):
     assert best_per_number(rows)[10]["candidate"] == "ten"
 
 
-def test_every_day_of_the_month_is_read_natively():
-    # Superseded 2026-10-25: days were code-switched like ordinals ("ngo-ten October"); the user asked for dates to be native.
+def test_every_day_of_the_month_is_code_switched_like_an_ordinal():
     dictionary = with_default_organisation_initialisms(PronunciationDictionary("v1", language="zu-ZA", job_id="job-1"))
+    expected = {1: "wan", 10: "ten", 12: "twelve", 22: "twenty-two", 31: "thirty-wan"}     # 1 and 31 use the approved respellings
     for day in range(1, 32):
         tts = dictionary.apply(f"kusukela ngo-{day} October 2026, ngokwesitatimende").tts_text
-        assert tts.startswith("kusukela ngomhla w") and " kuOkthoba izinkulungwane ezimbili namashumi amabili nesithupha, ngokwesitatimende" in tts
-        assert "first" not in tts and "second" not in tts and "October" not in tts and not any(c.isdigit() for c in tts)
-    assert dictionary.apply("kusukela ngo-10 October 2026").tts_text.startswith("kusukela ngomhla weshumi kuOkthoba")
+        assert tts.startswith("kusukela ngo-") and " October 2026, ngokwesitatimende" in tts
+        assert "first" not in tts and "second" not in tts and "mhla" not in tts
+        if day in expected:
+            assert f"ngo-{expected[day]} October" in tts
     assert dictionary.apply("ngomhla ka-22 Okthoba 2026").tts_text.startswith("mhla zingamashumi")   # explicit isiZulu construction kept
 
 

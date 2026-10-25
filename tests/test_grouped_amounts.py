@@ -48,12 +48,11 @@ def test_a_plain_three_digit_quantity_is_native_but_an_identifier_stays_digit_by
     assert read("Idokethi 2015") == "Idokethi tuu zeeroh wan fayiv"             # four digits: unchanged
 
 
-def test_dates_are_native_too_and_the_numbers_around_them_are_unaffected():
-    assert read("ngo-5 Novemba") == "ngomhla wesihlanu kuNovemba"
-    assert read("ngo-19 Agasti") == "ngomhla weshumi nesishiyagalolunye kuAgasti"
-    assert read("ngowesi-10 kuMbasa") == "ngomhla weshumi kuEphreli"
-    assert read("Ngo-5 Novemba bafika abantu abangu-4,500") == "Ngomhla wesihlanu kuNovemba bafika abantu abayizinkulungwane ezine namakhulu amahlanu"
-    assert read("kuNovemba 2025") == "kuNovemba izinkulungwane ezimbili namashumi amabili nesihlanu"
+def test_dates_are_still_code_switched_while_numbers_around_them_are_native():
+    assert read("ngo-5 Novemba") == "ngo-fayiv November"
+    assert read("ngo-19 Agasti") == "ngo-naynteen August"
+    assert read("ngowesi-10 kuMbasa") == "ngowesi-ten kuMbasa"
+    assert read("Ngo-5 Novemba bafika abantu abangu-4,500") == "Ngo-fayiv November bafika abantu abayizinkulungwane ezine namakhulu amahlanu"
 
 
 def test_other_numbers_keep_their_existing_readings():

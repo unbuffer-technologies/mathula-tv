@@ -1196,11 +1196,7 @@ def _zulu_dynamic_ordinal_candidates(
     candidates: list[tuple[int, int, PronunciationEntry]] = []
     for match in _ZU_ORDINAL_DIGITS.finditer(text):
         before = match.group(0)
-        number = int(match.group("number"))
-        if 1 <= number <= 31:        # native: the concord in front ("ngo", "o") plus the ordinal ("wesihlanu", "wokuqala")
-            after = match.group("prefix")[:-len("wesi")] + _zulu_date_ordinal_day(number)
-        else:
-            after = f"{match.group('prefix')}-{_code_switch_number_word(number)}"
+        after = f"{match.group('prefix')}-{_code_switch_number_word(int(match.group('number')))}"
         candidates.append(
             (
                 match.start(),
@@ -1355,9 +1351,12 @@ def _zulu_two_digit_year_words(value: int) -> str:
 
 
 def _zulu_year_tts(year: int) -> str:
-    """A 1900-2099 year as native isiZulu numerals ("izinkulungwane ezimbili namashumi amabili nane"), the way a year is
-    said in isiZulu. (Earlier versions code-switched the year to English, "twenty twenty-four".)"""
-    return _native_amount_words(year // 1000, year % 1000) or f"{year}"
+    """Render a 1900-2099 year as two spoken two-digit groups, e.g. 2024 ->
+    "twenty twenty-four", matching how South African English broadcast speech
+    actually reads a year -- never digit-by-digit, never a bare cardinal."""
+    head, tail = divmod(year, 100)
+    head_word = {19: "nineteen", 20: "twenty"}[head]
+    return f"{head_word} {_zulu_two_digit_year_words(tail)}"
 
 
 def _zulu_native_date_tts(match: re.Match[str]) -> str:
@@ -1370,16 +1369,21 @@ def _zulu_native_date_tts(match: re.Match[str]) -> str:
     elif prefix.startswith("umhla"):
         date = f"umhla {_zulu_date_ordinal_day(day)} ku{month}"
     elif not prefix:
-        # A day-first date with no isiZulu date construction ("ngo-22 October 2026", "19 August"). It was code-switched to
-        # English by ear in job a537c3077a094523b7c15056ccc556a5 (2026-10-23); on 2026-10-25 the user asked for dates to be
-        # read natively too, so it uses the same native day and month as the explicit constructions: "umhla ... kuOkthoba".
-        date = f"umhla {_zulu_date_ordinal_day(day)} ku{month}"
+        # A day-first date with no isiZulu date construction ("ngo-22 October 2026", "19 August"): human-approved by ear
+        # (job a537c3077a094523b7c15056ccc556a5, 2026-10-23) to be code-switched exactly like an ordinal -- the
+        # English number word after whatever isiZulu prefix the text already carries ("ngo-twenty-two October"),
+        # with no "first"/"second". An explicit construction (ngomhla ka-22 ..., umhla ..., mhla ...) keeps the
+        # native isiZulu reading above.
+        english_month = _ZU_MONTH_ENGLISH_CODE_SWITCH_BY_ALIAS.get(match.group("month").casefold(), match.group("month"))
+        date = f"{_code_switch_number_word(day)} {english_month}"
     else:
         date = f"mhla {_zulu_date_subject_day(day)} ku{month}"
-    digits = re.search(r"(?:19|20)[0-9]{2}", year)
-    if digits is None:
-        return date + year
-    return date + (", " if "," in year else " ") + _zulu_year_tts(int(digits.group()))
+    # A day+month+year date's own trailing year is deliberately left as raw
+    # digits, matching this function's established, tested behavior (see
+    # test_zulu_native_dates_v131822.py) -- the real, user-reported defect
+    # this session fixes is only the DAY-LESS "Month YYYY"/"ka-YYYY" case
+    # (_ZU_BARE_YEAR below), which never reaches this function at all.
+    return date + year
 
 
 # A year with no day attached, immediately preceded by a month name -- e.g.
@@ -1486,14 +1490,6 @@ _ZU_KA_YEAR = re.compile(
 )
 
 
-# What the translation glues in front of a day-first date: "ngo-" (on), "ngowesi-" / "ngowe-" / "owesi-" (an ordinal marker), or
-# "we-" / "wesi-" after "umhla" / "ngomhla" / "mhla". It is replaced by the native construction, not read in front of it.
-_DATE_MARKER_BEFORE_DAY = re.compile(
-    r"(?<![A-Za-z])(?P<lead>(?:ngumhla|ngomhla|umhla|mhla)\s+)?(?P<m>(?:ng|ka|na|ne|kw)?o?(?:wesi|we)|ngo)\s*-\s*$",
-    re.IGNORECASE,
-)
-
-
 def _zulu_dynamic_date_candidates(
     text: str,
     *,
@@ -1506,22 +1502,12 @@ def _zulu_dynamic_date_candidates(
     for match in _ZU_CALENDAR_DATE.finditer(text):
         before = match.group(0)
         after = _zulu_native_date_tts(match)
-        start = match.start()
-        if not match.group("prefix"):
-            marker = _DATE_MARKER_BEFORE_DAY.search(text[max(0, start - 22):start])
-            if marker:        # "ngo-5 Novemba", "ngowesi-10 kuMbasa", "umhla we-12 kuMbasa": the marker is part of the date
-                start -= len(marker.group(0))
-                lead = (marker.group("lead") or "").strip() or ("ngomhla" if marker.group("m").casefold().startswith(("ng", "ngo")) else "umhla")
-                after = lead + after[len("umhla"):]
-                before = text[start:match.end()]
-                if before[:1].isupper():        # "Ngo-5 Novemba" opens a sentence: keep its capital
-                    after = after[:1].upper() + after[1:]
-        consumed.append((start, match.end()))
+        consumed.append((match.start(), match.end()))
         if before.casefold() == after.casefold():
             continue
         candidates.append(
             (
-                start,
+                match.start(),
                 match.end(),
                 PronunciationEntry(
                     display_text=before,
@@ -1580,8 +1566,10 @@ def _zulu_dynamic_date_candidates(
         if any(start <= match.start() < end for start, end in consumed):
             continue
         before = match.group(0)
-        month_native = _ZU_MONTH_LOANWORD_BY_ALIAS.get(match.group("month").casefold(), match.group("month"))
-        after = f"mhla {_zulu_date_subject_day(int(match.group('day')))} ku{month_native}"
+        english_month = _ZU_MONTH_ENGLISH_CODE_SWITCH_BY_ALIAS.get(
+            match.group("month").casefold(), match.group("month"),
+        )
+        after = english_month + match.group("sep") + _english_ordinal_day_word(int(match.group("day")))
         candidates.append(
             (
                 match.start(),

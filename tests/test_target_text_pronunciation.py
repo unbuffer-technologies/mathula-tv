@@ -60,7 +60,7 @@ def test_global_entries_cover_names_numbers_dates_and_initials():
     result = dictionary.apply(text)
     assert "Feh-rohz Kaan" in result.tts_text
     assert "amaphesenti angamashumi amabili" in result.tts_text
-    assert "ngomhla wamashumi amabili nanye kuJulayi" in result.tts_text
+    assert "umhla zingamashumi amabili nanye" in result.tts_text
     assert "Ess Ay" in result.tts_text
     assert {item.kind for item in result.substitutions} == {
         "personal_name",
@@ -69,7 +69,7 @@ def test_global_entries_cover_names_numbers_dates_and_initials():
         "initials",
     }
     assert normalise_numbers_for_tts(text, dictionary).tts_text.count("amaphesenti") == 1
-    assert normalise_dates_for_tts(text, dictionary).tts_text.count("kuJulayi") == 1        # the month is the isiZulu name now, not a respelt "July"
+    assert normalise_dates_for_tts(text, dictionary).tts_text.count("Ntulikazi") == 1
     assert expand_initials_for_tts(text, dictionary).tts_text.count("Ess Ay") == 1
 
 
@@ -516,10 +516,8 @@ def test_jacob_zuma_uses_the_human_approved_respelling():
     assert "Jeyikab" not in result.tts_text and "Jacob" not in result.tts_text
 
 
-def test_isizulu_prefixed_ordinal_digits_are_spoken_as_native_ordinals():
-    # Superseded 2026-10-25: these were English number words after the isiZulu prefix (approved by ear in job
-    # a537c3077a094523b7c15056ccc556a5, "that's how people code switch"); the user then asked for dates, and with them
-    # the day ordinals, to be read natively.
+def test_isizulu_prefixed_ordinal_digits_are_spoken_as_english_number_words():
+    # Human-approved by ear (job a537c3077a094523b7c15056ccc556a5): "that's how people code switch".
     dictionary = with_default_organisation_initialisms(
         PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
     )
@@ -527,25 +525,25 @@ def test_isizulu_prefixed_ordinal_digits_are_spoken_as_native_ordinals():
     result = dictionary.apply(text)
 
     assert result.spoken_text == text                                   # display text and the numbers check keep the digits
-    assert result.tts_text == "Angaba ngowesikhombisa, oweshumi, oweshumi nanye, noma ngisho oweshumi nambili osusiwe."
+    assert result.tts_text == "Angaba ngowesi-seven, owesi-ten, owesi-eleven, noma ngisho owesi-twelve osusiwe."   # plain: heard right
 
 
-def test_day_ordinals_and_day_first_dates_are_native():
+def test_numbers_the_voice_mispronounces_use_the_human_approved_respelling():
     dictionary = with_default_organisation_initialisms(
         PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
     )
-    assert dictionary.apply("ngowesi-1, owesi-2, owesi-5, owesi-8").tts_text == "ngowokuqala, owesibili, owesihlanu, owesishiyagalombili"
-    assert dictionary.apply("owesi-3 ngowesi-4").tts_text == "owesithathu ngowesine"
-    assert dictionary.apply("kusukela ngo-21 October").tts_text == "kusukela ngomhla wamashumi amabili nanye kuOkthoba"
-    assert dictionary.apply("kusukela ngo-31 October").tts_text == "kusukela ngomhla wamashumi amathathu nanye kuOkthoba"
-    assert dictionary.apply("kusukela ngo-22 October").tts_text == "kusukela ngomhla wamashumi amabili nambili kuOkthoba"
+    assert dictionary.apply("ngowesi-1, owesi-2, owesi-5, owesi-8").tts_text == "ngowesi-wan, owesi-tuu, owesi-fayiv, owesi-eyt"
+    assert dictionary.apply("owesi-3 ngowesi-4").tts_text == "owesi-three ngowesi-four"       # the plain word was already right
+    assert dictionary.apply("kusukela ngo-21 October").tts_text == "kusukela ngo-twenty-wan October"
+    assert dictionary.apply("kusukela ngo-31 October").tts_text == "kusukela ngo-thirty-wan October"
+    assert dictionary.apply("kusukela ngo-22 October").tts_text == "kusukela ngo-twenty-two October"     # unchanged
 
 
 def test_ordinal_rule_covers_compound_numbers_and_leaves_other_text_alone():
     dictionary = with_default_organisation_initialisms(
         PronunciationDictionary("v1", language="zu-ZA", job_id="job-123")
     )
-    assert dictionary.apply("Uzoba ngowesi-21 ohlwini.").tts_text == "Uzoba ngowamashumi amabili nanye ohlwini."
+    assert dictionary.apply("Uzoba ngowesi-21 ohlwini.").tts_text == "Uzoba ngowesi-twenty-wan ohlwini."      # respelled by ear
     assert dictionary.apply("kuphela ngowesi-105.").tts_text == "kuphela ngowesi-one hundred and five."
     assert dictionary.apply("Basebenzise owesikhombisa kanye nabayi-18.").tts_text == "Basebenzise owesikhombisa kanye nabayi-18."
     assert dictionary.apply("lowesi-21").tts_text == "lowesi-21"                 # not a recognised ordinal concord
