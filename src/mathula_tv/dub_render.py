@@ -189,10 +189,14 @@ def render_submission(
     """
     from .cli import create_tts_backend
     from .experience_store import ExperienceStore
+    from .housekeeping import ensure_free_space
     from .native_dub import render_native_dub
     from .orchestrator import Orchestrator
 
     store = ExperienceStore(settings.work_dir)
+    # a render writes gigabytes: with the disk low, other runs' scratch audio goes first, and if that is not enough this stops
+    # with a message about what is using the space, instead of a render that dies writing its video
+    ensure_free_space(store.root, keep_run_dir=store.repeat_dir(run_id, clip_id, repeat), progress=progress or print)
     root, info, voice_map = prepare_render_root(store, settings.work_dir, run_id=run_id, clip_id=clip_id, repeat=repeat)
     job = Orchestrator(settings).jobs.load(info["job_id"])               # read-only: used for the source video path
     editorial = None

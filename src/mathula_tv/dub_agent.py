@@ -553,7 +553,24 @@ def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) ->
     return note
 
 
-def run_agent(
+def run_agent(client: ChatClient, workbench: Workbench, **kwargs: Any) -> dict[str, Any]:
+    """Run the agent (see ``_run_agent``), then remove this run's scratch TTS audio. Records (submission, scorecard, trace) stay.
+
+    Only this run's folder is touched: autopilot batches run several repeats at once, so nothing here may clean another run's."""
+    from .housekeeping import clean_measure, keep_measure
+
+    try:
+        return _run_agent(client, workbench, **kwargs)
+    finally:
+        episode = getattr(workbench, "episode", None)
+        if not keep_measure() and episode and episode.get("dir"):
+            try:
+                clean_measure(workbench.store.root, Path(episode["dir"]))
+            except Exception:        # cleaning is housekeeping: it must never turn a finished run into a failure
+                pass
+
+
+def _run_agent(
     client: ChatClient, workbench: Workbench, *, clip_id: str, run_id: str, repeat: int = 1,
     max_turns: int = 40, max_total_tokens: int = 500_000, tts_budget: int = 300,
     system_prompt: str = SYSTEM_PROMPT, speed_policy: str = "natural",
