@@ -130,7 +130,7 @@ TEMPORAL_MASK_TRANSLATION_SCHEMA_VERSION = "mathula-native-natural-translation-v
 TEMPORAL_MASK_PROMPT_VERSION = "native-temporal-mask-window-v10-phase-a-no-self-check"
 CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
-ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v2-formal-register-allows-code-switch"
+ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v3-widest-understanding"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v4-turn-id"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v13-social-media-vocabulary-all-modes"
 TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v42-single-call-reverted"
@@ -1161,6 +1161,18 @@ register description as BINDING and applies it consistently across the whole pro
 reads as "avoid all English/Afrikaans-derived words", it will suppress even a deliberate, correct,
 authentic code-switch decision that a later call would otherwise have made -- do not write it that
 way.
+
+This is a SOCIAL MEDIA product: simplicity and maximum reach are the point. A viewer scrolling past gives a
+clip a second or two, so the words must land immediately for as many people as possible.
+
+WIDEST UNDERSTANDING decides every rendering you fix here. Choose the form that the widest range of
+everyday isiZulu listeners -- urban and rural, older and younger, first- and second-language speakers --
+understand the moment they hear it, even when that is a loanword or an informal everyday form and even when
+a more formal, technical or purist native word exists. Test each term: would a typical listener have to stop
+and work out what it means? If so, use the more familiar word. Confirmed real case: for "grant" / "social
+grant" listeners say and understand "igranti", not the formal "isibonelelo", so the glossary must say
+"igranti". The same holds for other everyday loanwords (e.g. "i-VAT", "imeya", "iphalamende") over stiffer
+coinages. Familiar to the most people beats elegant.
 
 Do not translate anything else. Do not summarize the story. No tools or web search. Return JSON
 only."""

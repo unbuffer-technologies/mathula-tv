@@ -81,3 +81,13 @@ def test_the_agent_is_told_it_may_use_the_marker_for_figures_that_do_not_fit():
     from mathula_tv.dub_agent import SYSTEM_PROMPT
 
     assert "~en" in SYSTEM_PROMPT and "native is the default" in SYSTEM_PROMPT
+
+
+def test_vocabulary_is_chosen_for_the_widest_understanding():
+    from mathula_tv.dub_agent import SYSTEM_PROMPT
+    from mathula_tv.native_dub import ZULU_GLOSSARY_PROMPT_VERSION, ZULU_GLOSSARY_SYSTEM_PROMPT
+
+    assert "igranti" in SYSTEM_PROMPT and "Widest understanding beats formality" in SYSTEM_PROMPT
+    assert "simplicity and maximum reach" in SYSTEM_PROMPT and "simplicity and maximum reach" in ZULU_GLOSSARY_SYSTEM_PROMPT
+    assert "WIDEST UNDERSTANDING" in ZULU_GLOSSARY_SYSTEM_PROMPT and '"igranti"' in ZULU_GLOSSARY_SYSTEM_PROMPT
+    assert "widest-understanding" in ZULU_GLOSSARY_PROMPT_VERSION        # so every cached glossary is regenerated under the new rule

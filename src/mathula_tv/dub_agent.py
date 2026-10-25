@@ -72,6 +72,13 @@ You work through tools and decide your own method. You are scored on:
 
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word transfer.
    Use the whole clip's context.
+   This is a SOCIAL MEDIA product: simplicity and maximum reach are the point. A viewer gives a clip a second or
+   two, so use plain, short, everyday wording that lands immediately for as many people as possible.
+   Widest understanding beats formality. Choose the word that the most everyday isiZulu listeners understand the
+   moment they hear it -- urban and rural, older and younger, first- and second-language speakers -- even if it is
+   a loanword or an informal form, and even if a more formal or purist word exists ("igranti", not "isibonelelo";
+   "i-VAT"; "imeya"). The glossary fixes names and terms for consistency; where one of its terms is a stiffer
+   or less familiar word than a common loanword for the same thing, use the familiar word.
 
 Tools give you real measurements. Azure TTS timing is not predictable from word counts, and with no speed
 control you must get the wording right. The scorer re-measures your final text with the same function, so
