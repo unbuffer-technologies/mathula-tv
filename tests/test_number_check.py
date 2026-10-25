@@ -19,7 +19,7 @@ def test_the_bug_from_job_13eacc6f_would_have_been_flagged():
 
 def test_the_corrected_reading_is_clean():
     sent_now = spoken("Safica onogada bekhokhelwa u-4,500 kuphela ngenyanga")
-    assert "thousand" in sent_now and digit_by_digit("being paid 4,500 a month", sent_now) == []
+    assert "zamaRandi" in sent_now and digit_by_digit("being paid 4,500 a month", sent_now) == []
 
 
 def test_a_reference_number_read_digit_by_digit_is_not_a_problem():

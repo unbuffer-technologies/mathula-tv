@@ -31,6 +31,7 @@ ZU_PREFIXED_CARDINAL_VERSION = "mathula-zu-prefixed-cardinal-v2-currency-safe-v1
 ZU_RAND_MILLION_CODE_SWITCH_VERSION = "mathula-zu-rand-million-code-switch-v1-v13.18.62"
 ZU_SPACE_GROUPED_THOUSAND_CODE_SWITCH_VERSION = "mathula-zu-space-grouped-thousand-code-switch-v1"
 ZU_GROUPED_AMOUNT_CODE_SWITCH_VERSION = "mathula-zu-grouped-amount-english-v1"
+ZU_NATIVE_AMOUNT_VERSION = "mathula-zu-native-rand-amount-v1"
 ZU_ENGLISH_REFERENCE_NUMBER_CODE_SWITCH_VERSION = "mathula-zu-english-reference-number-code-switch-v1-v13.19.20"
 ZU_VOICE_SPECIFIC_PRONUNCIATION_VERSION = "mathula-zu-voice-specific-pronunciation-v1"
 ZU_ENGLISH_ORDINAL_CODE_SWITCH_VERSION = "mathula-zu-english-ordinal-code-switch-v1-2026-10-22"
@@ -905,11 +906,22 @@ def _zulu_dynamic_currency_candidates(
             continue                                            # a bare space-grouped number is not necessarily an amount
         if not comma and match.group("tail") == "000":
             continue                                            # "10 000": the space-grouped thousand rule above
-        before = match.group(0)
-        after = _grouped_amount_words(int(match.group("lead")), int(match.group("tail"))) + (" rand" if match.group("rand") else "")
+        lead, tail = int(match.group("lead")), int(match.group("tail"))
+        start, native = match.start(), None
+        if match.group("rand") or _money_context(text, match.start()):
+            native = _native_amount_words(lead, tail)
+        if native:
+            # native isiZulu: the copula in front of the figure ("u-4,500") is part of the figure's reading and is dropped
+            start = _copula_start(text, start)
+            before, after = text[start:match.end()], native + " zamaRandi"
+            notes = ("Application-controlled native isiZulu reading of a rand amount", ZU_NATIVE_AMOUNT_VERSION)
+        else:
+            before = match.group(0)
+            after = _grouped_amount_words(lead, tail) + (" rand" if match.group("rand") else "")
+            notes = ("Application-controlled English reading of a grouped amount", ZU_GROUPED_AMOUNT_CODE_SWITCH_VERSION)
         candidates.append(
             (
-                match.start(),
+                start,
                 match.end(),
                 PronunciationEntry(
                     display_text=before,
@@ -919,15 +931,69 @@ def _zulu_dynamic_currency_candidates(
                     source="application_default",
                     confidence=1.0,
                     kind="currency",
-                    notes=(
-                        "Application-controlled English reading of a grouped amount",
-                        ZU_GROUPED_AMOUNT_CODE_SWITCH_VERSION,
-                        "Approved/display digits remain immutable",
-                    ),
+                    notes=(*notes, "Approved/display digits remain immutable"),
                 ),
             )
         )
     return candidates
+
+
+# Native isiZulu numerals for a rand amount of 1,000 to 99,999. The numeral after "izinkulungwane" (thousands, class 10) takes
+# the class 10 concord (ezi-); after "amakhulu" (hundreds, class 6) the class 6 concord (ama-/ayi-). The tens and hundreds
+# reuse the reviewed 20--99 tables above. A reading, not a rule of the voice: the person who speaks isiZulu judges it by ear.
+_ZU_CLASS10_UNITS = {
+    2: "ezimbili", 3: "ezintathu", 4: "ezine", 5: "eziyisihlanu", 6: "eziyisithupha", 7: "eziyisikhombisa",
+    8: "eziyisishiyagalombili", 9: "eziyisishiyagalolunye",
+}
+_ZU_MONEY_WORDS = re.compile(
+    r"(khokh|hlawul|mholo|mali\b|marandi|rand|nikez|thola|phakela|inkokhelo|izindleko|ibhajethi|isabelomali|mkhokho|ntela|nyuswa)",
+    re.IGNORECASE,
+)
+_ZU_COPULA = re.compile(r"(?<![A-Za-z])(?:ngu|u)-$", re.IGNORECASE)
+
+
+def _money_context(text: str, position: int) -> bool:
+    """Do the words just before a figure talk about paying or money? (4,500 people is a count, not rand.)"""
+    return bool(_ZU_MONEY_WORDS.search(text[max(0, position - 45):position]))
+
+
+def _copula_start(text: str, position: int) -> int:
+    found = _ZU_COPULA.search(text[max(0, position - 5):position])
+    return position - len(found.group(0)) if found else position
+
+
+def _unit_and_tens_words(value: int, joiner: str) -> str:
+    """1--99 after a joined "na": nanye ... nesishiyagalolunye / neshumi ... / namashumi amabili nanye."""
+    tens, unit = divmod(value, 10)
+    if tens == 0:
+        return _ZU_DATE_COMPOUND_UNITS[unit]
+    if tens == 1:
+        return "neshumi" + (" " + _ZU_DATE_COMPOUND_UNITS[unit] if unit else "")
+    return f"namashumi {_ZU_CARDINAL_TENS[tens]}" + (" " + _ZU_DATE_COMPOUND_UNITS[unit] if unit else "")
+
+
+def _native_amount_words(lead: int, tail: int) -> str | None:
+    """4,500 -> "izinkulungwane ezine namakhulu amahlanu". None when this reading does not cover the amount."""
+    if not 1 <= lead <= 99:
+        return None
+    if lead == 1:
+        thousands = "inkulungwane"
+    elif lead < 10:
+        thousands = f"izinkulungwane {_ZU_CLASS10_UNITS[lead]}"
+    elif lead < 20:
+        thousands = "izinkulungwane eziyishumi" + (" " + _ZU_DATE_COMPOUND_UNITS[lead - 10] if lead > 10 else "")
+    else:
+        tens, unit = divmod(lead, 10)
+        thousands = f"izinkulungwane ezingamashumi {_ZU_CARDINAL_TENS[tens]}" + (" " + _ZU_DATE_COMPOUND_UNITS[unit] if unit else "")
+    words = [thousands]
+    hundreds, rest = divmod(tail, 100)
+    if hundreds == 1:
+        words.append("nekhulu")
+    elif hundreds:
+        words.append(f"namakhulu {_ZU_CARDINAL_TENS[hundreds]}")
+    if rest:
+        words.append(_unit_and_tens_words(rest, "na"))
+    return " ".join(words)
 
 
 def _grouped_amount_words(lead: int, tail: int) -> str:
