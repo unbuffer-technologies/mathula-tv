@@ -24,6 +24,15 @@ class StubWorkbench:
         self.budget = budget
         self.measured = 0
 
+    def list_foreign_words(self):
+        return {"words": []}
+
+    def try_pronunciation(self, word, spellings):
+        return {"word": word, "results": []}
+
+    def use_pronunciation(self, word, spelling):
+        return {"ok": True}
+
     def open_clip(self, clip_id, run_id, repeat=1, tts_budget=None, speed_policy="natural"):
         self.opened_repeat = repeat
         self.episode = {"clip_id": clip_id, "tts_used": 0, "submissions": 0}

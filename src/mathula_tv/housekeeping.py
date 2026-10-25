@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 SCRATCH_NAME = "measure"
+SCRATCH_NAMES = (SCRATCH_NAME, "pronunciation_lab")        # the agent's TTS test audio, and the pronunciation lab's
 DEFAULT_MIN_FREE_GB = 4.0
 
 
@@ -29,7 +30,7 @@ def _is_run_scratch(path: Path, runs_root: Path) -> bool:
     except ValueError:
         return False
     parts = relative.parts
-    return len(parts) == 4 and parts[3] == SCRATCH_NAME and parts[2].startswith("r") and path.is_dir() and not path.is_symlink()
+    return len(parts) == 4 and parts[3] in SCRATCH_NAMES and parts[2].startswith("r") and path.is_dir() and not path.is_symlink()
 
 
 def _size(path: Path) -> int:
@@ -44,9 +45,9 @@ def clean_measure(experience_root: Path, run_dir: Path | None = None, *, except_
     """Remove scratch audio. With ``run_dir``: that run's. Without: every run's, except ``except_run_dir``. Returns bytes freed."""
     runs_root = Path(experience_root) / "runs"
     if run_dir is not None:
-        targets = [Path(run_dir) / SCRATCH_NAME]
+        targets = [Path(run_dir) / name for name in SCRATCH_NAMES]
     else:
-        targets = list(runs_root.glob(f"*/*/r*/{SCRATCH_NAME}"))
+        targets = [t for name in SCRATCH_NAMES for t in runs_root.glob(f"*/*/r*/{name}")]
     freed = 0
     keep = Path(except_run_dir).resolve() if except_run_dir is not None else None
     for target in targets:

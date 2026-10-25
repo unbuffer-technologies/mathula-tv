@@ -70,6 +70,12 @@ You work through tools and decide your own method. You are scored on:
    ("four thousand fayiv hundred rand"). The ~en is never spoken, and the digits stay for the number checks.
    Use it only where the time requires it; native is the default.
 
+   English words you keep in the Zulu ("Fighters", "medical aid", names) are spoken by the Zulu voice with Zulu letter rules and can come
+   out unrecognisable ("MaFighter" was heard as "mafactor"). Never glue a Zulu prefix onto an English word the speaker says as it is. Once the dub
+   fits, call list_foreign_words; for the ones the speaker says in English, try_pronunciation shows the speaker's sounds and the sounds the voice
+   makes for your spelling, with the differences. Adjust the spelling from the differences, then use_pronunciation for the closest. Tries are
+   limited (5 per word, 15 per clip): spend them where the voice is clearly off, not on words that already sound right.
+
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word transfer.
    Use the whole clip's context.
    This is a SOCIAL MEDIA product: simplicity and maximum reach are the point. A viewer gives a clip a second or
@@ -181,6 +187,19 @@ TOOL_SPECS = [
            "partial": {"type": "boolean", "description": "true = update only the units you send."},
            "remove": {"type": "array", "items": {"type": "string"},
                       "description": "partial only: ids of current units to delete (e.g. units you re-split)."}}, ["items"]),
+    _tool("list_foreign_words", "After your dub fits: the English words your Zulu keeps that the speaker says in the source audio "
+          "(including ones you glued a Zulu prefix onto), so you know which to check with try_pronunciation.", {}, []),
+    _tool("try_pronunciation", "Hear what the Zulu voice does with up to 3 spellings of an English word. For each spelling it returns the sounds "
+          "the voice made, the speaker's own sounds for the word (decoded from the source audio), how close they are (0-1) and what differs "
+          "(\"speaker ɔɪ, voice o\", \"the voice leaves out d\"). Use the differences to choose your next spelling. A try is budgeted "
+          "(5 per word, 15 per clip).",
+          {"word": {"type": "string", "description": "the word as written in your Zulu, e.g. MaFighter or medical"},
+           "spellings": {"type": "array", "items": {"type": "string"}, "maxItems": 3,
+                         "description": "spellings to try, e.g. [\"Fighters\", \"Fayitas\"]; respell with Zulu letters to steer the sounds"}},
+          ["word", "spellings"]),
+    _tool("use_pronunciation", "Make a spelling you tried the way this word is spoken: for your own measurements from now on, in the render, "
+          "and remembered for later clips. Only a spelling you have tried can be used.",
+          {"word": {"type": "string"}, "spelling": {"type": "string"}}, ["word", "spelling"]),
     _tool("get_submission", "The units currently accepted (all, or only unit_ids), with their text and any flags from "
           "the last score. Use it to see your own current state, e.g. after your history was trimmed.",
           {"unit_ids": {"type": "array", "items": {"type": "string"}}}, []),
@@ -445,7 +464,7 @@ def build_dispatch(
             episode_clip, run_id, repeat=repeat, tts_budget=tts_budget, speed_policy=speed_policy,
         )
 
-    return {
+    tools: dict[str, Callable[..., Any]] = {
         "open_clip": open_clip,
         "recall_lessons": workbench.recall_lessons,
         "measure_tts": workbench.measure_tts,
@@ -455,6 +474,10 @@ def build_dispatch(
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
         "get_submission": workbench.get_submission,
     }
+    for name in ("list_foreign_words", "try_pronunciation", "use_pronunciation"):       # the pronunciation lab, where the workbench has one
+        if hasattr(workbench, name):
+            tools[name] = getattr(workbench, name)
+    return tools
 
 
 def execute_tool(dispatch: dict[str, Callable[..., Any]], name: str, raw_arguments: str) -> tuple[str, bool]:

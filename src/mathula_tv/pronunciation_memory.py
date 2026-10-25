@@ -2,6 +2,8 @@
 
 What one job learns about how the voice says a word is kept here and applied to the next job:
 
+* a spelling the dubbing agent chose with the pronunciation lab (``source="agent"``, lowest priority: a person's reading and a verified
+  repair outrank it);
 * a swallowed word that a repair brought back (``source="repair"``), stored only after the real render's check confirmed it;
 * a name or word whose reading a person approved (``source="person"``), stored with the CLI.
 
@@ -23,7 +25,7 @@ from typing import Any, Mapping, Sequence
 SCHEMA = "mathula-pronunciation-memory-v1"
 MEMORY_SOURCE = "memory"
 MAX_FAILURES = 2
-_PRIORITY = {"person": 2, "repair": 1}
+_PRIORITY = {"person": 2, "repair": 1, "agent": 0}
 
 
 def memory_path(work_dir: Path) -> Path:

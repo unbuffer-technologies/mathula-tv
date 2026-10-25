@@ -11,6 +11,7 @@ chooses, then submits units.
 """
 from __future__ import annotations
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -123,6 +124,8 @@ class Workbench:
         self.segments: list[dict[str, Any]] = []
         self.source_corrections: list[dict[str, Any]] = []
         self.glossary_changes: list[dict[str, str]] = []
+        self._pronunciation_lab: Any = None
+        self.pronunciation_choices: list[dict[str, Any]] = []   # spellings the agent chose with the lab, for the report
         # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
         # keep fitting. A submission that breaks one is rejected, so fixing one unit can never silently
         # break another, and the clip's flow only ever improves.
@@ -253,6 +256,80 @@ class Workbench:
                                  "why": c.get("reason", "")} for c in self.source_corrections],
             }
         return opened
+
+    # -- pronunciation lab (see pronunciation_lab) ----------------------------------
+    def _lab(self) -> Any:
+        """The clip's pronunciation lab: the speaker's sounds for a word, and the Zulu voice's sounds for a spelling."""
+        if self._pronunciation_lab is None:
+            from .pronunciation_lab import PronunciationLab
+
+            episode = self._episode()
+            entry = self.store.load_corpus()["clips"][episode["clip_id"]]
+            voice = next((v.get("selected_voice") for v in self.voices.values() if v.get("selected_voice")), "zu-ZA-ThembaNeural")
+            self._pronunciation_lab = PronunciationLab(
+                Path(self.store.root).parent / "jobs" / str(entry["job_id"]), voice=voice, key=os.environ["AZURE_SPEECH_KEY"],
+                region=os.environ["AZURE_SPEECH_REGION"].strip().lower(), work_dir=Path(episode["dir"]) / "pronunciation_lab")
+        return self._pronunciation_lab
+
+    def _known_readings(self) -> set[str]:
+        """Texts that already have a reading (the clip's lexicon and the shared memory): the lab does not need to look at them."""
+        from .pronunciation_memory import entries_for, memory_path
+
+        known: set[str] = set()
+        lexicon = Path(self.store.clip_dir(self._episode()["clip_id"])) / "native_dub" / "pronunciation_names.json"
+        if lexicon.is_file():
+            known |= {str(e["display_text"]).casefold() for e in read_json(lexicon).get("entries", [])}
+        known |= {str(e["display_text"]).casefold() for e in entries_for(memory_path(Path(self.store.root).parent), self._lab().voice)}
+        return known
+
+    def list_foreign_words(self) -> dict[str, Any]:
+        """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
+        from .pronunciation_lab import MAX_TRIES_PER_CLIP, candidate_words
+        from .pronunciation_search import looks_isizulu
+
+        submission = Path(self._episode()["dir"]) / "submission.json"
+        if not submission.is_file():
+            raise ValueError("submit a dub first: there is no Zulu text to look through yet")
+        texts = [str(i.get("zulu_text") or "") for i in read_json(submission).get("items", [])]
+        found = candidate_words(texts, self._lab().transcript, looks_isizulu=looks_isizulu, exclude=self._known_readings())
+        return {"words": found, "note": "Check only the ones that matter. Never glue a Zulu prefix onto an English word the speaker says as it is.",
+                "tries_left_in_clip": MAX_TRIES_PER_CLIP - self._lab().total_tries}
+
+    def try_pronunciation(self, word: str, spellings: list[str]) -> dict[str, Any]:
+        """Hear what the Zulu voice does with up to three spellings of ``word`` and how they differ from the speaker's sounds."""
+        from .pronunciation_lab import PronunciationBudgetExhausted
+
+        try:
+            return self._lab().try_spellings(word, spellings)
+        except PronunciationBudgetExhausted as exc:
+            raise BudgetExhausted(str(exc)) from exc
+
+    def use_pronunciation(self, word: str, spelling: str) -> dict[str, Any]:
+        """Make ``spelling`` the way ``word`` is spoken: in your own measurements now, in the render, and in the shared memory for later clips."""
+        from . import dub_pronunciation
+        from .pronunciation_memory import memory_path, remember
+
+        lab, episode = self._lab(), self._episode()
+        tried = lab.tried.get(word, {}).get(spelling)
+        if tried is None:
+            raise ValueError(f"try {spelling!r} for {word!r} with try_pronunciation before using it")
+        clip_dir = Path(self.store.clip_dir(episode["clip_id"]))
+        lexicon_path = clip_dir / "native_dub" / "pronunciation_names.json"
+        lexicon = read_json(lexicon_path) if lexicon_path.is_file() else {"schema": "mathula-names-lexicon-v1", "voice": lab.voice, "entries": []}
+        lexicon["entries"] = [e for e in lexicon.get("entries", []) if str(e.get("display_text", "")).casefold() != word.casefold()]
+        lexicon["entries"].append({"display_text": word, "tts_text": spelling, "kind": "english_code_switch", "confidence": 0.7,
+                                   "source": "agent-pronunciation", "closeness": tried["closeness"]})
+        lexicon_path.parent.mkdir(parents=True, exist_ok=True)
+        lexicon_path.write_text(json.dumps(lexicon, ensure_ascii=False, indent=1), encoding="utf-8")
+        dub_pronunciation._REGISTERED.discard(str(clip_dir))                 # measure from now on with the new reading
+        self.pronunciation_root = dub_pronunciation.register_clip_pronunciation(self.store, episode["clip_id"])
+        entry = self.store.load_corpus()["clips"][episode["clip_id"]]
+        remember(memory_path(Path(self.store.root).parent), word, spelling, source="agent", voice=lab.voice, job_id=str(entry["job_id"]),
+                 kind="english_code_switch", note=f"chosen by the agent with the lab; closeness {tried['closeness']}; voice sounds {tried['voice_sounds']}")
+        choice = {"word": word, "spelling": spelling, "closeness": tried["closeness"], "speaker_sounds": " ".join(lab.source(word)["phones"]),
+                  "voice_sounds": tried["voice_sounds"]}
+        self.pronunciation_choices = [c for c in self.pronunciation_choices if c["word"] != word] + [choice]
+        return {"ok": True, **choice, "note": "your measurements now use this reading; re-measure any unit that contains the word"}
 
     def measure_tts(
         self, text: str, start_ms: int, end_ms: int, next_start_ms: int | None = None,

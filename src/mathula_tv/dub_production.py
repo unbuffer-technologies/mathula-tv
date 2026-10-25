@@ -200,9 +200,13 @@ def run_production(
         "headline": _headline(run_dir),
     }
 
+    report["pronunciation_choices"] = workbench.pronunciation_choices          # for a person's ear: what the agent chose with the lab
     if render and (run_dir / "submission.json").is_file():
         try:
             from .dub_render import render_submission
+            from .pronunciation_memory import apply_for_job
+
+            apply_for_job(job_root)        # the render reads the job's lexicon: give it what the shared memory holds, the agent's choices included
 
             report["render"] = render_submission(settings, run_id=run_id, clip_id=clip_id, repeat=1, hook=hook)
             if hook:
