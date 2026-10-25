@@ -27,7 +27,7 @@ def _dictionary(locale: str = "zu-ZA") -> PronunciationDictionary:
         ),
         (
             "Impendulo yayidingeka ngomhla ka-25 Okthoba 2025.",
-            "Impendulo yayidingeka mhla zingamashumi amabili nesihlanu kuOkthoba 2025.",
+            "Impendulo yayidingeka mhla zingamashumi amabili nesihlanu kuOkthoba izinkulungwane ezimbili namashumi amabili nesihlanu.",
         ),
         (
             "Isikhala esilandelayo ngumhla ka-19 August.",
@@ -41,7 +41,7 @@ def _dictionary(locale: str = "zu-ZA") -> PronunciationDictionary:
             # Superseded 2026-10-23 by the user's by-ear decision: a day-first date with no isiZulu date construction is
             # code-switched like an ordinal (English number word, English month), not read in isiZulu number words.
             "19 Agasti. Icala liyaqhubeka.",
-            "naynteen August. Icala liyaqhubeka.",
+            "umhla weshumi nesishiyagalolunye kuAgasti. Icala liyaqhubeka.",
         ),
         (
             "Mhla ziyi-1 kuNhlangulana.",
@@ -49,7 +49,7 @@ def _dictionary(locale: str = "zu-ZA") -> PronunciationDictionary:
         ),
         (
             "mhla zingama-31 Ncwaba 2026",
-            "mhla zingamashumi amathathu nanye kuAgasti 2026",
+            "mhla zingamashumi amathathu nanye kuAgasti izinkulungwane ezimbili namashumi amabili nesithupha",
         ),
     ),
 )
@@ -74,7 +74,7 @@ def test_target_text_audits_date_change_without_changing_caption() -> None:
     assert target.spoken_text == source
     assert target.subtitle_text == source
     assert target.tts_text == (
-        "Ubufakazi bumiselwe umhla weshumi nesishiyagalolunye kuAgasti 2026."
+        "Ubufakazi bumiselwe umhla weshumi nesishiyagalolunye kuAgasti izinkulungwane ezimbili namashumi amabili nesithupha."
     )
     assert target.changes[0].change_type == "date_normalisation"
     assert target.pronunciation_substitutions[0].source == "application_default"
@@ -113,7 +113,7 @@ def test_direct_dub_rebuilds_every_variant_from_native_date_policy() -> None:
     assert [variant.tts_text for variant in segments[0].variants] == [
         "Icala lihlehliselwe umhla weshumi nesishiyagalolunye kuAgasti.",
         "Lihlehliselwe mhla ziyishumi nesishiyagalolunye kuAgasti.",
-        "naynteen August.",
+        "umhla weshumi nesishiyagalolunye kuAgasti.",
     ]
     assert [variant.spoken_text for variant in segments[0].variants] == [
         "Icala lihlehliselwe umhla ka-19 Agasti.",
@@ -148,7 +148,7 @@ def test_date_normalizer_is_isolated_from_other_locales_and_month_mentions() -> 
         "Sahlangana ngo-Okthoba."
     )
     result = normalise_dates_for_tts("19 Agasti", _dictionary())
-    assert result.tts_text == "naynteen August"
+    assert result.tts_text == "umhla weshumi nesishiyagalolunye kuAgasti"
     assert ZU_NATIVE_DATE_PRONUNCIATION_VERSION.startswith(
         "mathula-zu-native-calendar-date"
     )
@@ -166,22 +166,22 @@ def test_date_normalizer_is_isolated_from_other_locales_and_month_mentions() -> 
     (
         (
             "kuningi okwakwenzeka ngoDisemba 2024, futhi okuningi",
-            "kuningi okwakwenzeka ngoDisemba twenty twenty-four, futhi okuningi",
+            "kuningi okwakwenzeka ngoDisemba izinkulungwane ezimbili namashumi amabili nane, futhi okuningi",
         ),
         (
             "kwakunguNovemba ka-2024, uDisemba ka-2024 noma uJanuwari ka-2025",
-            "kwakunguNovemba ka-twenty twenty-four, uDisemba ka-twenty twenty-four "
-            "noma uJanuwari ka-twenty twenty-faif",
+            "kwakunguNovemba ka-izinkulungwane ezimbili namashumi amabili nane, uDisemba ka-izinkulungwane ezimbili namashumi amabili nane "
+            "noma uJanuwari ka-izinkulungwane ezimbili namashumi amabili nesihlanu",
         ),
-        ("ngonyaka ka-1999", "ngonyaka ka-nineteen ninety-nine"),
-        ("ngonyaka ka-2000", "ngonyaka ka-twenty hundred"),
-        ("ngonyaka ka-2005", "ngonyaka ka-twenty oh faif"),
+        ("ngonyaka ka-1999", "ngonyaka ka-inkulungwane namakhulu ayisishiyagalolunye namashumi ayisishiyagalolunye nesishiyagalolunye"),
+        ("ngonyaka ka-2000", "ngonyaka ka-izinkulungwane ezimbili"),
+        ("ngonyaka ka-2005", "ngonyaka ka-izinkulungwane ezimbili nesihlanu"),
         (
             "ngasekupheleni kuka-2024, mhlawumbe ekuqaleni kuka-2025",
-            "ngasekupheleni kuka-twenty twenty-four, mhlawumbe ekuqaleni "
-            "kuka-twenty twenty-faif",
+            "ngasekupheleni kuka-izinkulungwane ezimbili namashumi amabili nane, mhlawumbe ekuqaleni "
+            "kuka-izinkulungwane ezimbili namashumi amabili nesihlanu",
         ),
-        ("ngonyaka ka-2001", "ngonyaka ka-twenty oh wani"),
+        ("ngonyaka ka-2001", "ngonyaka ka-izinkulungwane ezimbili nanye"),
     ),
 )
 def test_bare_year_with_no_day_gets_a_natural_english_year_reading(
@@ -224,7 +224,7 @@ def test_a_year_shaped_number_with_no_month_or_ka_context_keeps_its_reference_re
 @pytest.mark.parametrize(
     ("source", "expected"),
     (
-        ("ahead of Novemba 1", "ahead of November first"),
+        ("ahead of Novemba 1", "ahead of mhla lulunye kuNovemba"),
         # The real committed text: a Zulu class-11 relative concord ("lwa-")
         # glued directly onto the already-recognized "ngo-" month alias with
         # no space -- confirmed this only works because _ZU_MONTH_BARE_DAY
@@ -233,10 +233,10 @@ def test_a_year_shaped_number_with_no_month_or_ka_context_keeps_its_reference_re
         # part of the date) -- only the month/day lexical content switches.
         (
             "lohulumeni basekhaya lwangoNovemba 1.",
-            "lohulumeni basekhaya lwangoNovember first.",
+            "lohulumeni basekhaya lwamhla lulunye kuNovemba.",
         ),
-        ("kwenzeka ngoDisemba 21", "kwenzeka ngoDecember twenty-first"),
-        ("kwenzeka ngoDisemba 15", "kwenzeka ngoDecember fifteenth"),
+        ("kwenzeka ngoDisemba 21", "kwenzeka mhla zingamashumi amabili nanye kuDisemba"),
+        ("kwenzeka ngoDisemba 15", "kwenzeka mhla ziyishumi nesihlanu kuDisemba"),
     ),
 )
 def test_bare_day_of_month_with_no_ordinal_suffix_gets_a_natural_english_code_switch_reading(
@@ -251,7 +251,7 @@ def test_a_full_calendar_date_is_unaffected_by_the_bare_day_mechanism() -> None:
     # The day-before-month, day+month+year case (_ZU_CALENDAR_DATE) must not
     # also get a second, overlapping bare-day candidate.
     result = _dictionary().apply("Sihlehlisele umhla ka-3 Mashi 2026.")
-    assert result.tts_text == "Sihlehlisele umhla wesithathu kuMashi 2026."
+    assert result.tts_text == "Sihlehlisele umhla wesithathu kuMashi izinkulungwane ezimbili namashumi amabili nesithupha."
 
 
 def test_an_ordinal_suffixed_day_is_not_touched_by_the_bare_day_mechanism() -> None:
@@ -268,7 +268,7 @@ def test_a_full_day_month_year_date_still_leaves_its_own_year_digits_raw() -> No
     # existing established behavior asserted elsewhere in this file (e.g.
     # test_target_text_audits_date_change_without_changing_caption).
     result = _dictionary().apply("Sihlehlisele umhla ka-3 Mashi 2026.")
-    assert result.tts_text == "Sihlehlisele umhla wesithathu kuMashi 2026."
+    assert result.tts_text == "Sihlehlisele umhla wesithathu kuMashi izinkulungwane ezimbili namashumi amabili nesithupha."
 
 
 def test_a_five_digit_reference_number_is_unaffected_by_the_year_exclusion() -> None:
