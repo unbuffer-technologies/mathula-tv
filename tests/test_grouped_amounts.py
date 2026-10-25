@@ -58,3 +58,26 @@ def test_dates_are_still_code_switched_while_numbers_around_them_are_native():
 def test_other_numbers_keep_their_existing_readings():
     assert "thousand" not in read("u-4500") and "amaRandi" not in read("u-4500")      # an ungrouped number is not touched by this rule
     assert "thousand" not in read("1,234,567")                              # millions are left alone
+
+
+def test_the_agent_can_ask_for_the_shorter_english_reading_of_a_figure_with_the_marker():
+    assert read("bekhokhelwa u-4,500 kuphela") == "bekhokhelwa izinkulungwane ezine namakhulu amahlanu zamaRandi kuphela"        # default: native
+    assert read("bekhokhelwa u-4,500~en kuphela") == "bekhokhelwa u-four thousand fayiv hundred kuphela"                          # asked for
+    assert read("bekhokhelwa u-R19,500~en ngenyanga") == "bekhokhelwa u-naynteen thousand fayiv hundred rand ngenyanga"
+    assert read("abantu abangu-4,500~en bafika") == "abantu abangu-four thousand fayiv hundred bafika"
+    assert read("bafika abantu 500~en") == "bafika abantu fayiv hundred" and read("bafika abantu 150~en") == "bafika abantu wan hundred and fifty"
+    assert read("Idokethi 123~en") == "Idokethi wan tuu triiy"                                      # an identifier is never turned into a quantity
+
+
+def test_the_marker_is_never_spoken_and_never_breaks_the_digits_check():
+    from mathula_tv.native_dub import _missing_required_literals
+
+    assert "~en" not in read("u-11~en kuphela") and read("u-11~en kuphela") == "u-11 kuphela"       # a marker no rule used is dropped
+    assert "~en" not in read("bekhokhelwa u-4,500 ~en kuphela")
+    assert _missing_required_literals(source_text="paid 4,500 a month", candidate_text="bekhokhelwa u-4,500~en kuphela") == []
+
+
+def test_the_agent_is_told_it_may_use_the_marker_for_figures_that_do_not_fit():
+    from mathula_tv.dub_agent import SYSTEM_PROMPT
+
+    assert "~en" in SYSTEM_PROMPT and "native is the default" in SYSTEM_PROMPT

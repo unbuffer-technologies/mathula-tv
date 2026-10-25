@@ -883,6 +883,10 @@ def _zulu_dynamic_currency_candidates(
             continue                                            # a bare space-grouped number is not necessarily a quantity
         lead, tail = int(match.group("lead")), int(match.group("tail"))
         start, native = match.start(), _native_amount_words(lead, tail)
+        end = match.end()
+        if _marked_english(text, end):
+            native = None            # the agent asked for the shorter English reading of this figure
+            end += len(ZU_ENGLISH_MARKER)
         if native:
             prefix = _COUNT_PREFIX.search(text[max(0, start - 14):start])
             if prefix:            # "abangu-4,500" / "amaRandi ayi-10 000": the concord is part of the reading, no unit noun follows
@@ -893,16 +897,16 @@ def _zulu_dynamic_currency_candidates(
                 after = native + " zamaRandi"
             else:
                 after = native
-            before = text[start:match.end()]
+            before = text[start:end]
             notes = ("Application-controlled native isiZulu reading of a grouped number", ZU_NATIVE_AMOUNT_VERSION)
         else:
-            before = match.group(0)
+            before = text[match.start():end]
             after = _grouped_amount_words(lead, tail) + (" rand" if match.group("rand") else "")
             notes = ("Application-controlled English reading of a grouped amount", ZU_GROUPED_AMOUNT_CODE_SWITCH_VERSION)
         candidates.append(
             (
                 start,
-                match.end(),
+                end,
                 PronunciationEntry(
                     display_text=before,
                     spoken_text=before,
@@ -951,6 +955,22 @@ def _native_hundreds(value: int) -> str:
     hundreds, rest = divmod(value, 100)
     words = "ikhulu" if hundreds == 1 else f"amakhulu {_ZU_CARDINAL_TENS[hundreds]}"
     return words + (" " + _unit_and_tens_words(rest, "na") if rest else "")
+
+
+# The agent writes a figure with this marker right after it ("u-4,500~en") to have it read in English, which is shorter, when a
+# unit does not fit its window with the native isiZulu reading. The marker is never spoken.
+ZU_ENGLISH_MARKER = "~en"
+
+
+def _marked_english(text: str, position: int) -> bool:
+    return text[position:position + len(ZU_ENGLISH_MARKER)].casefold() == ZU_ENGLISH_MARKER
+
+
+def _english_hundreds(value: int) -> str:
+    """500 -> "fayiv hundred", 150 -> "wan hundred and fifty": the English reading of a three-digit quantity."""
+    hundreds, rest = divmod(value, 100)
+    words = f"{_code_switch_number_word(hundreds)} hundred"
+    return words + (" and " + (_code_switch_number_word(rest) if rest <= 31 else _english_cardinal_word(rest)) if rest else "")
 
 
 def _money_context(text: str, position: int) -> bool:
@@ -1100,12 +1120,17 @@ def _zulu_dynamic_reference_number_candidates(
     for match in _ZU_BARE_REFERENCE_NUMBER.finditer(text):
         before = match.group(0)
         after = " ".join(_ZU_ENGLISH_DIGIT_WORDS[digit] for digit in before)
+        end = match.end()
         if len(before) == 3 and before[0] != "0" and not _ZU_IDENTIFIER_CONTEXT.search(text[max(0, match.start() - 30):match.start()]):
-            after = _native_hundreds(int(before))               # a quantity ("abantu abangu-500"), not an identifier
+            if _marked_english(text, end):
+                after = _english_hundreds(int(before))           # asked for: the shorter English reading
+                before, end = text[match.start():end + len(ZU_ENGLISH_MARKER)], end + len(ZU_ENGLISH_MARKER)
+            else:
+                after = _native_hundreds(int(before))           # a quantity ("abantu abangu-500"), not an identifier
         candidates.append(
             (
                 match.start(),
-                match.end(),
+                end,
                 PronunciationEntry(
                     display_text=before,
                     spoken_text=before,
@@ -2025,7 +2050,8 @@ class PronunciationDictionary:
         output.append(text[cursor:])
         return PronunciationResult(
             spoken_text=text,
-            tts_text="".join(output),
+            # a marker no rule used (after a small number, say) is dropped here: it is never spoken
+            tts_text=re.sub(re.escape(ZU_ENGLISH_MARKER), "", "".join(output), flags=re.IGNORECASE),
             substitutions=tuple(substitutions),
             dictionary_version=self.dictionary_version,
             dictionary_sha256=self.sha256,

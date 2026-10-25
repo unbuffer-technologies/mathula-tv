@@ -63,6 +63,13 @@ You work through tools and decide your own method. You are scored on:
    them (each gap widened by at most 1.5 s; nothing if the units are back to back). That is a fallback,
    not a goal: a viewer hears padding as a pause, so prefer wording that fills the time.
 
+   Figures. Write numbers and amounts as digits ("u-4,500", "abantu abangu-500"). They are spoken in native
+   isiZulu (izinkulungwane ezine namakhulu amahlanu zamaRandi), which takes longer than English. Dates and
+   ordinals are spoken as code-switched English. When a unit does not fit its window, you may make a figure
+   shorter by writing ~en straight after it ("u-4,500~en", "abantu abangu-500~en"): it is then spoken in English
+   ("four thousand fayiv hundred rand"). The ~en is never spoken, and the digits stay for the number checks.
+   Use it only where the time requires it; native is the default.
+
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word transfer.
    Use the whole clip's context.
 
