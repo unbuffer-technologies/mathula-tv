@@ -185,7 +185,8 @@ class PronunciationLab:
 
         if self._windows is None:
             self._windows = ps.NameWindows(ps.bookmark_synthesizer(self.voice, self.key, self.region), lambda wav: (), self.work_dir / "voice")
-        audio = self._windows.audio(ps.Context(before="Kuthiwe ", after="ubekhona ngaleso sikhathi.", pitch="-6%"), ps.Candidate(spelling))
+        # the word alone, with nothing before or after it, so the neighbouring words' sounds do not leak into its window
+        audio = self._windows.audio(ps.Context(before="", after=".", pitch="-6%"), ps.Candidate(spelling))
         return list(self.gop.decode(audio))
 
     def try_spellings(self, word: str, spellings: Sequence[str]) -> dict[str, Any]:
