@@ -24,6 +24,34 @@ from typing import Any, Iterable
 
 from .atomic_io import atomic_write_json, read_json
 
+def glossary_sha(native_dir: Path) -> str | None:
+    """Checksum of a job's terminology glossary, so a clip frozen under an older glossary is refrozen when it changes."""
+    path = Path(native_dir) / "zulu_terminology_glossary.json"
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def glossary_terms(document: Any) -> dict[str, str]:
+    """{english: zulu} from a glossary file, whatever the wrapper (the first list of {english, zulu} items)."""
+    def find(node: Any) -> list[dict[str, Any]] | None:
+        if isinstance(node, list) and node and isinstance(node[0], dict) and "english" in node[0] and "zulu" in node[0]:
+            return node
+        if isinstance(node, dict):
+            for value in node.values():
+                found = find(value)
+                if found:
+                    return found
+        return None
+
+    return {str(t["english"]).casefold(): str(t["zulu"]) for t in (find(document) or [])}
+
+
+def glossary_changes(previous: Any, current: Any) -> list[dict[str, str]]:
+    """Terms whose isiZulu rendering changed between two glossaries: [{english, was, now}]."""
+    old, new = glossary_terms(previous), glossary_terms(current)
+    return [{"english": english, "was": old[english], "now": new[english]} for english in new
+            if english in old and old[english].casefold() != new[english].casefold()]
+
+
 def source_corrections_sha(native_dir: Path) -> str | None:
     """Checksum of a job's source corrections, so a clip frozen before they existed (or with others) can be refrozen."""
     path = Path(native_dir) / "source_corrections.json"
@@ -180,6 +208,7 @@ class ExperienceStore:
         segments = read_json(frozen / "pass1_restored_transcript.json").get("segments") or []
         entry = {
             "source_corrections_sha": source_corrections_sha(native),
+            "glossary_sha": glossary_sha(native),
             "job_id": job_root.name,
             "frozen_at": _now(),
             "duration_s": round(max((int(s.get("end_ms") or 0) for s in segments), default=0) / 1000.0, 1),

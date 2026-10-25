@@ -525,19 +525,32 @@ def pushback_message(result: dict[str, Any], unmet: list[str], *, tts_left: int)
 
 
 def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) -> str:
-    """In a repair run: the source corrections made since the earlier submission, and the units that carry those segments."""
+    """In a repair run: what changed since the earlier submission (source corrections, glossary terms) and the units it touches."""
+    note = ""
     corrections = getattr(workbench, "source_corrections", None) or []
-    if not corrections:
-        return ""
-    parts = []
-    for correction in corrections:
-        units = [str(item.get("item_id") or "?") for item in seed_items
-                 if correction["segment_id"] in [str(s) for s in item.get("source_segment_ids") or []]]
-        parts.append(f"segment {correction['segment_id']}: the transcript had {correction['token']!r} but the speaker said "
-                     f"{correction['replacement']!r}" + (f" (units: {', '.join(units)})" if units else ""))
-    return ("The English source was corrected after that submission, against the speaker's audio: " + "; ".join(parts) +
-            ". Re-translate the units that carry these segments so the Zulu says what the speaker meant, and treat them "
-            "as units that need change. ")
+    if corrections:
+        parts = []
+        for correction in corrections:
+            units = [str(item.get("item_id") or "?") for item in seed_items
+                     if correction["segment_id"] in [str(s) for s in item.get("source_segment_ids") or []]]
+            parts.append(f"segment {correction['segment_id']}: the transcript had {correction['token']!r} but the speaker said "
+                         f"{correction['replacement']!r}" + (f" (units: {', '.join(units)})" if units else ""))
+        note += ("The English source was corrected after that submission, against the speaker's audio: " + "; ".join(parts) +
+                 ". Re-translate the units that carry these segments so the Zulu says what the speaker meant, and treat them "
+                 "as units that need change. ")
+    changes = getattr(workbench, "glossary_changes", None) or []
+    if changes:
+        parts = []
+        for change in changes:
+            old_forms = [f.strip() for f in change["was"].split("/") if f.strip()]
+            units = [str(item.get("item_id") or "?") for item in seed_items
+                     if any(form.casefold() in str(item.get("zulu_text") or "").casefold() for form in old_forms)]
+            if units:
+                parts.append(f"{change['english']!r}: now {change['now']!r} (was {change['was']!r}) in units {', '.join(units)}")
+        if parts:
+            note += ("The glossary was revised for simpler wording with the widest reach. These units use a term it replaced; "
+                     "change that term in them and treat them as units that need change: " + "; ".join(parts) + ". ")
+    return note
 
 
 def run_agent(

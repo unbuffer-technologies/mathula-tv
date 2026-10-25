@@ -143,13 +143,23 @@ def primary_voice(voice_resolution: Path, default: str = "zu-ZA-ThembaNeural") -
 
 def ensure_frozen(store: Any, job_root: Path, clip_id: str) -> dict[str, Any]:
     """Freeze the job's Pass-1 inputs as a clip, once. A new clip has no baseline translation to compare with."""
-    from .experience_store import source_corrections_sha
+    from .experience_store import glossary_sha, source_corrections_sha
 
+    native = Path(job_root) / "native_dub"
+    frozen_native = store.clip_dir(clip_id) / "native_dub"
     existing = store.load_corpus()["clips"].get(clip_id)
-    if existing and existing.get("source_corrections_sha") == source_corrections_sha(Path(job_root) / "native_dub"):
+    frozen_glossary = glossary_sha(frozen_native)          # of the file itself, so clips frozen before checksums were stored still compare
+    if (existing and existing.get("source_corrections_sha") == source_corrections_sha(native)
+            and frozen_glossary == glossary_sha(native)):
         return {"clip_id": clip_id, **existing, "already_frozen": True}
-    # a new clip, or one frozen before its transcript corrections existed or changed: (re)freeze it
-    return store.freeze_clip(job_root, clip_id=clip_id, notes="production", require_baseline=False, overwrite=bool(existing))
+    # a new clip, or one frozen before its transcript corrections or glossary existed or changed: (re)freeze it. The glossary
+    # the clip was dubbed under is kept as previous_glossary.json so a repair run can find the units that use a term that changed.
+    old_glossary = frozen_native / "zulu_terminology_glossary.json"
+    previous = old_glossary.read_bytes() if existing and old_glossary.is_file() else None
+    frozen = store.freeze_clip(job_root, clip_id=clip_id, notes="production", require_baseline=False, overwrite=bool(existing))
+    if previous is not None and frozen_glossary != glossary_sha(native):
+        (frozen_native / "previous_glossary.json").write_bytes(previous)
+    return frozen
 
 
 def run_production(

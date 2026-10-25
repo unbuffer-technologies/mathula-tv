@@ -25,7 +25,7 @@ from .episode_scoring import (
 )
 from .dub_pronunciation import register_clip_pronunciation
 from .dub_voices import load_clip_voices, pick_voice_info
-from .experience_store import ExperienceStore
+from .experience_store import ExperienceStore, glossary_changes
 
 DEFAULT_TTS_BUDGET = 800
 MAX_MEASURE_BATCH = 40     # a whole clip's worth of units; the pool measures them six at a time
@@ -122,6 +122,7 @@ class Workbench:
         self.pronunciation_root: Path | None = None
         self.segments: list[dict[str, Any]] = []
         self.source_corrections: list[dict[str, Any]] = []
+        self.glossary_changes: list[dict[str, str]] = []
         # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
         # keep fitting. A submission that breaks one is rejected, so fixing one unit can never silently
         # break another, and the clip's flow only ever improves.
@@ -219,6 +220,9 @@ class Workbench:
         mine = set(self.scope["segment_ids"]) if self.scope else None
         corrections_path = native / "source_corrections.json"
         self.source_corrections = (read_json(corrections_path).get("corrections") or []) if corrections_path.is_file() else []
+        previous_path = native / "previous_glossary.json"
+        self.glossary_changes = (glossary_changes(read_json(previous_path), glossary_doc)
+                                 if previous_path.is_file() else [])
         opened = {
             "clip_id": clip_id,
             "segments": [

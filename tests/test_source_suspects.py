@@ -88,3 +88,41 @@ def test_a_clip_is_refrozen_when_its_source_corrections_change(tmp_path):
     frozen = json.loads((store.clip_dir("abc12345") / "native_dub" / "pass1_restored_transcript.json").read_text())
     assert "the municipality must know" in frozen["segments"][0]["restored_text"]
     assert "Masia" in json.loads((native / "pass1_restored_transcript.json").read_text())["segments"][0]["restored_text"]   # the job's own file is untouched
+
+
+def test_a_changed_glossary_term_is_found_in_the_units_that_use_the_old_word():
+    from mathula_tv.dub_agent import _source_correction_note
+    from mathula_tv.experience_store import glossary_changes
+
+    old = {"zulu_terminology_glossary": {"terms": [{"english": "social grant / grant", "zulu": "isibonelelo sikahulumeni / isibonelelo"},
+                                                   {"english": "municipality", "zulu": "umasipala"}]}}
+    new = {"zulu_terminology_glossary": {"terms": [{"english": "social grant / grant", "zulu": "igranti"},
+                                                   {"english": "municipality", "zulu": "umasipala"}]}}
+    changes = glossary_changes(old, new)
+    assert changes == [{"english": "social grant / grant", "was": "isibonelelo sikahulumeni / isibonelelo", "now": "igranti"}]
+    workbench = SimpleNamespace(source_corrections=[], glossary_changes=changes)
+    seed = [{"item_id": "u14", "zulu_text": "Cha, isibonelelo asihambi neze."}, {"item_id": "u15", "zulu_text": "Igranti yona ayiphumi."}]
+    note = _source_correction_note(workbench, seed)
+    assert "units u14" in note and "u15" not in note and "'igranti'" in note and "simpler wording" in note
+    assert _source_correction_note(SimpleNamespace(source_corrections=[], glossary_changes=[]), seed) == ""
+
+
+def test_a_clip_is_refrozen_when_its_glossary_changes_and_the_old_glossary_is_kept(tmp_path):
+    from mathula_tv.dub_production import ensure_frozen
+    from mathula_tv.experience_store import ExperienceStore
+
+    job = tmp_path / "jobs" / "abc12345"
+    native = job / "native_dub"
+    native.mkdir(parents=True)
+    segments = {"segments": [{"segment_id": "seg-1", "restored_text": "the grant", "source_text": "the grant", "start_ms": 0, "end_ms": 1000}]}
+    for name in ("pass1_restored_transcript.json", "context_ledger.json"):
+        (native / name).write_text(json.dumps(segments))
+    glossary = native / "zulu_terminology_glossary.json"
+    glossary.write_text(json.dumps({"zulu_terminology_glossary": {"terms": [{"english": "grant", "zulu": "isibonelelo"}]}}))
+    store = ExperienceStore(tmp_path / "experience")
+    assert not ensure_frozen(store, job, "abc12345").get("already_frozen") and ensure_frozen(store, job, "abc12345").get("already_frozen")
+    glossary.write_text(json.dumps({"zulu_terminology_glossary": {"terms": [{"english": "grant", "zulu": "igranti"}]}}))
+    assert not ensure_frozen(store, job, "abc12345").get("already_frozen")
+    kept = json.loads((store.clip_dir("abc12345") / "native_dub" / "previous_glossary.json").read_text())
+    assert kept["zulu_terminology_glossary"]["terms"][0]["zulu"] == "isibonelelo"
+    assert ensure_frozen(store, job, "abc12345").get("already_frozen")
