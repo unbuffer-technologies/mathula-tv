@@ -64,7 +64,9 @@ def test_rand_million_amount_is_not_overridden_by_english_code_switch() -> None:
     assert "triiy" not in result.tts_text
 
 
-def test_space_grouped_thousand_reads_as_english_magnitude_not_digit_spelled() -> None:
+def test_space_grouped_thousand_reads_as_a_magnitude_not_digit_spelled() -> None:
+    # Superseded 2026-10-25: the earlier direction was the English "10 thousand"; the user then asked for ordinary numbers and
+    # money to be read natively and only dates to stay code-switched, so this is now the native isiZulu numeral.
     # Real, confirmed defect, job b15075e7268049b491ee9e2222e5811f, user-
     # reported live: "bad pronunciation of 10000". The real SSML sent to
     # Azure read "amaRandi ayi-10 zeeroh zeeroh zeeroh ..." -- the space
@@ -76,7 +78,7 @@ def test_space_grouped_thousand_reads_as_english_magnitude_not_digit_spelled() -
     result = _zulu_dictionary().apply("Uphumile ngebheyili yamaRandi ayi-10 000 ngemibandela.")
 
     assert result.spoken_text == "Uphumile ngebheyili yamaRandi ayi-10 000 ngemibandela."
-    assert "10 thousand" in result.tts_text
+    assert "ayizinkulungwane eziyishumi" in result.tts_text
     assert "zeeroh" not in result.tts_text
 
 
@@ -90,7 +92,10 @@ def test_space_grouped_thousand_generalizes_to_other_round_amounts() -> None:
     for amount in ("5 000", "100 000", "999 000"):
         result = dictionary.apply(f"Kukhokhwe ayi-{amount} ngenyanga.")
         assert "zeeroh" not in result.tts_text
-        assert amount.split()[0] + " thousand" in result.tts_text
+        if amount == "5 000":
+            assert "ayizinkulungwane eziyisihlanu" in result.tts_text            # native isiZulu
+        else:
+            assert "thousand" in result.tts_text                                  # six figures keep the English magnitude
 
 
 def test_non_thousand_three_digit_group_is_still_digit_spelled() -> None:

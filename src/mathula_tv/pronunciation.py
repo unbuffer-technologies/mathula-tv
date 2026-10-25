@@ -877,44 +877,24 @@ def _zulu_dynamic_currency_candidates(
                 ),
             )
         )
-    for match in _ZU_SPACE_GROUPED_THOUSAND.finditer(text):
-        before = match.group(0)
-        after = f"{match.group('number')} thousand"
-        candidates.append(
-            (
-                match.start(),
-                match.end(),
-                PronunciationEntry(
-                    display_text=before,
-                    spoken_text=before,
-                    tts_text=after,
-                    language=language,
-                    source="application_default",
-                    confidence=1.0,
-                    kind="currency",
-                    notes=(
-                        "Application-controlled English thousand-magnitude code switch",
-                        ZU_SPACE_GROUPED_THOUSAND_CODE_SWITCH_VERSION,
-                        "Approved/display code switch remains immutable",
-                    ),
-                ),
-            )
-        )
     for match in _ZU_GROUPED_AMOUNT.finditer(text):
         comma = match.group("sep") == ","
-        if not comma and not match.group("rand"):
-            continue                                            # a bare space-grouped number is not necessarily an amount
-        if not comma and match.group("tail") == "000":
-            continue                                            # "10 000": the space-grouped thousand rule above
+        if not comma and not match.group("rand") and match.group("tail") != "000":
+            continue                                            # a bare space-grouped number is not necessarily a quantity
         lead, tail = int(match.group("lead")), int(match.group("tail"))
-        start, native = match.start(), None
-        if match.group("rand") or _money_context(text, match.start()):
-            native = _native_amount_words(lead, tail)
+        start, native = match.start(), _native_amount_words(lead, tail)
         if native:
-            # native isiZulu: the copula in front of the figure ("u-4,500") is part of the figure's reading and is dropped
-            start = _copula_start(text, start)
-            before, after = text[start:match.end()], native + " zamaRandi"
-            notes = ("Application-controlled native isiZulu reading of a rand amount", ZU_NATIVE_AMOUNT_VERSION)
+            prefix = _COUNT_PREFIX.search(text[max(0, start - 14):start])
+            if prefix:            # "abangu-4,500" / "amaRandi ayi-10 000": the concord is part of the reading, no unit noun follows
+                start -= len(prefix.group(0))
+                after = _with_count_prefix(prefix.group("concord"), native)
+            elif match.group("rand") or _money_context(text, match.start()):
+                start = _copula_start(text, start)              # "u-4,500": the copula is part of the figure's reading
+                after = native + " zamaRandi"
+            else:
+                after = native
+            before = text[start:match.end()]
+            notes = ("Application-controlled native isiZulu reading of a grouped number", ZU_NATIVE_AMOUNT_VERSION)
         else:
             before = match.group(0)
             after = _grouped_amount_words(lead, tail) + (" rand" if match.group("rand") else "")
@@ -950,6 +930,27 @@ _ZU_MONEY_WORDS = re.compile(
     re.IGNORECASE,
 )
 _ZU_COPULA = re.compile(r"(?<![A-Za-z])(?:ngu|u)-$", re.IGNORECASE)
+
+
+# A count written with a concord ("abangu-4,500", "ezingu-12 000", "amaRandi ayi-10 000") is read as the concord plus the numeral
+# noun with its own "yi": abayizinkulungwane ezine namakhulu amahlanu. The concord is the one the translation already chose.
+_COUNT_PREFIX = re.compile(r"(?<![A-Za-z])(?P<concord>abangu|ezingu|zingu|engu|ayi)-\s*$", re.IGNORECASE)
+_ZU_COUNT_CONCORD_BASE = {"abangu": "aba", "ezingu": "ezi", "zingu": "zi", "engu": "e", "ayi": "a"}
+
+
+def _with_count_prefix(concord: str, numeral_phrase: str) -> str:
+    noun, _, rest = numeral_phrase.partition(" ")
+    return _ZU_COUNT_CONCORD_BASE[concord.casefold()] + "yi" + noun[1:] + (" " + rest if rest else "")
+
+
+_ZU_IDENTIFIER_CONTEXT = re.compile(r"(inombolo|idokethi|docket|case|ID|ifoni|iselula|ireferensi|reference|invoyisi)\W*\w*\W*$", re.IGNORECASE)
+
+
+def _native_hundreds(value: int) -> str:
+    """100--999: 500 -> amakhulu amahlanu, 150 -> ikhulu namashumi amahlanu."""
+    hundreds, rest = divmod(value, 100)
+    words = "ikhulu" if hundreds == 1 else f"amakhulu {_ZU_CARDINAL_TENS[hundreds]}"
+    return words + (" " + _unit_and_tens_words(rest, "na") if rest else "")
 
 
 def _money_context(text: str, position: int) -> bool:
@@ -1099,6 +1100,8 @@ def _zulu_dynamic_reference_number_candidates(
     for match in _ZU_BARE_REFERENCE_NUMBER.finditer(text):
         before = match.group(0)
         after = " ".join(_ZU_ENGLISH_DIGIT_WORDS[digit] for digit in before)
+        if len(before) == 3 and before[0] != "0" and not _ZU_IDENTIFIER_CONTEXT.search(text[max(0, match.start() - 30):match.start()]):
+            after = _native_hundreds(int(before))               # a quantity ("abantu abangu-500"), not an identifier
         candidates.append(
             (
                 match.start(),

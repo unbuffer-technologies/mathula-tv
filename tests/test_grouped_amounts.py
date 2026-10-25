@@ -30,13 +30,31 @@ def test_native_numerals_follow_the_class_concords():
     assert _native_amount_words(150, 0) is None                       # six-figure amounts keep the English reading
 
 
-def test_a_grouped_number_that_is_not_money_keeps_the_english_reading():
-    assert read("ka-4,500") == "ka-four thousand fayiv hundred"                      # no sign of money around it
-    assert "zamaRandi" not in read("kwafika abantu abangu-4,500")                    # a head count is not rand
-    assert read("u-R150,000 ngenyanga") == "u-one hundred and fifty thousand rand ngenyanga"        # six figures: English, as before
+def test_a_grouped_number_that_is_not_money_is_native_too_and_a_count_keeps_its_concord():
+    assert read("ka-4,500") == "ka-izinkulungwane ezine namakhulu amahlanu"                       # no unit noun: the number alone
+    assert read("kwafika abantu abangu-4,500") == "kwafika abantu abayizinkulungwane ezine namakhulu amahlanu"
+    assert read("izinto ezingu-12 000") == "izinto eziyizinkulungwane eziyishumi nambili"
+    assert read("amaRandi ayi-10 000") == "amaRandi ayizinkulungwane eziyishumi"                  # was "10 thousand" (code-switched)
+    assert "zamaRandi" not in read("kwafika abantu abangu-4,500")                                 # a head count is not rand
+    assert read("u-R150,000 ngenyanga") == "u-one hundred and fifty thousand rand ngenyanga"      # six figures: English, as before
+
+
+def test_a_plain_three_digit_quantity_is_native_but_an_identifier_stays_digit_by_digit():
+    assert read("bafika abantu 500") == "bafika abantu amakhulu amahlanu"
+    assert read("bafika abantu 150") == "bafika abantu ikhulu namashumi amahlanu"
+    assert read("bafika abantu 101") == "bafika abantu ikhulu nanye"
+    assert read("Idokethi 123") == "Idokethi wan tuu triiy"                      # an identifier is read digit by digit, as before
+    assert read("inombolo 500") == "inombolo fayiv zeeroh zeeroh"
+    assert read("Idokethi 2015") == "Idokethi tuu zeeroh wan fayiv"             # four digits: unchanged
+
+
+def test_dates_are_still_code_switched_while_numbers_around_them_are_native():
+    assert read("ngo-5 Novemba") == "ngo-fayiv November"
+    assert read("ngo-19 Agasti") == "ngo-naynteen August"
+    assert read("ngowesi-10 kuMbasa") == "ngowesi-ten kuMbasa"
+    assert read("Ngo-5 Novemba bafika abantu abangu-4,500") == "Ngo-fayiv November bafika abantu abayizinkulungwane ezine namakhulu amahlanu"
 
 
 def test_other_numbers_keep_their_existing_readings():
-    assert read("amaRandi ayi-10 000") == "amaRandi ayi-10 thousand"        # the earlier space-grouped thousand rule
     assert "thousand" not in read("u-4500") and "amaRandi" not in read("u-4500")      # an ungrouped number is not touched by this rule
     assert "thousand" not in read("1,234,567")                              # millions are left alone
