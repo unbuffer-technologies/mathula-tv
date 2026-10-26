@@ -177,9 +177,10 @@ def prepare_render_root(
     atomic_write_json(native / "pass2_natural_translation.json", committed)
     from .delivery import load_sheet, write_unit_prosody
 
-    # each unit's voice takes a small pitch/volume lift or drop toward how its speaker delivered those lines (MATHULA_DELIVERY=0 turns it off)
+    # OFF by default (2026-10-27): a per-unit pitch/volume nudge made the voice wander between units (up to +-5 %) and a listener heard it as
+    # a change of speaker at a unit boundary; the delivery sheet still shapes the agent's wording. MATHULA_DELIVERY=1 turns the nudge on.
     write_unit_prosody(native, load_sheet(native / "delivery_sheet.json"), submission["items"],
-                       enabled=os.environ.get("MATHULA_DELIVERY", "1").strip().lower() not in {"0", "false", "no", "off"})
+                       enabled=os.environ.get("MATHULA_DELIVERY", "0").strip().lower() in {"1", "true", "yes", "on"})
     return root, {"job_id": job_id, "groups": len(committed["temporal_mask_groups"]), "sentences": len(records)}, voice_target
 
 
