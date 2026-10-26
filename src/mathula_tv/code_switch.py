@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -49,8 +50,8 @@ PROPOSE_PROMPT = (
     "people or thing he has already named is a possible subject here. Propose 2 to 4 GENUINELY DIFFERENT candidate readings (different words "
     "or a different meaning, not spelling variants of one). For each give the words tagged by language, the spelling that would make a "
     "isiZulu speaker say it the way he did (it will be spoken aloud and compared with the phones), the English meaning, and why it fits. "
-    "Names of people, places and organisations are names, not another language. Never invent: include a candidate only if the sounds could "
-    "plausibly carry it."
+    "Names of people, places and organisations are names, not another language. The English meaning must say only what the words of THIS stretch say: do not add what the next stretch says, "
+    "and do not fill in a subject or figure he did not say here. Never invent: include a candidate only if the sounds could plausibly carry it."
 )
 
 CHOOSE_PROMPT = (
@@ -156,14 +157,14 @@ def _same_meaning(a: str, b: str) -> bool:
     return set(_words(a)) == set(_words(b))
 
 
-def is_resolved(candidates: Sequence[Mapping[str, Any]], chosen: int, confidence: str) -> bool:
+def is_resolved(candidates: Sequence[Mapping[str, Any]], chosen: int, confidence: str, checked: bool = False) -> bool:
     """Resolved only if the model is sure AND the choice sounds best, clearly better than every rival that means something different."""
     if chosen < 0 or confidence != "high":
         return False
     pick = candidates[chosen]
     closeness = [c.get("closeness") for c in candidates]
     if any(value is None for value in closeness):
-        return True                              # no phone check was possible: the model's confidence is all there is
+        return not checked                       # a check was possible but did not run for every candidate: not resolved; no check at all: the model's word is all there is
     rivals = [c["closeness"] for c in candidates if c is not pick and not _same_meaning(c["english_meaning"], pick["english_meaning"])]
     return pick["closeness"] >= max(closeness) - 1e-9 and all(pick["closeness"] - r >= MIN_CLOSENESS_MARGIN for r in rivals)
 
@@ -186,13 +187,20 @@ def solve_stretch(
         schema=_propose_schema(), max_output_tokens=2500).data.get("candidates") or []
     candidates = []
     for candidate in proposed[:MAX_CANDIDATES]:
-        closeness = None
-        if speak is not None and source_phones:
-            try:
-                closeness = align(list(source_phones), speak(candidate["spelling_for_sounds"]))["closeness"]
-            except Exception:                      # a candidate the voice cannot speak is simply untested
-                closeness = None
-        candidates.append({**candidate, "closeness": closeness})
+        closeness, untested = None, ""
+        if speak is None:
+            untested = "no voice check available"
+        elif not source_phones:
+            untested = "the audio of this stretch gave no phones"
+        else:
+            for attempt in (1, 2):                 # one retry: a throttled or dropped call is the usual reason
+                try:
+                    closeness, untested = align(list(source_phones), speak(candidate["spelling_for_sounds"]))["closeness"], ""
+                    break
+                except Exception as exc:
+                    untested = f"{type(exc).__name__}: {str(exc)[:80]}"
+                    time.sleep(1.5)
+        candidates.append({**candidate, "closeness": closeness, **({"untested": untested} if untested else {})})
     if not candidates:
         return {"status": "uncertain", "candidates": [], "chosen": -1, "confidence": "low", "reason": "no candidate"}
     shown = [{"index": i, "english_meaning": c["english_meaning"], "words": " ".join(w["text"] for w in c["words"]), "fits_because": c["fits_because"],
@@ -201,7 +209,7 @@ def solve_stretch(
         operation="native_code_switch_choice", system_prompt=CHOOSE_PROMPT, payload={"stretch": evidence, "candidates": shown, **context},
         schema=_choose_schema(len(candidates)), max_output_tokens=800).data
     chosen, confidence = int(choice["chosen"]), str(choice["confidence"])
-    return {"status": "resolved" if is_resolved(candidates, chosen, confidence) else "uncertain", "candidates": candidates, "chosen": chosen,
+    return {"status": "resolved" if is_resolved(candidates, chosen, confidence, checked=speak is not None) else "uncertain", "candidates": candidates, "chosen": chosen,
             "confidence": confidence, "reason": str(choice.get("reason") or "")}
 
 
@@ -276,7 +284,8 @@ def build(
             "english_reading": stretch["english"], "isizulu_reading": stretch["isizulu"], "disagreement": stretch["disagreement"],
             "reconstruction": pick["words"] if pick else [], "english_meaning": pick["english_meaning"] if pick else "",
             "confidence": solved["confidence"], "status": solved["status"] if pick else "uncertain", "reason": solved["reason"],
-            "candidates": [{"english_meaning": c["english_meaning"], "words": " ".join(w["text"] for w in c["words"]), "closeness": c["closeness"]}
+            "candidates": [{"english_meaning": c["english_meaning"], "words": " ".join(w["text"] for w in c["words"]), "closeness": c["closeness"],
+                            **({"untested": c["untested"]} if c.get("untested") else {})}
                            for c in solved["candidates"]],
             "alternative": rivals[0]["english_meaning"] if rivals and not _same_meaning(rivals[0]["english_meaning"], pick["english_meaning"] if pick else "") else "",
             **({"missed_speech": {"after_word": gap.get("after_word"), "extends_to_ms": gap.get("extends_to_ms")}} if gap else {})})

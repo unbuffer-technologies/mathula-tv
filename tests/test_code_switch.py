@@ -57,7 +57,8 @@ def test_a_reading_is_resolved_only_when_it_is_sure_sounds_best_and_clearly_beat
     same = cands(("the children's grant", 0.80), ("Grant the children's", 0.75))
     assert cs.is_resolved(same, 0, "high")                                              # a rival that means the same does not count against it
     assert not cs.is_resolved(clear, -1, "high")
-    assert cs.is_resolved(cands(("x", None), ("y", None)), 0, "high")                   # no phone check possible: the model's word is all there is
+    assert cs.is_resolved(cands(("x", None), ("y", None)), 0, "high")                   # no phone check possible at all: the model's word is all there is
+    assert not cs.is_resolved(cands(("x", None), ("y", None)), 0, "high", checked=True) # a check was possible but did not run: not resolved
 
 
 def _fixture(tmp_path, with_gap=False):
@@ -162,3 +163,17 @@ def test_missed_speech_in_another_language_joins_the_dub_only_when_resolved(tmp_
     saved["corrections"] = []
     (native / "source_corrections.json").write_text(json.dumps(saved), encoding="utf-8")
     assert cs.add_missed_speech_to_corrections(tmp_path, lambda m: None) == []
+
+
+def test_candidates_the_voice_could_not_test_are_recorded_and_the_stretch_stays_uncertain(tmp_path, monkeypatch):
+    _fixture(tmp_path)
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+
+    def broken(text):
+        raise RuntimeError("throttled")
+
+    path = cs.build(tmp_path, Provider(), zulu_reading=lambda a, b: "lethu siyayibadala thru taxt" if a >= 7 else "what is our job",
+                    afrikaans_reading=lambda a, b: "", phones=lambda a, b: [("j", 0.0, 0.1), ("a", 0.1, 0.2)], speak=broken, platform="", progress=lambda m: None)
+    stretch = cs.load(path)["stretches"][0]
+    assert stretch["status"] == "uncertain"                                             # sure of itself, but never checked against the audio
+    assert all("throttled" in c["untested"] for c in stretch["candidates"])
