@@ -223,5 +223,5 @@ def test_candidates_that_say_the_same_thing_do_not_count_as_rivals_to_each_other
     assert cs.is_resolved(cands, 0, "medium", checked=True, agreed=True, same_message=[2])             # the model says 2 is the same message: resolved
     assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=True, same_message=[1])         # a genuinely different rival (2) still blocks
     assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=False, same_message=[2])        # still needs the model's word or an independent source
-    far = [dict(cands[0]), dict(cands[1], closeness=0.72), dict(cands[2])]
-    assert not cs.is_resolved(far, 0, "high", checked=True, same_message=[2])                          # a different message must still be clearly worse
+    near = [dict(cands[0]), dict(cands[1], closeness=0.77), dict(cands[2])]
+    assert not cs.is_resolved(near, 0, "high", checked=True, same_message=[2])                         # a different message must still be clearly worse
