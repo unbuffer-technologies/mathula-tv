@@ -140,7 +140,7 @@ def topic_memory(segments: Sequence[Mapping[str, Any]], before_s: float, probe: 
 
 def speakable(spelling: str) -> str:
     """The spelling as plain words for the voice: sentence punctuation next to the end-of-text bookmark makes the voice drop the bookmark."""
-    return re.sub(r"\s+", " ", re.sub(r"[?!.,;:â€¦â€”â€“]+", " ", str(spelling))).strip()
+    return re.sub(r"\s+", " ", re.sub(r"[?!.,;:…—–]+", " ", str(spelling))).strip()
 
 
 def _propose_schema() -> dict[str, Any]:
