@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -26,7 +27,7 @@ from .atomic_io import atomic_write_json, read_json
 
 COMMIT_SCHEMA = "mathula-agent-submission-commit-v1"
 _FROZEN_INPUTS = ("pass1_restored_transcript.json", "context_ledger.json", "zulu_terminology_glossary.json")
-_OPTIONAL_JOB_INPUTS = ("speaker_seriousness_modes.json", "pronunciation_research.json", "pronunciation_names.json")
+_OPTIONAL_JOB_INPUTS = ("speaker_seriousness_modes.json", "pronunciation_research.json", "pronunciation_names.json", "delivery_sheet.json")
 
 
 class RenderAdapterError(ValueError):
@@ -174,6 +175,11 @@ def prepare_render_root(
 
     committed = build_committed_translation(submission, records)
     atomic_write_json(native / "pass2_natural_translation.json", committed)
+    from .delivery import load_sheet, write_unit_prosody
+
+    # each unit's voice takes a small pitch/volume lift or drop toward how its speaker delivered those lines (MATHULA_DELIVERY=0 turns it off)
+    write_unit_prosody(native, load_sheet(native / "delivery_sheet.json"), submission["items"],
+                       enabled=os.environ.get("MATHULA_DELIVERY", "1").strip().lower() not in {"0", "false", "no", "off"})
     return root, {"job_id": job_id, "groups": len(committed["temporal_mask_groups"]), "sentences": len(records)}, voice_target
 
 

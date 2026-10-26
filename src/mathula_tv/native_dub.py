@@ -8949,8 +8949,11 @@ def _synthesize_group(
     prosody = voice_info.get("base_prosody") if isinstance(voice_info.get("base_prosody"), Mapping) else {}
     # Rate is always exactly zero for this experimental architecture. Stable
     # pitch/volume persona is retained because it does not time-compress speech.
-    pitch = bounded_prosody_int(prosody.get("pitch_percent"), default=0, lower=-10, upper=10)
-    volume = bounded_prosody_int(prosody.get("volume_percent"), default=0, lower=-3, upper=3)
+    from .delivery import read_unit_prosody
+
+    delivery_pitch, delivery_volume = read_unit_prosody(job_root, str(group["group_id"]))      # the speaker's own lift/drop for this unit
+    pitch = bounded_prosody_int(int(prosody.get("pitch_percent") or 0) + delivery_pitch, default=0, lower=-10, upper=10)
+    volume = bounded_prosody_int(int(prosody.get("volume_percent") or 0) + delivery_volume, default=0, lower=-3, upper=3)
     request = AzureTTSRequest(
         turn_id=str(group["group_id"]),
         speaker_id=str(group["speaker_id"]),

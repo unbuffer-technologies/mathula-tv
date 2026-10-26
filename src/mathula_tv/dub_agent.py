@@ -85,6 +85,11 @@ You work through tools and decide your own method. You are scored on:
    a loanword or an informal form, and even if a more formal or purist word exists ("igranti", not "isibonelelo";
    "i-VAT"; "imeya"). The glossary fixes names and terms for consistency; where one of its terms is a stiffer
    or less familiar word than a common loanword for the same thing, use the familiar word.
+   Delivery: the clip carries a `delivery` sheet measured from the audio. A speaker people know (a politician above all) should be
+   recognisable in the dub, so write the isiZulu with their shape: keep their pace (a quick run stays short and quick, a slow weighted
+   line stays weighted), keep the pauses they take for effect by ending the sentence there, keep the phrases they repeat repeated, and
+   let the words they lean on (stressed_words) land at the end of a phrase or right after a pause. This shapes wording only: never
+   lengthen a unit past its window for it, never invent a pause, and the meaning and plain wording above still come first.
 
 Tools give you real measurements. Azure TTS timing is not predictable from word counts, and with no speed
 control you must get the wording right. The scorer re-measures your final text with the same function, so

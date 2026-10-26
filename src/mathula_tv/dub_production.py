@@ -121,6 +121,12 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
         check_source(job_root, provider, speech_backend=stt, progress=progress)
     except Exception as exc:
         progress(f"[prepare] source check skipped: {type(exc).__name__}: {str(exc)[:200]}")
+    try:        # how each speaker delivers, measured from the audio (see delivery): the agent writes toward it, the renderer nudges the voice
+        from .delivery import ensure_sheet
+
+        ensure_sheet(job_root, progress=progress)
+    except Exception as exc:
+        progress(f"[prepare] delivery sheet skipped: {type(exc).__name__}: {str(exc)[:200]}")
     return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices), "names_lexicon": str(names) if names else None,
             "glossary": paths.zulu_glossary.is_file(), "pronunciation_research": paths.pronunciation_research.is_file()}
 

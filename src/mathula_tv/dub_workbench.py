@@ -247,6 +247,11 @@ class Workbench:
                 "context so your retelling fits the whole story. submit_dub covers just your segments; "
                 f"the next speech after your turn starts at {self.scope.get('next_start_ms')} ms."
             )
+        sheet = self._delivery_sheet(clip_id)
+        if sheet:
+            from .delivery import for_agent
+
+            opened["delivery"] = for_agent(sheet, sorted(mine) if mine is not None else None)
         if self.source_corrections:
             opened["source_corrections"] = {
                 "note": ("The English below was corrected against the speaker's audio: the transcript had misheard these "
@@ -256,6 +261,13 @@ class Workbench:
                                  "why": c.get("reason", "")} for c in self.source_corrections],
             }
         return opened
+
+    def _delivery_sheet(self, clip_id: str) -> dict[str, Any] | None:
+        """How the clip's speakers deliver (see delivery): read from the job, where prepare_agent_inputs writes it."""
+        from .delivery import SHEET_NAME, load_sheet
+
+        entry = self.store.load_corpus()["clips"][clip_id]
+        return load_sheet(Path(self.store.root).parent / "jobs" / str(entry["job_id"]) / "native_dub" / SHEET_NAME)
 
     # -- pronunciation lab (see pronunciation_lab) ----------------------------------
     def _lab(self) -> Any:
