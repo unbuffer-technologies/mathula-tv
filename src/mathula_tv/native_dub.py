@@ -532,6 +532,15 @@ PROTECTED_GAP_OVERFLOW_HARD_MAX_MS = 1000
 # audio: the old model estimated 26.0% for a turn whose real render measured 36.0%; this
 # constant closes that gap to 37.3%, within 1.3 points.
 AZURE_SENTENCE_BOUNDARY_PAUSE_MS = 1000
+# With an explicit sentence silence (tts_ssml.sentence_pause_ms) Azure leaves that value plus ~150 ms (measured 2026-10-26: 200 -> 340-370 ms, 400 -> 540-570 ms).
+_EXPLICIT_SENTENCE_PAUSE_OVERHEAD_MS = 150
+
+
+def _sentence_boundary_pause_ms() -> int:
+    from .tts_ssml import sentence_pause_ms
+
+    explicit = sentence_pause_ms()
+    return explicit + _EXPLICIT_SENTENCE_PAUSE_OVERHEAD_MS if explicit else AZURE_SENTENCE_BOUNDARY_PAUSE_MS
 
 # Compress-direction overrun never blocks the pipeline (max_natural_speed_percent is a
 # console warning only, never a hard ceiling -- unlimited rush is technically possible),
@@ -6874,14 +6883,18 @@ def render_native_dub(
         ),
     )
     _emit_progress(progress, f"[native dub] Dialogue mix complete in {mix_wall_seconds:.1f}s")
+    master_audio = _with_gap_ambience(
+        paths.dialogue_bus, source_video, scheduled, paths.root / "audio" / "master_bus.wav",
+        total_duration_ms=render_duration_ms, sample_rate=tts.sample_rate, progress=progress,
+    )
     _emit_progress(progress, "[native dub] Rendering dubbed master without changing video timing...")
     master_started = time.monotonic()
     if progress is None:
-        render_video(source_video, paths.dialogue_bus, paths.video)
+        render_video(source_video, master_audio, paths.video)
     else:
         _render_native_master_with_ffmpeg_progress(
             source_video=source_video,
-            dialogue_bus=paths.dialogue_bus,
+            dialogue_bus=master_audio,
             output_video=paths.video,
             progress=progress,
             lite=lite,
@@ -10367,6 +10380,40 @@ def _emit_native_timing_failure_diagnostic(
     )
 
 
+def _with_gap_ambience(
+    dialogue_bus: Path,
+    source_video: Path,
+    scheduled: Sequence[Mapping[str, Any]],
+    output: Path,
+    *,
+    total_duration_ms: int,
+    sample_rate: int,
+    progress: Callable[[str], None] | None,
+) -> Path:
+    """The audio the master is built from: the dub, plus the source's applause/crowd/room sound in the pauses between units.
+
+    Without it every pause is digital silence (a speaker stopping for applause left 4 s of nothing).  Never fatal: any failure
+    keeps the plain dialogue bus.  ``MATHULA_GAP_AMBIENCE=0`` turns it off.
+    """
+    from .mixing import ambience_gaps, mix_gap_ambience
+
+    if os.environ.get("MATHULA_GAP_AMBIENCE", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return dialogue_bus
+    windows = [
+        (int(item["source_start_ms"]), max(int(item["source_end_ms"]), int(item["scheduled_end_ms"]))) for item in scheduled
+    ]
+    gaps = ambience_gaps(windows)
+    if not gaps:
+        return dialogue_bus
+    try:
+        mix_gap_ambience(dialogue_bus, source_video, gaps, output, sample_rate=sample_rate, total_duration_ms=total_duration_ms)
+    except Exception as error:                                   # the ambience is an extra; the dub must still render
+        _emit_progress(progress, f"[native dub] source ambience skipped: {type(error).__name__}: {str(error)[:160]}")
+        return dialogue_bus
+    _emit_progress(progress, f"[native dub] Source sound kept in {len(gaps)} pauses between units ({sum(e - s for s, e in gaps) / 1000:.1f} s)")
+    return output
+
+
 def _schedule_source_timeline(
     measured: Sequence[Mapping[str, Any]],
     *,
@@ -13368,7 +13415,7 @@ def _measure_speaker_turn_total(
     member_ids = list(segment["member_group_ids"])
     wav_paths = [Path(str(member_winners[gid]["path"])) for gid in member_ids]
     gaps_ms = [
-        max(DEFAULT_MIN_PROTECTED_PAUSE_MS, AZURE_SENTENCE_BOUNDARY_PAUSE_MS)
+        max(DEFAULT_MIN_PROTECTED_PAUSE_MS, _sentence_boundary_pause_ms())
         for _ in range(len(member_ids) - 1)
     ]
     # Bounded regardless of turn size -- joining every member id (as the old,

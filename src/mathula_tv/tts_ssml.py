@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -10,7 +11,14 @@ from typing import Iterable, Literal, Sequence
 
 
 SSML_NAMESPACE = "http://www.w3.org/2001/10/synthesis"
+MSTTS_NAMESPACE = "http://www.w3.org/2001/mstts"
 XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+_SILENCE_TYPE = "Sentenceboundary-exact"
+_SILENCE_VALUE = re.compile(r"(\d{1,4})ms\Z")
+# Azure's neural voices leave ~950 ms after every full stop, far longer than a newsreader's ~400 ms; in a 42 s unit of
+# nine sentences that is 8 s of dead air.  The pause after a sentence is set explicitly instead (0 keeps Azure's own).
+DEFAULT_SENTENCE_PAUSE_MS = 400
+MAX_SENTENCE_PAUSE_MS = 1_000
 _PROVENANCE = object()
 _VOICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _LANGUAGE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){1,2}\Z")
@@ -106,6 +114,25 @@ def _tag(local_name: str) -> str:
 
 def _format_signed(value: int, suffix: str) -> str:
     return f"{value:+d}{suffix}"
+
+
+def sentence_pause_ms() -> int:
+    """The silence Azure leaves after each sentence (``MATHULA_SENTENCE_PAUSE_MS``; 0 keeps the voice's own ~950 ms)."""
+    try:
+        value = int(os.environ.get("MATHULA_SENTENCE_PAUSE_MS", DEFAULT_SENTENCE_PAUSE_MS))
+    except ValueError:
+        value = DEFAULT_SENTENCE_PAUSE_MS
+    return max(0, min(MAX_SENTENCE_PAUSE_MS, value))
+
+
+def _speak_and_voice_open(language: str, voice: str) -> str:
+    pause = sentence_pause_ms()
+    if not pause:
+        return f'<speak version="1.0" xmlns="{SSML_NAMESPACE}" xml:lang="{language}"><voice name="{voice}">'
+    return (
+        f'<speak version="1.0" xmlns="{SSML_NAMESPACE}" xmlns:mstts="{MSTTS_NAMESPACE}" xml:lang="{language}">'
+        f'<voice name="{voice}"><mstts:silence type="{_SILENCE_TYPE}" value="{pause}ms"/>'
+    )
 
 
 def _check_text(value: str, *, field_name: str) -> str:
@@ -253,8 +280,7 @@ class SafeSSMLBuilder:
 
         body = "".join(rendered)
         xml = (
-            f'<speak version="1.0" xmlns="{SSML_NAMESPACE}" xml:lang="{language}">'
-            f'<voice name="{voice}">'
+            f"{_speak_and_voice_open(language, voice)}"
             f'<prosody rate="{_format_signed(rate_percent, "%")}" '
             f'pitch="{_format_signed(pitch_percent, "%")}" '
             f'volume="{_format_signed(volume_percent, "%")}">{body}</prosody>'
@@ -411,8 +437,7 @@ def build_group_bookmark_ssml(
 
     body = "".join(rendered)
     xml = (
-        f'<speak version="1.0" xmlns="{SSML_NAMESPACE}" xml:lang="{language}">'
-        f'<voice name="{voice}">'
+        f"{_speak_and_voice_open(language, voice)}"
         f'<prosody rate="{_format_signed(rate_percent, "%")}" '
         f'pitch="{_format_signed(pitch_percent, "%")}" '
         f'volume="{_format_signed(volume_percent, "%")}">{body}</prosody>'
@@ -497,6 +522,8 @@ def validate_ssml(
             continue
         if prefix == "xml" and namespace == XML_NAMESPACE:
             continue
+        if prefix == "mstts" and namespace == MSTTS_NAMESPACE:
+            continue
         raise SSMLValidationError("SSML contains an unknown namespace declaration")
 
     allowed_voices = frozenset(allowed_voices)
@@ -513,8 +540,9 @@ def validate_ssml(
             "say-as",
             "bookmark",
         )
-    }
+    } | {f"{{{MSTTS_NAMESPACE}}}silence"}
     allowed_attributes = {
+        f"{{{MSTTS_NAMESPACE}}}silence": {"type", "value"},
         _tag("speak"): {"version", f"{{{XML_NAMESPACE}}}lang"},
         _tag("voice"): {"name"},
         _tag("prosody"): {"rate", "pitch", "volume"},
@@ -550,11 +578,21 @@ def validate_ssml(
         raise SSMLValidationError("SSML voice is not allowlisted")
     if voice.text and voice.text.strip():
         raise SSMLValidationError("Text outside the SSML prosody element is not allowed")
-    if len(voice) != 1 or voice[0].tag != _tag("prosody"):
+    silence_tag = f"{{{MSTTS_NAMESPACE}}}silence"
+    leading = [child for child in voice if child.tag == silence_tag]
+    if leading:
+        silence = leading[0]
+        pause = _SILENCE_VALUE.fullmatch(silence.attrib.get("value", ""))
+        if (len(leading) != 1 or voice[0] is not silence or len(silence) or (silence.text and silence.text.strip())
+                or (silence.tail and silence.tail.strip()) or silence.attrib.get("type") != _SILENCE_TYPE
+                or pause is None or int(pause.group(1)) > MAX_SENTENCE_PAUSE_MS):
+            raise SSMLValidationError("SSML sentence-boundary silence is invalid")
+    spoken = [child for child in voice if child.tag != silence_tag]
+    if len(spoken) != 1 or spoken[0].tag != _tag("prosody"):
         raise SSMLValidationError("SSML voice must contain exactly one prosody element")
     if voice.tail and voice.tail.strip():
         raise SSMLValidationError("Text outside the SSML voice element is not allowed")
-    prosody = voice[0]
+    prosody = spoken[0]
     if prosody.tail and prosody.tail.strip():
         raise SSMLValidationError("Text outside the SSML prosody element is not allowed")
     expected_prosody_attributes = {"rate", "pitch", "volume"}

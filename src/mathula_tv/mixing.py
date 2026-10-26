@@ -114,6 +114,75 @@ def render_dialogue_tracks(
 
 
 
+AMBIENCE_MIN_GAP_MS = 1500
+AMBIENCE_MARGIN_MS = 250
+AMBIENCE_FADE_MS = 200
+AMBIENCE_GAIN_DB = -4.0
+
+
+def ambience_gaps(
+    windows: list[tuple[int, int]], *, min_gap_ms: int = AMBIENCE_MIN_GAP_MS, margin_ms: int = AMBIENCE_MARGIN_MS,
+) -> list[tuple[int, int]]:
+    """The stretches between two spoken windows where the source's own sound (applause, crowd, room tone) may play.
+
+    ``windows`` are the (start, end) of every dubbed unit, widened to wherever its dub audio ends. Only gaps of at least
+    ``min_gap_ms`` between two units qualify, and each side keeps ``margin_ms`` clear so a speaker's last breath or the dub's
+    first syllable is never layered under the source.  The stretch before the first unit and after the last is left alone: the
+    transcript says nothing about what is spoken there.
+    """
+    ordered = sorted((int(start), int(end)) for start, end in windows)
+    gaps: list[tuple[int, int]] = []
+    reach = ordered[0][1] if ordered else 0
+    for start, end in ordered[1:]:
+        if start - reach >= min_gap_ms:
+            gaps.append((reach + margin_ms, start - margin_ms))
+        reach = max(reach, end)
+    return gaps
+
+
+def mix_gap_ambience(
+    dialogue_bus: Path,
+    source_video: Path,
+    gaps: list[tuple[int, int]],
+    output: Path,
+    *,
+    sample_rate: int,
+    total_duration_ms: int,
+    gain_db: float = AMBIENCE_GAIN_DB,
+    fade_ms: int = AMBIENCE_FADE_MS,
+    runner: Callable[..., Any] = subprocess.run,
+) -> dict[str, Any]:
+    """Lay the source video's own audio over the dialogue bus inside ``gaps`` only, with soft edges.
+
+    The dub is the only sound in a render otherwise, so every pause between units is digital silence — even where the
+    speaker stopped for applause.  Nothing is written over speech: the gaps lie between unit windows by construction.
+    """
+    if not gaps:
+        return {"gaps": 0}
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(dialogue_bus)]
+    filters: list[str] = []
+    for index, (start, end) in enumerate(gaps, start=1):
+        duration = (end - start) / 1000.0
+        fade = min(fade_ms / 1000.0, duration / 2)
+        command += ["-ss", f"{start / 1000.0:.3f}", "-t", f"{duration:.3f}", "-i", str(source_video)]
+        filters.append(
+            f"[{index}:a]aresample={sample_rate},aformat=channel_layouts=mono,asetpts=PTS-STARTPTS,"
+            f"afade=t=in:st=0:d={fade:.3f}:curve=qsin,afade=t=out:st={max(0.0, duration - fade):.3f}:d={fade:.3f}:curve=qsin,"
+            f"volume={gain_db}dB,adelay={start}:all=1[g{index}]"
+        )
+    inputs = "[0:a]" + "".join(f"[g{index}]" for index in range(1, len(gaps) + 1))
+    total_samples = round(total_duration_ms * sample_rate / 1000)
+    filters.append(
+        f"{inputs}amix=inputs={len(gaps) + 1}:duration=first:normalize=0:dropout_transition=0,"
+        f"alimiter=limit=0.92:attack=5:release=80,apad=whole_len={total_samples},atrim=end_sample={total_samples},asetpts=N/SR/TB[a]"
+    )
+    command += ["-filter_complex", ";".join(filters), "-map", "[a]", "-ar", str(sample_rate), "-ac", "1", "-c:a", "pcm_s16le", str(output)]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    runner(command, check=True)
+    quality = _validate_pcm(output, sample_rate, channels=1)
+    return {"gaps": len(gaps), "gap_ms": [list(gap) for gap in gaps], "gain_db": gain_db, **quality}
+
+
 def _speaker_track_command(
     clips: list[dict[str, Any]], output: Path, total_duration_ms: int, sample_rate: int
 ) -> list[str]:
