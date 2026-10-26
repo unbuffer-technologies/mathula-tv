@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import re
 import wave
 from dataclasses import dataclass, field
@@ -364,6 +365,12 @@ def bookmark_synthesizer(voice: str, key: str, region: str) -> SynthesizeMarked:
         marks: dict[str, float] = {}
         synth.bookmark_reached.connect(lambda event: marks.__setitem__(event.text, event.audio_offset / 10_000))
         result = synth.speak_ssml_async(ssml).get()
+        # the SDK reports bookmarks on its own thread: under load the last one can arrive just after the call returns, so wait for them all
+        expected = set(re.findall(r'<bookmark mark="([^"]+)"', marked))
+        for _ in range(40):
+            if expected <= set(marks):
+                break
+            time.sleep(0.05)
         if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted or not marks:
             raise RuntimeError(f"synthesis failed or returned no bookmarks: {result.reason}")
         wav.write_bytes(result.audio_data)

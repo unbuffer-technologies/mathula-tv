@@ -178,15 +178,15 @@ def test_candidates_the_voice_could_not_test_are_recorded_and_the_stretch_stays_
     assert stretch["status"] == "uncertain"                                             # sure of itself, but never checked against the audio
     assert all("throttled" in c["untested"] for c in stretch["candidates"])
 
-def test_youtube_captions_are_one_more_reading_and_can_make_a_stretch_hard_on_their_own(tmp_path):
+def test_youtube_captions_are_evidence_for_a_stretch_but_never_what_selects_one(tmp_path):
     _fixture(tmp_path)
     provider = Provider()
-    # Azure's isiZulu reading agrees with the English one for the second phrase, but YouTube's captions read it very differently
-    path = cs.build(tmp_path, provider, zulu_reading=lambda a, b: "Siyipatala through tax" if a >= 7 else "What is our job",
+    # the isiZulu recogniser disagrees with the English one only for the second phrase; YouTube's (Zulu-model) captions garble BOTH
+    path = cs.build(tmp_path, provider, zulu_reading=lambda a, b: "lethu siyayibadala thru taxt" if a >= 7 else "What is our job",
                     afrikaans_reading=lambda a, b: "", phones=lambda a, b: [("j", 0.0, 0.1)], speak=lambda t: ["j"], platform="",
-                    youtube_reading=lambda a, b: "imali yethu siyayibhadala through tax" if a >= 7 else "what is our job", progress=lambda m: None)
+                    youtube_reading=lambda a, b: "imali yethu siyayibhadala through tax" if a >= 7 else "wat is awa jobe", progress=lambda m: None)
     doc = cs.load(path)
-    assert [s["start_s"] for s in doc["stretches"]] == [7.0]
+    assert [s["start_s"] for s in doc["stretches"]] == [7.0]                              # the first phrase was not dragged in by YouTube's garbling
     assert doc["stretches"][0]["youtube_reading"] == "imali yethu siyayibhadala through tax"
     assert provider.calls[0]["payload"]["stretch"]["youtube_caption_reading"] == "imali yethu siyayibhadala through tax"
     assert "YouTube" in provider.calls[0]["system_prompt"]

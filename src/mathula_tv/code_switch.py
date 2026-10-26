@@ -76,7 +76,7 @@ def disagreement(first: str, second: str) -> float:
 
 def select_stretches(rows: Sequence[Mapping[str, Any]], *, floor: float = MIN_DISAGREEMENT, cap: int = MAX_STRETCHES) -> list[dict[str, Any]]:
     """The stretches the two recognisers read most differently (at least ``floor``), the worst first, at most ``cap``, in time order."""
-    scored = [(max(disagreement(r["english"], r["isizulu"]), disagreement(r["english"], r.get("youtube", ""))), r) for r in rows]
+    scored = [(disagreement(r["english"], r["isizulu"]), r) for r in rows]      # YouTube's captions are evidence, not a trigger: its isiZulu model garbles plain English
     worst = sorted((s for s in scored if s[0] >= floor), key=lambda s: -s[0])[:cap]
     return sorted((dict(r, disagreement=round(score, 2)) for score, r in worst), key=lambda r: r["start_s"])
 
