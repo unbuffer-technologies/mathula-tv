@@ -37,7 +37,7 @@ def find_gaps(words: Sequence[Mapping[str, Any]], min_gap: float = MIN_GAP_SECON
 
 CHUNK_SECONDS = 30.0
 CHUNK_OVERLAP_SECONDS = 4.0           # each chunk keeps its middle, so no word is judged at the edge where it may be cut in half
-COVERAGE_TOLERANCE_SECONDS = 0.3      # a second-pass word this close to a first-pass word is the same word
+COVERAGE_TOLERANCE_SECONDS = 0.2      # a second-pass word whose middle is this close to a first-pass word is the same word
 STRETCH_JOIN_SECONDS = 1.0            # second-pass words closer than this belong to one stretch of speech
 STRETCH_MIN_SECONDS = 0.6
 
@@ -86,9 +86,10 @@ def uncovered_stretches(
     import bisect
 
     def covered(word: Mapping[str, Any]) -> bool:
-        a, b = float(word["start"]) - tolerance, _end(word) + tolerance
-        index = bisect.bisect_right(starts, b)
-        return any(first_pass[i][1] >= a for i in range(max(0, index - 6), index))
+        """The word's midpoint lies inside a first-pass word (give or take ``tolerance``): the same word, heard twice."""
+        middle = (float(word["start"]) + _end(word)) / 2
+        index = bisect.bisect_right(starts, middle + tolerance)
+        return any(first_pass[i][1] + tolerance >= middle for i in range(max(0, index - 6), index))
 
     stretches: list[list[Mapping[str, Any]]] = []
     for word in heard:
