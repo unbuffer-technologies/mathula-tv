@@ -140,9 +140,10 @@ def test_recovered_speech_that_is_not_english_is_left_out_and_a_failed_check_kee
             assert kwargs["payload"]["items"][1]["heard"] == "Nalay Yaban Tuanasia in Yusa"
             return SimpleNamespace(data={"verdicts": [{"id": 0, "verdict": "english_speech"}, {"id": 1, "verdict": "not_english"}]})
 
-    messages = []
-    kept = vet_recovered(Provider(), recovered, SEGMENTS, messages.append)
+    messages, rejected = [], []
+    kept = vet_recovered(Provider(), recovered, SEGMENTS, messages.append, rejected)
     assert [k["heard"] for k in kept] == ["Science and technology."]
+    assert [r["heard"] for r in rejected] == ["Nalay Yaban Tuanasia in Yusa"]           # handed on to the code-switch step
     assert any("Nalay" in m for m in messages)
 
     class Broken:

@@ -122,7 +122,10 @@ def build(
     pass1_path, analysis = native / "pass1_restored_transcript.json", job_root / "analysis" / "azure_diarization.json"
     if not (pass1_path.is_file() and analysis.is_file()):
         return None
-    sha = hashlib.sha256(pass1_path.read_bytes()).hexdigest()
+    corrections_path = native / "source_corrections.json"
+    unresolved = (json.loads(corrections_path.read_text(encoding="utf-8")).get("unresolved") or []) if corrections_path.is_file() else []
+    # the cache key is the transcript plus the missed-speech stretches to reconstruct (the source check can find different ones next time)
+    sha = hashlib.sha256(pass1_path.read_bytes() + json.dumps([[i.get("gap_start_s"), i.get("gap_end_s")] for i in unresolved]).encode()).hexdigest()
     target = native / FILE
     if target.is_file():
         try:
@@ -142,6 +145,13 @@ def build(
             for index, (start, end) in enumerate(spans)]
     chosen = select_stretches(rows)
     progress(f"[code-switch] {len(chosen)} of {len(rows)} stretches are read very differently by the English and isiZulu recognisers")
+    # speech the transcript missed that the English check rejected (another language): reconstructed too, whatever the readings say
+    for item in unresolved:
+        start, end = float(item["gap_start_s"]), min(float(item["gap_end_s"]), float(item["gap_start_s"]) + MAX_STRETCH_SECONDS)
+        chosen.append({"id": len(rows) + len(chosen), "start_s": round(start, 1), "end_s": round(end, 1), "english": str(item.get("heard") or ""),
+                       "isizulu": zulu_reading(start, end), "disagreement": 1.0, "unresolved": item})
+    if unresolved:
+        progress(f"[code-switch] {len(unresolved)} stretch(es) of missed speech that were not English are reconstructed as well")
     for stretch in chosen:
         stretch["afrikaans"] = afrikaans_reading(stretch["start_s"], stretch["end_s"])
         stretch["phones"] = group_phones(phones(stretch["start_s"], stretch["end_s"]))
@@ -157,15 +167,54 @@ def build(
         result = results.get(stretch["id"])
         if not result:
             continue
+        gap = stretch.get("unresolved")
         found.append({
-            "segment_id": segment_for(segments, stretch["start_s"], stretch["end_s"]), "start_s": stretch["start_s"], "end_s": stretch["end_s"],
+            "segment_id": str(gap["segment_id"]) if gap else segment_for(segments, stretch["start_s"], stretch["end_s"]),
+            "start_s": stretch["start_s"], "end_s": stretch["end_s"],
             "english_reading": stretch["english"], "isizulu_reading": stretch["isizulu"], "disagreement": stretch["disagreement"],
             "reconstruction": result["reconstruction"], "english_meaning": result["english_meaning"], "confidence": result["confidence"],
-            "evidence": result["evidence"]})
+            "evidence": result["evidence"],
+            **({"missed_speech": {"after_word": gap.get("after_word"), "extends_to_ms": gap.get("extends_to_ms")}} if gap else {})})
         progress(f"[code-switch] {stretch['start_s']:.0f}s ({result['confidence']}): {result['english_meaning'][:90]}")
     target.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "pass1_sha256": sha, "stretches_examined": len(rows), "stretches": found},
                                  ensure_ascii=False, indent=1), encoding="utf-8")
     return target
+
+
+def add_missed_speech_to_corrections(job_root: Path, progress: Callable[[str], None] = print) -> list[dict[str, Any]]:
+    """Missed speech in another language that was reconstructed with HIGH confidence joins the source corrections, so the dub says it.
+
+    Its English meaning is written into the segment the speech continues and the segment's window grows to cover it (as for English
+    speech the first pass skipped).  Medium and low confidence stay evidence for the agent only: a wrong sentence put in a politician's
+    mouth is worse than a pause.  Safe to call again: a correction is added once."""
+    from .source_gaps import insertion
+
+    native = Path(job_root) / "native_dub"
+    doc, corrections_path = load(native / FILE), native / "source_corrections.json"
+    if not doc or not corrections_path.is_file():
+        return []
+    file = json.loads(corrections_path.read_text(encoding="utf-8"))
+    pass1 = json.loads((native / "pass1_restored_transcript.json").read_text(encoding="utf-8"))
+    texts = {str(s["segment_id"]): str(s.get("restored_text") or s.get("source_text") or "") for s in pass1.get("segments") or []}
+    existing = {(str(c.get("segment_id")), str(c.get("replacement"))) for c in file.get("corrections") or []}
+    added = []
+    for stretch in doc.get("stretches") or []:
+        gap = stretch.get("missed_speech")
+        if not gap or stretch["confidence"] != "high" or not stretch.get("segment_id"):
+            continue
+        change = insertion(texts.get(str(stretch["segment_id"]), ""), str(gap.get("after_word") or ""), stretch["english_meaning"])
+        if change is None or (str(stretch["segment_id"]), change["replacement"]) in existing:
+            continue
+        correction = {"segment_id": stretch["segment_id"], **change, "kind": "missing speech (other language)", "sentence": "", "audio_phones": None,
+                      "reason": f"{stretch['end_s'] - stretch['start_s']:.1f} s the speaker said in another language, reconstructed from the sounds: "
+                                f"{' '.join(p['text'] for p in stretch['reconstruction'])!r}",
+                      "heard": stretch["english_meaning"], "extends_to_ms": gap.get("extends_to_ms")}
+        file.setdefault("corrections", []).append(correction)
+        added.append(correction)
+        progress(f"[code-switch] speech in another language at {stretch['start_s']:.0f} s added to the dub: {stretch['english_meaning']!r}")
+    if added:
+        corrections_path.write_text(json.dumps(file, indent=1, ensure_ascii=False), encoding="utf-8")
+    return added
 
 
 def run(job_root: Path, provider: Any, *, speech_backend: Any, gop: Any = None, progress: Callable[[str], None] = print) -> Path | None:
@@ -213,7 +262,10 @@ def run(job_root: Path, provider: Any, *, speech_backend: Any, gop: Any = None, 
             loaded.append(True)
         return gop.decode_timed(clip(start, end))
 
-    return build(job_root, provider, zulu_reading=reading("zu-ZA"), afrikaans_reading=reading("af-ZA"), phones=sounds, progress=progress)
+    path = build(job_root, provider, zulu_reading=reading("zu-ZA"), afrikaans_reading=reading("af-ZA"), phones=sounds, progress=progress)
+    if path:
+        add_missed_speech_to_corrections(job_root, progress)           # every run: the source check rewrites its corrections file each time
+    return path
 
 
 def load(path: Path) -> dict[str, Any] | None:

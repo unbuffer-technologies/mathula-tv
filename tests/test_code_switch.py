@@ -30,6 +30,37 @@ def test_phones_are_grouped_into_words_where_the_speaker_pauses_and_segments_fou
     assert cs.segment_for(segments, 20.0, 22.0) is None
 
 
+def test_missed_speech_in_another_language_is_reconstructed_and_only_high_confidence_joins_the_dub(tmp_path):
+    native, analysis = tmp_path / "native_dub", tmp_path / "analysis"
+    native.mkdir()
+    analysis.mkdir()
+    (native / "pass1_restored_transcript.json").write_text(json.dumps({"segments": [
+        {"segment_id": "seg-1", "start_ms": 0, "end_ms": 6000, "restored_text": "The grant is ours. Mali"},
+        {"segment_id": "seg-2", "start_ms": 12000, "end_ms": 15000, "restored_text": "Then we go."}]}), encoding="utf-8")
+    (analysis / "azure_diarization.json").write_text(json.dumps({"phrases": [{"start": 1.0, "end": 4.0, "text": "The grant is ours"}]}), encoding="utf-8")
+    unresolved = [{"segment_id": "seg-1", "heard": "Nalay Yaban", "after_word": "Mali", "gap_start_s": 7.0, "gap_end_s": 10.0, "extends_to_ms": 9800},
+                  {"segment_id": "seg-1", "heard": "Xyz", "after_word": "ours.", "gap_start_s": 10.0, "gap_end_s": 11.5, "extends_to_ms": 11400}]
+    (native / "source_corrections.json").write_text(json.dumps({"corrections": [], "unresolved": unresolved}), encoding="utf-8")
+    confidences = {"Nalay Yaban": "high", "Xyz": "medium"}
+
+    class Provider:
+        def complete_json(self, **kwargs):
+            return SimpleNamespace(data={"stretches": [
+                {"id": s["id"], "reconstruction": [{"text": "imali yabantu", "language": "isizulu"}], "english_meaning": "the people's money",
+                 "confidence": confidences[s["english_recogniser"]], "evidence": "phones"} for s in kwargs["payload"]["stretches"]]})
+
+    path = cs.build(tmp_path, Provider(), zulu_reading=lambda a, b: "", afrikaans_reading=lambda a, b: "", phones=lambda a, b: [], progress=lambda m: None)
+    doc = cs.load(path)
+    assert [s["segment_id"] for s in doc["stretches"]] == ["seg-1", "seg-1"]               # both reconstructed, whatever the readings said
+    added = cs.add_missed_speech_to_corrections(tmp_path, lambda m: None)
+    assert len(added) == 1 and added[0]["extends_to_ms"] == 9800 and added[0]["replacement"].endswith("Mali the people's money")
+    saved = json.loads((native / "source_corrections.json").read_text(encoding="utf-8"))
+    assert len(saved["corrections"]) == 1
+    assert cs.add_missed_speech_to_corrections(tmp_path, lambda m: None) == []              # added once
+    # the medium-confidence one is still shown to the agent as evidence
+    assert any(s["confidence"] == "medium" for s in cs.for_agent(doc)["stretches"])
+
+
 def test_build_collects_evidence_for_the_hard_stretches_only_and_the_agent_view_is_scoped(tmp_path):
     native, analysis = tmp_path / "native_dub", tmp_path / "analysis"
     native.mkdir()

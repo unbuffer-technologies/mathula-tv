@@ -104,8 +104,10 @@ RECOVERED_PROMPT = (
 
 
 def vet_recovered(provider: Any, recovered: Sequence[Mapping[str, Any]], segments: Sequence[Mapping[str, Any]],
-                  progress: Callable[[str], None] = print) -> list[dict[str, Any]]:
-    """Keep only recovered speech that reads as real English; one batched model call. A failed call keeps everything (as before)."""
+                  progress: Callable[[str], None] = print, rejected: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Keep only recovered speech that reads as real English; one batched model call. A failed call keeps everything (as before).
+
+    What is left out is appended to ``rejected``: it is speech in another language, and ``code_switch`` takes it from there."""
     items = [dict(item) for item in recovered]
     if not items:
         return items
@@ -130,6 +132,8 @@ def vet_recovered(provider: Any, recovered: Sequence[Mapping[str, Any]], segment
             kept.append(item)
         else:
             progress(f"[source] left out as not English: {item.get('heard')!r}")
+            if rejected is not None:
+                rejected.append(item)
     return kept
 
 
@@ -271,13 +275,14 @@ def run(job_root: Path, provider: Any, *, gop: Any = None, speech_backend: Any =
     corrections = corrections_from(suspects, verdicts)
     for item in corrections:
         progress(f"[source] {item['token']!r} is probably a misheard word -> {item['replacement']!r}  ({item['reason'][:100]})")
+    unresolved: list[dict[str, Any]] = []
     if speech_backend is not None:        # speech the transcript never wrote down (see source_gaps)
         try:
-            corrections += vet_recovered(provider, missed_speech(job_root, pass1, speech_backend, progress), pass1.get("segments") or [], progress)
+            corrections += vet_recovered(provider, missed_speech(job_root, pass1, speech_backend, progress), pass1.get("segments") or [], progress, unresolved)
         except Exception as exc:
             progress(f"[source] the missing-speech check could not run ({type(exc).__name__}: {str(exc)[:120]})")
     path = native / FILE
-    path.write_text(json.dumps({"schema": SCHEMA, "corrections": corrections, "examined": [
+    path.write_text(json.dumps({"schema": SCHEMA, "corrections": corrections, "unresolved": unresolved, "examined": [
         {"token": s["token"], "segment_id": s["segment_id"], "audio_phones": s.get("audio_phones"),
          "verdict": next((v.get("verdict") for v in verdicts if int(v["id"]) == s["id"]), None)} for s in suspects]},
         indent=1, ensure_ascii=False), encoding="utf-8")
