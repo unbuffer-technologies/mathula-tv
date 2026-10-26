@@ -10389,6 +10389,46 @@ def _emit_native_timing_failure_diagnostic(
     )
 
 
+def _gaps_without_speech(
+    source_video: Path, gaps: Sequence[tuple[int, int]], progress: Callable[[str], None] | None,
+) -> list[tuple[int, int]]:
+    """The gaps in which the source holds no recognisable speech.
+
+    The transcript does not hold everything the speaker said ("To be guaranteed that if you become sick" sat between two units),
+    and the source sound must never carry English words into the dub.  Each gap is transcribed; one word and it is left silent.
+    When the check cannot run at all, no gap gets source sound.
+    """
+    import tempfile
+
+    from .azure_stt import normalize
+    from .cli import create_speech_backend
+    from .config import load_settings
+
+    try:
+        backend = create_speech_backend(load_settings())
+    except Exception as error:
+        _emit_progress(progress, f"[native dub] source sound skipped: no speech check available ({type(error).__name__})")
+        return []
+    kept: list[tuple[int, int]] = []
+    with tempfile.TemporaryDirectory(prefix="gap_speech_") as scratch:
+        for start, end in gaps:
+            clip = Path(scratch) / f"gap_{start}.wav"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{start / 1000:.3f}", "-t", f"{(end - start) / 1000:.3f}", "-i", str(source_video),
+                            "-ac", "1", "-ar", "16000", str(clip)], check=True, capture_output=True)
+            try:
+                words = normalize(backend.transcribe(clip, locale="en-US")).get("words") or []
+            except Exception as error:
+                if "empty transcription" not in str(error):              # Azure's way of saying it heard nothing
+                    _emit_progress(progress, f"[native dub] source sound skipped at {start / 1000:.0f} s: speech check failed ({type(error).__name__})")
+                    continue
+                words = []
+            if words:
+                _emit_progress(progress, f"[native dub] no source sound at {start / 1000:.0f}-{end / 1000:.0f} s: speech in it ({' '.join(str(w.get('text')) for w in words)[:80]!r})")
+                continue
+            kept.append((start, end))
+    return kept
+
+
 def _with_gap_ambience(
     dialogue_bus: Path,
     source_video: Path,
@@ -10412,6 +10452,8 @@ def _with_gap_ambience(
         (int(item["source_start_ms"]), max(int(item["source_end_ms"]), int(item["scheduled_end_ms"]))) for item in scheduled
     ]
     gaps = ambience_gaps(windows)
+    if gaps:
+        gaps = _gaps_without_speech(source_video, gaps, progress)
     if not gaps:
         return dialogue_bus
     try:

@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from mathula_tv.mixing import ambience_gaps
@@ -65,6 +66,44 @@ class AmbienceGapsTest(unittest.TestCase):
     def test_before_first_and_after_last_unit_is_left_alone(self):
         self.assertEqual(ambience_gaps([(8_000, 9_000)]), [])
         self.assertEqual(ambience_gaps([]), [])
+
+
+class GapSpeechTest(unittest.TestCase):
+    def _run(self, answers):
+        from mathula_tv import native_dub
+
+        class Backend:
+            def __init__(self):
+                self.calls = 0
+
+            def transcribe(self, path, locale):
+                result = answers[self.calls]
+                self.calls += 1
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+        messages = []
+        with mock.patch("mathula_tv.cli.create_speech_backend", return_value=Backend()), \
+                mock.patch("mathula_tv.config.load_settings", return_value=object()), \
+                mock.patch("mathula_tv.azure_stt.normalize", side_effect=lambda raw: raw), \
+                mock.patch.object(native_dub.subprocess, "run"):
+            kept = native_dub._gaps_without_speech(
+                Path("source.mp4"), [(1000, 3000), (5000, 8000), (10000, 12000)], messages.append)
+        return kept, messages
+
+    def test_a_gap_with_speech_or_an_unreadable_check_gets_no_source_sound(self):
+        kept, messages = self._run([
+            {"words": []},                                            # applause: kept
+            {"words": [{"text": "Police"}, {"text": "station"}]},     # English speech: left silent
+            RuntimeError("network down"),                             # could not check: left silent
+        ])
+        self.assertEqual(kept, [(1000, 3000)])
+        self.assertTrue(any("Police station" in m for m in messages))
+
+    def test_azures_empty_transcription_means_nothing_was_heard(self):
+        kept, _ = self._run([RuntimeError("Azure Speech returned an empty transcription")] * 3)
+        self.assertEqual(kept, [(1000, 3000), (5000, 8000), (10000, 12000)])
 
 
 if __name__ == "__main__":
