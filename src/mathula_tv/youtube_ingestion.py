@@ -55,6 +55,7 @@ class YouTubeDownload:
     duration: float
     extractor: str | None
     downloaded_at: str
+    captions: tuple[Path, ...] = ()           # YouTube's own caption files (json3) fetched with the video; may be empty
 
     def manifest(self) -> dict[str, Any]:
         return {
@@ -71,6 +72,7 @@ class YouTubeDownload:
             "downloaded_at": self.downloaded_at,
             "playlist_allowed": False,
             "maximum_height": 1080,
+            "caption_files": [caption.name for caption in self.captions],
         }
 
 
@@ -93,6 +95,10 @@ def record_youtube_submission(
 
     record = download.manifest()
     job_dir = Path(orchestrator.jobs.job_dir(job.job_id))
+    for caption in download.captions:          # YouTube's own captions travel with the job (see youtube_captions)
+        target = job_dir / "input/youtube_captions" / caption.name.removeprefix("captions-")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(caption, target)
     source_manifest_path = job_dir / "input/youtube_source.json"
     _atomic_write_json(source_manifest_path, record)
 
@@ -322,6 +328,38 @@ def _resolve_downloaded_media(directory: Path, reported_paths: Sequence[Path]) -
     return actual[0]
 
 
+def _download_captions(url: str, directory: Path, *, cookies_file: Path | None = None) -> tuple[Path, ...]:
+    """YouTube's caption tracks for the video as json3 files: the uploader's own subtitles, and the automatic captions in the language
+    YouTube heard (``<lang>-orig``; every other automatic track is a machine translation of that one and is not fetched).
+
+    An extra, never a requirement: a failure here is swallowed and the video is ingested as before."""
+    found: list[Path] = []
+    for flags, languages in ((["--write-subs"], "en,zu,nso,st,tn,xh"), (["--write-auto-subs"], ".*-orig")):
+        try:
+            _run(
+                [
+                    *_yt_dlp_command(),
+                    "--no-playlist",
+                    "--no-warnings",
+                    "--skip-download",
+                    *flags,
+                    "--sub-langs",
+                    languages,
+                    "--sub-format",
+                    "json3",
+                    "--output",
+                    str(directory / "captions-%(id)s.%(ext)s"),
+                    *_cookies_args(cookies_file),
+                    url,
+                ],
+                purpose="caption download",
+            )
+        except Exception:                     # the captions are optional
+            continue
+    found = sorted(directory.glob("captions-*.json3"))
+    return tuple(found)
+
+
 def _download(url: str, directory: Path, *, cookies_file: Path | None = None) -> Path:
     # Keep the temporary filename independent of the YouTube title.  This avoids
     # Windows filename sanitization/path-length differences and makes the final
@@ -381,8 +419,10 @@ def download_youtube_video(
 
     with tempfile.TemporaryDirectory(prefix="mathula-youtube-") as temporary_dir:
         path = _download(webpage_url, Path(temporary_dir), cookies_file=resolved_cookies_file)
+        captions = _download_captions(webpage_url, Path(temporary_dir), cookies_file=resolved_cookies_file)
         yield YouTubeDownload(
             path=path,
+            captions=captions,
             requested_url=requested_url,
             webpage_url=webpage_url,
             video_id=video_id,

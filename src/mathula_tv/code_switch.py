@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 SCHEMA_VERSION = "mathula-code-switch-evidence-v1"
-EVIDENCE_VERSION = 3              # bump when what the model is given or asked changes: cached evidence is then rebuilt
+EVIDENCE_VERSION = 4              # bump when what the model is given or asked changes: cached evidence is then rebuilt
 FILE = "code_switch_evidence.json"
 MIN_DISAGREEMENT = 0.5            # how differently the English and isiZulu recognisers read a stretch (0 = the same words, 1 = nothing shared)
 MAX_STRETCHES = 15
@@ -42,8 +42,9 @@ LANGUAGES = ("english", "isizulu", "sepedi", "sesotho", "setswana", "siswati", "
 PROPOSE_PROMPT = (
     "You reconstruct what a South African politician really said in a stretch where machine transcripts disagree. At a rally he moves "
     "between English, isiZulu and, depending on the place, Sepedi (Northern Sotho), Sesotho, Setswana, siSwati, Xitsonga or Afrikaans. You get "
-    "three recogniser readings of the same audio (English, isiZulu, Afrikaans: the English one turns other languages into nonsense, the "
-    "isiZulu one reads isiZulu well and other languages badly) and the raw phones a language-independent phone model heard (IPA, grouped "
+    "recogniser readings of the same audio (English, isiZulu, Afrikaans, and YouTube's own automatic captions, which are often tagged isiZulu: "
+    "the English one turns other languages into nonsense, the isiZulu ones read isiZulu well and other languages badly, YouTube's can be right "
+    "on isiZulu where the others are wrong and wrong on English) and the raw phones a language-independent phone model heard (IPA, grouped "
     "where he pauses; noisy). You also get what he said just before and after, the paragraph it sits in, the stretches already resolved just "
     "before it, earlier sentences of the speech about the same things, and what his party is campaigning on. The argument is strong evidence: "
     "a speaker builds patterns (the grant for the old, then the grant for the children; a figure, then the next figure), and every group of "
@@ -75,7 +76,7 @@ def disagreement(first: str, second: str) -> float:
 
 def select_stretches(rows: Sequence[Mapping[str, Any]], *, floor: float = MIN_DISAGREEMENT, cap: int = MAX_STRETCHES) -> list[dict[str, Any]]:
     """The stretches the two recognisers read most differently (at least ``floor``), the worst first, at most ``cap``, in time order."""
-    scored = [(disagreement(r["english"], r["isizulu"]), r) for r in rows]
+    scored = [(max(disagreement(r["english"], r["isizulu"]), disagreement(r["english"], r.get("youtube", ""))), r) for r in rows]
     worst = sorted((s for s in scored if s[0] >= floor), key=lambda s: -s[0])[:cap]
     return sorted((dict(r, disagreement=round(score, 2)) for score, r in worst), key=lambda r: r["start_s"])
 
@@ -178,7 +179,7 @@ def solve_stretch(
 
     evidence = {
         "start_s": stretch["start_s"], "english_recogniser": stretch["english"], "isizulu_recogniser": stretch["isizulu"],
-        "afrikaans_recogniser": stretch["afrikaans"], "phones_grouped_by_pauses": stretch["phones"],
+        "afrikaans_recogniser": stretch["afrikaans"], "youtube_caption_reading": stretch.get("youtube", ""), "phones_grouped_by_pauses": stretch["phones"],
         "said_just_before": stretch.get("before", ""), "said_just_after": stretch.get("after", ""), "paragraph_it_sits_in": stretch.get("paragraph", "")}
     carried = [f"[{r['start_s']:.0f}s] {' '.join(p['text'] for p in r['reconstruction'])} = {r['english_meaning']} ({r['status']})" for r in resolved[-CARRIED_FORWARD:]]
     context = {"rally_story_and_party_platform": rally, "already_resolved_just_before": carried, "earlier_sentences_about_the_same_things": list(memory)}
@@ -216,7 +217,7 @@ def solve_stretch(
 def build(
     job_root: Path, provider: Any, *, zulu_reading: Callable[[float, float], str], afrikaans_reading: Callable[[float, float], str],
     phones: Callable[[float, float], list[tuple[str, float, float]]], speak: Callable[[str], list[str]] | None = None,
-    platform: str = "", progress: Callable[[str], None] = print,
+    platform: str = "", youtube_reading: Callable[[float, float], str] | None = None, progress: Callable[[str], None] = print,
 ) -> Path | None:
     """Write ``native_dub/code_switch_evidence.json`` for a job.  The readers take (start_s, end_s) of the job's analysis audio;
     ``speak(text)`` returns the phones the isiZulu voice produces for a text; ``platform`` is the party's current campaign as text."""
@@ -231,7 +232,7 @@ def build(
     corrections_path = native / "source_corrections.json"
     unresolved = (json.loads(corrections_path.read_text(encoding="utf-8")).get("unresolved") or []) if corrections_path.is_file() else []
     # the cache key: the transcript, the missed-speech stretches to reconstruct, the platform text and the version of this method
-    sha = hashlib.sha256(pass1_path.read_bytes() + json.dumps([EVIDENCE_VERSION, platform, [[i.get("gap_start_s"), i.get("gap_end_s")] for i in unresolved]]).encode()).hexdigest()
+    sha = hashlib.sha256(pass1_path.read_bytes() + json.dumps([EVIDENCE_VERSION, platform, youtube_reading is not None, [[i.get("gap_start_s"), i.get("gap_end_s")] for i in unresolved]]).encode()).hexdigest()
     target = native / FILE
     if target.is_file():
         try:
@@ -245,15 +246,15 @@ def build(
     spans = [(float(p["start"]), min(float(p["end"]), float(p["start"]) + MAX_STRETCH_SECONDS)) for p in phrases]
     with ThreadPoolExecutor(max_workers=4) as pool:
         zulu = list(pool.map(lambda span: zulu_reading(*span), spans))
-    rows = [{"id": index, "start_s": round(start, 1), "end_s": round(end, 1), "english": str(phrases[index].get("text") or ""), "isizulu": zulu[index]}
-            for index, (start, end) in enumerate(spans)]
+    rows = [{"id": index, "start_s": round(start, 1), "end_s": round(end, 1), "english": str(phrases[index].get("text") or ""), "isizulu": zulu[index],
+             "youtube": youtube_reading(start, end) if youtube_reading else ""} for index, (start, end) in enumerate(spans)]
     chosen = select_stretches(rows)
     progress(f"[code-switch] {len(chosen)} of {len(rows)} stretches are read very differently by the English and isiZulu recognisers")
     # speech the transcript missed that the English check rejected (another language): reconstructed too, whatever the readings say
     for item in unresolved:
         start, end = float(item["gap_start_s"]), min(float(item["gap_end_s"]), float(item["gap_start_s"]) + MAX_STRETCH_SECONDS)
         chosen.append({"id": len(rows) + len(chosen), "start_s": round(start, 1), "end_s": round(end, 1), "english": str(item.get("heard") or ""),
-                       "isizulu": zulu_reading(start, end), "disagreement": 1.0, "unresolved": item})
+                       "isizulu": zulu_reading(start, end), "youtube": youtube_reading(start, end) if youtube_reading else "", "disagreement": 1.0, "unresolved": item})
     if unresolved:
         progress(f"[code-switch] {len(unresolved)} stretch(es) of missed speech that were not English are reconstructed as well")
     chosen.sort(key=lambda s: s["start_s"])                       # the rolling window moves forward in time
@@ -281,7 +282,7 @@ def build(
         rivals = [c for c in solved["candidates"] if c is not pick]
         found.append({
             "segment_id": owner, "start_s": stretch["start_s"], "end_s": stretch["end_s"],
-            "english_reading": stretch["english"], "isizulu_reading": stretch["isizulu"], "disagreement": stretch["disagreement"],
+            "english_reading": stretch["english"], "isizulu_reading": stretch["isizulu"], "youtube_reading": stretch.get("youtube", ""), "disagreement": stretch["disagreement"],
             "reconstruction": pick["words"] if pick else [], "english_meaning": pick["english_meaning"] if pick else "",
             "confidence": solved["confidence"], "status": solved["status"] if pick else "uncertain", "reason": solved["reason"],
             "candidates": [{"english_meaning": c["english_meaning"], "words": " ".join(w["text"] for w in c["words"]), "closeness": c["closeness"],
@@ -403,8 +404,10 @@ def run(job_root: Path, provider: Any, *, speech_backend: Any, gop: Any = None, 
             voice = primary_voice(voices_path)
         lab = PronunciationLab(job_root, voice=voice, key=key, region=region, work_dir=scratch / "lab", gop=gop)
         speak = lab.voice_reading
+    from . import youtube_captions
+
     path = build(job_root, provider, zulu_reading=reading("zu-ZA"), afrikaans_reading=reading("af-ZA"), phones=sounds, speak=speak,
-                 platform=platform, progress=progress)
+                 platform=platform, youtube_reading=youtube_captions.reading(job_root), progress=progress)
     if path:
         add_missed_speech_to_corrections(job_root, progress)           # every run: the source check rewrites its corrections file each time
     return path
