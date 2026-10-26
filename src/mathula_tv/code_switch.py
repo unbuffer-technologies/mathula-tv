@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 SCHEMA_VERSION = "mathula-code-switch-evidence-v1"
-EVIDENCE_VERSION = 7              # bump when what the model is given or asked changes: cached evidence is then rebuilt
+EVIDENCE_VERSION = 8              # bump when what the model is given or asked changes: cached evidence is then rebuilt
 FILE = "code_switch_evidence.json"
 MIN_DISAGREEMENT = 0.5            # how differently the English and isiZulu recognisers read a stretch (0 = the same words, 1 = nothing shared)
 MAX_STRETCHES = 15
@@ -60,7 +60,8 @@ CHOOSE_PROMPT = (
     "voice and its phones compared with the phones of the original audio: 'closeness' is how near its sounds are to the audio (higher is "
     "closer; differences of a few hundredths are small). Weigh the sounds first, then how well each continues the argument. Pick the candidate "
     "you believe he said, or -1 if none fits both the sounds and the argument. Say how sure you are: 'high' only when the choice is clear on "
-    "both counts."
+    "both counts. Also list every OTHER candidate that says essentially the same thing as your choice (differing only in tense, spelling or "
+    "wording, not in who or what or how much): the sounds cannot tell such candidates apart, so they do not count as rivals."
 )
 
 
@@ -154,9 +155,10 @@ def _propose_schema() -> dict[str, Any]:
 
 
 def _choose_schema(count: int) -> dict[str, Any]:
-    return {"type": "object", "additionalProperties": False, "required": ["chosen", "confidence", "reason"],
+    return {"type": "object", "additionalProperties": False, "required": ["chosen", "confidence", "reason", "same_message_as_chosen"],
             "properties": {"chosen": {"type": "integer", "enum": list(range(-1, count))},
-                           "confidence": {"type": "string", "enum": ["high", "medium", "low"]}, "reason": {"type": "string"}}}
+                           "confidence": {"type": "string", "enum": ["high", "medium", "low"]}, "reason": {"type": "string"},
+                           "same_message_as_chosen": {"type": "array", "items": {"type": "integer", "enum": list(range(count))}}}}
 
 
 def _same_meaning(a: str, b: str) -> bool:
@@ -174,7 +176,8 @@ def corroborated(words: Sequence[str], readings: Sequence[str]) -> bool:
     return found >= 2 or (found >= 1 and found * 2 >= len(distinctive))
 
 
-def is_resolved(candidates: Sequence[Mapping[str, Any]], chosen: int, confidence: str, checked: bool = False, agreed: bool = False) -> bool:
+def is_resolved(candidates: Sequence[Mapping[str, Any]], chosen: int, confidence: str, checked: bool = False, agreed: bool = False,
+                same_message: Sequence[int] = ()) -> bool:
     """Resolved only if the choice sounds best, clearly better than every rival that means something different, AND either the model
     is sure or it is fairly sure and an independent reading says the same words (agreement of independent sources outweighs a self-rating,
     which varies from run to run on the same evidence)."""
@@ -184,8 +187,13 @@ def is_resolved(candidates: Sequence[Mapping[str, Any]], chosen: int, confidence
     closeness = [c.get("closeness") for c in candidates]
     if any(value is None for value in closeness):
         return not checked                       # a check was possible but did not run for every candidate: not resolved; no check at all: the model's word is all there is
-    rivals = [c["closeness"] for c in candidates if c is not pick and not _same_meaning(c["english_meaning"], pick["english_meaning"])]
-    return pick["closeness"] >= max(closeness) - 1e-9 and all(pick["closeness"] - r >= MIN_CLOSENESS_MARGIN for r in rivals)
+    # candidates that say the same thing as the choice (the model names them; identical wording counts too) are one reading: the sounds cannot
+    # separate a tense from another tense, so only candidates that say something else are rivals
+    group = {chosen, *(int(i) for i in same_message if 0 <= int(i) < len(candidates))}
+    group |= {i for i, c in enumerate(candidates) if _same_meaning(c["english_meaning"], pick["english_meaning"])}
+    best_in_group = max(candidates[i]["closeness"] for i in group)
+    rivals = [c["closeness"] for i, c in enumerate(candidates) if i not in group]
+    return best_in_group >= max(closeness) - 1e-9 and all(best_in_group - r >= MIN_CLOSENESS_MARGIN for r in rivals)
 
 
 def solve_stretch(
@@ -229,7 +237,8 @@ def solve_stretch(
         schema=_choose_schema(len(candidates)), max_output_tokens=800).data
     chosen, confidence = int(choice["chosen"]), str(choice["confidence"])
     agreed = chosen >= 0 and corroborated([w["text"] for w in candidates[chosen]["words"]], [stretch.get("youtube", ""), stretch.get("isizulu", ""), stretch.get("afrikaans", "")])
-    return {"status": "resolved" if is_resolved(candidates, chosen, confidence, checked=speak is not None, agreed=agreed) else "uncertain", "candidates": candidates, "chosen": chosen,
+    return {"status": "resolved" if is_resolved(candidates, chosen, confidence, checked=speak is not None, agreed=agreed,
+                                                         same_message=choice.get("same_message_as_chosen") or []) else "uncertain", "candidates": candidates, "chosen": chosen,
             "confidence": confidence, "reason": str(choice.get("reason") or "")}
 
 

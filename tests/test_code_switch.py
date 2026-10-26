@@ -211,3 +211,17 @@ def test_independent_agreement_lets_a_medium_confidence_reading_count_as_resolve
     assert not cs.is_resolved(clear, 0, "low", agreed=True)                                                        # low never is
     close = [{"english_meaning": "x", "closeness": 0.70}, {"english_meaning": "y", "closeness": 0.69}]
     assert not cs.is_resolved(close, 0, "medium", agreed=True)                                                     # the sounds still need a clear margin
+
+
+
+def test_candidates_that_say_the_same_thing_do_not_count_as_rivals_to_each_other():
+    # the real case: "siyayinyusa" (are increasing) was chosen; "sizoyinyusa" (will increase) sounds a little closer but says the same thing
+    cands = [{"english_meaning": "and the one for the children, we are increasing it", "closeness": 0.736},
+             {"english_meaning": "we are increasing the children's money", "closeness": 0.686},
+             {"english_meaning": "and the one for the children, we will increase it", "closeness": 0.791}]
+    assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=True)                          # as before: a closer rival blocks it
+    assert cs.is_resolved(cands, 0, "medium", checked=True, agreed=True, same_message=[2])             # the model says 2 is the same message: resolved
+    assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=True, same_message=[1])         # a genuinely different rival (2) still blocks
+    assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=False, same_message=[2])        # still needs the model's word or an independent source
+    far = [dict(cands[0]), dict(cands[1], closeness=0.72), dict(cands[2])]
+    assert not cs.is_resolved(far, 0, "high", checked=True, same_message=[2])                          # a different message must still be clearly worse
