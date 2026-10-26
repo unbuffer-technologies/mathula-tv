@@ -179,9 +179,16 @@ def find_missing_speech(
         gap_start, gap_end = _end(before), float(after.get("start") or 0.0)
         if not heard_by_second_pass and not has_speech(levels, frame, gap_start, gap_end):
             continue
-        window_start = max(0.0, gap_start - 1.0)
-        heard = transcribe(audio, window_start, gap_end + 1.0)
-        inside = [w for w in heard if gap_start - 0.05 <= window_start + float(w.get("start") or 0.0) + 0.1 <= gap_end + 0.05]
+        # listened to twice: with a second of context either side (a word cut at the edge is still understood) and tight around the
+        # pause (a last word is not merged into the next phrase); whichever recovers more words wins
+        best: tuple[float, list[Mapping[str, Any]]] = (0.0, [])
+        for context in (1.0, 0.15):
+            window_start = max(0.0, gap_start - context)
+            heard = transcribe(audio, window_start, gap_end + context)
+            words_here = [w for w in heard if gap_start - 0.05 <= window_start + float(w.get("start") or 0.0) + 0.1 <= gap_end + 0.05]
+            if len(words_here) > len(best[1]):
+                best = (window_start, words_here)
+        window_start, inside = best
         text = " ".join(str(w.get("text")) for w in inside).strip()
         if len(inside) < MIN_WORDS:
             continue

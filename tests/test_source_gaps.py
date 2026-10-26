@@ -53,7 +53,7 @@ def test_speech_in_a_transcript_gap_is_listened_to_again_and_added_but_silence_a
                 {"text": "water", "start": 2.6}, {"text": "and", "start": 2.9}, {"text": "electricity", "start": 3.2}]
 
     found = find_missing_speech(SEGMENTS, WORDS, audio, transcribe, progress=lambda message: None)
-    assert asked == [(21, 27)]                                            # the quiet 11-20 s gap was never re-transcribed
+    assert asked == [(21, 27), (22, 26)]                                  # the gap, with context and tight; the quiet 11-20 s gap was never re-transcribed
     assert len(found) == 1 and found[0]["segment_id"] == "seg-10"
     pass1 = {"segments": [dict(s, source_text=s["restored_text"]) for s in SEGMENTS]}
     apply_corrections(pass1, found)
