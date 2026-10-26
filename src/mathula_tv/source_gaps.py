@@ -191,6 +191,10 @@ def find_missing_speech(
             words_here = [w for w in heard if gap_start - 0.05 <= window_start + float(w.get("start") or 0.0) + 0.1 <= gap_end + 0.05]
             if len(words_here) > len(best[1]):
                 best = (window_start, words_here)
+        if second_pass:           # the chunked pass has heard this stretch too, in its own context (absolute times): the fullest listen wins
+            overheard = [w for w in second_pass if gap_start - 0.05 <= float(w.get("start") or 0.0) + 0.1 <= gap_end + 0.05]
+            if len(overheard) > len(best[1]):
+                best = (0.0, overheard)
         window_start, inside = best
         text = " ".join(str(w.get("text")) for w in inside).strip()
         if len(inside) < MIN_WORDS:

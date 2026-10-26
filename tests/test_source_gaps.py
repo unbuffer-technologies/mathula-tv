@@ -116,6 +116,17 @@ def test_speech_only_the_second_pass_hears_is_listened_to_again_and_added_even_i
     assert 21500 < found[0]["extends_to_ms"] <= 21850
 
 
+def test_the_second_passs_own_words_win_when_they_are_the_fullest_listen(tmp_path):
+    audio = tmp_path / "a.wav"
+    write_wav(audio, [(22.4, 26.0)])
+    second = [{"text": "going", "start": 22.5, "end": 22.8}, {"text": "to", "start": 22.9, "end": 23.0}, {"text": "pay", "start": 23.1, "end": 23.4},
+              {"text": "cells.", "start": 23.5, "end": 24.0}]
+    short = lambda path, start, end: [{"text": "going", "start": 22.5 - start, "end": 22.8 - start}, {"text": "to", "start": 22.9 - start, "end": 23.0 - start},
+                                      {"text": "pay", "start": 23.1 - start, "end": 23.4 - start}]
+    found = find_missing_speech(SEGMENTS, WORDS, audio, short, progress=lambda m: None, second_pass=second)
+    assert found[0]["replacement"].endswith("going to pay cells.")
+
+
 def test_a_window_azure_cannot_transcribe_does_not_stop_the_check(tmp_path):
     audio = tmp_path / "a.wav"
     write_wav(audio, [(22.4, 26.0)])
