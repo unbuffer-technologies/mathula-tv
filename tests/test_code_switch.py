@@ -22,6 +22,13 @@ def test_the_most_different_readings_are_chosen_capped_and_returned_in_time_orde
     assert all("disagreement" in r for r in cs.select_stretches(rows))
 
 
+def test_neighbours_are_the_phrases_just_before_and_after():
+    phrases = [{"start": 0.0, "end": 2.0, "text": "one"}, {"start": 2.5, "end": 4.0, "text": "two"}, {"start": 4.5, "end": 6.0, "text": "three"},
+               {"start": 10.0, "end": 12.0, "text": "four"}, {"start": 12.5, "end": 14.0, "text": "five"}, {"start": 14.5, "end": 16.0, "text": "six"}]
+    assert cs.neighbours(phrases, 6.5, 9.5) == ("two three", "four five")
+    assert cs.neighbours(phrases, 0.0, 2.0) == ("", "two three")
+
+
 def test_phones_are_grouped_into_words_where_the_speaker_pauses_and_segments_found_by_overlap():
     timed = [("n", 0.0, 0.05), ("a", 0.05, 0.1), ("m", 0.4, 0.45), ("a", 0.45, 0.5)]
     assert cs.group_phones(timed) == "na | ma"
@@ -86,8 +93,11 @@ def test_build_collects_evidence_for_the_hard_stretches_only_and_the_agent_view_
     assert len(doc["stretches"]) == 1 and doc["stretches_examined"] == 2          # only the stretch the recognisers disagree on
     stretch = doc["stretches"][0]
     assert stretch["segment_id"] == "seg-2" and stretch["confidence"] == "high"
-    assert asked["payload"]["rally"] == "A rally in Mpumalanga."
-    assert asked["payload"]["stretches"][0]["phones_grouped_by_pauses"] == "se"
+    assert asked["payload"]["rally_and_story_of_the_speech"].startswith("A rally in Mpumalanga.")
+    sent = asked["payload"]["stretches"][0]
+    assert sent["phones_grouped_by_pauses"] == "se"
+    assert sent["said_just_before"] == "What is our job"                          # the argument around the stretch goes to the model
+    assert sent["paragraph_it_sits_in"] == ""                                      # (this segment has no text in the fixture)
     # cached by the transcript's checksum: a second build does not call the model again
     asked.clear()
     assert cs.build(tmp_path, Provider(), zulu_reading=lambda a, b: "", afrikaans_reading=lambda a, b: "", phones=lambda a, b: [], progress=lambda m: None) == path

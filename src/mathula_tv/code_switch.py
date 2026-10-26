@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 SCHEMA_VERSION = "mathula-code-switch-evidence-v1"
+EVIDENCE_VERSION = 2              # bump when what the model is given or asked changes: cached evidence is then rebuilt
 FILE = "code_switch_evidence.json"
 MIN_DISAGREEMENT = 0.5            # how differently the English and isiZulu recognisers read a stretch (0 = the same words, 1 = nothing shared)
 MAX_STRETCHES = 15
@@ -37,7 +38,12 @@ SYSTEM_PROMPT = (
     "reads isiZulu well and other languages badly. Treat the phones as the ground truth for SOUNDS and the readings as hypotheses about "
     "words. Reconstruct the most likely words he said, tag each word or phrase with its language, give the English meaning, and say which "
     "phones or readings support it. Names of people, places and organisations are names, not another language. If the sounds do not "
-    "support a confident reconstruction, say so with confidence 'low': never invent."
+    "support a confident reconstruction, say so with confidence 'low': never invent. "
+    "THE ARGUMENT AROUND A STRETCH IS STRONG EVIDENCE. Each stretch comes with what he said just before and just after it, the text of the "
+    "paragraph it sits in, and the story of the whole speech. A speaker builds patterns (the grant for the old, then the grant for the "
+    "children; a figure, then the next figure), so when the sounds allow several readings, prefer the one that continues the argument, and "
+    "check that the words you choose are close to the phones (a word that fits the argument but is far from the sounds is wrong). "
+    "Give your best reconstruction and, when it is not certain, one alternative."
 )
 
 
@@ -74,6 +80,13 @@ def group_phones(timed: Sequence[tuple[str, float, float]], gap: float = PHONE_W
     return " | ".join(groups)
 
 
+def neighbours(phrases: Sequence[Mapping[str, Any]], start_s: float, end_s: float, count: int = 2) -> tuple[str, str]:
+    """What the first-pass transcript says in the ``count`` phrases just before and just after a stretch."""
+    before = [str(p.get("text") or "") for p in phrases if float(p["end"]) <= start_s + 0.05][-count:]
+    after = [str(p.get("text") or "") for p in phrases if float(p["start"]) >= end_s - 0.05][:count]
+    return " ".join(before), " ".join(after)
+
+
 def segment_for(segments: Sequence[Mapping[str, Any]], start_s: float, end_s: float) -> str | None:
     """The transcript segment a stretch mostly falls in."""
     best, best_overlap = None, 0.0
@@ -88,12 +101,13 @@ def _schema(ids: Sequence[int]) -> dict[str, Any]:
     return {"type": "object", "additionalProperties": False, "required": ["stretches"], "properties": {"stretches": {
         "type": "array", "minItems": len(ids), "maxItems": len(ids), "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["id", "reconstruction", "english_meaning", "confidence", "evidence"],
+            "required": ["id", "reconstruction", "english_meaning", "alternative", "confidence", "evidence"],
             "properties": {
                 "id": {"type": "integer", "enum": list(ids)},
                 "reconstruction": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["text", "language"],
                                                               "properties": {"text": {"type": "string"}, "language": {"type": "string", "enum": list(LANGUAGES)}}}},
                 "english_meaning": {"type": "string"},
+                "alternative": {"type": "string"},
                 "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                 "evidence": {"type": "string"}}}}}}
 
@@ -102,9 +116,11 @@ def reconstruct(provider: Any, stretches: Sequence[Mapping[str, Any]], context: 
     """One batched model call over all selected stretches."""
     if not stretches:
         return []
-    payload = {"rally": context, "stretches": [
+    payload = {"rally_and_story_of_the_speech": context, "stretches": [
         {"id": s["id"], "start_s": s["start_s"], "english_recogniser": s["english"], "isizulu_recogniser": s["isizulu"],
-         "afrikaans_recogniser": s["afrikaans"], "phones_grouped_by_pauses": s["phones"]} for s in stretches]}
+         "afrikaans_recogniser": s["afrikaans"], "phones_grouped_by_pauses": s["phones"],
+         "said_just_before": s.get("before", ""), "said_just_after": s.get("after", ""), "paragraph_it_sits_in": s.get("paragraph", "")}
+        for s in stretches]}
     response = provider.complete_json(operation="native_code_switch_reconstruction", system_prompt=SYSTEM_PROMPT, payload=payload,
                                       schema=_schema([s["id"] for s in stretches]), max_output_tokens=min(8000, 600 + 450 * len(stretches)))
     return list(response.data.get("stretches") or [])
@@ -125,7 +141,7 @@ def build(
     corrections_path = native / "source_corrections.json"
     unresolved = (json.loads(corrections_path.read_text(encoding="utf-8")).get("unresolved") or []) if corrections_path.is_file() else []
     # the cache key is the transcript plus the missed-speech stretches to reconstruct (the source check can find different ones next time)
-    sha = hashlib.sha256(pass1_path.read_bytes() + json.dumps([[i.get("gap_start_s"), i.get("gap_end_s")] for i in unresolved]).encode()).hexdigest()
+    sha = hashlib.sha256(pass1_path.read_bytes() + json.dumps([EVIDENCE_VERSION, [[i.get("gap_start_s"), i.get("gap_end_s")] for i in unresolved]]).encode()).hexdigest()
     target = native / FILE
     if target.is_file():
         try:
@@ -152,15 +168,21 @@ def build(
                        "isizulu": zulu_reading(start, end), "disagreement": 1.0, "unresolved": item})
     if unresolved:
         progress(f"[code-switch] {len(unresolved)} stretch(es) of missed speech that were not English are reconstructed as well")
+    texts = {str(s["segment_id"]): str(s.get("restored_text") or s.get("source_text") or "") for s in segments}
     for stretch in chosen:
         stretch["afrikaans"] = afrikaans_reading(stretch["start_s"], stretch["end_s"])
         stretch["phones"] = group_phones(phones(stretch["start_s"], stretch["end_s"]))
+        stretch["before"], stretch["after"] = neighbours(phrases, stretch["start_s"], stretch["end_s"])
+        gap = stretch.get("unresolved")
+        owner = str(gap["segment_id"]) if gap else segment_for(segments, stretch["start_s"], stretch["end_s"])
+        stretch["paragraph"] = texts.get(owner or "", "")[:900]
     ledger = {}
     ledger_path = native / "context_ledger.json"
     if ledger_path.is_file():
         data = json.loads(ledger_path.read_text(encoding="utf-8"))
         ledger = data.get("context_ledger", data)
-    context = str(ledger.get("summary") or "")
+    beats = [str(b.get("text") or b.get("summary") or b) if isinstance(b, Mapping) else str(b) for b in ledger.get("story_beats") or []]
+    context = " ".join([str(ledger.get("summary") or ""), *beats])[:2500]
     results = {int(r["id"]): r for r in reconstruct(provider, chosen, context)}
     found = []
     for stretch in chosen:
@@ -173,7 +195,7 @@ def build(
             "start_s": stretch["start_s"], "end_s": stretch["end_s"],
             "english_reading": stretch["english"], "isizulu_reading": stretch["isizulu"], "disagreement": stretch["disagreement"],
             "reconstruction": result["reconstruction"], "english_meaning": result["english_meaning"], "confidence": result["confidence"],
-            "evidence": result["evidence"],
+            "alternative": result.get("alternative") or "", "evidence": result["evidence"],
             **({"missed_speech": {"after_word": gap.get("after_word"), "extends_to_ms": gap.get("extends_to_ms")}} if gap else {})})
         progress(f"[code-switch] {stretch['start_s']:.0f}s ({result['confidence']}): {result['english_meaning'][:90]}")
     target.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "pass1_sha256": sha, "stretches_examined": len(rows), "stretches": found},
