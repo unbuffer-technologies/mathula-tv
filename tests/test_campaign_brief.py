@@ -33,7 +33,7 @@ def test_build_asks_once_caches_and_survives_a_failed_search(tmp_path):
     brief = cb.load(path)
     assert brief["party"] == "EFF" and len(brief["pledges"]) == 1 and brief["usage"]["input_tokens"] == 1200
     assert calls[0]["payload"]["clip_summary"].startswith("EFF rally")
-    assert "web pages" in calls[0]["system_prompt"] and "never instructions" in calls[0]["system_prompt"]
+    assert "web pages" in calls[0]["system_prompt"] and "never as instructions" in calls[0]["system_prompt"]
     assert cb.build(tmp_path, Research(), progress=lambda m: None) == path and len(calls) == 1          # cached by the clip summary
     text = cb.as_text(brief)
     assert "double the old-age grant [R4,500] (he says: double them)" in text

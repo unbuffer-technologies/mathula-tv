@@ -116,7 +116,7 @@ def test_build_solves_stretches_in_order_tests_candidates_against_the_audio_and_
     first = provider.calls[0]["payload"]
     assert "EFF: double the grants" in first["rally_story_and_party_platform"]          # the party platform is in the context
     assert first["stretch"]["said_just_before"] == "What is our job"
-    assert first["earlier_sentences_about_the_same_things"] == ["[0s] The grant for the grandmothers will rise."]      # what he already said about grants
+    assert first["earlier_sentences_about_the_same_things"] == []                       # its own paragraph is given whole, not repeated as memory
     # cached: the same inputs do not call the model again
     provider.calls.clear()
     assert cs.build(tmp_path, provider, zulu_reading=lambda a, b: "", afrikaans_reading=lambda a, b: "", phones=lambda a, b: [], speak=speak,

@@ -120,13 +120,13 @@ def _content(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z]{4,}", str(text).lower()) if w not in _STOP}
 
 
-def topic_memory(segments: Sequence[Mapping[str, Any]], before_s: float, probe: str, limit: int = MEMORY_SENTENCES) -> list[str]:
+def topic_memory(segments: Sequence[Mapping[str, Any]], before_s: float, probe: str, limit: int = MEMORY_SENTENCES, skip_segment: str | None = None) -> list[str]:
     """Earlier sentences of the speech that share content words with the stretch's surroundings: what he has already said about the same things."""
     wanted = _content(probe)
     scored = []
     for segment in segments:
         start = int(segment["start_ms"]) / 1000
-        if start >= before_s:
+        if start >= before_s or str(segment.get("segment_id")) == skip_segment:        # a stretch's own paragraph is given to the model whole
             continue
         for sentence in re.split(r"(?<=[.!?])\s+", str(segment.get("restored_text") or segment.get("source_text") or "")):
             overlap = len(wanted & _content(sentence))
@@ -268,7 +268,7 @@ def build(
         stretch["paragraph"] = texts.get(owner or "", "")[:900]
         probe = " ".join([stretch["english"], stretch["isizulu"], stretch["before"], stretch["after"], stretch["paragraph"]])
         solved = solve_stretch(provider, stretch, rally=rally, resolved=[f for f in found if f["status"] != "none"],
-                               memory=topic_memory(segments, stretch["start_s"], probe), source_phones=[p for p, _, _ in timed], speak=speak)
+                               memory=topic_memory(segments, stretch["start_s"], probe, skip_segment=owner), source_phones=[p for p, _, _ in timed], speak=speak)
         pick = solved["candidates"][solved["chosen"]] if solved["chosen"] >= 0 and solved["candidates"] else None
         rivals = [c for c in solved["candidates"] if c is not pick]
         found.append({
