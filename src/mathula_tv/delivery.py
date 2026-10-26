@@ -79,7 +79,8 @@ def track(samples: np.ndarray, rate: int) -> tuple[np.ndarray, np.ndarray]:
         peak = np.where(use_half, half_peak, peak)
         before, here, after = auto[rows, lag - 1], auto[rows, lag], auto[rows, np.minimum(lag + 1, auto.shape[1] - 1)]
         denominator = before - 2 * here + after
-        shift = np.where(np.abs(denominator) > 1e-9, 0.5 * (before - after) / denominator, 0.0)
+        usable = np.abs(denominator) > 1e-9
+        shift = np.where(usable, 0.5 * (before - after) / np.where(usable, denominator, 1.0), 0.0)
         hz = rate / (lag + np.clip(shift, -1, 1))
         voiced = peak >= 0.5
         semitones[first:last] = np.where(voiced, 12 * np.log2(hz / 100.0), np.nan)

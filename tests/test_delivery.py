@@ -62,14 +62,15 @@ class MeasurementTest(unittest.TestCase):
     def test_a_faster_louder_higher_segment_reads_that_way_against_the_speakers_own_usual(self):
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / "a.wav"
-            parts = [_tone(110, 3.0, 0.1), np.zeros(8000), _tone(110, 3.0, 0.1), np.zeros(8000), _tone(150, 3.0, 0.4)]
+            room = (np.random.default_rng(2).normal(0, 0.001, 24000)).astype(np.float32)      # a real recording is never digitally silent
+            parts = [_tone(110, 3.0, 0.1), room, _tone(110, 3.0, 0.1), room, _tone(150, 3.0, 0.4)]
             _write(audio, np.concatenate(parts).astype(np.float32))
             segments = [{"segment_id": "s1", "speaker_id": "A", "start_ms": 0, "end_ms": 3000, "restored_text": "one two three"},
-                        {"segment_id": "s2", "speaker_id": "A", "start_ms": 3500, "end_ms": 6500, "restored_text": "four five six"},
-                        {"segment_id": "s3", "speaker_id": "A", "start_ms": 7000, "end_ms": 10000, "restored_text": "seven eight nine"}]
-            words = (_words(["one", "two", "three", "four", "five", "six"], 0.0, 0.2, 0.3)[:3]
-                     + _words(["four", "five", "six"], 3.5, 0.2, 0.3)
-                     + _words(["seven", "eight", "nine", "ten", "elev"], 7.0, 0.02, 0.2))
+                        {"segment_id": "s2", "speaker_id": "A", "start_ms": 4500, "end_ms": 7500, "restored_text": "four five six"},
+                        {"segment_id": "s3", "speaker_id": "A", "start_ms": 9000, "end_ms": 12000, "restored_text": "seven eight nine"}]
+            words = (_words(["one", "two", "three"], 0.0, 0.2, 0.3)
+                     + _words(["four", "five", "six"], 4.5, 0.2, 0.3)
+                     + _words(["seven", "eight", "nine", "ten", "elev"], 9.0, 0.02, 0.2))
             sheet = delivery.build_sheet(audio, segments, words)
         fast = sheet["segments"]["s3"]
         self.assertGreater(fast["pitch_vs_usual_st"], 3)
