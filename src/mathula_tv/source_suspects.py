@@ -93,6 +93,46 @@ def judge(provider: Any, suspects: list[dict[str, Any]], known_names: Sequence[s
     return list(response.data.get("verdicts") or [])
 
 
+RECOVERED_PROMPT = (
+    "An English speech recogniser skipped some stretches of a South African political speech on its first pass; a second listen "
+    "wrote down the words in 'heard'. The speaker mixes English with isiZulu, Sesotho, Setswana and Afrikaans, and the recogniser "
+    "often turns those into nonsense English. For each item decide: 'english_speech' (real English words that fit the argument "
+    "around them -- they continue or add to the sentence in 'context') or 'not_english' (garbled letters from another language, "
+    "crowd noise written as words, or words that do not fit). Be conservative: an invented sentence in the dub is worse than a "
+    "missing one, so answer 'not_english' whenever you are not clearly sure."
+)
+
+
+def vet_recovered(provider: Any, recovered: Sequence[Mapping[str, Any]], segments: Sequence[Mapping[str, Any]],
+                  progress: Callable[[str], None] = print) -> list[dict[str, Any]]:
+    """Keep only recovered speech that reads as real English; one batched model call. A failed call keeps everything (as before)."""
+    items = [dict(item) for item in recovered]
+    if not items:
+        return items
+    by_id = {str(s.get("segment_id")): str(s.get("restored_text") or s.get("source_text") or "") for s in segments}
+    payload = {"items": [{"id": index, "heard": item.get("heard") or item.get("replacement"), "context": by_id.get(str(item["segment_id"]), "")[-400:]}
+                         for index, item in enumerate(items)]}
+    ids = list(range(len(items)))
+    response_schema = {"type": "object", "additionalProperties": False, "required": ["verdicts"], "properties": {"verdicts": {
+        "type": "array", "minItems": len(ids), "maxItems": len(ids), "items": {"type": "object", "additionalProperties": False,
+            "required": ["id", "verdict"], "properties": {"id": {"type": "integer", "enum": ids},
+                                                          "verdict": {"type": "string", "enum": ["english_speech", "not_english"]}}}}}}
+    try:
+        response = provider.complete_json(operation="native_recovered_speech_check", system_prompt=RECOVERED_PROMPT, payload=payload,
+                                          schema=response_schema, max_output_tokens=400 + 40 * len(items))
+        verdicts = {int(v["id"]): v["verdict"] for v in response.data.get("verdicts") or []}
+    except Exception as exc:
+        progress(f"[source] could not vet the recovered speech ({type(exc).__name__}); keeping it all")
+        return items
+    kept = []
+    for index, item in enumerate(items):
+        if verdicts.get(index, "english_speech") == "english_speech":
+            kept.append(item)
+        else:
+            progress(f"[source] left out as not English: {item.get('heard')!r}")
+    return kept
+
+
 def corrections_from(suspects: Sequence[Mapping[str, Any]], verdicts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     by_id = {int(v["id"]): v for v in verdicts}
     found = []
@@ -233,7 +273,7 @@ def run(job_root: Path, provider: Any, *, gop: Any = None, speech_backend: Any =
         progress(f"[source] {item['token']!r} is probably a misheard word -> {item['replacement']!r}  ({item['reason'][:100]})")
     if speech_backend is not None:        # speech the transcript never wrote down (see source_gaps)
         try:
-            corrections += missed_speech(job_root, pass1, speech_backend, progress)
+            corrections += vet_recovered(provider, missed_speech(job_root, pass1, speech_backend, progress), pass1.get("segments") or [], progress)
         except Exception as exc:
             progress(f"[source] the missing-speech check could not run ({type(exc).__name__}: {str(exc)[:120]})")
     path = native / FILE

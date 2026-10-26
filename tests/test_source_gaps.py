@@ -127,6 +127,32 @@ def test_the_second_passs_own_words_win_when_they_are_the_fullest_listen(tmp_pat
     assert found[0]["replacement"].endswith("going to pay cells.")
 
 
+def test_recovered_speech_that_is_not_english_is_left_out_and_a_failed_check_keeps_everything():
+    from types import SimpleNamespace
+
+    from mathula_tv.source_suspects import vet_recovered
+
+    recovered = [{"segment_id": "seg-10", "heard": "Science and technology.", "replacement": "x"},
+                 {"segment_id": "seg-10", "heard": "Nalay Yaban Tuanasia in Yusa", "replacement": "y"}]
+
+    class Provider:
+        def complete_json(self, **kwargs):
+            assert kwargs["payload"]["items"][1]["heard"] == "Nalay Yaban Tuanasia in Yusa"
+            return SimpleNamespace(data={"verdicts": [{"id": 0, "verdict": "english_speech"}, {"id": 1, "verdict": "not_english"}]})
+
+    messages = []
+    kept = vet_recovered(Provider(), recovered, SEGMENTS, messages.append)
+    assert [k["heard"] for k in kept] == ["Science and technology."]
+    assert any("Nalay" in m for m in messages)
+
+    class Broken:
+        def complete_json(self, **kwargs):
+            raise RuntimeError("down")
+
+    assert vet_recovered(Broken(), recovered, SEGMENTS, lambda m: None) == recovered
+    assert vet_recovered(Broken(), [], SEGMENTS, lambda m: None) == []
+
+
 def test_a_window_azure_cannot_transcribe_does_not_stop_the_check(tmp_path):
     audio = tmp_path / "a.wav"
     write_wav(audio, [(22.4, 26.0)])

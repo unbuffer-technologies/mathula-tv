@@ -207,7 +207,7 @@ def find_missing_speech(
             continue
         spoken_until = max(window_start + float(w.get("end") or w.get("start") or 0.0) for w in inside)
         found.append({"segment_id": segment["segment_id"], **change, "reason": f"{gap_end - gap_start:.1f} s of speech the transcript missed, heard again: {text!r}",
-                      "sentence": "", "audio_phones": None, "kind": "missing speech",
+                      "sentence": "", "audio_phones": None, "kind": "missing speech", "heard": text,
                       # the words are spoken in the gap, so the segment's window has to reach them: the dub then says them there
                       "extends_to_ms": int(min(spoken_until + END_TAIL_SECONDS, gap_end - NEXT_WORD_MARGIN_SECONDS) * 1000)})
         progress(f"[source] speech missed by the transcript at {gap_start:.0f}-{gap_end:.0f} s: {text!r}")
