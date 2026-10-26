@@ -58,6 +58,20 @@ def test_speech_in_a_transcript_gap_is_listened_to_again_and_added_but_silence_a
     pass1 = {"segments": [dict(s, source_text=s["restored_text"]) for s in SEGMENTS]}
     apply_corrections(pass1, found)
     assert pass1["segments"][0]["restored_text"].endswith("Rupert is going to pay for water and electricity.")
+    # the words are spoken in the gap, so the segment's window reaches them (it ended at 22.4 s, the last word starts at 24.3 s)
+    assert 24300 < found[0]["extends_to_ms"] <= 24500
+    assert pass1["segments"][0]["end_ms"] == found[0]["extends_to_ms"]
+
+
+def test_a_recovered_window_never_runs_into_the_next_segment_and_never_shrinks():
+    segments = [{"segment_id": "a", "start_ms": 0, "end_ms": 5000, "restored_text": "one two."},
+                {"segment_id": "b", "start_ms": 9000, "end_ms": 12000, "restored_text": "three."}]
+    far = [{"segment_id": "a", "token": "two.", "replacement": "two four.", "extends_to_ms": 20000}]
+    apply_corrections({"segments": segments}, far)
+    assert segments[0]["end_ms"] == 8950                                   # stops 50 ms short of the next segment
+    near = [{"segment_id": "a", "token": "four.", "replacement": "four five.", "extends_to_ms": 4000}]
+    apply_corrections({"segments": segments}, near)
+    assert segments[0]["end_ms"] == 8950
 
 
 def test_a_loud_gap_that_yields_no_words_adds_nothing(tmp_path):

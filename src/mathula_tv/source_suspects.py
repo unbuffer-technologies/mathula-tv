@@ -106,10 +106,11 @@ def corrections_from(suspects: Sequence[Mapping[str, Any]], verdicts: Sequence[M
 def apply_corrections(pass1: dict[str, Any], corrections: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Replace each corrected word in its segment's English (in place). Returns what actually changed."""
     changed = []
+    segments = pass1.get("segments") or []
     for correction in corrections:
         # not \b: a token such as "is—" ends in punctuation, where \b would never match
         pattern = re.compile(r"(?<![A-Za-z'])" + re.escape(correction["token"]) + r"(?![A-Za-z'])")
-        for segment in pass1.get("segments") or []:
+        for segment in segments:
             if str(segment.get("segment_id")) != str(correction["segment_id"]):
                 continue
             for field in ("restored_text", "source_text"):
@@ -119,7 +120,23 @@ def apply_corrections(pass1: dict[str, Any], corrections: Sequence[Mapping[str, 
                     if field == "restored_text":
                         changed.append({"segment_id": segment["segment_id"], "was": correction["token"], "now": correction["replacement"],
                                         "reason": correction.get("reason", "")})
+                        _extend_window(segment, segments, correction.get("extends_to_ms"))
     return changed
+
+
+def _extend_window(segment: dict[str, Any], segments: Sequence[Mapping[str, Any]], extends_to_ms: Any) -> None:
+    """Speech recovered after a segment's end: its window grows to cover it (never into the next segment)."""
+    try:
+        target = int(extends_to_ms)
+    except (TypeError, ValueError):
+        return
+    later = [int(s["start_ms"]) for s in segments if int(s["start_ms"]) > int(segment["start_ms"])]
+    if later:
+        target = min(target, min(later) - 50)
+    if target > int(segment["end_ms"]):
+        segment["end_ms"] = target
+        if "end" in segment:
+            segment["end"] = target / 1000.0
 
 
 def apply_to_frozen(pass1_path: Path, corrections_path: Path) -> list[dict[str, Any]]:
