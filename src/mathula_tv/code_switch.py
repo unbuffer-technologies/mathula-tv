@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 SCHEMA_VERSION = "mathula-code-switch-evidence-v1"
-EVIDENCE_VERSION = 6              # bump when what the model is given or asked changes: cached evidence is then rebuilt
+EVIDENCE_VERSION = 7              # bump when what the model is given or asked changes: cached evidence is then rebuilt
 FILE = "code_switch_evidence.json"
 MIN_DISAGREEMENT = 0.5            # how differently the English and isiZulu recognisers read a stretch (0 = the same words, 1 = nothing shared)
 MAX_STRETCHES = 15
@@ -163,9 +163,22 @@ def _same_meaning(a: str, b: str) -> bool:
     return set(_words(a)) == set(_words(b))
 
 
-def is_resolved(candidates: Sequence[Mapping[str, Any]], chosen: int, confidence: str, checked: bool = False) -> bool:
-    """Resolved only if the model is sure AND the choice sounds best, clearly better than every rival that means something different."""
-    if chosen < 0 or confidence != "high":
+def corroborated(words: Sequence[str], readings: Sequence[str]) -> bool:
+    """Do the chosen words also appear in an independent reading (YouTube's captions, the isiZulu or Afrikaans recogniser)?
+
+    A word of five letters or more counts as found when some word of a reading is nearly the same (the recognisers spell differently);
+    corroborated when at least two such words are found, or one when that is half of them."""
+    heard = {t for reading in readings for t in re.findall(r"[a-z]+", str(reading).lower())}
+    distinctive = [w for w in (re.sub(r"[^a-z]", "", str(x).lower()) for x in words) if len(w) >= 5]
+    found = sum(1 for w in distinctive if any(SequenceMatcher(None, w, t).ratio() >= 0.8 for t in heard))
+    return found >= 2 or (found >= 1 and found * 2 >= len(distinctive))
+
+
+def is_resolved(candidates: Sequence[Mapping[str, Any]], chosen: int, confidence: str, checked: bool = False, agreed: bool = False) -> bool:
+    """Resolved only if the choice sounds best, clearly better than every rival that means something different, AND either the model
+    is sure or it is fairly sure and an independent reading says the same words (agreement of independent sources outweighs a self-rating,
+    which varies from run to run on the same evidence)."""
+    if chosen < 0 or not (confidence == "high" or (confidence == "medium" and agreed)):
         return False
     pick = candidates[chosen]
     closeness = [c.get("closeness") for c in candidates]
@@ -215,7 +228,8 @@ def solve_stretch(
         operation="native_code_switch_choice", system_prompt=CHOOSE_PROMPT, payload={"stretch": evidence, "candidates": shown, **context},
         schema=_choose_schema(len(candidates)), max_output_tokens=800).data
     chosen, confidence = int(choice["chosen"]), str(choice["confidence"])
-    return {"status": "resolved" if is_resolved(candidates, chosen, confidence, checked=speak is not None) else "uncertain", "candidates": candidates, "chosen": chosen,
+    agreed = chosen >= 0 and corroborated([w["text"] for w in candidates[chosen]["words"]], [stretch.get("youtube", ""), stretch.get("isizulu", ""), stretch.get("afrikaans", "")])
+    return {"status": "resolved" if is_resolved(candidates, chosen, confidence, checked=speak is not None, agreed=agreed) else "uncertain", "candidates": candidates, "chosen": chosen,
             "confidence": confidence, "reason": str(choice.get("reason") or "")}
 
 

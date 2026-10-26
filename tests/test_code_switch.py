@@ -197,3 +197,17 @@ def test_candidates_are_spoken_as_plain_words_without_sentence_punctuation():
     assert cs.speakable("Nale yabantwana, siyayinyusa!") == "Nale yabantwana siyayinyusa"
     assert cs.speakable("ANC ayinamali… ANC ayibhadali") == "ANC ayinamali ANC ayibhadali"
     assert cs.speakable("i-grant") == "i-grant"                                          # hyphens inside a word stay
+
+
+def test_independent_agreement_lets_a_medium_confidence_reading_count_as_resolved():
+    youtube = "ku ANC imali ye grant iphuma la from you South Africa nale le yabantwana siyayinyusa,"
+    assert cs.corroborated(["Naleyo", "yabantwana", "siyayinyusa"], [youtube, "Nale yabantu anase yusa", ""])      # YouTube has the same words
+    assert not cs.corroborated(["Imali", "yabantu", "ANC", "ayinyusi"], [youtube])                                  # it does not
+    assert cs.corroborated(["yabantwana"], [youtube])                                                              # the only distinctive word, found
+    assert not cs.corroborated(["a", "b"], [youtube])                                                              # nothing distinctive to find
+    clear = [{"english_meaning": "increase the children's one", "closeness": 0.705}, {"english_meaning": "the children's money", "closeness": 0.659}]
+    assert not cs.is_resolved(clear, 0, "medium")                                                                  # medium alone is not enough
+    assert cs.is_resolved(clear, 0, "medium", agreed=True)                                                         # medium plus an independent source is
+    assert not cs.is_resolved(clear, 0, "low", agreed=True)                                                        # low never is
+    close = [{"english_meaning": "x", "closeness": 0.70}, {"english_meaning": "y", "closeness": 0.69}]
+    assert not cs.is_resolved(close, 0, "medium", agreed=True)                                                     # the sounds still need a clear margin
