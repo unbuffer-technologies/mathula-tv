@@ -15,7 +15,9 @@ the agent, the gates, the meaning check and the renderer read. The job's own Pas
 from __future__ import annotations
 
 import json
+import os
 import re
+import wave
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -176,7 +178,18 @@ def missed_speech(job_root: Path, pass1: Mapping[str, Any], speech_backend: Any,
                         "-ac", "1", "-ar", "16000", str(clip)], check=True, capture_output=True)
         return normalize(speech_backend.transcribe(clip, locale="en-US")).get("words") or []
 
-    return find_missing_speech(pass1.get("segments") or [], words, audio, transcribe, progress=progress)
+    second_pass = None
+    if os.environ.get("MATHULA_SECOND_PASS", "1").strip().lower() not in {"0", "false", "no", "off"}:
+        from .source_gaps import second_pass_words
+
+        try:        # an independent pass over the whole recording in chunks: the first pass can skip short bursts of speech over a crowd
+            with wave.open(str(audio), "rb") as reader:
+                duration = reader.getnframes() / reader.getframerate()
+            second_pass = second_pass_words(duration, transcribe, audio)
+            progress(f"[source] second pass heard {len(second_pass)} words against the first pass's {len(words)}")
+        except Exception as exc:
+            progress(f"[source] the second pass could not run ({type(exc).__name__}: {str(exc)[:120]})")
+    return find_missing_speech(pass1.get("segments") or [], words, audio, transcribe, progress=progress, second_pass=second_pass)
 
 
 def run(job_root: Path, provider: Any, *, gop: Any = None, speech_backend: Any = None,

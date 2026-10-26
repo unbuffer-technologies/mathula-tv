@@ -74,6 +74,49 @@ def test_a_recovered_window_never_runs_into_the_next_segment_and_never_shrinks()
     assert segments[0]["end_ms"] == 8950
 
 
+def test_the_second_pass_keeps_only_the_middle_of_each_chunk_and_reports_absolute_times():
+    from mathula_tv.source_gaps import second_pass_words
+
+    spoken = [(2.0, "alpha"), (27.0, "bravo"), (29.0, "edge-of-first"), (33.5, "charlie"), (58.0, "delta")]   # (absolute start, word)
+
+    def transcribe(audio, start, end):
+        return [{"text": t, "start": s - start, "end": s - start + 0.3} for s, t in spoken if start <= s and s + 0.3 <= end]
+
+    heard = second_pass_words(60.0, transcribe, None)
+    assert [w["text"] for w in heard] == ["alpha", "bravo", "edge-of-first", "charlie", "delta"]       # each word exactly once
+    assert [round(w["start"], 1) for w in heard] == [2.0, 27.0, 29.0, 33.5, 58.0]
+
+
+def test_stretches_are_what_the_second_pass_hears_where_the_first_pass_has_nothing():
+    from mathula_tv.source_gaps import uncovered_stretches
+
+    first = [{"text": "one", "start": 1.0, "end": 1.4}, {"text": "two", "start": 1.5, "end": 1.9}, {"text": "six", "start": 9.0, "end": 9.4}]
+    second = [{"text": "one", "start": 1.05, "end": 1.4}, {"text": "two", "start": 1.55, "end": 1.9},
+              {"text": "three", "start": 3.0, "end": 3.4}, {"text": "four", "start": 3.6, "end": 4.0}, {"text": "five", "start": 4.2, "end": 4.6},
+              {"text": "lone", "start": 6.5, "end": 6.8}, {"text": "six", "start": 9.1, "end": 9.4}]
+    assert uncovered_stretches(second, first) == [(3.0, 4.6)]               # a single stray word (6.5 s) is not enough
+
+
+def test_speech_only_the_second_pass_hears_is_listened_to_again_and_added_even_inside_a_short_pause(tmp_path):
+    audio = tmp_path / "a.wav"
+    write_wav(audio, [(19, 30)])
+    words = [{"text": "Rupert", "start": 20.0, "end": 20.4}, {"text": "is", "start": 20.5, "end": 20.9}, {"text": "We", "start": 21.95, "end": 22.2}]
+    segments = [{"segment_id": "s", "start_ms": 19500, "end_ms": 21000, "restored_text": "Rupert is—"},
+                {"segment_id": "t", "start_ms": 21950, "end_ms": 25000, "restored_text": "We care."}]
+    second = [{"text": "going", "start": 21.0, "end": 21.3}, {"text": "to", "start": 21.4, "end": 21.5}, {"text": "pay", "start": 21.6, "end": 21.9}]
+    asked = []
+
+    def transcribe(path, start, end):
+        asked.append((round(start, 1), round(end, 1)))
+        return [{"text": "going", "start": 21.0 - start, "end": 21.3 - start}, {"text": "to", "start": 21.4 - start, "end": 21.5 - start},
+                {"text": "pay", "start": 21.6 - start, "end": 21.9 - start}]
+
+    assert find_missing_speech(segments, words, audio, transcribe, progress=lambda m: None) == []        # a 1.05 s pause: no first-pass candidate
+    found = find_missing_speech(segments, words, audio, transcribe, progress=lambda m: None, second_pass=second)
+    assert len(found) == 1 and found[0]["replacement"] == "is going to pay."
+    assert 21500 < found[0]["extends_to_ms"] <= 21900
+
+
 def test_a_loud_gap_that_yields_no_words_adds_nothing(tmp_path):
     audio = tmp_path / "a.wav"
     write_wav(audio, [(22.4, 26.0)])
