@@ -255,6 +255,9 @@ class Workbench:
         switched = self._code_switch(clip_id, sorted(mine) if mine is not None else None)
         if switched:
             opened["code_switch"] = switched
+        brief = self._campaign_brief(clip_id)
+        if brief:
+            opened["campaign_brief"] = brief
         if self.source_corrections:
             opened["source_corrections"] = {
                 "note": ("The English below was corrected against the speaker's audio: the transcript had misheard these "
@@ -272,6 +275,13 @@ class Workbench:
         entry = self.store.load_corpus()["clips"][clip_id]
         doc = load(Path(self.store.root).parent / "jobs" / str(entry["job_id"]) / "native_dub" / FILE)
         return for_agent(doc, segment_ids) if doc else None
+
+    def _campaign_brief(self, clip_id: str) -> dict[str, Any] | None:
+        """What the speaker's party is campaigning on, with sources (see campaign_brief): context for the topic and the figures only."""
+        from .campaign_brief import FILE, for_agent, load
+
+        entry = self.store.load_corpus()["clips"][clip_id]
+        return for_agent(load(Path(self.store.root).parent / "jobs" / str(entry["job_id"]) / "native_dub" / FILE))
 
     def _delivery_sheet(self, clip_id: str) -> dict[str, Any] | None:
         """How the clip's speakers deliver (see delivery): read from the job, where prepare_agent_inputs writes it."""

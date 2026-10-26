@@ -122,9 +122,13 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
     except Exception as exc:
         progress(f"[prepare] source check skipped: {type(exc).__name__}: {str(exc)[:200]}")
     try:        # what the speaker really said where they switch language and the English transcript is nonsense (see code_switch)
+        from . import campaign_brief
         from .code_switch import run as reconstruct_code_switch
 
-        reconstruct_code_switch(job_root, provider, speech_backend=stt, progress=progress)
+        # what the party is campaigning on: a prior for the reconstruction, never evidence of what was said (one cached research call per clip)
+        brief_path = campaign_brief.build(job_root, progress=progress)
+        platform = campaign_brief.as_text(campaign_brief.load(brief_path)) if brief_path else ""
+        reconstruct_code_switch(job_root, provider, speech_backend=stt, platform=platform, progress=progress)
     except Exception as exc:
         progress(f"[prepare] code-switch evidence skipped: {type(exc).__name__}: {str(exc)[:200]}")
     try:        # how each speaker delivers, measured from the audio (see delivery): the agent writes toward it, the renderer nudges the voice
@@ -213,6 +217,12 @@ def run_production(
     }
 
     report["pronunciation_choices"] = workbench.pronunciation_choices          # for a person's ear: what the agent chose with the lab
+    try:        # stretches where the language switch could not be settled: a short list for a person to listen to
+        from .code_switch import FILE as CODE_SWITCH_FILE, load as load_code_switch, review_items
+
+        report["code_switch_review"] = review_items(load_code_switch(job_root / "native_dub" / CODE_SWITCH_FILE))
+    except Exception:
+        report["code_switch_review"] = []
     if render and (run_dir / "submission.json").is_file():
         try:
             from .dub_render import render_submission
