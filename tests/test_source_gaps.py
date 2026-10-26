@@ -103,18 +103,17 @@ def test_speech_only_the_second_pass_hears_is_listened_to_again_and_added_even_i
     words = [{"text": "Rupert", "start": 20.0, "end": 20.4}, {"text": "is", "start": 20.5, "end": 20.9}, {"text": "We", "start": 21.95, "end": 22.2}]
     segments = [{"segment_id": "s", "start_ms": 19500, "end_ms": 21000, "restored_text": "Rupert is—"},
                 {"segment_id": "t", "start_ms": 21950, "end_ms": 25000, "restored_text": "We care."}]
-    second = [{"text": "going", "start": 21.0, "end": 21.3}, {"text": "to", "start": 21.4, "end": 21.5}, {"text": "pay", "start": 21.6, "end": 21.9}]
+    second = [{"text": "going", "start": 21.05, "end": 21.3}, {"text": "to", "start": 21.35, "end": 21.45}, {"text": "pay", "start": 21.5, "end": 21.75}]
     asked = []
 
     def transcribe(path, start, end):
         asked.append((round(start, 1), round(end, 1)))
-        return [{"text": "going", "start": 21.0 - start, "end": 21.3 - start}, {"text": "to", "start": 21.4 - start, "end": 21.5 - start},
-                {"text": "pay", "start": 21.6 - start, "end": 21.9 - start}]
+        return [{**w, "start": w["start"] - start, "end": w["end"] - start} for w in second]
 
     assert find_missing_speech(segments, words, audio, transcribe, progress=lambda m: None) == []        # a 1.05 s pause: no first-pass candidate
     found = find_missing_speech(segments, words, audio, transcribe, progress=lambda m: None, second_pass=second)
     assert len(found) == 1 and found[0]["replacement"] == "is going to pay."
-    assert 21500 < found[0]["extends_to_ms"] <= 21900
+    assert 21500 < found[0]["extends_to_ms"] <= 21850
 
 
 def test_a_loud_gap_that_yields_no_words_adds_nothing(tmp_path):
