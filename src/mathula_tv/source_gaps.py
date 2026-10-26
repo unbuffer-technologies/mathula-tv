@@ -184,7 +184,10 @@ def find_missing_speech(
         best: tuple[float, list[Mapping[str, Any]]] = (0.0, [])
         for context in (1.0, 0.15):
             window_start = max(0.0, gap_start - context)
-            heard = transcribe(audio, window_start, gap_end + context)
+            try:
+                heard = transcribe(audio, window_start, gap_end + context)
+            except Exception:                      # a window with nothing in it makes Azure answer with an error: it heard nothing
+                continue
             words_here = [w for w in heard if gap_start - 0.05 <= window_start + float(w.get("start") or 0.0) + 0.1 <= gap_end + 0.05]
             if len(words_here) > len(best[1]):
                 best = (window_start, words_here)

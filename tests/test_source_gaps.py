@@ -116,6 +116,19 @@ def test_speech_only_the_second_pass_hears_is_listened_to_again_and_added_even_i
     assert 21500 < found[0]["extends_to_ms"] <= 21850
 
 
+def test_a_window_azure_cannot_transcribe_does_not_stop_the_check(tmp_path):
+    audio = tmp_path / "a.wav"
+    write_wav(audio, [(22.4, 26.0)])
+
+    def transcribe(path, start, end):
+        if end - start < 5:                                  # the tight window: "empty transcription"
+            raise RuntimeError("Azure Speech returned an empty transcription")
+        return [{"text": "going", "start": 1.4}, {"text": "to", "start": 1.7}, {"text": "pay", "start": 2.0}]
+
+    found = find_missing_speech(SEGMENTS, WORDS, audio, transcribe, progress=lambda m: None)
+    assert len(found) == 1 and "going to pay" in found[0]["replacement"]
+
+
 def test_a_loud_gap_that_yields_no_words_adds_nothing(tmp_path):
     audio = tmp_path / "a.wav"
     write_wav(audio, [(22.4, 26.0)])
