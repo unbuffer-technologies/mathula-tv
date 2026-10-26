@@ -22,6 +22,8 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .delivery import strip_pauses
+
 CHUNK = 10
 ISSUE_KINDS = ("omission", "addition", "distortion", "unclear")
 
@@ -110,6 +112,7 @@ def judge_units(client: Any, units: Sequence[Mapping[str, str]], *, chunk: int =
     """Judge ``units`` ({"id","source","dub"}). Returns per-unit verdicts plus the token cost."""
     usage: dict[str, int] = {}
     verdicts: list[dict[str, Any]] = []
+    units = [{**u, "dub": strip_pauses(u["dub"])} for u in units]       # ~pause800 is a direction to the voice, not part of the meaning
     for start in range(0, len(units), chunk):
         part = units[start:start + chunk]
         back = _call(client, BACK_TRANSLATE_PROMPT, [{"id": u["id"], "zulu": u["dub"]} for u in part], usage)

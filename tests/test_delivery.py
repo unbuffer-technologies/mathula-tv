@@ -95,8 +95,10 @@ class ForTheAgentAndRendererTest(unittest.TestCase):
     def test_agent_view_is_compact_and_scoped(self):
         view = delivery.for_agent(self.SHEET, ["s1", "s3"])
         self.assertEqual([r["segment_id"] for r in view["segments"]], ["s1", "s3"])
-        self.assertEqual(view["segments"][0]["pauses"], [{"ms": 800, "after": "money"}])
+        self.assertEqual(view["segments"][0]["pauses_inside"], ["800 ms after 'money'"])
+        self.assertEqual(view["segments"][0]["loudness_vs_usual_db"], 9.0)
         self.assertNotIn("repeats", view["segments"][0])
+        self.assertNotIn("loudness_vs_usual_db", delivery.for_agent(self.SHEET, ["s2"])["segments"][0])
         self.assertIn("recognise", view["note"])
 
     def test_unit_prosody_is_a_capped_nudge_weighted_by_segment_length(self):
@@ -122,6 +124,17 @@ class ForTheAgentAndRendererTest(unittest.TestCase):
             delivery.write_unit_prosody(native, self.SHEET, units, enabled=False)
             self.assertEqual(delivery.read_unit_prosody(Path(directory), "u1"), (0, 0))
             self.assertFalse((native / delivery.PROSODY_NAME).exists())
+
+    def test_pause_marker_becomes_a_break_between_the_pieces_of_speech(self):
+        self.assertEqual(delivery.split_pauses("Imali yethu. ~pause900 Uma uya"), ["Imali yethu.", 900, "Uma uya"])
+        self.assertEqual(delivery.split_pauses("Sawubona"), ["Sawubona"])
+        self.assertEqual(delivery.split_pauses("A ~pause5000 B"), ["A", 2000, "B"])                  # clamped to the longest allowed pause
+        self.assertEqual(delivery.split_pauses("~pause800 A"), ["A"])                                # none before the first word
+        self.assertEqual(delivery.split_pauses("A ~pause800"), ["A"])                                # none after the last: it would be trimmed
+        self.assertEqual(delivery.split_pauses("A ~pause800 ~pause800 B"), ["A", 800, "B"])          # none doubled
+        long = delivery.split_pauses(" ".join(f"w{i} ~pause2000" for i in range(6)) + " end")
+        self.assertLessEqual(sum(p for p in long if isinstance(p, int)), delivery.MAX_MARKED_PAUSE_TOTAL_MS)
+        self.assertEqual(delivery.strip_pauses("Imali yethu. ~pause900 Uma uya"), "Imali yethu. Uma uya")
 
     def test_load_sheet_rejects_foreign_files(self):
         with tempfile.TemporaryDirectory() as directory:

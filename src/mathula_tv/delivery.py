@@ -37,6 +37,43 @@ _SMALL_WORDS = {"the", "and", "that", "this", "with", "from", "have", "will", "y
                 "are", "you", "not", "but", "its", "our", "was", "has", "had", "can", "all", "who", "how", "why"}
 
 
+# -- pause marker ------------------------------------------------------------------------------------------------------------
+# The voice leaves ~0.55 s after a sentence; a speaker who holds a pause for effect (this one up to 2 s) cannot be matched by wording.
+# The agent writes ``~pause800`` at the spot; it is never spoken, becomes a silence of that many milliseconds, and counts toward the
+# unit's length like any other part of the speech.
+PAUSE_MARKER = re.compile(r"\s*~pause(\d{3,4})\b\s*", re.IGNORECASE)
+MIN_MARKED_PAUSE_MS = 200
+MAX_MARKED_PAUSE_MS = 2000
+MAX_MARKED_PAUSE_TOTAL_MS = 4500              # the SSML builder refuses more silence than this in one document
+
+
+def split_pauses(text: str) -> list[str | int]:
+    """The text as speech pieces with the marked pauses (milliseconds) between them; each pause clamped, the total capped."""
+    pieces: list[str | int] = []
+    position, total = 0, 0
+    for match in PAUSE_MARKER.finditer(text):
+        before = text[position:match.start()]
+        if before.strip():
+            pieces.append(before)
+        pause = max(MIN_MARKED_PAUSE_MS, min(MAX_MARKED_PAUSE_MS, int(match.group(1))))
+        pause = min(pause, MAX_MARKED_PAUSE_TOTAL_MS - total)
+        if pause >= MIN_MARKED_PAUSE_MS and pieces and not isinstance(pieces[-1], int):       # none at the very start, none doubled
+            pieces.append(pause)
+            total += pause
+        position = match.end()
+    rest = text[position:]
+    if rest.strip() or not pieces:
+        pieces.append(rest)
+    while pieces and isinstance(pieces[-1], int):                                              # a pause at the very end would be trimmed anyway
+        pieces.pop()
+    return pieces
+
+
+def strip_pauses(text: str) -> str:
+    """The text without its pause markers (what a reader or the meaning check should see)."""
+    return PAUSE_MARKER.sub(" ", text).strip()
+
+
 # -- signal ------------------------------------------------------------------------------------------------------------------
 
 def read_wav(path: Path) -> tuple[np.ndarray, int]:
@@ -312,11 +349,18 @@ def for_agent(sheet: Mapping[str, Any], segment_ids: Sequence[str] | None = None
     for segment_id, row in (sheet.get("segments") or {}).items():
         if wanted is not None and segment_id not in wanted:
             continue
-        compact = {k: v for k, v in row.items() if v not in (None, [], "") and k not in ("start_ms", "end_ms", "words")}
-        compact["segment_id"] = segment_id
-        compact["pauses"] = [{"ms": p["ms"], "after": p["after"]} for p in row.get("pauses") or []]
-        if not compact["pauses"]:
-            compact.pop("pauses")
+        compact: dict[str, Any] = {"segment_id": segment_id}
+        for key in ("pace_vs_usual_pct", "pitch_vs_usual_st", "ends_by_st"):
+            if row.get(key) is not None:
+                compact[key] = row[key]
+        if abs(row.get("loudness_vs_usual_db") or 0) >= 1.5:          # broadcast audio is compressed: small differences are not delivery
+            compact["loudness_vs_usual_db"] = row["loudness_vs_usual_db"]
+        pauses = [f"{p['ms']} ms after '{p['after']}'" for p in (row.get("pauses") or [])[:3]]
+        if pauses:
+            compact["pauses_inside"] = pauses
+        for key in ("stressed_words", "repeats"):
+            if row.get(key):
+                compact[key] = row[key]
         rows.append(compact)
     return {"note": AGENT_NOTE, "speakers": sheet.get("speakers") or {}, "segments": rows}
 

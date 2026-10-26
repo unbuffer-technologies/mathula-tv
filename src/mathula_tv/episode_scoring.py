@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .atomic_io import read_json
+from .delivery import strip_pauses
 from .dub_padding import plan_turn_padding
 from .experience_store import text_hash
 
@@ -275,7 +276,7 @@ def _score_group(
     from .native_dub import _missing_required_literals
 
     source_text = str(item.get("source_text") or "")
-    spoken = str(item.get("spoken_text") or "")
+    spoken = strip_pauses(str(item.get("spoken_text") or ""))          # ~pause800 directs the voice; the gates read only the words
     variant = str(item.get("variant_id") or "")
     start = int(item.get("start_ms") or 0)
     end = int(item.get("end_ms") or 0)

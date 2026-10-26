@@ -90,6 +90,10 @@ You work through tools and decide your own method. You are scored on:
    line stays weighted), keep the pauses they take for effect by ending the sentence there, keep the phrases they repeat repeated, and
    let the words they lean on (stressed_words) land at the end of a phrase or right after a pause. This shapes wording only: never
    lengthen a unit past its window for it, never invent a pause, and the meaning and plain wording above still come first.
+   The voice leaves only about half a second after a sentence. Where the sheet shows the speaker holding a pause of 600 ms or more
+   (pauses_inside), you may write ~pause900 (milliseconds, 200-2000) at the matching spot in your isiZulu: "...ngentela yethu. ~pause900 Uma
+   uya esitolo...". It is never spoken, it is a silence of that length that counts toward the unit's duration like any other part, and
+   it is also the cheapest way to fill a window honestly. Use it only for pauses the speaker really takes, at most two per unit.
 
 Tools give you real measurements. Azure TTS timing is not predictable from word counts, and with no speed
 control you must get the wording right. The scorer re-measures your final text with the same function, so

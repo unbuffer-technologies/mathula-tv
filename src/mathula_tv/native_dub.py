@@ -8939,13 +8939,19 @@ def _synthesize_group(
         if part["type"] == "break":
             typed_parts.append(BreakPart(int(part["duration_ms"])))
         else:
+            from .delivery import split_pauses, strip_pauses
+
             text = str(part["text"])
-            ready = _native_dub_tts_ready_parts(text, job_root=job_root, voice=selected_voice)
-            if isinstance(ready, str):
-                typed_parts.append(TextPart(ready))
-            else:
-                typed_parts.extend(ready)
-            plain_text.append(text)
+            for piece in split_pauses(text):                      # ~pause800: a held pause the agent asked for (see delivery)
+                if isinstance(piece, int):
+                    typed_parts.append(BreakPart(piece))
+                    continue
+                ready = _native_dub_tts_ready_parts(piece, job_root=job_root, voice=selected_voice)
+                if isinstance(ready, str):
+                    typed_parts.append(TextPart(ready))
+                else:
+                    typed_parts.extend(ready)
+            plain_text.append(strip_pauses(text))
     prosody = voice_info.get("base_prosody") if isinstance(voice_info.get("base_prosody"), Mapping) else {}
     # Rate is always exactly zero for this experimental architecture. Stable
     # pitch/volume persona is retained because it does not time-compress speech.
