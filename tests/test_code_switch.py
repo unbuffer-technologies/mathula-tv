@@ -190,3 +190,9 @@ def test_youtube_captions_are_evidence_for_a_stretch_but_never_what_selects_one(
     assert doc["stretches"][0]["youtube_reading"] == "imali yethu siyayibhadala through tax"
     assert provider.calls[0]["payload"]["stretch"]["youtube_caption_reading"] == "imali yethu siyayibhadala through tax"
     assert "YouTube" in provider.calls[0]["system_prompt"]
+
+def test_candidates_are_spoken_as_plain_words_without_sentence_punctuation():
+    assert cs.speakable("What is our job?") == "What is our job"
+    assert cs.speakable("Nale yabantwana, siyayinyusa!") == "Nale yabantwana siyayinyusa"
+    assert cs.speakable("ANC ayinamali… ANC ayibhadali") == "ANC ayinamali ANC ayibhadali"
+    assert cs.speakable("i-grant") == "i-grant"                                          # hyphens inside a word stay

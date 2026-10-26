@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 SCHEMA_VERSION = "mathula-code-switch-evidence-v1"
-EVIDENCE_VERSION = 5              # bump when what the model is given or asked changes: cached evidence is then rebuilt
+EVIDENCE_VERSION = 6              # bump when what the model is given or asked changes: cached evidence is then rebuilt
 FILE = "code_switch_evidence.json"
 MIN_DISAGREEMENT = 0.5            # how differently the English and isiZulu recognisers read a stretch (0 = the same words, 1 = nothing shared)
 MAX_STRETCHES = 15
@@ -138,6 +138,11 @@ def topic_memory(segments: Sequence[Mapping[str, Any]], before_s: float, probe: 
     return [text for _, _, text in sorted(best, key=lambda s: s[1])]
 
 
+def speakable(spelling: str) -> str:
+    """The spelling as plain words for the voice: sentence punctuation next to the end-of-text bookmark makes the voice drop the bookmark."""
+    return re.sub(r"\s+", " ", re.sub(r"[?!.,;:â€¦â€”â€“]+", " ", str(spelling))).strip()
+
+
 def _propose_schema() -> dict[str, Any]:
     word = {"type": "object", "additionalProperties": False, "required": ["text", "language"],
             "properties": {"text": {"type": "string"}, "language": {"type": "string", "enum": list(LANGUAGES)}}}
@@ -196,7 +201,7 @@ def solve_stretch(
         else:
             for attempt in (1, 2):                 # one retry: a throttled or dropped call is the usual reason
                 try:
-                    closeness, untested = align(list(source_phones), speak(candidate["spelling_for_sounds"]))["closeness"], ""
+                    closeness, untested = align(list(source_phones), speak(speakable(candidate["spelling_for_sounds"])))["closeness"], ""
                     break
                 except Exception as exc:
                     untested = f"{type(exc).__name__}: {str(exc)[:80]}"
