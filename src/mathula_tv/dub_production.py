@@ -122,13 +122,9 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
     except Exception as exc:
         progress(f"[prepare] source check skipped: {type(exc).__name__}: {str(exc)[:200]}")
     try:        # what the speaker really said where they switch language and the English transcript is nonsense (see code_switch)
-        from . import campaign_brief
         from .code_switch import run as reconstruct_code_switch
 
-        # what the party is campaigning on: a prior for the reconstruction, never evidence of what was said (one cached research call per clip)
-        brief_path = campaign_brief.build(job_root, progress=progress)
-        platform = campaign_brief.as_text(campaign_brief.load(brief_path)) if brief_path else ""
-        reconstruct_code_switch(job_root, provider, speech_backend=stt, platform=platform, progress=progress)
+        reconstruct_code_switch(job_root, provider, speech_backend=stt, progress=progress)
     except Exception as exc:
         progress(f"[prepare] code-switch evidence skipped: {type(exc).__name__}: {str(exc)[:200]}")
     try:        # how each speaker delivers, measured from the audio (see delivery): the agent writes toward it, the renderer nudges the voice

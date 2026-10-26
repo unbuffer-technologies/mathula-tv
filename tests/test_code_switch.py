@@ -94,7 +94,7 @@ class Provider:
         return SimpleNamespace(data={"chosen": self.pick, "confidence": self.confidence, "reason": "r"})
 
 
-def test_build_solves_stretches_in_order_tests_candidates_against_the_audio_and_marks_clear_winners_resolved(tmp_path):
+def test_build_solves_stretches_in_order_tests_candidates_against_the_audio_and_marks_clear_winners_resolved(tmp_path, monkeypatch):
     native = _fixture(tmp_path)
     provider = Provider()
     spoken = []
@@ -106,7 +106,7 @@ def test_build_solves_stretches_in_order_tests_candidates_against_the_audio_and_
     path = cs.build(tmp_path, provider, zulu_reading=lambda a, b: "lethu siyayibadala thru taxt" if a >= 7 else "what is our job", afrikaans_reading=lambda a, b: "sy baddala",
                     phones=lambda a, b: [("j", 0.0, 0.1), ("a", 0.1, 0.2), ("b", 0.2, 0.3), ("a", 0.3, 0.4), ("n", 0.4, 0.5), ("t", 0.5, 0.6),
                                          ("a", 0.6, 0.7), ("n", 0.7, 0.8), ("a", 0.8, 0.9)],
-                    speak=speak, platform="EFF: double the grants", progress=lambda m: None)
+                    speak=speak, progress=lambda m: None)
     doc = cs.load(path)
     stretch = doc["stretches"][0]
     assert stretch["segment_id"] == "seg-1"
@@ -115,17 +115,18 @@ def test_build_solves_stretches_in_order_tests_candidates_against_the_audio_and_
     assert stretch["candidates"][0]["closeness"] - stretch["candidates"][1]["closeness"] >= cs.MIN_CLOSENESS_MARGIN
     assert spoken == ["yabantwana siyayinyusa", "yabantu"]                             # each candidate was spoken and tested
     first = provider.calls[0]["payload"]
-    assert "EFF: double the grants" in first["rally_story_and_party_platform"]          # the party platform is in the context
+    assert first["rally_story"].startswith("A rally in Mpumalanga.")                   # the story of the speech is in the context
     assert first["stretch"]["said_just_before"] == "What is our job"
     assert first["earlier_sentences_about_the_same_things"] == []                       # its own paragraph is given whole, not repeated as memory
     # cached: the same inputs do not call the model again
     provider.calls.clear()
     assert cs.build(tmp_path, provider, zulu_reading=lambda a, b: "", afrikaans_reading=lambda a, b: "", phones=lambda a, b: [], speak=speak,
-                    platform="EFF: double the grants", progress=lambda m: None) == path
+                    progress=lambda m: None) == path
     assert not provider.calls
-    # a different platform text rebuilds it
+    # a new version of the method rebuilds it
+    monkeypatch.setattr(cs, "EVIDENCE_VERSION", cs.EVIDENCE_VERSION + 1)
     assert cs.build(tmp_path, provider, zulu_reading=lambda a, b: "lethu siyayibadala thru taxt" if a >= 7 else "what is our job", afrikaans_reading=lambda a, b: "",
-                    phones=lambda a, b: [("j", 0.0, 0.1)], speak=speak, platform="something else", progress=lambda m: None) == path
+                    phones=lambda a, b: [("j", 0.0, 0.1)], speak=speak, progress=lambda m: None) == path
     assert provider.calls
     view = cs.for_agent(doc, [stretch["segment_id"]])
     assert view["stretches"][0]["status"] == "resolved" and "or_perhaps" not in view["stretches"][0]
@@ -135,7 +136,7 @@ def test_a_stretch_whose_best_sounding_candidate_is_not_clearly_best_is_uncertai
     _fixture(tmp_path)
     provider = Provider(pick=0, confidence="high")
     path = cs.build(tmp_path, provider, zulu_reading=lambda a, b: "lethu siyayibadala thru taxt" if a >= 7 else "what is our job", afrikaans_reading=lambda a, b: "",
-                    phones=lambda a, b: [("j", 0.0, 0.1), ("a", 0.1, 0.2)], speak=lambda text: ["j", "a"], platform="", progress=lambda m: None)
+                    phones=lambda a, b: [("j", 0.0, 0.1), ("a", 0.1, 0.2)], speak=lambda text: ["j", "a"], progress=lambda m: None)
     doc = cs.load(path)
     assert doc["stretches"][0]["status"] == "uncertain"                                 # both candidates sound identical: a tie
     review = cs.review_items(doc)
@@ -173,7 +174,7 @@ def test_candidates_the_voice_could_not_test_are_recorded_and_the_stretch_stays_
         raise RuntimeError("throttled")
 
     path = cs.build(tmp_path, Provider(), zulu_reading=lambda a, b: "lethu siyayibadala thru taxt" if a >= 7 else "what is our job",
-                    afrikaans_reading=lambda a, b: "", phones=lambda a, b: [("j", 0.0, 0.1), ("a", 0.1, 0.2)], speak=broken, platform="", progress=lambda m: None)
+                    afrikaans_reading=lambda a, b: "", phones=lambda a, b: [("j", 0.0, 0.1), ("a", 0.1, 0.2)], speak=broken, progress=lambda m: None)
     stretch = cs.load(path)["stretches"][0]
     assert stretch["status"] == "uncertain"                                             # sure of itself, but never checked against the audio
     assert all("throttled" in c["untested"] for c in stretch["candidates"])
@@ -183,7 +184,7 @@ def test_youtube_captions_are_evidence_for_a_stretch_but_never_what_selects_one(
     provider = Provider()
     # the isiZulu recogniser disagrees with the English one only for the second phrase; YouTube's (Zulu-model) captions garble BOTH
     path = cs.build(tmp_path, provider, zulu_reading=lambda a, b: "lethu siyayibadala thru taxt" if a >= 7 else "What is our job",
-                    afrikaans_reading=lambda a, b: "", phones=lambda a, b: [("j", 0.0, 0.1)], speak=lambda t: ["j"], platform="",
+                    afrikaans_reading=lambda a, b: "", phones=lambda a, b: [("j", 0.0, 0.1)], speak=lambda t: ["j"],
                     youtube_reading=lambda a, b: "imali yethu siyayibhadala through tax" if a >= 7 else "wat is awa jobe", progress=lambda m: None)
     doc = cs.load(path)
     assert [s["start_s"] for s in doc["stretches"]] == [7.0]                              # the first phrase was not dragged in by YouTube's garbling

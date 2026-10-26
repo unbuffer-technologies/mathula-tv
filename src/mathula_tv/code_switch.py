@@ -7,7 +7,7 @@ SAME audio and reconstructs the words, one stretch at a time, in time order (a r
 
   1. evidence: the English, isiZulu and Afrikaans readings, and the phones a language-independent model hears (sounds, not words);
   2. context that rolls forward: the stretches already resolved just before, earlier sentences of the speech about the same things, the
-     paragraph it sits in, and what the speaker's party is campaigning on (a prior only, see ``campaign_brief``);
+     paragraph it sits in;
   3. the model proposes a few genuinely different candidate readings;
   4. each candidate is SPOKEN by the isiZulu voice and the phones it produces are compared with the phones of the original audio -- a
      candidate that fits the argument but sounds nothing like the audio loses;
@@ -46,7 +46,7 @@ PROPOSE_PROMPT = (
     "the English one turns other languages into nonsense, the isiZulu ones read isiZulu well and other languages badly, YouTube's can be right "
     "on isiZulu where the others are wrong and wrong on English) and the raw phones a language-independent phone model heard (IPA, grouped "
     "where he pauses; noisy). You also get what he said just before and after, the paragraph it sits in, the stretches already resolved just "
-    "before it, earlier sentences of the speech about the same things, and what his party is campaigning on. The argument is strong evidence: "
+    "before it, and earlier sentences of the speech about the same things. The argument is strong evidence: "
     "a speaker builds patterns (the grant for the old, then the grant for the children; a figure, then the next figure), and every group of "
     "people or thing he has already named is a possible subject here. Propose 2 to 4 GENUINELY DIFFERENT candidate readings (different words "
     "or a different meaning, not spelling variants of one). For each give the words tagged by language, the spelling that would make a "
@@ -187,7 +187,7 @@ def solve_stretch(
         "afrikaans_recogniser": stretch["afrikaans"], "youtube_caption_reading": stretch.get("youtube", ""), "phones_grouped_by_pauses": stretch["phones"],
         "said_just_before": stretch.get("before", ""), "said_just_after": stretch.get("after", ""), "paragraph_it_sits_in": stretch.get("paragraph", "")}
     carried = [f"[{r['start_s']:.0f}s] {' '.join(p['text'] for p in r['reconstruction'])} = {r['english_meaning']} ({r['status']})" for r in resolved[-CARRIED_FORWARD:]]
-    context = {"rally_story_and_party_platform": rally, "already_resolved_just_before": carried, "earlier_sentences_about_the_same_things": list(memory)}
+    context = {"rally_story": rally, "already_resolved_just_before": carried, "earlier_sentences_about_the_same_things": list(memory)}
     proposed = provider.complete_json(
         operation="native_code_switch_candidates", system_prompt=PROPOSE_PROMPT, payload={"stretch": evidence, **context},
         schema=_propose_schema(), max_output_tokens=2500).data.get("candidates") or []
@@ -222,10 +222,10 @@ def solve_stretch(
 def build(
     job_root: Path, provider: Any, *, zulu_reading: Callable[[float, float], str], afrikaans_reading: Callable[[float, float], str],
     phones: Callable[[float, float], list[tuple[str, float, float]]], speak: Callable[[str], list[str]] | None = None,
-    platform: str = "", youtube_reading: Callable[[float, float], str] | None = None, progress: Callable[[str], None] = print,
+    youtube_reading: Callable[[float, float], str] | None = None, progress: Callable[[str], None] = print,
 ) -> Path | None:
     """Write ``native_dub/code_switch_evidence.json`` for a job.  The readers take (start_s, end_s) of the job's analysis audio;
-    ``speak(text)`` returns the phones the isiZulu voice produces for a text; ``platform`` is the party's current campaign as text."""
+    ``speak(text)`` returns the phones the isiZulu voice produces for a text."""
     import hashlib
     from concurrent.futures import ThreadPoolExecutor
 
@@ -236,8 +236,8 @@ def build(
         return None
     corrections_path = native / "source_corrections.json"
     unresolved = (json.loads(corrections_path.read_text(encoding="utf-8")).get("unresolved") or []) if corrections_path.is_file() else []
-    # the cache key: the transcript, the missed-speech stretches to reconstruct, the platform text and the version of this method
-    sha = hashlib.sha256(pass1_path.read_bytes() + json.dumps([EVIDENCE_VERSION, platform, youtube_reading is not None, [[i.get("gap_start_s"), i.get("gap_end_s")] for i in unresolved]]).encode()).hexdigest()
+    # the cache key: the transcript, the missed-speech stretches to reconstruct and the version of this method
+    sha = hashlib.sha256(pass1_path.read_bytes() + json.dumps([EVIDENCE_VERSION, youtube_reading is not None, [[i.get("gap_start_s"), i.get("gap_end_s")] for i in unresolved]]).encode()).hexdigest()
     target = native / FILE
     if target.is_file():
         try:
@@ -270,7 +270,7 @@ def build(
         data = json.loads(ledger_path.read_text(encoding="utf-8"))
         ledger = data.get("context_ledger", data)
     beats = [str(b.get("text") or b.get("summary") or b) if isinstance(b, Mapping) else str(b) for b in ledger.get("story_beats") or []]
-    rally = "\n".join(part for part in (" ".join([str(ledger.get("summary") or ""), *beats])[:1800], platform[:2200]) if part)
+    rally = " ".join([str(ledger.get("summary") or ""), *beats])[:1800]
     found: list[dict[str, Any]] = []
     for stretch in chosen:
         stretch["afrikaans"] = afrikaans_reading(stretch["start_s"], stretch["end_s"])
@@ -349,7 +349,7 @@ def review_items(doc: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     return items
 
 
-def run(job_root: Path, provider: Any, *, speech_backend: Any, gop: Any = None, platform: str = "", progress: Callable[[str], None] = print) -> Path | None:
+def run(job_root: Path, provider: Any, *, speech_backend: Any, gop: Any = None, progress: Callable[[str], None] = print) -> Path | None:
     """``build`` with the real recognisers: Azure speech for the isiZulu and Afrikaans readings, the wav2vec2 phone model for the sounds,
     and the isiZulu voice (spoken through the pronunciation lab) to test each candidate against the audio."""
     import os
@@ -412,7 +412,7 @@ def run(job_root: Path, provider: Any, *, speech_backend: Any, gop: Any = None, 
     from . import youtube_captions
 
     path = build(job_root, provider, zulu_reading=reading("zu-ZA"), afrikaans_reading=reading("af-ZA"), phones=sounds, speak=speak,
-                 platform=platform, youtube_reading=youtube_captions.reading(job_root), progress=progress)
+                 youtube_reading=youtube_captions.reading(job_root), progress=progress)
     if path:
         add_missed_speech_to_corrections(job_root, progress)           # every run: the source check rewrites its corrections file each time
     return path
