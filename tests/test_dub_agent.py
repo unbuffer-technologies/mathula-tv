@@ -535,3 +535,42 @@ def test_a_repair_that_already_meets_the_bar_says_so_and_asks_for_no_changes(tmp
     client = ScriptedClient([_reply(content="nothing to change")])
     summary = run_agent(client, workbench, clip_id="c1", run_id="r", tts_budget=50, seed_items=[{"item_id": "u1"}])
     assert "meets the bar" in client.seen[0][1]["content"] and summary["stop_reason"] == "agent_finished"
+
+
+class PendingWorkbench(StubWorkbench):
+    """A workbench whose pronunciation lab has not been used yet."""
+
+    checked = False
+
+    def pronunciation_check_pending(self):
+        return not self.checked
+
+    def list_foreign_words(self):
+        self.checked = True
+        return {"words": []}
+
+
+def test_an_agent_that_never_looked_at_pronunciation_is_reminded_once_before_it_may_finish(tmp_path):
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),                                                        # reminded here, not finished
+        _reply(calls=[_call("c", "list_foreign_words", {})]),
+        _reply(content="done"),
+    ])
+    summary = run_agent(client, PendingWorkbench(tmp_path), clip_id="c1", run_id="r")
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5
+    assert summary["tool_calls"].get("list_foreign_words") == 1
+    assert any("not looked at the English words" in str(m.get("content")) for m in client.seen[3] if m["role"] == "user")
+
+
+def test_the_pronunciation_reminder_is_bounded_to_one(tmp_path):
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),
+        _reply(content="still done"),                                                   # ignores the reminder: finishes anyway
+    ])
+    summary = run_agent(client, PendingWorkbench(tmp_path), clip_id="c1", run_id="r")
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 4
+    assert "list_foreign_words" not in summary["tool_calls"]

@@ -599,6 +599,12 @@ def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) ->
     return note
 
 
+PRONUNCIATION_REMINDER = (
+    "Before you finish: you have not looked at the English words your Zulu keeps. Call list_foreign_words, and for each word the voice may "
+    "be getting wrong use try_pronunciation, then use_pronunciation for a spelling that an English listener writes as the word. "
+    "If a unit's words change, re-measure and re-submit it. Then finish.")
+
+
 def run_agent(client: ChatClient, workbench: Workbench, **kwargs: Any) -> dict[str, Any]:
     """Run the agent (see ``_run_agent``), then remove this run's scratch TTS audio. Records (submission, scorecard, trace) stay.
 
@@ -657,6 +663,7 @@ def _run_agent(
     tool_counts: dict[str, int] = {}
     stop_reason = "max_turns"
     nudged = False
+    pronunciation_reminded = False
     pushbacks = 0
     unmet: list[str] = []
     turn = 0
@@ -696,6 +703,15 @@ def _run_agent(
             if not accepted():
                 stop_reason = "finished_without_submission"
                 break
+            # The pronunciation lab is optional in the prompt, so an agent can finish without ever looking at the English words it kept
+            # (prod-19 did, and shipped "Science" for the voice to read with Zulu letters).  One reminder, once, before it is allowed to finish.
+            pending = getattr(workbench, "pronunciation_check_pending", None)
+            if (callable(pending) and pending() and not pronunciation_reminded and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens):
+                pronunciation_reminded = True
+                text = PRONUNCIATION_REMINDER
+                messages.append({"role": "user", "content": text})
+                trace.log("pronunciation_reminder", turn=turn, text=text)
+                continue
             # The agent says it is done. The harness checks that against its own score instead of
             # taking its word for it -- bounded, and only while budget remains to act on it.
             unmet = unmet_targets(getattr(workbench, "last_submit", None), max_dead_air_pct=max_dead_air_pct)

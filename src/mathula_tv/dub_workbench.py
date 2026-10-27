@@ -125,6 +125,7 @@ class Workbench:
         self.source_corrections: list[dict[str, Any]] = []
         self.glossary_changes: list[dict[str, str]] = []
         self._pronunciation_lab: Any = None
+        self.foreign_words_listed = False                       # whether the agent has looked at the English words its Zulu keeps
         self.pronunciation_choices: list[dict[str, Any]] = []   # spellings the agent chose with the lab, for the report
         # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
         # keep fitting. A submission that breaks one is rejected, so fixing one unit can never silently
@@ -308,8 +309,13 @@ class Workbench:
         known -= failing_readings(self._lab(), saved)          # a saved reading an English listener does not understand is back on the list
         return known
 
+    def pronunciation_check_pending(self) -> bool:
+        """True while the agent has a pronunciation lab it has not used: the harness reminds it once before it may finish."""
+        return not self.foreign_words_listed and hasattr(self, "list_foreign_words")
+
     def list_foreign_words(self) -> dict[str, Any]:
         """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
+        self.foreign_words_listed = True
         from .pronunciation_lab import MAX_TRIES_PER_CLIP, candidate_words
         from .pronunciation_search import looks_isizulu
 
