@@ -110,7 +110,7 @@ def _stem(word: str) -> str:
 
 
 def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, Any]], *, looks_isizulu: Callable[[str], bool],
-                    exclude: set[str] = frozenset(), limit: int = 16, named: Sequence[Mapping[str, str]] = ()) -> list[dict[str, Any]]:
+                    exclude: set[str] = frozenset(), limit: int = 30, named: Sequence[Mapping[str, str]] = ()) -> list[dict[str, Any]]:
     """English words that the Zulu text keeps and that the speaker says in the source audio.
 
     A token counts when its stem (after any isiZulu prefix glued on, with a hyphen or straight onto a capital: "weScience") is a word of the
@@ -152,7 +152,25 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
             found[written] = {"word": written, "occurrences_in_dub": count, "speaker_says": spoken[stem]["as_spoken"],
                               "times_the_speaker_says_it": spoken[stem]["count"],
                               "note": "a Zulu prefix is glued on: the speaker says the English word as it is" if written.casefold() != english.casefold() else ""}
-    return sorted(found.values(), key=lambda e: (-e["occurrences_in_dub"], e["word"]))[:limit]
+    return _one_entry_per_word(found.values())[:limit]
+
+
+def _one_entry_per_word(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The same English word written several ways ("benefit", "ama-benefit", "inama-benefit") is one thing to check, not three: the
+    lab compares the speaker's word with the voice's, whichever prefix the Zulu put on it.  The most common form leads."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        groups.setdefault(_stem(entry["speaker_says"]), []).append(entry)
+    merged = []
+    for group in groups.values():
+        group.sort(key=lambda e: (-e["occurrences_in_dub"], e["word"]))
+        lead = dict(group[0])
+        lead["occurrences_in_dub"] = sum(e["occurrences_in_dub"] for e in group)
+        if len(group) > 1:
+            lead["also_written"] = [e["word"] for e in group[1:]]
+        lead["note"] = next((e["note"] for e in group if e["note"]), "")
+        merged.append(lead)
+    return sorted(merged, key=lambda e: (-e["occurrences_in_dub"], e["word"]))
 
 
 class PronunciationLab:

@@ -47,10 +47,12 @@ def test_a_prefix_glued_on_without_a_hyphen_is_still_found():
     words = [{"text": "science"}, {"text": "technology"}, {"text": "Fighters"}]
     texts = ["Kungani sidinga ungqongqoshe weScience and Technology? Phela iScience iyisifundo.", "NeTechnology iyisifundo."]
     found = candidate_words(texts, words, looks_isizulu=looks_isizulu)
-    by_word = {f["word"]: f for f in found}
-    assert {"weScience", "iScience", "NeTechnology", "Technology"} <= set(by_word)
-    assert "prefix" in by_word["iScience"]["note"] and by_word["iScience"]["speaker_says"] == "science"
-    assert "prefix" not in by_word["Technology"]["note"]                                  # not glued: nothing to say about a prefix
+    assert len(found) == 2                                                                # one entry per English word
+    science = next(f for f in found if f["speaker_says"] == "science")
+    technology = next(f for f in found if f["speaker_says"] == "technology")
+    assert {science["word"], *science["also_written"]} == {"weScience", "iScience"} and science["occurrences_in_dub"] == 2
+    assert {technology["word"], *technology["also_written"]} == {"Technology", "NeTechnology"}
+    assert "prefix" in science["note"] and "prefix" in technology["note"]
     # a Zulu-shaped word with no glued prefix stays filtered out, even if the English transcript happens to contain it
     assert candidate_words(["Sinemali eningi"], [{"text": "emali"}, {"text": "malis"}], looks_isizulu=looks_isizulu) == []
     assert candidate_words(["imali"], [{"text": "imali"}], looks_isizulu=looks_isizulu) == []
@@ -169,4 +171,4 @@ def test_the_models_reading_of_the_zulu_finds_what_the_rules_cannot():
     # a word already given a reading, or that the rules found, is not listed twice
     assert candidate_words(["iScience"], words, looks_isizulu=looks_isizulu, named=named, exclude={"science"}) == []
     both = candidate_words(["weScience", "iScience"], words, looks_isizulu=looks_isizulu, named=named)
-    assert sorted(f["word"] for f in both) == ["iScience", "weScience"]
+    assert len(both) == 1 and both[0]["occurrences_in_dub"] == 2 and both[0]["speaker_says"] == "science"
