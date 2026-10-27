@@ -266,3 +266,15 @@ def test_reading_understood_asks_once_and_spends_no_try():
     lab_ = Lab({}, {})
     assert lab_.reading_understood("sick", "sik") is True and lab_.reading_understood("sick", "sik") is True
     assert Lab.asked == 1 and lab_.total_tries == 0
+
+
+def test_measured_sound_differences_are_shown_with_each_try_and_in_the_advice():
+    class Measured(ListenerLab):
+        def sound_differences(self, source, spelling):
+            return ["the voice's stop number 1 (b), against 2 of the speaker's occurrence(s): voicing starts 52 ms after the release against the speaker's 26"]                 if spelling == "Sains" else []
+
+    out = Measured({"Sains": ["s", "aɪ", "n", "s"]}, {"Sains": "Scenes."}).try_spellings("science", ["Sains"])
+    assert out["results"][0]["how_the_sounds_are_made_differently"][0].startswith("the voice's stop number 1")
+    assert "Measured in the closest ('Sains')" in out["advice"]
+    quiet = Measured({"Sayinsi": ["s", "aɪ", "iː", "n", "s"]}, {"Sayinsi": "Science."}).try_spellings("science", ["Sayinsi"])
+    assert "how_the_sounds_are_made_differently" not in quiet["results"][0]

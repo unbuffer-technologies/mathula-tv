@@ -79,10 +79,13 @@ You work through tools and decide your own method. You are scored on:
    ("english_listener_understands"). That is your main check: a spelling the listener writes as the word beats one that only matches sounds,
    and a spelling they write as something else ("Scenes" for "science") is wrong however close its sounds score. Learn from what they wrote:
    it tells you which sound to change.
-   Zulu spelling for English sounds: the plain letters b, p, t, k are Zulu's own soft or sharp sounds; the English sounds are written bh,
-   ph, th, kh ("benefit" is heard as "Bare feet", "bhenefit" as "benefit"; like ibhasi, iphepha, ikhompiyutha). Try the h-forms first for
-   an English word. The English listener is for ordinary English words only: South African names (Nkomazi, Malema, places, parties) are
-   not listed for you and the listener cannot judge them, so never respell a name by what it writes.
+   Two sounds can share a label: the recogniser says "b" for Zulu's soft plain b and for an English b. So each result may also carry
+   "how_the_sounds_are_made_differently", measured from both audios for the stops (p b t d k g): how sharp the release is, how long the
+   closure before it lasts, whether the vocal folds vibrate through the closure, how long until voicing starts after the release, and the
+   hiss after it. Zulu writes sounds that look alike in English with different letters (a plain letter and its h-form can differ in exactly
+   these ways), so read the measured difference, decide which letters would change that property, and confirm it with the English
+   listener. The listener is for ordinary English words only: South African names (Nkomazi, Malema, places, parties) are not listed for
+   you and it cannot judge them, so never respell a name by what it writes.
    Read each difference as the letters to change, and leave the parts that already match alone. Two spellings that make the same sounds
    are one idea (the result says so). A word whose closest spelling is still under about 0.85 deserves the rest of its tries on spellings that
    change the named sounds ("speaker k s, voice tʃ": write the k and the s so the voice keeps both) before you settle; stopping after one call
@@ -217,7 +220,7 @@ TOOL_SPECS = [
     _tool("try_pronunciation", "Hear what the Zulu voice does with up to 3 spellings of an English word. For each spelling it returns the sounds "
           "the voice made, the speaker's own sounds for the word (decoded from the source audio), how close they are (0-1) and what differs "
           "(\"speaker ɔɪ, voice o\", \"the voice leaves out d\"), what an English listener writes for the voice's audio (english_hears), "
-          "plus advice on what to change next. Use the differences to choose "
+          "how its stops are made differently from the speaker's (release, closure, voicing), plus advice on what to change next. Use the differences to choose "
           "your next spelling. A try is budgeted "
           "(5 per word, 15 per clip).",
           {"word": {"type": "string", "description": "the word as written in your Zulu, e.g. MaFighter or medical"},

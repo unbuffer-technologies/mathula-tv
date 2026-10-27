@@ -202,6 +202,8 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
     if len(distinct) < len(tried):
         parts.append(f"{len(tried)} spellings gave only {len(distinct)} different sound(s): spellings that sound the same count as one idea, "
                      "so change the letters behind the differences, not the letters around them.")
+    if best.get("how_the_sounds_are_made_differently"):
+        parts.append(f"Measured in the closest ({best['spelling']!r}): " + " | ".join(best["how_the_sounds_are_made_differently"]) + ".")
     if not understood and best.get("differences"):
         parts.append(f"Still different in the closest ({best['spelling']!r}, {best['closeness']}): " + "; ".join(best["differences"]) + ".")
     if not understood and min(left_word, left_clip) > 0:
@@ -282,7 +284,8 @@ class PronunciationLab:
             heard = heard_word(self.job_root / "audio" / "analysis_mono.wav", self.transcript, re.sub(r"[^A-Za-z']", "", spoken_form), self.gop,
                                self.work_dir / "source", limit=4)
             self._source_cache[stem] = ({"found": True, "phones": heard["phones"], "occurrences": len(heard["spans"]), "spoken_form": spoken_form,
-                                         "each_occurrence": [" ".join(d) for d in heard["decoded"]]} if heard else {"found": False, "phones": []})
+                                         "each_occurrence": [" ".join(d) for d in heard["decoded"]],
+                                         "_timed": heard.get("timed"), "_clips": heard.get("clips")} if heard else {"found": False, "phones": []})
         return self._source_cache[stem]
 
     def _audio_for(self, spelling: str) -> Path:
@@ -309,6 +312,23 @@ class PronunciationLab:
             heard = self.english_hears(spelling)
             self._reading_checks[key] = None if heard is None else understood_as(heard, word)
         return self._reading_checks[key]
+
+    def sound_differences(self, source: Mapping[str, Any], spelling: str) -> list[str]:
+        """How the stops of the voice's word are made differently from the speaker's, measured from both audios (release, closure, vocal-fold
+        vibration, voicing delay, hiss).  The phone recogniser gives two different sounds the same label; these measures do not."""
+        from . import phone_acoustics as pa
+
+        timed, clips = source.get("_timed"), source.get("_clips")
+        audio = self._voice_audio.get(spelling)
+        if not timed or not clips or audio is None:
+            return []
+        try:
+            if "_speaker_features" not in source:
+                source["_speaker_features"] = [pa.timed_features(pa.load(Path(clip)), occurrence) for clip, occurrence in zip(clips, timed) if occurrence]
+            voice = pa.timed_features(pa.load(Path(audio)), self.gop.decode_timed(audio))
+            return pa.differences(source["_speaker_features"], voice)
+        except Exception:                                       # a measuring failure leaves out the extra information, never the try
+            return []
 
     def english_hears(self, spelling: str) -> str | None:
         """What an English listener (Azure speech-to-text, en-ZA) writes for the voice saying ``spelling`` alone; None when it cannot be asked.
@@ -351,6 +371,9 @@ class PronunciationLab:
             heard = self.voice_reading(spelling)
             comparison = align(source["phones"], heard)
             record = {"spelling": spelling, "voice_sounds": " ".join(heard), **comparison}
+            notes = self.sound_differences(source, spelling)
+            if notes:
+                record["how_the_sounds_are_made_differently"] = notes
             listener = self.english_hears(spelling)
             if listener is not None:
                 record["english_hears"] = listener or "(nothing)"
