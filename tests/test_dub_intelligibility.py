@@ -33,3 +33,38 @@ def test_a_misheard_word_is_not_a_dropped_word():
 
 def test_nothing_is_reported_at_the_edges_of_a_unit_where_there_is_no_gap_to_measure():
     assert dropped_words("Sawubona bantu", heard(("bantu", 2.0, 2.5))) == []
+
+
+def test_check_run_transcribes_units_side_by_side_and_keeps_their_order(tmp_path, monkeypatch):
+    import json
+    import threading
+    import time
+
+    from mathula_tv import dub_intelligibility as di
+
+    audio = tmp_path / "render" / "native_dub" / "audio" / "phrases"
+    audio.mkdir(parents=True)
+    groups = []
+    for index, unit in enumerate(["u1", "u2", "u3", "u4"]):
+        (audio / f"{unit}.wav").write_bytes(b"RIFF")
+        groups.append({"group_id": unit, "speaker_id": "S0", "start_ms": index * 1000, "spoken_text": "Sawubona mhlaba"})
+    (tmp_path / "scorecard.json").write_text(json.dumps({"groups": groups}), encoding="utf-8")
+    monkeypatch.setattr("mathula_tv.number_check.check_numbers", lambda run_dir: [])
+
+    lock, state = threading.Lock(), {"now": 0, "peak": 0}
+
+    class SlowBackend:
+        def transcribe(self, wav, locale):
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+            time.sleep(0.3)
+            with lock:
+                state["now"] -= 1
+            return {"words": heard(("Sawubona", 0.0, 0.5), ("mhlaba", 0.6, 1.1))}
+
+    started = time.monotonic()
+    report = di.check_run(tmp_path, SlowBackend(), lambda raw: raw)
+    assert time.monotonic() - started < 0.9           # four 0.3 s calls overlapped, not 1.2 s one after another
+    assert state["peak"] > 1
+    assert report["units_checked"] == 4 and report["dropped_total"] == 0

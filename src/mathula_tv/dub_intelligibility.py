@@ -10,6 +10,7 @@ It is a check, not a repair: it reports where, and never changes the dub or bloc
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -47,23 +48,32 @@ def dropped_words(spoken_text: str, heard: Sequence[Mapping[str, Any]], *, min_g
     return found
 
 
+CHECK_WORKERS = 6
+
+
 def check_run(run_dir: Path, backend: Any, normalize: Any, *, locale: str = "zu-ZA") -> dict[str, Any]:
     """Check every unit of a rendered run; writes ``intelligibility.json`` beside the scorecard."""
     run_dir = Path(run_dir)
     scorecard = json.loads((run_dir / "scorecard.json").read_text(encoding="utf-8"))
     audio_dir = run_dir / "render" / "native_dub" / "audio" / "phrases"
-    units: list[dict[str, Any]] = []
+    checks = []
     for group in scorecard.get("groups") or []:
-        unit = str(group.get("group_id"))
-        wav = audio_dir / f"{unit}.wav"
-        if not wav.is_file() or not group.get("spoken_text"):
-            continue
+        wav = audio_dir / f"{group.get('group_id')}.wav"
+        if wav.is_file() and group.get("spoken_text"):
+            checks.append((group, wav))
+
+    def check(pair: tuple[dict[str, Any], Path]) -> dict[str, Any]:
+        group, wav = pair
         heard = normalize(backend.transcribe(wav, locale=locale)).get("words") or []
         offset = float(group.get("start_ms") or 0) / 1000
         dropped = dropped_words(str(group["spoken_text"]), heard)
         for item in dropped:
             item["at_video_s"] = round(offset + item["at_s"], 2)
-        units.append({"unit": unit, "speaker": group.get("speaker_id"), "dropped": dropped})
+        return {"unit": str(group.get("group_id")), "speaker": group.get("speaker_id"), "dropped": dropped}
+
+    # The units are independent requests to the speech service: side by side (the order of the units is kept), not one after another.
+    with ThreadPoolExecutor(max_workers=max(1, min(CHECK_WORKERS, len(checks)))) as pool:
+        units: list[dict[str, Any]] = list(pool.map(check, checks))
     try:        # quantities that went to the voice digit by digit (see number_check)
         from .number_check import check_numbers
 
