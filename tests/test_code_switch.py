@@ -280,3 +280,30 @@ def test_the_agent_is_told_to_decide_an_uncertain_stretch_and_is_given_the_reaso
     assert "never drop an uncertain stretch" in out["note"].lower() and "do not rely" not in out["note"].lower()
     row = out["stretches"][0]
     assert row["or_perhaps"] == "Confuse" and row["why"].startswith("The recognisers")
+
+
+def test_a_chooser_that_calls_the_stretch_a_false_start_makes_it_abandoned_not_uncertain():
+    class FalseStart(Provider):
+        def complete_json(self, **kwargs):
+            out = super().complete_json(**kwargs)
+            if kwargs["operation"] == "native_code_switch_choice":
+                out.data["speech_kind"] = "false_start"
+            return out
+
+    stretch = {"start_s": 420.8, "end_s": 422.4, "english": "Rupert is", "isizulu": "Rubai.", "afrikaans": "", "youtube": "water", "phones": [],
+               "before": "", "after": "We don't care about Rupert.", "paragraph": ""}
+    solved = cs.solve_stretch(FalseStart(), stretch, rally="", resolved=[], memory=[], source_phones=[], speak=None)
+    assert solved["status"] == "abandoned"
+    assert "speech_kind" in cs._choose_schema(2)["required"] and "false_start" in cs.CHOOSE_PROMPT
+    doc = {"stretches": [{"start_s": 420.8, "end_s": 422.4, "english_reading": "Rupert is", "isizulu_reading": "Rubai.", "status": "abandoned",
+                          "candidates": [{"words": "Rupert is", "english_meaning": "Rupert is", "closeness": 0.85}]}]}
+    assert cs.review_items(doc) == []                                                          # nothing for a person to settle
+    assert cs.reassess(doc) == 0 and doc["stretches"][0]["status"] == "abandoned"             # and re-deciding leaves it alone
+
+
+def test_an_abandoned_stretch_reaches_the_agent_as_something_not_to_dub():
+    doc = {"schema_version": cs.SCHEMA_VERSION, "stretches": [
+        {"segment_id": "s1", "start_s": 420.8, "english_reading": "Rupert is", "reconstruction": [{"text": "Rupert", "language": "english"}, {"text": "is", "language": "english"}],
+         "english_meaning": "Rupert is-", "status": "abandoned"}]}
+    out = cs.for_agent(doc)
+    assert "false start" in out["note"] and out["stretches"][0]["status"] == "abandoned"

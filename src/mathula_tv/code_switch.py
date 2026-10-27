@@ -61,7 +61,11 @@ CHOOSE_PROMPT = (
     "closer; differences of a few hundredths are small). Weigh the sounds first, then how well each continues the argument. Pick the candidate "
     "you believe he said, or -1 if none fits both the sounds and the argument. Say how sure you are: 'high' only when the choice is clear on "
     "both counts. Also list every OTHER candidate that says essentially the same thing as your choice (differing only in tense, spelling or "
-    "wording, not in who or what or how much): the sounds cannot tell such candidates apart, so they do not count as rivals."
+    "wording, not in who or what or how much): the sounds cannot tell such candidates apart, so they do not count as rivals. Finally say what "
+    "kind of stretch it is. A rally speech is off script: a speaker often breaks a sentence off and starts again (\"Rupert is -- We don't care "
+    "about Rupert\"), repeats a start, or changes his mind half way. If this stretch is such a fragment, because what follows begins afresh "
+    "or says something else, answer speech_kind 'false_start': it is a disfluency, not a message to reconstruct, and the sentence he goes on "
+    "to say is what he means. Otherwise answer 'speech'."
 )
 
 
@@ -155,8 +159,9 @@ def _propose_schema() -> dict[str, Any]:
 
 
 def _choose_schema(count: int) -> dict[str, Any]:
-    return {"type": "object", "additionalProperties": False, "required": ["chosen", "confidence", "reason", "same_message_as_chosen"],
-            "properties": {"chosen": {"type": "integer", "enum": list(range(-1, count))},
+    return {"type": "object", "additionalProperties": False, "required": ["chosen", "confidence", "reason", "same_message_as_chosen", "speech_kind"],
+            "properties": {"speech_kind": {"type": "string", "enum": ["speech", "false_start"]},
+                           "chosen": {"type": "integer", "enum": list(range(-1, count))},
                            "confidence": {"type": "string", "enum": ["high", "medium", "low"]}, "reason": {"type": "string"},
                            "same_message_as_chosen": {"type": "array", "items": {"type": "integer", "enum": list(range(count))}}}}
 
@@ -242,7 +247,7 @@ def reassess(doc: dict[str, Any]) -> int:
     candidates, the Afrikaans reading), so it is never downgraded here."""
     changed = 0
     for stretch in doc.get("stretches") or []:
-        if stretch.get("status") == "resolved":
+        if stretch.get("status") in ("resolved", "abandoned"):
             continue
         reconstruction, candidates = stretch.get("reconstruction") or [], stretch.get("candidates") or []
         if not reconstruction or not candidates:
@@ -298,6 +303,8 @@ def solve_stretch(
         operation="native_code_switch_choice", system_prompt=CHOOSE_PROMPT, payload={"stretch": evidence, "candidates": shown, **context},
         schema=_choose_schema(len(candidates)), max_output_tokens=800).data
     chosen, confidence = int(choice["chosen"]), str(choice["confidence"])
+    if choice.get("speech_kind") == "false_start":                 # a sentence he broke off: nothing to settle, nothing to dub
+        return {"status": "abandoned", "candidates": candidates, "chosen": chosen, "confidence": confidence, "reason": str(choice.get("reason") or "")}
     agreed = chosen >= 0 and corroborated([w["text"] for w in candidates[chosen]["words"]], [stretch.get("youtube", ""), stretch.get("isizulu", ""), stretch.get("afrikaans", "")])
     english_agrees = chosen >= 0 and english_agrees_with(stretch.get("english", ""), [w["text"] for w in candidates[chosen]["words"]])
     return {"status": "resolved" if is_resolved(candidates, chosen, confidence, checked=speak is not None, agreed=agreed,
@@ -372,7 +379,7 @@ def build(
         owner = str(gap["segment_id"]) if gap else segment_for(segments, stretch["start_s"], stretch["end_s"])
         stretch["paragraph"] = texts.get(owner or "", "")[:900]
         probe = " ".join([stretch["english"], stretch["isizulu"], stretch["before"], stretch["after"], stretch["paragraph"]])
-        solved = solve_stretch(provider, stretch, rally=rally, resolved=[f for f in found if f["status"] != "none"],
+        solved = solve_stretch(provider, stretch, rally=rally, resolved=[f for f in found if f["status"] not in ("none", "abandoned")],
                                memory=topic_memory(segments, stretch["start_s"], probe, skip_segment=owner), source_phones=[p for p, _, _ in timed], speak=speak)
         pick = solved["candidates"][solved["chosen"]] if solved["chosen"] >= 0 and solved["candidates"] else None
         rivals = [c for c in solved["candidates"] if c is not pick]
@@ -380,7 +387,7 @@ def build(
             "segment_id": owner, "start_s": stretch["start_s"], "end_s": stretch["end_s"],
             "english_reading": stretch["english"], "isizulu_reading": stretch["isizulu"], "youtube_reading": stretch.get("youtube", ""), "disagreement": stretch["disagreement"],
             "reconstruction": pick["words"] if pick else [], "english_meaning": pick["english_meaning"] if pick else "",
-            "confidence": solved["confidence"], "status": solved["status"] if pick else "uncertain", "reason": solved["reason"],
+            "confidence": solved["confidence"], "status": solved["status"] if (pick or solved["status"] == "abandoned") else "uncertain", "reason": solved["reason"],
             "candidates": [{"english_meaning": c["english_meaning"], "words": " ".join(w["text"] for w in c["words"]), "closeness": c["closeness"],
                             **({"untested": c["untested"]} if c.get("untested") else {})}
                            for c in solved["candidates"]],
@@ -527,7 +534,9 @@ AGENT_NOTE = (
     "differ in meaning, choose the one the argument supports and say in approach_notes which you chose and why. Use the reconstruction to "
     "understand the MEANING of a garbled stretch; never translate the garbled English itself. Words tagged isizulu are his own isiZulu: keep "
     "them as isiZulu, in plain wording. Words tagged sepedi, sesotho, setswana, siswati or xitsonga are not understood by most isiZulu viewers: "
-    "say the meaning in plain isiZulu (a short greeting or slogan the audience knows may stay)."
+    "say the meaning in plain isiZulu (a short greeting or slogan the audience knows may stay). status 'abandoned' is a false start: rally "
+    "speech is off script and he breaks a sentence off and starts again (\"Rupert is -- We don't care about Rupert\"). Do not dub the fragment; "
+    "dub the sentence he goes on to say, and let the unit's window cover the pause."
 )
 
 
