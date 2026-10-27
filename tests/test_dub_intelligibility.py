@@ -68,3 +68,33 @@ def test_check_run_transcribes_units_side_by_side_and_keeps_their_order(tmp_path
     assert time.monotonic() - started < 0.9           # four 0.3 s calls overlapped, not 1.2 s one after another
     assert state["peak"] > 1
     assert report["units_checked"] == 4 and report["dropped_total"] == 0
+
+
+def test_a_word_the_whole_unit_pass_skipped_but_a_narrow_pass_hears_is_not_reported(tmp_path, monkeypatch):
+    import json
+    import subprocess
+
+    from mathula_tv import dub_intelligibility as di
+
+    audio = tmp_path / "render" / "native_dub" / "audio" / "phrases"
+    audio.mkdir(parents=True)
+    (audio / "u1.wav").write_bytes(b"RIFF")
+    spoken = "Sawubona mhlaba. Singumasipala. Uyini umsebenzi wethu."
+    (tmp_path / "scorecard.json").write_text(json.dumps({"groups": [{"group_id": "u1", "speaker_id": "S0", "start_ms": 0, "spoken_text": spoken}]}), encoding="utf-8")
+    monkeypatch.setattr("mathula_tv.number_check.check_numbers", lambda run_dir: [])
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)                        # the clip cut is not under test
+
+    whole = heard(("Sawubona", 0.0, 0.5), ("mhlaba", 0.6, 1.1), ("Uyini", 4.0, 4.4), ("umsebenzi", 4.5, 5.0), ("wethu", 5.1, 5.5))
+
+    class Backend:
+        def __init__(self, narrow):
+            self.narrow, self.calls = narrow, 0
+
+        def transcribe(self, wav, locale):
+            self.calls += 1
+            return {"words": whole if self.calls == 1 else self.narrow}
+
+    found = di.check_run(tmp_path, Backend(heard(("Singumasipala", 0.1, 0.9), ("uyini", 3.0, 3.4))), lambda raw: raw)
+    assert found["dropped_total"] == 0                                                       # it was spoken: the narrow pass hears it
+    still = di.check_run(tmp_path, Backend(heard(("uyini", 3.0, 3.4))), lambda raw: raw)
+    assert still["dropped_total"] == 1 and still["units"][0]["dropped"][0]["words"] == ["Singumasipala."]      # not heard either time: reported

@@ -49,6 +49,38 @@ def dropped_words(spoken_text: str, heard: Sequence[Mapping[str, Any]], *, min_g
 
 
 CHECK_WORKERS = 6
+RECHECK_MARGIN_S = 0.8                 # seconds of the unit either side of a flagged gap that are transcribed again
+
+
+def _letters(word: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(word).casefold())
+
+
+def _recheck(wav: Path, dropped: list[dict[str, Any]], backend: Any, normalize: Any, locale: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Transcribe only the stretch around each flagged gap.  Words that are heard there were spoken (the whole-unit pass skipped them): they are
+    not reported.  Words still not heard stay reported.  A failure to recheck leaves the item reported, as before."""
+    import subprocess
+    import tempfile
+    from difflib import SequenceMatcher
+
+    kept, cleared = [], []
+    with tempfile.TemporaryDirectory() as directory:
+        for index, item in enumerate(dropped):
+            start, end = max(0.0, float(item["at_s"]) - RECHECK_MARGIN_S), float(item["at_s"]) + float(item.get("gap_s") or 0) + RECHECK_MARGIN_S
+            clip = Path(directory) / f"gap{index}.wav"
+            try:
+                subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(wav), "-ac", "1", "-ar", "16000",
+                                str(clip)], check=True)
+                heard = {_letters(w.get("text", "")) for w in normalize(backend.transcribe(clip, locale=locale)).get("words") or []} - {""}
+            except Exception:
+                kept.append(item)
+                continue
+            missing = [w for w in item["words"] if not any(SequenceMatcher(None, _letters(w), h).ratio() >= 0.8 for h in heard)]
+            if missing:
+                kept.append({**item, "words": missing})
+            else:
+                cleared.append({"words": item["words"], "at_s": item["at_s"]})
+    return kept, cleared
 
 
 def check_run(run_dir: Path, backend: Any, normalize: Any, *, locale: str = "zu-ZA") -> dict[str, Any]:
@@ -67,9 +99,13 @@ def check_run(run_dir: Path, backend: Any, normalize: Any, *, locale: str = "zu-
         heard = normalize(backend.transcribe(wav, locale=locale)).get("words") or []
         offset = float(group.get("start_ms") or 0) / 1000
         dropped = dropped_words(str(group["spoken_text"]), heard)
+        spoken_after_all: list[dict[str, Any]] = []
+        if dropped:                  # one pass over a whole unit can skip a short phrase: listen again to just the stretch before reporting it
+            dropped, spoken_after_all = _recheck(wav, dropped, backend, normalize, locale)
         for item in dropped:
             item["at_video_s"] = round(offset + item["at_s"], 2)
-        return {"unit": str(group.get("group_id")), "speaker": group.get("speaker_id"), "dropped": dropped}
+        return {"unit": str(group.get("group_id")), "speaker": group.get("speaker_id"), "dropped": dropped,
+                **({"heard_on_rechecking": spoken_after_all} if spoken_after_all else {})}
 
     # The units are independent requests to the speech service: side by side (the order of the units is kept), not one after another.
     with ThreadPoolExecutor(max_workers=max(1, min(CHECK_WORKERS, len(checks)))) as pool:
