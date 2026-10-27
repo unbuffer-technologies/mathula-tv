@@ -228,3 +228,37 @@ def test_understood_as_ignores_spacing_case_punctuation_and_a_plural_s():
 
     assert understood_as("Correctional.", "correctional") and understood_as("Fighter", "Fighters") and understood_as("Science", "science")
     assert not understood_as("Scenes.", "science") and not understood_as("", "science")
+
+
+def test_saved_agent_readings_an_english_listener_rejects_go_back_on_the_list():
+    from mathula_tv.pronunciation_lab import failing_readings
+
+    class Checker:
+        def reading_understood(self, word, spelling):
+            return {("sick", "sick"): False, ("fund", "fund"): True, ("deputy", "dephuthi"): None}[(word, spelling)]
+
+    entries = [
+        {"display_text": "sick", "tts_text": "sick", "source": "agent", "kind": "english_code_switch"},
+        {"display_text": "fund", "tts_text": "fund", "source": "agent", "kind": "english_code_switch"},
+        {"display_text": "deputy", "tts_text": "dephuthi", "source": "agent", "kind": "english_code_switch"},          # could not be asked: fine
+        {"display_text": "Fighters", "tts_text": "Fayitas", "source": "person", "kind": "english_code_switch"},        # approved by ear: never re-checked
+        {"display_text": "hlu", "tts_text": "hluuu", "source": "repair", "kind": "other"},                              # not an English word
+        {"display_text": "old", "tts_text": "old", "source": "agent", "kind": "english_code_switch", "disabled": True},
+    ]
+    assert failing_readings(Checker(), entries) == {"sick"}
+
+
+def test_reading_understood_asks_once_and_spends_no_try():
+    class Lab(ListenerLab):
+        asked = 0
+
+        def _audio_for(self, spelling):
+            return None
+
+        def english_hears(self, spelling):
+            Lab.asked += 1
+            return "Sick."
+
+    lab_ = Lab({}, {})
+    assert lab_.reading_understood("sick", "sik") is True and lab_.reading_understood("sick", "sik") is True
+    assert Lab.asked == 1 and lab_.total_tries == 0

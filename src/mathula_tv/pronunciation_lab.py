@@ -213,6 +213,23 @@ def understood_as(heard: str, word: str) -> bool:
     return bool(word_letters) and (heard_letters == word_letters or heard_letters.rstrip("s") == word_letters.rstrip("s"))
 
 
+def failing_readings(lab: Any, entries: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Display texts (casefolded) of saved English-word readings that an English listener does not understand.
+
+    Only readings an agent chose or a repair made are re-checked: one a person approved by ear is not second-guessed, and a name or a Zulu
+    word is not an English word to listen for.  A reading that cannot be checked counts as fine.  The ones returned go back on the
+    agent's list, so a run corrects a bad earlier pick instead of trusting it for ever."""
+    failing: set[str] = set()
+    for entry in entries:
+        if entry.get("source") in ("agent",) and entry.get("kind") == "english_code_switch" and not entry.get("disabled"):
+            try:
+                if lab.reading_understood(str(entry["display_text"]), str(entry["tts_text"])) is False:
+                    failing.add(str(entry["display_text"]).casefold())
+            except Exception:
+                continue
+    return failing
+
+
 class PronunciationLab:
     """The sounds of a word as the speaker said it, and as the voice says a spelling. One instance per clip; models load on first use."""
 
@@ -221,6 +238,7 @@ class PronunciationLab:
         self._gop = gop
         self._stt = stt                                  # an Azure speech-to-text backend; made on first use when None
         self._voice_audio: dict[str, Path] = {}
+        self._reading_checks: dict[tuple[str, str], bool | None] = {}
         self._windows: Any = None
         self._transcript: list[Mapping[str, Any]] | None = None
         self.tries_per_word: dict[str, int] = {}
@@ -261,16 +279,30 @@ class PronunciationLab:
                                          "each_occurrence": [" ".join(d) for d in heard["decoded"]]} if heard else {"found": False, "phones": []})
         return self._source_cache[stem]
 
-    def voice_reading(self, spelling: str) -> list[str]:
-        """The sounds the Zulu voice produces for ``spelling``, decoded from its own audio with the same recogniser."""
+    def _audio_for(self, spelling: str) -> Path:
+        """The voice saying ``spelling`` alone, as rendered (no pitch change)."""
         from . import pronunciation_search as ps
 
         if self._windows is None:
             self._windows = ps.NameWindows(ps.bookmark_synthesizer(self.voice, self.key, self.region), lambda wav: (), self.work_dir / "voice")
         # the word alone, with nothing before or after it, so the neighbouring words' sounds do not leak into its window
-        audio = self._windows.audio(ps.Context(before="", after=".", pitch="+0%"), ps.Candidate(spelling))      # as rendered: no pitch change
-        self._voice_audio[spelling] = Path(audio)
-        return list(self.gop.decode(audio))
+        audio = Path(self._windows.audio(ps.Context(before="", after=".", pitch="+0%"), ps.Candidate(spelling)))
+        self._voice_audio[spelling] = audio
+        return audio
+
+    def voice_reading(self, spelling: str) -> list[str]:
+        """The sounds the Zulu voice produces for ``spelling``, decoded from its own audio with the same recogniser."""
+        return list(self.gop.decode(self._audio_for(spelling)))
+
+    def reading_understood(self, word: str, spelling: str) -> bool | None:
+        """Whether an English listener writes ``word`` when the voice says ``spelling``; None when that cannot be asked.  No sounds are decoded
+        and no try is spent: this re-checks a reading that was saved earlier."""
+        key = (word.casefold(), spelling)
+        if key not in self._reading_checks:
+            self._audio_for(spelling)
+            heard = self.english_hears(spelling)
+            self._reading_checks[key] = None if heard is None else understood_as(heard, word)
+        return self._reading_checks[key]
 
     def english_hears(self, spelling: str) -> str | None:
         """What an English listener (Azure speech-to-text, en-ZA) writes for the voice saying ``spelling`` alone; None when it cannot be asked.

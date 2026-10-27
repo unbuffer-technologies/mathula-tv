@@ -296,13 +296,16 @@ class Workbench:
 
     def _known_readings(self) -> set[str]:
         """Texts that already have a reading (the clip's lexicon and the shared memory): the lab does not need to look at them."""
+        from .pronunciation_lab import failing_readings
         from .pronunciation_memory import entries_for, memory_path
 
         known: set[str] = set()
         lexicon = Path(self.store.clip_dir(self._episode()["clip_id"])) / "native_dub" / "pronunciation_names.json"
         if lexicon.is_file():
             known |= {str(e["display_text"]).casefold() for e in read_json(lexicon).get("entries", [])}
-        known |= {str(e["display_text"]).casefold() for e in entries_for(memory_path(Path(self.store.root).parent), self._lab().voice)}
+        saved = entries_for(memory_path(Path(self.store.root).parent), self._lab().voice)
+        known |= {str(e["display_text"]).casefold() for e in saved}
+        known -= failing_readings(self._lab(), saved)          # a saved reading an English listener does not understand is back on the list
         return known
 
     def list_foreign_words(self) -> dict[str, Any]:
