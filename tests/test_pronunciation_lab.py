@@ -190,3 +190,41 @@ def test_advice_is_short_when_the_closest_spelling_is_close_enough():
     lab_ = FakeLab({"Fighters": ["f", "aɪ", "t", "ə", "z"]})
     out = lab_.try_spellings("Fighters", ["Fighters"])
     assert out["advice"].endswith("use it.")
+
+
+class ListenerLab(FakeLab):
+    """FakeLab where an English listener's answers are fixed."""
+
+    def __init__(self, voice_sounds, heard):
+        super().__init__(voice_sounds)
+        self._heard = heard
+
+    def source(self, word):
+        return {"found": True, "phones": ["s", "aɪ", "ə", "n", "s"], "occurrences": 2, "spoken_form": "science", "each_occurrence": []}
+
+    def english_hears(self, spelling):
+        return self._heard.get(spelling)
+
+
+def test_the_english_listener_leads_the_ranking_and_the_advice():
+    lab_ = ListenerLab({"Sains": ["s", "aɪ", "n", "s"], "Sayinsi": ["s", "aɪ", "iː", "n", "s"]}, {"Sains": "Scenes.", "Sayinsi": "Science."})
+    out = lab_.try_spellings("science", ["Sains", "Sayinsi"])
+    by_spelling = {r["spelling"]: r for r in out["results"]}
+    assert by_spelling["Sains"]["english_hears"] == "Scenes." and by_spelling["Sains"]["english_listener_understands"] is False
+    assert by_spelling["Sayinsi"]["english_listener_understands"] is True
+    assert out["closest_so_far"]["spelling"] == "Sayinsi"
+    assert "writes the word for 'Sayinsi'" in out["advice"] and "Scenes" in out["advice"]
+
+
+def test_nobody_understood_says_what_was_heard_and_a_listener_outage_changes_nothing():
+    none = ListenerLab({"Science": ["s", "k", "iː", "n", "ts"]}, {"Science": "Skins."}).try_spellings("science", ["Science"])
+    assert "No spelling is understood yet" in none["advice"] and "Skins" in none["advice"]
+    down = ListenerLab({"Sains": ["s", "aɪ", "n", "s"]}, {}).try_spellings("science", ["Sains"])          # english_hears -> None: could not ask
+    assert "english_hears" not in down["results"][0] and "closeness" in down["results"][0]
+
+
+def test_understood_as_ignores_spacing_case_punctuation_and_a_plural_s():
+    from mathula_tv.pronunciation_lab import understood_as
+
+    assert understood_as("Correctional.", "correctional") and understood_as("Fighter", "Fighters") and understood_as("Science", "science")
+    assert not understood_as("Scenes.", "science") and not understood_as("", "science")

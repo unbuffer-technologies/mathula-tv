@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -177,27 +178,49 @@ GOOD_ENOUGH = 0.85
 
 
 def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], left_word: int, left_clip: int) -> str:
-    """What to do next, from the tries so far.  It reads the differences; it adds no score and does not choose for the agent."""
-    if best["closeness"] >= GOOD_ENOUGH:
+    """What to do next, from the tries so far.  It reads what an English listener wrote and the differences; it adds no score and does not
+    choose for the agent."""
+    heard = {record["spelling"]: record["english_hears"] for record in tried.values() if record.get("english_hears") is not None}
+    understood = [record["spelling"] for record in tried.values() if record.get("english_listener_understands")]
+    parts = []
+    if heard:
+        shown = "; ".join(f"{spelling!r} -> {text!r}" for spelling, text in list(heard.items())[-4:])
+        if understood:
+            parts.append(f"An English listener writes the word for {', '.join(repr(x) for x in understood)}. What the listener wrote: {shown}. "
+                         "Use one of those; between them, the one whose sounds are closest.")
+        else:
+            parts.append(f"No spelling is understood yet. What an English listener wrote: {shown}. Change the sounds that make them hear the wrong word.")
+    elif best["closeness"] >= GOOD_ENOUGH:
         return f"{best['spelling']!r} is close to the speaker's sounds; use it."
     distinct = {record["voice_sounds"] for record in tried.values()}
-    parts = []
     if len(distinct) < len(tried):
         parts.append(f"{len(tried)} spellings gave only {len(distinct)} different sound(s): spellings that sound the same count as one idea, "
                      "so change the letters behind the differences, not the letters around them.")
-    if best.get("differences"):
+    if not understood and best.get("differences"):
         parts.append(f"Still different in the closest ({best['spelling']!r}, {best['closeness']}): " + "; ".join(best["differences"]) + ".")
-    if min(left_word, left_clip) > 0:
+    if not understood and min(left_word, left_clip) > 0:
         parts.append(f"{left_word} tries left for this word, {left_clip} in the clip: try spellings that change those sounds before settling.")
     return " ".join(parts)
+
+
+def _letters(text: str) -> str:
+    return re.sub(r"[^a-z]", "", str(text).casefold())
+
+
+def understood_as(heard: str, word: str) -> bool:
+    """Whether what an English listener wrote is the word (spacing, case, punctuation and a plural -s do not matter)."""
+    heard_letters, word_letters = _letters(heard), _letters(word)
+    return bool(word_letters) and (heard_letters == word_letters or heard_letters.rstrip("s") == word_letters.rstrip("s"))
 
 
 class PronunciationLab:
     """The sounds of a word as the speaker said it, and as the voice says a spelling. One instance per clip; models load on first use."""
 
-    def __init__(self, job_root: Path, *, voice: str, key: str, region: str, work_dir: Path, gop: Any = None) -> None:
+    def __init__(self, job_root: Path, *, voice: str, key: str, region: str, work_dir: Path, gop: Any = None, stt: Any = None) -> None:
         self.job_root, self.voice, self.key, self.region, self.work_dir = Path(job_root), voice, key, region, Path(work_dir)
         self._gop = gop
+        self._stt = stt                                  # an Azure speech-to-text backend; made on first use when None
+        self._voice_audio: dict[str, Path] = {}
         self._windows: Any = None
         self._transcript: list[Mapping[str, Any]] | None = None
         self.tries_per_word: dict[str, int] = {}
@@ -234,7 +257,7 @@ class PronunciationLab:
             spoken_form = spoken_stems.get(stem, word)
             heard = heard_word(self.job_root / "audio" / "analysis_mono.wav", self.transcript, re.sub(r"[^A-Za-z']", "", spoken_form), self.gop,
                                self.work_dir / "source", limit=4)
-            self._source_cache[stem] = ({"found": True, "phones": heard["phones"], "occurrences": len(heard["spans"]),
+            self._source_cache[stem] = ({"found": True, "phones": heard["phones"], "occurrences": len(heard["spans"]), "spoken_form": spoken_form,
                                          "each_occurrence": [" ".join(d) for d in heard["decoded"]]} if heard else {"found": False, "phones": []})
         return self._source_cache[stem]
 
@@ -245,8 +268,33 @@ class PronunciationLab:
         if self._windows is None:
             self._windows = ps.NameWindows(ps.bookmark_synthesizer(self.voice, self.key, self.region), lambda wav: (), self.work_dir / "voice")
         # the word alone, with nothing before or after it, so the neighbouring words' sounds do not leak into its window
-        audio = self._windows.audio(ps.Context(before="", after=".", pitch="-6%"), ps.Candidate(spelling))
+        audio = self._windows.audio(ps.Context(before="", after=".", pitch="+0%"), ps.Candidate(spelling))      # as rendered: no pitch change
+        self._voice_audio[spelling] = Path(audio)
         return list(self.gop.decode(audio))
+
+    def english_hears(self, spelling: str) -> str | None:
+        """What an English listener (Azure speech-to-text, en-ZA) writes for the voice saying ``spelling`` alone; None when it cannot be asked.
+
+        The recogniser is trained on real speech and knows which sound sequences are words, so it hears what a person would, where the phone
+        recogniser only hears sounds.  It filters; it does not approve (a person's ear decides)."""
+        audio = self._voice_audio.get(spelling)
+        if audio is None or not Path(audio).is_file():
+            return None
+        try:
+            if self._stt is None:
+                from .cli import create_speech_backend
+                from .config import load_settings
+
+                self._stt = create_speech_backend(load_settings())
+            from .azure_stt import normalize
+
+            clip = self.work_dir / "english_ear" / f"{abs(hash(spelling))}.wav"
+            clip.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(audio), "-ac", "1", "-ar", "16000", str(clip)], check=True)
+            words = normalize(self._stt.transcribe(clip, locale="en-ZA")).get("words") or []
+            return " ".join(str(w.get("text")) for w in words).strip()
+        except Exception as exc:                          # an empty transcription is an answer ("nothing"); a real failure is "could not ask"
+            return "" if "empty transcription" in str(exc).lower() else None
 
     def try_spellings(self, word: str, spellings: Sequence[str]) -> dict[str, Any]:
         """Try up to three spellings of ``word``; each is compared with the speaker's sounds. Counts against the budget."""
@@ -265,12 +313,16 @@ class PronunciationLab:
             heard = self.voice_reading(spelling)
             comparison = align(source["phones"], heard)
             record = {"spelling": spelling, "voice_sounds": " ".join(heard), **comparison}
+            listener = self.english_hears(spelling)
+            if listener is not None:
+                record["english_hears"] = listener or "(nothing)"
+                record["english_listener_understands"] = understood_as(listener, source.get("spoken_form") or word)
             twin = next((other for other, tried in self.tried.get(word, {}).items() if tried["voice_sounds"] == record["voice_sounds"]), None)
             if twin:
                 record["same_sounds_as"] = twin                     # a different spelling, the same sounds: not a new idea
             self.tried.setdefault(word, {})[spelling] = record
             results.append(record)
-        best = max(self.tried[word].values(), key=lambda r: r["closeness"])
+        best = max(self.tried[word].values(), key=lambda r: (bool(r.get("english_listener_understands")), r["closeness"]))
         left_word, left_clip = MAX_TRIES_PER_WORD - self.tries_per_word[word], MAX_TRIES_PER_CLIP - self.total_tries
         return {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], "results": results,
                 "closest_so_far": {"spelling": best["spelling"], "closeness": best["closeness"]},
