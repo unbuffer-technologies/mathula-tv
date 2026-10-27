@@ -110,12 +110,17 @@ def _stem(word: str) -> str:
 
 
 def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, Any]], *, looks_isizulu: Callable[[str], bool],
-                    exclude: set[str] = frozenset(), limit: int = 12) -> list[dict[str, Any]]:
+                    exclude: set[str] = frozenset(), limit: int = 16, named: Sequence[Mapping[str, str]] = ()) -> list[dict[str, Any]]:
     """English words that the Zulu text keeps and that the speaker says in the source audio.
 
     A token counts when its stem (after any isiZulu prefix glued on, with a hyphen or straight onto a capital: "weScience") is a word of the
     English transcript.  A glued prefix proves the writer meant an English word, so it is kept even when the word happens to end in a vowel and
-    so looks isiZulu ("Science").  Names already given a reading (``exclude``) are skipped."""
+    so looks isiZulu ("Science").  Names already given a reading (``exclude``) are skipped.
+
+    ``named`` is what a model read out of the Zulu text itself ({"written": "iScience", "english": "science"}): it finds the English words
+    by meaning, whatever their spelling or prefix.  Only the speaker's side (the transcript) is still matched here, because the lab needs
+    the speaker's own sounds for the word."""
+    texts = list(texts)
     spoken: dict[str, dict[str, Any]] = {}
     for word in source_words:
         text = str(word.get("text") or "")
@@ -137,6 +142,16 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
                     "note": "a Zulu prefix is glued on: the speaker says the English word as it is" if glued else ""})
                 entry["occurrences_in_dub"] += 1
                 break
+    for item in named:
+        written, english = str(item.get("written") or "").strip(), str(item.get("english") or "").strip()
+        stem = _stem(english)
+        if len(stem) < 4 or stem not in spoken or written in found or written.casefold() in exclude or english.casefold() in exclude:
+            continue
+        count = sum(text.count(written) for text in texts)
+        if count:
+            found[written] = {"word": written, "occurrences_in_dub": count, "speaker_says": spoken[stem]["as_spoken"],
+                              "times_the_speaker_says_it": spoken[stem]["count"],
+                              "note": "a Zulu prefix is glued on: the speaker says the English word as it is" if written.casefold() != english.casefold() else ""}
     return sorted(found.values(), key=lambda e: (-e["occurrences_in_dub"], e["word"]))[:limit]
 
 

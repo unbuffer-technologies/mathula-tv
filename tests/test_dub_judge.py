@@ -1,6 +1,6 @@
 import json
 
-from mathula_tv.dub_judge import judge_run, judge_units, summarise, units_from_scorecard
+from mathula_tv.dub_judge import UnitJudge, foreign_words, judge_run, judge_units, summarise, units_from_scorecard
 
 
 class FakeClient:
@@ -192,3 +192,35 @@ def test_each_issue_kind_is_checked_against_the_right_text():
     assert _grounded({"kind": "distortion", "source_quote": "arrested on Monday", "dub_quote": "arrested on Tuesday"}, src, back)
     assert not _grounded({"kind": "distortion", "source_quote": "arrested on Monday"}, src, back)     # needs both quotes
     assert _grounded({"kind": "addition", "dub_quote": "on Tuesday"}, src, back) and not _grounded({"kind": "unclear"}, src, back)
+
+
+class ForeignClient:
+    """Answers the foreign-word prompt from a table keyed by the Zulu text; counts calls."""
+
+    def __init__(self, table):
+        self.table, self.calls = table, 0
+
+    def complete(self, messages, *, json_mode=False, max_output_tokens=0, tools=None):
+        self.calls += 1
+        payload = json.loads(messages[1]["content"])
+        items = [{"id": p["id"], "words": self.table.get(p["zulu"], [])} for p in payload]
+        return {"choices": [{"message": {"content": json.dumps({"items": items})}}], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}
+
+
+SCIENCE = {"written": "iScience", "english": "science"}
+
+
+def test_foreign_words_are_read_from_the_zulu_text_alone():
+    client = ForeignClient({"Phela iScience iyisifundo.": [SCIENCE, {"written": "", "english": "x"}, "junk"]})
+    usage = {}
+    assert foreign_words(client, ["Phela iScience iyisifundo.", "Sawubona."], usage) == [SCIENCE]
+    assert usage == {"prompt_tokens": 7, "completion_tokens": 3}
+
+
+def test_pauses_are_not_sent_to_the_model_and_a_text_keeps_its_answer():
+    client = ForeignClient({"Phela iScience iyisifundo. Kunjalo.": [SCIENCE]})
+    judge = UnitJudge(client)
+    text = "Phela iScience iyisifundo. ~pause600 Kunjalo."
+    assert judge.foreign_words([text]) == [SCIENCE]
+    assert judge.foreign_words([text, text]) == [SCIENCE]
+    assert client.calls == 1                                 # asked once, remembered

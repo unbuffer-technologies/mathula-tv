@@ -314,7 +314,13 @@ class Workbench:
         if not submission.is_file():
             raise ValueError("submit a dub first: there is no Zulu text to look through yet")
         texts = [str(i.get("zulu_text") or "") for i in read_json(submission).get("items", [])]
-        found = candidate_words(texts, self._lab().transcript, looks_isizulu=looks_isizulu, exclude=self._known_readings())
+        named: list[dict[str, str]] = []
+        if self.judge is not None and hasattr(self.judge, "foreign_words"):
+            try:
+                named = self.judge.foreign_words(texts)          # the English words a model reads out of the Zulu, whatever their spelling
+            except Exception:                                    # an outage leaves the rule-based sweep, never an empty list
+                named = []
+        found = candidate_words(texts, self._lab().transcript, looks_isizulu=looks_isizulu, exclude=self._known_readings(), named=named)
         return {"words": found, "note": "Check only the ones that matter. Never glue a Zulu prefix onto an English word the speaker says as it is.",
                 "tries_left_in_clip": MAX_TRIES_PER_CLIP - self._lab().total_tries}
 

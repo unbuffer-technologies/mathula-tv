@@ -158,3 +158,15 @@ def test_a_person_approved_reading_is_not_replaced_by_the_agents_choice(tmp_path
     workbench.try_pronunciation("Fighters", ["Fayitas"])
     workbench.use_pronunciation("Fighters", "Fayitas")
     assert entries_for(memory_path(tmp_path), "zu-ZA-ThembaNeural")[0]["tts_text"] == "Fayitha"
+
+
+def test_the_models_reading_of_the_zulu_finds_what_the_rules_cannot():
+    words = [{"text": "science"}, {"text": "Fighters"}]
+    named = [{"written": "iScience", "english": "science"}, {"written": "iSayansi", "english": "sayansi"}]    # the second is not said by the speaker
+    found = candidate_words(["Phela iScience iyisifundo. iSayansi."], words, looks_isizulu=looks_isizulu, named=named)
+    assert [f["word"] for f in found] == ["iScience"]
+    assert found[0]["speaker_says"] == "science" and "prefix" in found[0]["note"] and found[0]["occurrences_in_dub"] == 1
+    # a word already given a reading, or that the rules found, is not listed twice
+    assert candidate_words(["iScience"], words, looks_isizulu=looks_isizulu, named=named, exclude={"science"}) == []
+    both = candidate_words(["weScience", "iScience"], words, looks_isizulu=looks_isizulu, named=named)
+    assert sorted(f["word"] for f in both) == ["iScience", "weScience"]

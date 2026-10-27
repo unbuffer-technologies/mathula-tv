@@ -50,6 +50,16 @@ Spoken delivery may legitimately drop filler ("um", repeated words); do not coun
 Reply with JSON only: {"items":[{"id":"...","meaning_preserved":0-3,"issues":[...]}]} with one entry per input id.
 """
 
+FOREIGN_PROMPT = """\
+You read isiZulu text spoken by a Zulu voice that reads every word with Zulu letter rules, so English words kept inside it come out
+wrong unless someone checks them. For each item list every English (or other non-Zulu) word or name the Zulu keeps as it is, in
+whatever form it has: bare ("medical aid"), with a hyphen prefix ("ne-medical"), or with a Zulu prefix written straight onto it
+("weScience", "iScience", "NeTechnology", "MaFighter"). Give "written" exactly as it appears in the text (the whole token) and
+"english" as the bare English word. Do not list ordinary isiZulu words, nor English words that are fully adapted into Zulu spelling
+("isikole", "ibhasi"), nor numbers.
+Reply with JSON only: {"items":[{"id":"...","words":[{"written":"...","english":"..."}]}]} with one entry per input id.
+"""
+
 CONFIRM_PROMPT = """A reviewer flagged each item below as losing material meaning. Check that claim strictly; flags are often wrong,
 especially on long units, where a dub that follows the source clause by clause gets described as "adding"
 things that the source already says.
@@ -144,6 +154,19 @@ def judge_units(client: Any, units: Sequence[Mapping[str, str]], *, chunk: int =
     return {"verdicts": verdicts, "summary": summarise(verdicts), "usage": usage}
 
 
+def foreign_words(client: Any, texts: Sequence[str], usage: dict[str, int], *, chunk: int = CHUNK) -> list[dict[str, str]]:
+    """The English words a model finds kept inside ``texts`` (isiZulu), each as {"written", "english"}. Text only: no audio, no source."""
+    found: dict[tuple[str, str], dict[str, str]] = {}
+    for start in range(0, len(texts), chunk):
+        part = [{"id": str(start + i), "zulu": strip_pauses(text)} for i, text in enumerate(texts[start:start + chunk])]
+        for item in _call(client, FOREIGN_PROMPT, part, usage).values():
+            for word in item.get("words") or []:
+                if isinstance(word, dict) and str(word.get("written") or "").strip() and str(word.get("english") or "").strip():
+                    written, english = str(word["written"]).strip(), str(word["english"]).strip()
+                    found.setdefault((written.casefold(), english.casefold()), {"written": written, "english": english})
+    return list(found.values())
+
+
 class UnitJudge:
     """A judge that remembers its verdicts, keyed by the exact (source, dub) text pair.
 
@@ -160,6 +183,24 @@ class UnitJudge:
     @staticmethod
     def _key(unit: Mapping[str, str]) -> str:
         return hashlib.sha1(f"{unit['source']}\x00{unit['dub']}".encode("utf-8")).hexdigest()
+
+    def foreign_words(self, texts: Sequence[str]) -> list[dict[str, str]]:
+        """English words kept in the Zulu texts. One model call per ten new texts; a text keeps its answer until it changes."""
+        cache = self.__dict__.setdefault("_foreign", {})
+        fresh = [t for t in dict.fromkeys(texts) if t not in cache]
+        for start in range(0, len(fresh), self.chunk):
+            part = fresh[start:start + self.chunk]
+            for text in part:
+                cache[text] = []
+            for word in foreign_words(self.client, part, self.usage, chunk=self.chunk):
+                for text in part:
+                    if word["written"] in strip_pauses(text):
+                        cache[text].append(word)
+        merged: dict[tuple[str, str], dict[str, str]] = {}
+        for text in texts:
+            for word in cache.get(text, []):
+                merged.setdefault((word["written"].casefold(), word["english"].casefold()), word)
+        return list(merged.values())
 
     def judge(self, units: Sequence[Mapping[str, str]]) -> list[dict[str, Any]]:
         fresh = {self._key(u): u for u in units if self._key(u) not in self._cache}
