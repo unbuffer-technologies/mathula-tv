@@ -173,6 +173,25 @@ def _one_entry_per_word(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any
     return sorted(merged, key=lambda e: (-e["occurrences_in_dub"], e["word"]))
 
 
+GOOD_ENOUGH = 0.85
+
+
+def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], left_word: int, left_clip: int) -> str:
+    """What to do next, from the tries so far.  It reads the differences; it adds no score and does not choose for the agent."""
+    if best["closeness"] >= GOOD_ENOUGH:
+        return f"{best['spelling']!r} is close to the speaker's sounds; use it."
+    distinct = {record["voice_sounds"] for record in tried.values()}
+    parts = []
+    if len(distinct) < len(tried):
+        parts.append(f"{len(tried)} spellings gave only {len(distinct)} different sound(s): spellings that sound the same count as one idea, "
+                     "so change the letters behind the differences, not the letters around them.")
+    if best.get("differences"):
+        parts.append(f"Still different in the closest ({best['spelling']!r}, {best['closeness']}): " + "; ".join(best["differences"]) + ".")
+    if min(left_word, left_clip) > 0:
+        parts.append(f"{left_word} tries left for this word, {left_clip} in the clip: try spellings that change those sounds before settling.")
+    return " ".join(parts)
+
+
 class PronunciationLab:
     """The sounds of a word as the speaker said it, and as the voice says a spelling. One instance per clip; models load on first use."""
 
@@ -246,9 +265,14 @@ class PronunciationLab:
             heard = self.voice_reading(spelling)
             comparison = align(source["phones"], heard)
             record = {"spelling": spelling, "voice_sounds": " ".join(heard), **comparison}
+            twin = next((other for other, tried in self.tried.get(word, {}).items() if tried["voice_sounds"] == record["voice_sounds"]), None)
+            if twin:
+                record["same_sounds_as"] = twin                     # a different spelling, the same sounds: not a new idea
             self.tried.setdefault(word, {})[spelling] = record
             results.append(record)
         best = max(self.tried[word].values(), key=lambda r: r["closeness"])
+        left_word, left_clip = MAX_TRIES_PER_WORD - self.tries_per_word[word], MAX_TRIES_PER_CLIP - self.total_tries
         return {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], "results": results,
                 "closest_so_far": {"spelling": best["spelling"], "closeness": best["closeness"]},
-                "tries_left_for_word": MAX_TRIES_PER_WORD - self.tries_per_word[word], "tries_left_in_clip": MAX_TRIES_PER_CLIP - self.total_tries}
+                "advice": _advice(self.tried[word], best, left_word, left_clip),
+                "tries_left_for_word": left_word, "tries_left_in_clip": left_clip}

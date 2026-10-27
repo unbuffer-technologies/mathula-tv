@@ -172,3 +172,21 @@ def test_the_models_reading_of_the_zulu_finds_what_the_rules_cannot():
     assert candidate_words(["iScience"], words, looks_isizulu=looks_isizulu, named=named, exclude={"science"}) == []
     both = candidate_words(["weScience", "iScience"], words, looks_isizulu=looks_isizulu, named=named)
     assert len(both) == 1 and both[0]["occurrences_in_dub"] == 2 and both[0]["speaker_says"] == "science"
+
+
+def test_try_spellings_flags_same_sounds_and_says_what_to_change_next():
+    lab_ = FakeLab({"correctional": ["k", "o", "r", "i", "tʃ", "i", "n", "a", "l"], "koreshinal": ["k", "o", "r", "i", "tʃ", "i", "n", "a", "l"],
+                    "koreksinal": ["k", "o", "r", "e", "k", "s", "i", "n", "a", "l"]})
+    lab_.source = lambda word: {"found": True, "phones": ["k", "o", "r", "e", "k", "s", "n", "a", "l"], "occurrences": 3, "each_occurrence": []}
+    first = lab_.try_spellings("correctional", ["correctional", "koreshinal"])
+    assert "same_sounds_as" not in first["results"][0] and first["results"][1]["same_sounds_as"] == "correctional"
+    assert "gave only 1 different sound" in first["advice"] and "tries left" in first["advice"] and "Still different" in first["advice"]
+    second = lab_.try_spellings("correctional", ["koreksinal"])
+    assert second["closest_so_far"]["spelling"] == "koreksinal"
+    assert second["closest_so_far"]["closeness"] > first["closest_so_far"]["closeness"] and second["advice"].endswith("use it.")      # now close enough
+
+
+def test_advice_is_short_when_the_closest_spelling_is_close_enough():
+    lab_ = FakeLab({"Fighters": ["f", "aɪ", "t", "ə", "z"]})
+    out = lab_.try_spellings("Fighters", ["Fighters"])
+    assert out["advice"].endswith("use it.")

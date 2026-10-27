@@ -75,6 +75,10 @@ You work through tools and decide your own method. You are scored on:
    fits, call list_foreign_words; for the ones the speaker says in English, try_pronunciation shows the speaker's sounds and the sounds the voice
    makes for your spelling, with the differences. Adjust the spelling from the differences, then use_pronunciation for the closest. Tries are
    limited (5 per word, 15 per clip): spend them where the voice is clearly off, not on words that already sound right.
+   Read each difference as the letters to change, and leave the parts that already match alone. Two spellings that make the same sounds
+   are one idea (the result says so). A word whose closest spelling is still under about 0.85 deserves the rest of its tries on spellings that
+   change the named sounds ("speaker k s, voice tʃ": write the k and the s so the voice keeps both) before you settle; stopping after one call
+   with tries left leaves a word badly said.
 
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word transfer.
    Use the whole clip's context.
@@ -204,7 +208,8 @@ TOOL_SPECS = [
           "(including ones you glued a Zulu prefix onto), so you know which to check with try_pronunciation.", {}, []),
     _tool("try_pronunciation", "Hear what the Zulu voice does with up to 3 spellings of an English word. For each spelling it returns the sounds "
           "the voice made, the speaker's own sounds for the word (decoded from the source audio), how close they are (0-1) and what differs "
-          "(\"speaker ɔɪ, voice o\", \"the voice leaves out d\"). Use the differences to choose your next spelling. A try is budgeted "
+          "(\"speaker ɔɪ, voice o\", \"the voice leaves out d\"), plus advice on what to change next. Use the differences to choose "
+          "your next spelling. A try is budgeted "
           "(5 per word, 15 per clip).",
           {"word": {"type": "string", "description": "the word as written in your Zulu, e.g. MaFighter or medical"},
            "spellings": {"type": "array", "items": {"type": "string"}, "maxItems": 3,
