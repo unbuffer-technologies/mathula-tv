@@ -600,9 +600,10 @@ def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) ->
 
 
 PRONUNCIATION_REMINDER = (
-    "Before you finish: you have not looked at the English words your Zulu keeps. Call list_foreign_words, and for each word the voice may "
-    "be getting wrong use try_pronunciation, then use_pronunciation for a spelling that an English listener writes as the word. "
-    "If a unit's words change, re-measure and re-submit it. Then finish.")
+    "One reminder, once: your Zulu keeps English words that the speaker says and that have no checked reading yet, so the voice may read them "
+    "with Zulu letters: {words}. If any of them may sound wrong, call list_foreign_words, check those with try_pronunciation, use "
+    "use_pronunciation for a spelling that an English listener writes as the word, re-measure any unit whose words change, and finish. "
+    "If you judge they are fine as they are, you do not have to use the lab: finish.")
 
 
 def run_agent(client: ChatClient, workbench: Workbench, **kwargs: Any) -> dict[str, Any]:
@@ -704,13 +705,14 @@ def _run_agent(
                 stop_reason = "finished_without_submission"
                 break
             # The pronunciation lab is optional in the prompt, so an agent can finish without ever looking at the English words it kept
-            # (prod-19 did, and shipped "Science" for the voice to read with Zulu letters).  One reminder, once, before it is allowed to finish.
+            # (prod-19 did).  If the sweep finds words with no checked reading, one reminder, once, naming them; with none, no reminder.
             pending = getattr(workbench, "pronunciation_check_pending", None)
-            if (callable(pending) and pending() and not pronunciation_reminded and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens):
+            words = pending() if callable(pending) and not pronunciation_reminded and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens else []
+            if words:                                # only when there is something to check: no need, no reminder
                 pronunciation_reminded = True
-                text = PRONUNCIATION_REMINDER
+                text = PRONUNCIATION_REMINDER.format(words=", ".join(words[:12]))
                 messages.append({"role": "user", "content": text})
-                trace.log("pronunciation_reminder", turn=turn, text=text)
+                trace.log("pronunciation_reminder", turn=turn, words=words[:12], text=text)
                 continue
             # The agent says it is done. The harness checks that against its own score instead of
             # taking its word for it -- bounded, and only while budget remains to act on it.

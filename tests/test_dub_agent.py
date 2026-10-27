@@ -543,7 +543,7 @@ class PendingWorkbench(StubWorkbench):
     checked = False
 
     def pronunciation_check_pending(self):
-        return not self.checked
+        return [] if self.checked else ["science", "correctional"]
 
     def list_foreign_words(self):
         self.checked = True
@@ -561,7 +561,8 @@ def test_an_agent_that_never_looked_at_pronunciation_is_reminded_once_before_it_
     summary = run_agent(client, PendingWorkbench(tmp_path), clip_id="c1", run_id="r")
     assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5
     assert summary["tool_calls"].get("list_foreign_words") == 1
-    assert any("not looked at the English words" in str(m.get("content")) for m in client.seen[3] if m["role"] == "user")
+    reminder = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "One reminder" in str(m.get("content"))]
+    assert reminder and "science, correctional" in reminder[0] and "you do not have to use the lab" in reminder[0]
 
 
 def test_the_pronunciation_reminder_is_bounded_to_one(tmp_path):
@@ -574,3 +575,17 @@ def test_the_pronunciation_reminder_is_bounded_to_one(tmp_path):
     summary = run_agent(client, PendingWorkbench(tmp_path), clip_id="c1", run_id="r")
     assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 4
     assert "list_foreign_words" not in summary["tool_calls"]
+
+
+def test_no_words_to_check_means_no_reminder(tmp_path):
+    class NothingToCheck(PendingWorkbench):
+        def pronunciation_check_pending(self):
+            return []
+
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),
+    ])
+    summary = run_agent(client, NothingToCheck(tmp_path), clip_id="c1", run_id="r")
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 3

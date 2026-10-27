@@ -309,13 +309,24 @@ class Workbench:
         known -= failing_readings(self._lab(), saved)          # a saved reading an English listener does not understand is back on the list
         return known
 
-    def pronunciation_check_pending(self) -> bool:
-        """True while the agent has a pronunciation lab it has not used: the harness reminds it once before it may finish."""
-        return not self.foreign_words_listed and hasattr(self, "list_foreign_words")
+    def pronunciation_check_pending(self) -> list[str]:
+        """The English words that still need a look, for the harness's one reminder; empty when there is no need (or the agent already listed them).
+
+        It runs the same sweep as ``list_foreign_words`` (the model's reading of the Zulu is cached, so the agent's own call costs nothing more)
+        and leaves out words that already have a reading an English listener understands.  A failure means no reminder, never a blocked run."""
+        if self.foreign_words_listed or not hasattr(self, "list_foreign_words"):
+            return []
+        try:
+            return [str(entry["word"]) for entry in self._foreign_candidates()["words"]]
+        except Exception:
+            return []
 
     def list_foreign_words(self) -> dict[str, Any]:
         """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
         self.foreign_words_listed = True
+        return self._foreign_candidates()
+
+    def _foreign_candidates(self) -> dict[str, Any]:
         from .pronunciation_lab import MAX_TRIES_PER_CLIP, candidate_words
         from .pronunciation_search import looks_isizulu
 
