@@ -99,6 +99,11 @@ def align(source: Sequence[str], heard: Sequence[str]) -> dict[str, Any]:
     return {"distance": round(distance, 3), "closeness": round(max(0.0, 1.0 - distance), 3), "differences": differences[:6]}
 
 
+# A Zulu prefix written straight onto an English word, no hyphen ("weScience", "iScience", "NeTechnology", "MaFighter"): one to four letters,
+# then a capital that starts the English word.  Missed before, so "Science" was never offered for checking and was spoken with Zulu letter rules.
+_GLUED_PREFIX = re.compile(r"^[A-Za-z][a-z]{0,3}(?=[A-Z][a-z]{3,})")
+
+
 def _stem(word: str) -> str:
     word = re.sub(r"[^a-z]", "", word.casefold())
     return word[:-1] if word.endswith("s") and len(word) > 4 else word
@@ -108,8 +113,9 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
                     exclude: set[str] = frozenset(), limit: int = 12) -> list[dict[str, Any]]:
     """English words that the Zulu text keeps and that the speaker says in the source audio.
 
-    A token counts when its stem (after any isiZulu prefix glued on with a hyphen, or "ma"/"Ma") is a word of the English transcript. Names
-    already given a reading (``exclude``) are skipped."""
+    A token counts when its stem (after any isiZulu prefix glued on, with a hyphen or straight onto a capital: "weScience") is a word of the
+    English transcript.  A glued prefix proves the writer meant an English word, so it is kept even when the word happens to end in a vowel and
+    so looks isiZulu ("Science").  Names already given a reading (``exclude``) are skipped."""
     spoken: dict[str, dict[str, Any]] = {}
     for word in source_words:
         text = str(word.get("text") or "")
@@ -120,9 +126,10 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
     for text in texts:
         for token in re.findall(r"[A-Za-z][A-Za-z'\-]*", text):
             written = token.split("-")[-1]
-            for variant, glued in ((written, None), (re.sub(r"^[Mm]a(?=[A-Z])", "", written), "ma")):
+            unglued = _GLUED_PREFIX.sub("", written)
+            for variant, glued in ((written, None), (unglued, "prefix") if unglued != written else (written, None)):
                 stem = _stem(variant)
-                if len(stem) < 4 or stem not in spoken or looks_isizulu(variant) or written.casefold() in exclude or variant.casefold() in exclude:
+                if len(stem) < 4 or stem not in spoken or (looks_isizulu(variant) and not glued) or written.casefold() in exclude or variant.casefold() in exclude:
                     continue
                 entry = found.setdefault(written, {
                     "word": written, "occurrences_in_dub": 0, "speaker_says": spoken[stem]["as_spoken"],

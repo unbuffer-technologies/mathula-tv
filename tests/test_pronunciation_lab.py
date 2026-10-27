@@ -43,6 +43,19 @@ def test_english_words_the_speaker_says_are_found_even_with_a_zulu_prefix_glued_
     assert candidate_words(["MaFighter"], WORDS, looks_isizulu=looks_isizulu, exclude={"mafighter"}) == []
 
 
+def test_a_prefix_glued_on_without_a_hyphen_is_still_found():
+    words = [{"text": "science"}, {"text": "technology"}, {"text": "Fighters"}]
+    texts = ["Kungani sidinga ungqongqoshe weScience and Technology? Phela iScience iyisifundo.", "NeTechnology iyisifundo."]
+    found = candidate_words(texts, words, looks_isizulu=looks_isizulu)
+    by_word = {f["word"]: f for f in found}
+    assert {"weScience", "iScience", "NeTechnology", "Technology"} <= set(by_word)
+    assert "prefix" in by_word["iScience"]["note"] and by_word["iScience"]["speaker_says"] == "science"
+    assert "prefix" not in by_word["Technology"]["note"]                                  # not glued: nothing to say about a prefix
+    # a Zulu-shaped word with no glued prefix stays filtered out, even if the English transcript happens to contain it
+    assert candidate_words(["Sinemali eningi"], [{"text": "emali"}, {"text": "malis"}], looks_isizulu=looks_isizulu) == []
+    assert candidate_words(["imali"], [{"text": "imali"}], looks_isizulu=looks_isizulu) == []
+
+
 class FakeLab(PronunciationLab):
     """The lab with the audio parts replaced: the speaker's sounds and the voice's sounds are fixed lists."""
 
