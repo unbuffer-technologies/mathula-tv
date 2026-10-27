@@ -1,6 +1,8 @@
+import os
 import json
 import tempfile
 import unittest
+from unittest import mock
 import wave
 from pathlib import Path
 
@@ -101,30 +103,6 @@ class ForTheAgentAndRendererTest(unittest.TestCase):
         self.assertNotIn("loudness_vs_usual_db", delivery.for_agent(self.SHEET, ["s2"])["segments"][0])
         self.assertIn("recognise", view["note"])
 
-    def test_unit_prosody_is_a_capped_nudge_weighted_by_segment_length(self):
-        units = [{"item_id": "u1", "source_segment_ids": ["s1"]}, {"item_id": "u2", "source_segment_ids": ["s2"]},
-                 {"item_id": "u3", "source_segment_ids": ["s3"]}, {"item_id": "u4", "source_segment_ids": ["s1", "s2"]}]
-        result = delivery.unit_prosody(self.SHEET, units)
-        self.assertEqual(result["u1"]["pitch_percent"], delivery.MAX_PITCH_PERCENT)         # +5 st would be +10 %: capped
-        self.assertEqual(result["u1"]["volume_percent"], delivery.MAX_VOLUME_PERCENT)
-        self.assertEqual(result["u2"]["pitch_percent"], -2)
-        self.assertEqual(result["u2"]["volume_percent"], 0)                                    # -1 dB * 0.5 rounds to 0 (banker's rounding)
-        self.assertEqual(result["u3"]["pitch_percent"], 0)                                     # nothing measured: no change
-        self.assertTrue(-delivery.MAX_PITCH_PERCENT <= result["u4"]["pitch_percent"] <= delivery.MAX_PITCH_PERCENT)
-
-    def test_write_and_read_back_and_off_switch(self):
-        with tempfile.TemporaryDirectory() as directory:
-            native = Path(directory) / "native_dub"
-            native.mkdir()
-            units = [{"item_id": "u1", "source_segment_ids": ["s1"]}]
-            delivery.write_unit_prosody(native, self.SHEET, units)
-            self.assertEqual(delivery.read_unit_prosody(Path(directory), "u1"), (4, 2))
-            self.assertEqual(delivery.read_unit_prosody(Path(directory), "missing"), (0, 0))
-            self.assertEqual(delivery.read_unit_prosody(None, "u1"), (0, 0))
-            delivery.write_unit_prosody(native, self.SHEET, units, enabled=False)
-            self.assertEqual(delivery.read_unit_prosody(Path(directory), "u1"), (0, 0))
-            self.assertFalse((native / delivery.PROSODY_NAME).exists())
-
     def test_pause_marker_becomes_a_break_between_the_pieces_of_speech(self):
         self.assertEqual(delivery.split_pauses("Imali yethu. ~pause900 Uma uya"), ["Imali yethu.", 900, "Uma uya"])
         self.assertEqual(delivery.split_pauses("Sawubona"), ["Sawubona"])
@@ -146,3 +124,14 @@ class ForTheAgentAndRendererTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VoicePitchTest(unittest.TestCase):
+    def test_persona_pitch_is_off_unless_switched_on(self):
+        from mathula_tv.native_dub import _voice_pitch_percent
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATHULA_PERSONA_PITCH", None)
+            self.assertEqual(_voice_pitch_percent({"pitch_percent": -6}), 0)
+        with mock.patch.dict(os.environ, {"MATHULA_PERSONA_PITCH": "1"}):
+            self.assertEqual(_voice_pitch_percent({"pitch_percent": -6}), -6)

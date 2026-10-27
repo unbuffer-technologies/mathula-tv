@@ -8921,6 +8921,13 @@ def _native_dub_tts_ready_parts(
     return parts if parts else ready_text
 
 
+def _voice_pitch_percent(prosody: Mapping[str, Any]) -> int:
+    """0 unless MATHULA_PERSONA_PITCH=1: a speaker's persona pitch offset (+-6 %) was only there to tell two speakers on one voice apart."""
+    if os.environ.get("MATHULA_PERSONA_PITCH", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        return 0
+    return bounded_prosody_int(prosody.get("pitch_percent"), default=0, lower=-10, upper=10)
+
+
 def _synthesize_group(
     *,
     tts: AzureTTSBackend,
@@ -8953,13 +8960,9 @@ def _synthesize_group(
                     typed_parts.extend(ready)
             plain_text.append(strip_pauses(text))
     prosody = voice_info.get("base_prosody") if isinstance(voice_info.get("base_prosody"), Mapping) else {}
-    # Rate is always exactly zero for this experimental architecture. Stable
-    # pitch/volume persona is retained because it does not time-compress speech.
-    from .delivery import read_unit_prosody
-
-    delivery_pitch, delivery_volume = read_unit_prosody(job_root, str(group["group_id"]))      # the speaker's own lift/drop for this unit
-    pitch = bounded_prosody_int(int(prosody.get("pitch_percent") or 0) + delivery_pitch, default=0, lower=-10, upper=10)
-    volume = bounded_prosody_int(int(prosody.get("volume_percent") or 0) + delivery_volume, default=0, lower=-3, upper=3)
+    # Rate and pitch are exactly zero: Azure sounds unnatural when either is bent, so the voice is imitated through wording and pauses only.
+    pitch = _voice_pitch_percent(prosody)
+    volume = bounded_prosody_int(prosody.get("volume_percent"), default=0, lower=-3, upper=3)
     request = AzureTTSRequest(
         turn_id=str(group["group_id"]),
         speaker_id=str(group["speaker_id"]),
@@ -9482,7 +9485,7 @@ def _synthesize_speaker_turns_with_bookmarks(
                 speaker_id = str(groups_by_id[member_ids[0]]["speaker_id"])
                 voice_info = voice_assignments[speaker_id]
                 prosody = voice_info.get("base_prosody") if isinstance(voice_info.get("base_prosody"), Mapping) else {}
-                pitch = bounded_prosody_int(prosody.get("pitch_percent"), default=0, lower=-10, upper=10)
+                pitch = _voice_pitch_percent(prosody)
                 volume = bounded_prosody_int(prosody.get("volume_percent"), default=0, lower=-3, upper=3)
                 voice = str(voice_info["selected_voice"])
                 # A per-clause variable-rate SSML mechanism (multiple sibling
@@ -9739,7 +9742,7 @@ def _presynthesize_islands_with_bookmarks(
         speaker_id = str(ordered[0]["speaker_id"])
         voice_info = voice_assignments[speaker_id]
         prosody = voice_info.get("base_prosody") if isinstance(voice_info.get("base_prosody"), Mapping) else {}
-        pitch = bounded_prosody_int(prosody.get("pitch_percent"), default=0, lower=-10, upper=10)
+        pitch = _voice_pitch_percent(prosody)
         volume = bounded_prosody_int(prosody.get("volume_percent"), default=0, lower=-3, upper=3)
         voice = str(voice_info["selected_voice"])
         island_texts = [

@@ -1,8 +1,8 @@
 """How each speaker delivers: pace, pauses, pitch, loudness and the words they lean on, measured from the source audio.
 
 The dub should sound like the person people know, not like a neutral newsreader.  The isiZulu voices take no style, so what can
-be carried over is (a) the *shape* of the speech -- where the speaker speeds up, stops for effect, repeats, stresses a word -- which
-the agent reproduces in its wording, and (b) a small pitch and volume lift or drop per unit, which the voice does take.
+be carried over is the *shape* of the speech -- where the speaker speeds up, stops for effect, repeats, stresses a word -- which
+the agent reproduces in its wording and in the pauses it holds.  Pace and pitch are never bent: Azure sounds unnatural when they are.
 
 Everything here is relative to the speaker's own habits (their median, their usual swing), never to an absolute scale, and nothing
 is scored: the sheet reports measurements, the agent and the renderer use them.
@@ -21,7 +21,6 @@ import numpy as np
 
 SCHEMA_VERSION = "mathula-delivery-sheet-v1"
 SHEET_NAME = "delivery_sheet.json"
-PROSODY_NAME = "delivery_prosody.json"
 HOP_S = 0.01
 WINDOW_S = 0.04
 F0_MIN_HZ = 70.0
@@ -29,10 +28,6 @@ F0_MAX_HZ = 400.0
 MIN_PAUSE_S = 0.3                    # a stop between words that a listener hears as a pause
 ARTICULATION_GAP_S = 0.25            # shorter gaps are part of speaking; longer ones are pauses and do not count toward pace
 STRESSED_WORDS = 3
-PITCH_PERCENT_PER_SEMITONE = 2.0     # a unit that is 2 semitones above the speaker's usual lifts the voice by 4 %
-MAX_PITCH_PERCENT = 4
-LOUD_PERCENT_PER_DB = 0.5
-MAX_VOLUME_PERCENT = 2
 _SMALL_WORDS = {"the", "and", "that", "this", "with", "from", "have", "will", "your", "they", "them", "what", "were", "been", "for",
                 "are", "you", "not", "but", "its", "our", "was", "has", "had", "can", "all", "who", "how", "why"}
 
@@ -363,62 +358,3 @@ def for_agent(sheet: Mapping[str, Any], segment_ids: Sequence[str] | None = None
                 compact[key] = row[key]
         rows.append(compact)
     return {"note": AGENT_NOTE, "speakers": sheet.get("speakers") or {}, "segments": rows}
-
-
-# -- for the renderer --------------------------------------------------------------------------------------------------------
-
-def unit_prosody(sheet: Mapping[str, Any], units: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
-    """A small pitch and volume change per unit, from how far its source segments sit above or below the speaker's usual.
-
-    Pitch and volume do not change how long the voice takes, so the timing the agent fitted is untouched.  Both are capped well
-    inside the voice's allowed range: this is a nudge toward the speaker's delivery, not a caricature.
-    """
-    rows = sheet.get("segments") or {}
-    result: dict[str, dict[str, Any]] = {}
-    for unit in units:
-        weights, pitch, loud = 0.0, 0.0, 0.0
-        pitch_weight, loud_weight = 0.0, 0.0
-        for segment_id in unit.get("source_segment_ids") or []:
-            row = rows.get(str(segment_id))
-            if not row:
-                continue
-            seconds = max(0.1, (int(row["end_ms"]) - int(row["start_ms"])) / 1000.0)
-            if row.get("pitch_vs_usual_st") is not None:
-                pitch += float(row["pitch_vs_usual_st"]) * seconds
-                pitch_weight += seconds
-            if row.get("loudness_vs_usual_db") is not None:
-                loud += float(row["loudness_vs_usual_db"]) * seconds
-                loud_weight += seconds
-            weights += seconds
-        if not weights:
-            continue
-        pitch_st = pitch / pitch_weight if pitch_weight else 0.0
-        loud_db = loud / loud_weight if loud_weight else 0.0
-        result[str(unit["item_id"])] = {
-            "pitch_percent": int(max(-MAX_PITCH_PERCENT, min(MAX_PITCH_PERCENT, round(pitch_st * PITCH_PERCENT_PER_SEMITONE)))),
-            "volume_percent": int(max(-MAX_VOLUME_PERCENT, min(MAX_VOLUME_PERCENT, round(loud_db * LOUD_PERCENT_PER_DB)))),
-            "pitch_vs_usual_st": _round(pitch_st), "loudness_vs_usual_db": _round(loud_db),
-        }
-    return result
-
-
-def write_unit_prosody(render_native_dir: Path, sheet: Mapping[str, Any] | None, units: Sequence[Mapping[str, Any]], *, enabled: bool = True) -> Path | None:
-    """``delivery_prosody.json`` in a render's native_dub folder (removed when off, so an old one never lingers)."""
-    target = Path(render_native_dir) / PROSODY_NAME
-    target.unlink(missing_ok=True)
-    if not enabled or not sheet:
-        return None
-    target.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "units": unit_prosody(sheet, units)}, indent=1), encoding="utf-8")
-    return target
-
-
-def read_unit_prosody(job_root: Path | None, group_id: str) -> tuple[int, int]:
-    """(pitch %, volume %) to add to a unit's voice for this render; (0, 0) when there is none."""
-    if job_root is None:
-        return 0, 0
-    path = Path(job_root) / "native_dub" / PROSODY_NAME
-    try:
-        entry = (json.loads(path.read_text(encoding="utf-8")).get("units") or {}).get(str(group_id)) or {}
-    except (OSError, ValueError):
-        return 0, 0
-    return int(entry.get("pitch_percent") or 0), int(entry.get("volume_percent") or 0)
