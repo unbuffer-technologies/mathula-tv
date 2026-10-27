@@ -326,3 +326,28 @@ def test_compare_reports_improvement_when_dead_air_drops_and_nothing_regresses()
     base = _score([_item(measured=2000, direction="expand")])
     cand = _score([_item(measured=3900)])
     assert compare_scorecards(base, cand)["verdict"] == "improvement"
+
+
+def test_a_submission_measures_its_units_side_by_side_and_keeps_their_order(tmp_path):
+    import threading
+    import time
+
+    native = _write_native(tmp_path)
+    lock, state = threading.Lock(), {"now": 0, "peak": 0}
+
+    class SlowTts(_FakeTts):
+        def synthesize(self, request, output_path, *, force=False):
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+            time.sleep(0.3)
+            with lock:
+                state["now"] -= 1
+            return SimpleNamespace(duration_ms=1000 if "Umbiko" in request.text else 4000)
+
+    submission = _sub(_u("a", 0, 4000, ["seg-1"], "Umbiko ukhomba amadokhumenti angu-24."), _u("b", 4000, 8000, ["seg-2"], "IMbombela ikhethile."))
+    started = time.monotonic()
+    card = score_submission_dir(native, submission, tts=SlowTts({}), measure_root=tmp_path / "m")
+    assert time.monotonic() - started < 0.55            # two 0.3 s syntheses overlapped, not 0.6 s one after the other
+    assert state["peak"] == 2
+    assert [g["group_id"] for g in card["groups"]] == ["a", "b"] and [g["measured_ms"] for g in card["groups"]] == [1000, 4000]

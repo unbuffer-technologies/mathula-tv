@@ -9,7 +9,9 @@ server exposes), so an agent cannot claim a fit it did not achieve.
 """
 from __future__ import annotations
 
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -125,6 +127,9 @@ def _source_text(item: Mapping[str, Any], segments_by_id: Mapping[str, Mapping[s
     return " ".join(_segment_english(segments_by_id[sid]) for sid in ids if sid in segments_by_id).strip()
 
 
+SUBMIT_MEASURE_WORKERS = int(os.environ.get("MATHULA_SUBMIT_WORKERS", "6"))
+
+
 def score_submission_dir(
     native_dub_dir: Path,
     submission: Mapping[str, Any],
@@ -171,14 +176,17 @@ def score_submission_dir(
         for item_id in turn["member_group_ids"]:
             turn_by_item[str(item_id)] = str(turn["member_group_ids"][0])
 
-    items = []
+    jobs = []
     for index, item in enumerate(raw_items):
         next_start = (
             int(raw_items[index + 1]["start_ms"]) if index + 1 < len(raw_items)
             else (int(next_start_after_ms) if next_start_after_ms is not None else None)
         )
-        source_text = _source_text(item, segments_by_id, shared_ids)
-        fit = measure_text_fit(
+        jobs.append((item, next_start, _source_text(item, segments_by_id, shared_ids)))
+
+    def measure(job: tuple[Mapping[str, Any], int | None, str]) -> dict[str, Any]:
+        item, next_start, source_text = job
+        return measure_text_fit(
             tts, text=str(item["zulu_text"]), start_ms=int(item["start_ms"]), end_ms=int(item["end_ms"]),
             next_start_ms=next_start, speaker_id=str(item["speaker_id"]), source_text=source_text,
             output_root=measure_root,
@@ -186,6 +194,13 @@ def score_submission_dir(
                                        int(item["end_ms"]), segments),
             pronunciation_root=pronunciation_root,
         )
+
+    # Every unit is synthesised by Azure (one request per unit, cached by text): done one after another, a full submission took 7.6 minutes
+    # (prod-21).  The units are independent, so they run side by side, as measure_tts_batch already does; the order of the results is kept.
+    with ThreadPoolExecutor(max_workers=max(1, min(SUBMIT_MEASURE_WORKERS, len(jobs)))) as pool:
+        fits = list(pool.map(measure, jobs))
+    items = []
+    for (item, next_start, source_text), fit in zip(jobs, fits):
         items.append({
             "group_id": str(item["item_id"]),
             "turn_id": item.get("turn_id") or turn_by_item.get(str(item["item_id"])),
