@@ -613,6 +613,13 @@ PRONUNCIATION_REMINDER = (
     "If you judge they are fine as they are, you do not have to use the lab: finish.")
 
 
+# The agent fits timing first and looks at pronunciation last, so a run that spends all its turns on timing never reaches the lab (prod-21
+# stopped at max_turns with the lab untouched).  Once an accepted draft exists and this few turns remain, the same one reminder is sent
+# early, with the turns left, so there is room to check the words and re-measure.
+PRONUNCIATION_RESERVE_TURNS = 20
+PRONUNCIATION_LATE_NOTE = "You have {left} turns left; spend at most 8 of them on this and keep the rest to re-measure and re-submit. "
+
+
 def run_agent(client: ChatClient, workbench: Workbench, **kwargs: Any) -> dict[str, Any]:
     """Run the agent (see ``_run_agent``), then remove this run's scratch TTS audio. Records (submission, scorecard, trace) stay.
 
@@ -687,6 +694,14 @@ def _run_agent(
                           messages_after=len(compacted), prompt_tokens_before=last_prompt_tokens)
                 messages[:] = compacted
                 compactions += 1
+        if not pronunciation_reminded and accepted() and turn >= max_turns - PRONUNCIATION_RESERVE_TURNS:
+            pending = getattr(workbench, "pronunciation_check_pending", None)
+            words = pending() if callable(pending) else []
+            pronunciation_reminded = True                      # asked once whether or not there is anything to check
+            if words:
+                text = PRONUNCIATION_LATE_NOTE.format(left=max_turns - turn + 1) + PRONUNCIATION_REMINDER.format(words=", ".join(words[:12]))
+                messages.append({"role": "user", "content": text})
+                trace.log("pronunciation_reminder", turn=turn, words=words[:12], text=text, early=True)
         response = client.complete(messages, tools=TOOL_SPECS)
         usage = response.get("usage") or {}
         last_prompt_tokens = int(usage.get("prompt_tokens") or 0)

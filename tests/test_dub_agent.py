@@ -589,3 +589,43 @@ def test_no_words_to_check_means_no_reminder(tmp_path):
     ])
     summary = run_agent(client, NothingToCheck(tmp_path), clip_id="c1", run_id="r")
     assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 3
+
+
+def test_a_run_that_is_running_out_of_turns_is_reminded_early_with_the_turns_left(tmp_path, monkeypatch):
+    from mathula_tv import dub_agent
+
+    monkeypatch.setattr(dub_agent, "PRONUNCIATION_RESERVE_TURNS", 3)
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),                    # turn 1
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),                       # turn 2: accepted
+        _reply(calls=[_call("c", "get_submission", {})]),                              # turn 3
+        _reply(calls=[_call("d", "get_submission", {})]),                              # turn 4: 6 - 3 = 3 <= 4 -> reminded before this reply? no: before turn 3
+        _reply(calls=[_call("e", "list_foreign_words", {})]),
+        _reply(content="done"),
+    ])
+    summary = run_agent(client, PendingWorkbench(tmp_path), clip_id="c1", run_id="r", max_turns=6)
+    reminders = [(i, str(m.get("content"))) for i, seen in enumerate(client.seen) for m in seen if m["role"] == "user" and "One reminder" in str(m.get("content"))]
+    assert reminders and "turns left" in reminders[0][1] and "science, correctional" in reminders[0][1]
+    assert reminders[0][0] <= 3                                                         # sent while there was still room to act on it
+    assert summary["stop_reason"] == "agent_finished"
+    assert sum(1 for seen in client.seen[-1:] for m in seen if "One reminder" in str(m.get("content"))) == 1      # once, not repeated at the end
+
+
+def test_the_early_reminder_is_not_sent_when_there_is_nothing_to_check(tmp_path, monkeypatch):
+    from mathula_tv import dub_agent
+
+    class Nothing(PendingWorkbench):
+        def pronunciation_check_pending(self):
+            return []
+
+    monkeypatch.setattr(dub_agent, "PRONUNCIATION_RESERVE_TURNS", 3)
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(calls=[_call("c", "get_submission", {})]),
+        _reply(calls=[_call("d", "get_submission", {})]),
+        _reply(content="done"),
+    ])
+    summary = run_agent(client, Nothing(tmp_path), clip_id="c1", run_id="r", max_turns=6)
+    assert summary["stop_reason"] == "agent_finished"
+    assert not any("One reminder" in str(m.get("content")) for seen in client.seen for m in seen)
