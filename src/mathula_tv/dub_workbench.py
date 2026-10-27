@@ -123,7 +123,7 @@ class Workbench:
         self.pronunciation_root: Path | None = None
         self.segments: list[dict[str, Any]] = []
         self.source_corrections: list[dict[str, Any]] = []
-        self.seed_source_texts: dict[str, str] | None = None     # repair runs: the earlier submission's source text per segment
+        self.seed_unit_texts: dict[str, str] | None = None       # repair runs: the English each unit of the earlier submission was written against
         self.glossary_changes: list[dict[str, str]] = []
         self._pronunciation_lab: Any = None
         self.foreign_words_listed = False                       # whether the agent has looked at the English words its Zulu keeps

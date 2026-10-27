@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import os
 import time
 from pathlib import Path
@@ -579,13 +580,26 @@ def pushback_message(result: dict[str, Any], unmet: list[str], *, tts_left: int)
     return " ".join(lines)
 
 
+def _norm_words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", str(text).lower())
+
+
 def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) -> str:
     """In a repair run: what changed since the earlier submission (source corrections, glossary terms) and the units it touches."""
     note = ""
     corrections = getattr(workbench, "source_corrections", None) or []
-    seed_texts = getattr(workbench, "seed_source_texts", None)
-    if seed_texts:        # only what the earlier submission does not reflect yet: its source text still carries the misheard token
-        corrections = [c for c in corrections if str(c["token"]) in str(seed_texts.get(str(c["segment_id"]), ""))]
+    seed_units = getattr(workbench, "seed_unit_texts", None)
+    current = {str(s["segment_id"]): str(s.get("restored_text") or s.get("source_text") or "") for s in getattr(workbench, "segments", None) or []}
+    changed_units: dict[str, tuple[str, str]] = {}
+    if seed_units and current:        # a unit whose English now reads differently from what the earlier submission was written against
+        for item in seed_items:
+            ids = [str(s) for s in item.get("source_segment_ids") or []]
+            before, now = str(seed_units.get(str(item.get("item_id")), "")), " ".join(current.get(i, "") for i in ids)
+            if before and _norm_words(before) != _norm_words(now):
+                changed_units[str(item.get("item_id"))] = (before, now)
+        # a correction is only news when it touches such a unit
+        corrections = [c for c in corrections if any(str(c["segment_id"]) in [str(s) for s in item.get("source_segment_ids") or []]
+                                                     and str(item.get("item_id")) in changed_units for item in seed_items)]
     if corrections:
         parts = []
         for correction in corrections:
@@ -598,6 +612,10 @@ def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) ->
         note += ("The English source was corrected after that submission, against the speaker's audio: " + "; ".join(parts) +
                  ". Re-translate the units that carry these segments so the Zulu says what the speaker meant, and treat them "
                  "as units that need change. ")
+    if changed_units:
+        shown = "; ".join(f"{unit}: the English now ends {now[-130:]!r} (it ended {before[-130:]!r})" for unit, (before, now) in changed_units.items())
+        note += ("The English source of these units changed after that submission, so the Zulu may say something the speaker did not: "
+                 + shown + ". Make each of them say only what the English now says, and treat them as units that need change. ")
     changes = getattr(workbench, "glossary_changes", None) or []
     if changes:
         parts = []

@@ -631,7 +631,7 @@ def test_the_early_reminder_is_not_sent_when_there_is_nothing_to_check(tmp_path,
     assert not any("One reminder" in str(m.get("content")) for seen in client.seen for m in seen)
 
 
-def test_a_repair_run_is_told_only_about_corrections_the_earlier_submission_does_not_reflect():
+def test_a_repair_run_is_told_which_units_the_english_changed_under():
     from mathula_tv.dub_agent import _source_correction_note
 
     class Bench:
@@ -639,11 +639,15 @@ def test_a_repair_run_is_told_only_about_corrections_the_earlier_submission_does
             {"segment_id": "seg-08", "token": "Abu Kogo", "replacement": "aboGogo"},                      # already in the earlier submission
             {"segment_id": "seg-10", "token": "Rupert is\u2014", "replacement": ""},                     # new: a false start taken out
         ]
-        seed_source_texts = {"seg-08": "we want aboGogo not to pay", "seg-10": "Leopard Creek is going to pay. Rupert is\u2014"}
+        segments = [{"segment_id": "seg-08", "restored_text": "we want aboGogo not to pay"},
+                    {"segment_id": "seg-10", "restored_text": "Leopard Creek is going to pay."}]
+        seed_unit_texts = {"u08": "we want aboGogo not to pay",
+                           "u10": "Leopard Creek is going to pay. Rupert is going to pay for water and electricity."}
 
     seed_items = [{"item_id": "u08", "source_segment_ids": ["seg-08"]}, {"item_id": "u10", "source_segment_ids": ["seg-10"]}]
     note = _source_correction_note(Bench(), seed_items)
-    assert "Rupert is" in note and "leave it out" in note and "(units: u10)" in note
-    assert "Abu Kogo" not in note
-    Bench.seed_source_texts = None                                                                           # no earlier texts known: all are listed, as before
+    assert "leave it out" in note and "(units: u10)" in note and "Abu Kogo" not in note
+    assert "u10: the English now ends" in note and "Rupert is going to pay for water" in note       # it also says what the unit used to be written against
+    assert "u08" not in note.split("English source of these units")[1]                                  # an unchanged unit is not mentioned
+    Bench.seed_unit_texts = None                                                                             # no earlier texts known: all corrections, as before
     assert "Abu Kogo" in _source_correction_note(Bench(), seed_items)

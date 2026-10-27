@@ -325,6 +325,11 @@ def test_a_false_start_is_taken_out_of_the_segment_text_as_a_correction(tmp_path
     apply_corrections(pass1, json.loads((native / "source_corrections.json").read_text(encoding="utf-8"))["corrections"])
     assert pass1["segments"][0]["restored_text"].strip() == "But Leopard Creek is going to pay for water and electricity."
     assert cs.add_missed_speech_to_corrections(tmp_path, lambda m: None) == []                       # added once
+    # the check for missed speech had already finished the fragment: that recovery goes, the fragment is removed from the original text
+    file = {"corrections": [{"segment_id": "seg-10", "kind": "missing speech", "token": "is\u2014", "replacement": "is going to pay for water and electricity"}]}
+    text2 = "But Leopard Creek is going to pay. Rupert is\u2014"
+    out = cs.remove_false_starts({"stretches": [dict(abandoned)]}, file, {"seg-10": text2}, lambda m: None)
+    assert [c["kind"] for c in file["corrections"]] == ["false start removed"] and {"recovered speech dropped", "false start removed"} <= {c["kind"] for c in out}
     # not found, or found twice, or too long: left alone for the agent
     texts = {"s": "Rupert is and then Rupert is\u2014 and Rupert is\u2014"}
     assert cs.remove_false_starts({"stretches": [{**abandoned, "segment_id": "s"}]}, {}, texts, lambda m: None) == []

@@ -453,7 +453,18 @@ def remove_false_starts(doc: Mapping[str, Any], file: dict[str, Any], texts: Map
             continue
         pattern = re.compile(r"(?<![A-Za-z'])" + r"[\s,.]*".join(re.escape(w) for w in words) + r"[\s]*[\u2014\u2013\-\u2026]+")
         matches = pattern.findall(texts.get(segment_id, ""))
-        if len(matches) != 1 or (segment_id, matches[0]) in taken:
+        if len(matches) != 1:
+            continue
+        # The check for missed speech may already have finished the fragment ("Rupert is--" became "Rupert is going to pay for water and
+        # electricity"): that recovery is wrong for a sentence he abandoned, so it goes, and the fragment is removed from the original text.
+        conflicts = [c for c in file.get("corrections") or [] if str(c.get("segment_id")) == segment_id
+                     and str(c.get("kind") or "").startswith("missing speech") and str(c.get("token") or "") and str(c["token"]) in matches[0]]
+        if conflicts:
+            file["corrections"] = [c for c in file["corrections"] if not any(c is x for x in conflicts)]
+            for c in conflicts:
+                removed.append({"segment_id": segment_id, "kind": "recovered speech dropped", "token": c["token"], "replacement": c.get("replacement", "")})
+                progress(f"[code-switch] speech 'recovered' after a false start dropped: {str(c.get('replacement'))[:70]!r}")
+        if (segment_id, matches[0]) in taken:
             continue
         correction = {"segment_id": segment_id, "token": matches[0], "replacement": "", "kind": "false start removed", "sentence": "",
                       "audio_phones": None, "reason": "the speaker broke this sentence off and started again; it is not a message to dub"}
