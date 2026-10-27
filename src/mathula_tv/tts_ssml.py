@@ -17,7 +17,7 @@ _SILENCE_TYPE = "Sentenceboundary-exact"
 _SILENCE_VALUE = re.compile(r"(\d{1,4})ms\Z")
 # Azure's neural voices leave ~950 ms after every full stop, far longer than a newsreader's ~400 ms; in a 42 s unit of
 # nine sentences that is 8 s of dead air.  The pause after a sentence is set explicitly instead (0 keeps Azure's own).
-DEFAULT_SENTENCE_PAUSE_MS = 400
+DEFAULT_SENTENCE_PAUSE_MS = 0      # off: the voice keeps its own sentence pause (set MATHULA_SENTENCE_PAUSE_MS=400 for a shorter one)
 MAX_SENTENCE_PAUSE_MS = 1_000
 _PROVENANCE = object()
 _VOICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")

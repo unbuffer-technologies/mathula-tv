@@ -21,9 +21,14 @@ def _builder():
 
 
 class SentencePauseTest(unittest.TestCase):
-    def test_default_sets_the_sentence_pause_in_both_builders(self):
+    def test_default_keeps_the_voices_own_pause(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("MATHULA_SENTENCE_PAUSE_MS", None)
+            self.assertEqual(sentence_pause_ms(), 0)
+            self.assertNotIn("mstts", _builder().build_plain_text("Sawubona.", voice=VOICE).xml)
+
+    def test_explicit_value_sets_the_sentence_pause_in_both_builders(self):
+        with mock.patch.dict(os.environ, {"MATHULA_SENTENCE_PAUSE_MS": "400"}):
             document = _builder().build_plain_text("Sawubona. Unjani?", voice=VOICE, pitch_percent=-6)
             xml, _ = build_group_bookmark_ssml([("u1", "Sawubona. Unjani?")], voice=VOICE, allowed_voices=[VOICE])
         for text in (document.xml, xml):
@@ -39,11 +44,12 @@ class SentencePauseTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MATHULA_SENTENCE_PAUSE_MS": "99999"}):
             self.assertEqual(sentence_pause_ms(), 1000)
         with mock.patch.dict(os.environ, {"MATHULA_SENTENCE_PAUSE_MS": "abc"}):
-            self.assertEqual(sentence_pause_ms(), 400)
+            self.assertEqual(sentence_pause_ms(), 0)
 
     def test_validator_rejects_other_silence_types_and_misplaced_silence(self):
         bounds = SSMLBounds()
-        good = _builder().build_plain_text("Sawubona.", voice=VOICE).xml
+        with mock.patch.dict(os.environ, {"MATHULA_SENTENCE_PAUSE_MS": "400"}):
+            good = _builder().build_plain_text("Sawubona.", voice=VOICE).xml
         validate_ssml(good, bounds=bounds, allowed_voices=[VOICE])
         for broken in (
             good.replace("Sentenceboundary-exact", "Comma-exact"),
