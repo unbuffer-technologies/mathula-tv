@@ -583,13 +583,18 @@ def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) ->
     """In a repair run: what changed since the earlier submission (source corrections, glossary terms) and the units it touches."""
     note = ""
     corrections = getattr(workbench, "source_corrections", None) or []
+    seed_texts = getattr(workbench, "seed_source_texts", None)
+    if seed_texts:        # only what the earlier submission does not reflect yet: its source text still carries the misheard token
+        corrections = [c for c in corrections if str(c["token"]) in str(seed_texts.get(str(c["segment_id"]), ""))]
     if corrections:
         parts = []
         for correction in corrections:
             units = [str(item.get("item_id") or "?") for item in seed_items
                      if correction["segment_id"] in [str(s) for s in item.get("source_segment_ids") or []]]
-            parts.append(f"segment {correction['segment_id']}: the transcript had {correction['token']!r} but the speaker said "
-                         f"{correction['replacement']!r}" + (f" (units: {', '.join(units)})" if units else ""))
+            said = (f"the speaker said {correction['replacement']!r}" if correction.get("replacement")
+                    else "the speaker broke that sentence off and started again, so it is not part of the speech: leave it out")
+            parts.append(f"segment {correction['segment_id']}: the transcript had {correction['token']!r} but {said}"
+                         + (f" (units: {', '.join(units)})" if units else ""))
         note += ("The English source was corrected after that submission, against the speaker's audio: " + "; ".join(parts) +
                  ". Re-translate the units that carry these segments so the Zulu says what the speaker meant, and treat them "
                  "as units that need change. ")

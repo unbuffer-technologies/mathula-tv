@@ -307,3 +307,25 @@ def test_an_abandoned_stretch_reaches_the_agent_as_something_not_to_dub():
          "english_meaning": "Rupert is-", "status": "abandoned"}]}
     out = cs.for_agent(doc)
     assert "false start" in out["note"] and out["stretches"][0]["status"] == "abandoned"
+
+
+def test_a_false_start_is_taken_out_of_the_segment_text_as_a_correction(tmp_path):
+    from mathula_tv.source_suspects import apply_corrections
+
+    native = tmp_path / "native_dub"
+    native.mkdir(parents=True)
+    text = "But Leopard Creek is going to pay for water and electricity. Rupert is\u2014"
+    (native / "pass1_restored_transcript.json").write_text(json.dumps({"segments": [{"segment_id": "seg-10", "restored_text": text, "source_text": text}]}), encoding="utf-8")
+    (native / "source_corrections.json").write_text(json.dumps({"corrections": []}), encoding="utf-8")
+    abandoned = {"start_s": 420.8, "end_s": 422.4, "segment_id": "seg-10", "english_reading": "Rupert is", "status": "abandoned"}
+    (native / cs.FILE).write_text(json.dumps({"schema_version": cs.SCHEMA_VERSION, "stretches": [abandoned]}), encoding="utf-8")
+    added = cs.add_missed_speech_to_corrections(tmp_path, lambda m: None)
+    assert len(added) == 1 and added[0]["kind"] == "false start removed" and added[0]["replacement"] == ""
+    pass1 = json.loads((native / "pass1_restored_transcript.json").read_text(encoding="utf-8"))
+    apply_corrections(pass1, json.loads((native / "source_corrections.json").read_text(encoding="utf-8"))["corrections"])
+    assert pass1["segments"][0]["restored_text"].strip() == "But Leopard Creek is going to pay for water and electricity."
+    assert cs.add_missed_speech_to_corrections(tmp_path, lambda m: None) == []                       # added once
+    # not found, or found twice, or too long: left alone for the agent
+    texts = {"s": "Rupert is and then Rupert is\u2014 and Rupert is\u2014"}
+    assert cs.remove_false_starts({"stretches": [{**abandoned, "segment_id": "s"}]}, {}, texts, lambda m: None) == []
+    assert cs.remove_false_starts({"stretches": [{**abandoned, "segment_id": "s", "english_reading": "one two three four five six seven"}]}, {}, texts, lambda m: None) == []

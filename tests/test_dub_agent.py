@@ -629,3 +629,21 @@ def test_the_early_reminder_is_not_sent_when_there_is_nothing_to_check(tmp_path,
     summary = run_agent(client, Nothing(tmp_path), clip_id="c1", run_id="r", max_turns=6)
     assert summary["stop_reason"] == "agent_finished"
     assert not any("One reminder" in str(m.get("content")) for seen in client.seen for m in seen)
+
+
+def test_a_repair_run_is_told_only_about_corrections_the_earlier_submission_does_not_reflect():
+    from mathula_tv.dub_agent import _source_correction_note
+
+    class Bench:
+        source_corrections = [
+            {"segment_id": "seg-08", "token": "Abu Kogo", "replacement": "aboGogo"},                      # already in the earlier submission
+            {"segment_id": "seg-10", "token": "Rupert is\u2014", "replacement": ""},                     # new: a false start taken out
+        ]
+        seed_source_texts = {"seg-08": "we want aboGogo not to pay", "seg-10": "Leopard Creek is going to pay. Rupert is\u2014"}
+
+    seed_items = [{"item_id": "u08", "source_segment_ids": ["seg-08"]}, {"item_id": "u10", "source_segment_ids": ["seg-10"]}]
+    note = _source_correction_note(Bench(), seed_items)
+    assert "Rupert is" in note and "leave it out" in note and "(units: u10)" in note
+    assert "Abu Kogo" not in note
+    Bench.seed_source_texts = None                                                                           # no earlier texts known: all are listed, as before
+    assert "Abu Kogo" in _source_correction_note(Bench(), seed_items)

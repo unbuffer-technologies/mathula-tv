@@ -198,6 +198,13 @@ def run_production(
         seed_items = json.loads((store.repeat_dir(repair_from, clip_id, 1) / "submission.json").read_text(encoding="utf-8"))["items"]
     judge = UnitJudge(ChatClient(client.config)) if judge_meaning and hasattr(client, "config") else None
     workbench = Workbench(store, lambda: create_tts_backend(settings), judge=judge)
+    if repair_from:        # which source text each segment had when the earlier submission was written
+        try:
+            seed_dir = store.repeat_dir(repair_from, clip_id, 1)
+            groups = {str(g["group_id"]): str(g.get("source_text") or "") for g in json.loads((seed_dir / "scorecard.json").read_text(encoding="utf-8")).get("groups") or []}
+            workbench.seed_source_texts = {str(sid): groups.get(str(item["item_id"]), "") for item in seed_items or [] for sid in item.get("source_segment_ids") or []}
+        except (OSError, ValueError, KeyError):
+            workbench.seed_source_texts = None
     summary = run_agent(
         client, workbench, clip_id=clip_id, run_id=run_id, repeat=1, max_turns=max_turns,
         max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=build_system_prompt(playbook),

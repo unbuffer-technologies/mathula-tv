@@ -123,6 +123,7 @@ class Workbench:
         self.pronunciation_root: Path | None = None
         self.segments: list[dict[str, Any]] = []
         self.source_corrections: list[dict[str, Any]] = []
+        self.seed_source_texts: dict[str, str] | None = None     # repair runs: the earlier submission's source text per segment
         self.glossary_changes: list[dict[str, str]] = []
         self._pronunciation_lab: Any = None
         self.foreign_words_listed = False                       # whether the agent has looked at the English words its Zulu keeps
@@ -261,7 +262,8 @@ class Workbench:
                 "note": ("The English below was corrected against the speaker's audio: the transcript had misheard these "
                          "words. The segments' english already carries the correction; translate that meaning, never the "
                          "misheard word."),
-                "corrections": [{"segment_id": c["segment_id"], "transcript_had": c["token"], "speaker_said": c["replacement"],
+                "corrections": [{"segment_id": c["segment_id"], "transcript_had": c["token"],
+                                 "speaker_said": c["replacement"] or "(nothing: he broke the sentence off and started again; it is not part of the speech)",
                                  "why": c.get("reason", "")} for c in self.source_corrections],
             }
         return opened

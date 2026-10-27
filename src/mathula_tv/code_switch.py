@@ -430,9 +430,37 @@ def add_missed_speech_to_corrections(job_root: Path, progress: Callable[[str], N
         file.setdefault("corrections", []).append(correction)
         added.append(correction)
         progress(f"[code-switch] speech in another language at {stretch['start_s']:.0f} s added to the dub: {stretch['english_meaning']!r}")
+    added.extend(remove_false_starts(doc, file, texts, progress))
     if added:
         corrections_path.write_text(json.dumps(file, indent=1, ensure_ascii=False), encoding="utf-8")
     return added
+
+
+MAX_FALSE_START_WORDS = 6
+
+
+def remove_false_starts(doc: Mapping[str, Any], file: dict[str, Any], texts: Mapping[str, str], progress: Callable[[str], None] = print) -> list[dict[str, Any]]:
+    """A sentence the speaker broke off ("Rupert is--" then "We don't care about Rupert") is taken out of the segment's text, as a correction.
+
+    Left in, the agent reads the fragment as a sentence and finishes it for him ("Rupert will also pay"), which he never said.  Only a short
+    fragment found once in its own segment is removed; anything else stays and is left to the agent, with the 'abandoned' note."""
+    removed = []
+    taken = {(str(c.get("segment_id")), str(c.get("token"))) for c in file.get("corrections") or [] if c.get("kind") == "false start removed"}
+    for stretch in doc.get("stretches") or []:
+        words = re.findall(r"[A-Za-z0-9']+", str(stretch.get("english_reading") or ""))
+        segment_id = str(stretch.get("segment_id") or "")
+        if stretch.get("status") != "abandoned" or not segment_id or not 1 <= len(words) <= MAX_FALSE_START_WORDS:
+            continue
+        pattern = re.compile(r"(?<![A-Za-z'])" + r"[\s,.]*".join(re.escape(w) for w in words) + r"[\s]*[\u2014\u2013\-\u2026]+")
+        matches = pattern.findall(texts.get(segment_id, ""))
+        if len(matches) != 1 or (segment_id, matches[0]) in taken:
+            continue
+        correction = {"segment_id": segment_id, "token": matches[0], "replacement": "", "kind": "false start removed", "sentence": "",
+                      "audio_phones": None, "reason": "the speaker broke this sentence off and started again; it is not a message to dub"}
+        file.setdefault("corrections", []).append(correction)
+        removed.append(correction)
+        progress(f"[code-switch] false start at {stretch['start_s']:.0f} s taken out of the text: {matches[0]!r}")
+    return removed
 
 
 def review_items(doc: Mapping[str, Any] | None) -> list[dict[str, Any]]:
