@@ -743,7 +743,7 @@ def _render_native_master_with_ffmpeg_progress(
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(source_video), "-i", str(dialogue_bus),
         "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-b:a", "192k",       # stereo: TVs cast to over VLC/Windows hiccup on mono AAC
         "-movflags", "+faststart", "-shortest", str(temporary),
     ]
 

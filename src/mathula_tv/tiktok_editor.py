@@ -3579,6 +3579,10 @@ def render_tiktok_hook_edit(
         os.getenv("MATHULA_TV_FINAL_AUDIO_BITRATE", "256k"),
         "-ar",
         "48000",
+        # Stereo, not the mono the dialogue bus is mixed in: a smart TV cast through VLC or Windows hiccuped about every 30 s on mono AAC
+        # and played the same file cleanly with the audio duplicated to two channels (2026-10-27).
+        "-ac",
+        "2",
         "-video_track_timescale",
         "90000",
         "-t",

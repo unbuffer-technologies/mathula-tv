@@ -473,6 +473,7 @@ def test_hook_edit_preserves_translation_and_keeps_remainder(
     assert command[command.index("-preset") + 1] == "veryfast"
     assert command[command.index("-crf") + 1] == "20"
     assert command[command.index("-b:a") + 1] == "256k"
+    assert command[command.index("-ac") + 1] == "2"          # stereo for TVs
     assert result["render_version"] == tiktok_editor.TIKTOK_EDIT_RENDER_VERSION
     assert output.read_bytes() == b"edited"
 
