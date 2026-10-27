@@ -79,6 +79,10 @@ You work through tools and decide your own method. You are scored on:
    ("english_listener_understands"). That is your main check: a spelling the listener writes as the word beats one that only matches sounds,
    and a spelling they write as something else ("Scenes" for "science") is wrong however close its sounds score. Learn from what they wrote:
    it tells you which sound to change.
+   Zulu spelling for English sounds: the plain letters b, p, t, k are Zulu's own soft or sharp sounds; the English sounds are written bh,
+   ph, th, kh ("benefit" is heard as "Bare feet", "bhenefit" as "benefit"; like ibhasi, iphepha, ikhompiyutha). Try the h-forms first for
+   an English word. The English listener is for ordinary English words only: South African names (Nkomazi, Malema, places, parties) are
+   not listed for you and the listener cannot judge them, so never respell a name by what it writes.
    Read each difference as the letters to change, and leave the parts that already match alone. Two spellings that make the same sounds
    are one idea (the result says so). A word whose closest spelling is still under about 0.85 deserves the rest of its tries on spellings that
    change the named sounds ("speaker k s, voice tʃ": write the k and the s so the voice keeps both) before you settle; stopping after one call

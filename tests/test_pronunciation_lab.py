@@ -170,6 +170,10 @@ def test_the_models_reading_of_the_zulu_finds_what_the_rules_cannot():
     assert found[0]["speaker_says"] == "science" and "prefix" in found[0]["note"] and found[0]["occurrences_in_dub"] == 1
     # a word already given a reading, or that the rules found, is not listed twice
     assert candidate_words(["iScience"], words, looks_isizulu=looks_isizulu, named=named, exclude={"science"}) == []
+    # a name the model marks as a name is not offered to the lab, even though the speaker says it
+    names = candidate_words(["eNkomazi", "iScience"], [{"text": "Nkomazi"}, {"text": "science"}], looks_isizulu=looks_isizulu,
+                            named=[{"written": "eNkomazi", "english": "Nkomazi", "kind": "name"}, {"written": "iScience", "english": "science", "kind": "word"}])
+    assert [f["word"] for f in names] == ["iScience"]
     both = candidate_words(["weScience", "iScience"], words, looks_isizulu=looks_isizulu, named=named)
     assert len(both) == 1 and both[0]["occurrences_in_dub"] == 2 and both[0]["speaker_says"] == "science"
 

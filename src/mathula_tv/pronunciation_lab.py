@@ -122,6 +122,8 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
     by meaning, whatever their spelling or prefix.  Only the speaker's side (the transcript) is still matched here, because the lab needs
     the speaker's own sounds for the word."""
     texts = list(texts)
+    name_stems = {_stem(str(item.get("english") or "")) for item in named if str(item.get("kind") or "").lower() == "name"} - {""}
+    name_written = {str(item.get("written") or "").casefold() for item in named if str(item.get("kind") or "").lower() == "name"}
     spoken: dict[str, dict[str, Any]] = {}
     for word in source_words:
         text = str(word.get("text") or "")
@@ -135,6 +137,8 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
             unglued = _GLUED_PREFIX.sub("", written)
             for variant, glued in ((written, None), (unglued, "prefix") if unglued != written else (written, None)):
                 stem = _stem(variant)
+                if stem in name_stems or written.casefold() in name_written:
+                    continue                                 # the model says it is a name: not an English word to listen for
                 if len(stem) < 4 or stem not in spoken or (looks_isizulu(variant) and not glued) or written.casefold() in exclude or variant.casefold() in exclude:
                     continue
                 entry = found.setdefault(written, {
@@ -145,6 +149,8 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
                 break
     for item in named:
         written, english = str(item.get("written") or "").strip(), str(item.get("english") or "").strip()
+        if str(item.get("kind") or "").lower() == "name":
+            continue                                         # names go through the names pipeline; an English listener cannot judge them
         stem = _stem(english)
         if len(stem) < 4 or stem not in spoken or written in found or written.casefold() in exclude or english.casefold() in exclude:
             continue

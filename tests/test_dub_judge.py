@@ -213,7 +213,7 @@ SCIENCE = {"written": "iScience", "english": "science"}
 def test_foreign_words_are_read_from_the_zulu_text_alone():
     client = ForeignClient({"Phela iScience iyisifundo.": [SCIENCE, {"written": "", "english": "x"}, "junk"]})
     usage = {}
-    assert foreign_words(client, ["Phela iScience iyisifundo.", "Sawubona."], usage) == [SCIENCE]
+    assert foreign_words(client, ["Phela iScience iyisifundo.", "Sawubona."], usage) == [{**SCIENCE, "kind": "word"}]
     assert usage == {"prompt_tokens": 7, "completion_tokens": 3}
 
 
@@ -221,6 +221,12 @@ def test_pauses_are_not_sent_to_the_model_and_a_text_keeps_its_answer():
     client = ForeignClient({"Phela iScience iyisifundo. Kunjalo.": [SCIENCE]})
     judge = UnitJudge(client)
     text = "Phela iScience iyisifundo. ~pause600 Kunjalo."
-    assert judge.foreign_words([text]) == [SCIENCE]
-    assert judge.foreign_words([text, text]) == [SCIENCE]
+    assert judge.foreign_words([text]) == [{**SCIENCE, "kind": "word"}]
+    assert judge.foreign_words([text, text]) == [{**SCIENCE, "kind": "word"}]
     assert client.calls == 1                                 # asked once, remembered
+
+
+def test_the_model_can_mark_a_word_as_a_name():
+    client = ForeignClient({"Lapha eNkomazi.": [{"written": "eNkomazi", "english": "Nkomazi", "kind": "name"}, {"written": "x", "english": "y", "kind": "bogus"}]})
+    found = foreign_words(client, ["Lapha eNkomazi."], {})
+    assert [(w["english"], w["kind"]) for w in found] == [("Nkomazi", "name"), ("y", "word")]
