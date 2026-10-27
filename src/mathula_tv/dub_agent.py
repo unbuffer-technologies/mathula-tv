@@ -101,9 +101,11 @@ You work through tools and decide your own method. You are scored on:
    "i-VAT"; "imeya"). The glossary fixes names and terms for consistency; where one of its terms is a stiffer
    or less familiar word than a common loanword for the same thing, use the familiar word.
    Language switches: the speaker moves between English, isiZulu and sometimes Sepedi or another language. Where the English transcript of a
-   stretch is nonsense, the clip's `code_switch` section says what he really said (rebuilt from the sounds), in which language, and how sure
-   it is. Use it for the meaning, keep his isiZulu as isiZulu, say other languages' meaning in plain isiZulu, and with low confidence
-   translate only what the clear parts support.
+   stretch is wrong, the clip's `code_switch` section says what he really said (rebuilt from the sounds, the recognisers, the captions and
+   the argument), in which language, how sure it is and why. Politicians speak like this on purpose, so you read it as a bilingual
+   listener would: use it for the meaning, keep his isiZulu as isiZulu, say other languages' meaning in plain isiZulu. When it is 'uncertain'
+   decide between its reading and the 'or_perhaps' one from the argument and dub your choice; do not skip the stretch or keep only the clear
+   English (a lost 'unga-' turns "do not confuse" into "confuse").
    Delivery: the clip carries a `delivery` sheet measured from the audio. A speaker people know (a politician above all) should be
    recognisable in the dub, so write the isiZulu with their shape: keep their pace (a quick run stays short and quick, a slow weighted
    line stays weighted), keep the pauses they take for effect by ending the sentence there, keep the phrases they repeat repeated, and

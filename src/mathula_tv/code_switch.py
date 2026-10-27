@@ -176,12 +176,38 @@ def corroborated(words: Sequence[str], readings: Sequence[str]) -> bool:
     return found >= 2 or (found >= 1 and found * 2 >= len(distinctive))
 
 
+MIN_SOUND_TO_OUTVOTE = 0.45       # sounds this poor cannot be outvoted, whatever the readings say
+
+
+def _tokens(words: Any) -> list[str]:
+    """Lower-case letter-only words of a candidate's words (a list of {"text"} or a plain string)."""
+    text = " ".join(str(w.get("text")) if isinstance(w, Mapping) else str(w) for w in words) if isinstance(words, (list, tuple)) else str(words)
+    return re.findall(r"[a-z]+", text.lower())
+
+
+def distinguishing_words_found(chosen: Any, rival: Any, readings: Sequence[str]) -> bool:
+    """Do the readings contain a word that tells the choice from its closer-sounding rival?
+
+    A word both candidates share ("SASSA") proves nothing about which is right, so only the choice's own words count: those of four letters or
+    more that the rival does not have.  One counts as found when a word of a reading contains it or is nearly the same."""
+    own = [w for w in _tokens(chosen) if len(w) >= 4 and w not in set(_tokens(rival))]
+    heard = {t for reading in readings for t in re.findall(r"[a-z]+", str(reading).lower())}
+    return any(any(w in t or (len(t) >= 4 and t in w) or SequenceMatcher(None, w, t).ratio() >= 0.8 for t in heard) for w in own)
+
+
 def is_resolved(candidates: Sequence[Mapping[str, Any]], chosen: int, confidence: str, checked: bool = False, agreed: bool = False,
-                same_message: Sequence[int] = ()) -> bool:
-    """Resolved only if the choice sounds best, clearly better than every rival that means something different, AND either the model
-    is sure or it is fairly sure and an independent reading says the same words (agreement of independent sources outweighs a self-rating,
-    which varies from run to run on the same evidence)."""
-    if chosen < 0 or not (confidence == "high" or (confidence == "medium" and agreed)):
+                same_message: Sequence[int] = (), english_agrees: bool = False, readings: Sequence[str] = ()) -> bool:
+    """Resolved when the model is sure, or fairly sure with an independent reading behind it, and the sounds do not clearly say otherwise.
+
+    Fairly sure + (an independent reading -- YouTube's captions, the isiZulu or Afrikaans recogniser -- has the same words, or the English
+    transcriber's own text is nearly the same as the choice) counts as sure: agreement of independent sources outweighs a self-rating, which
+    varies from run to run on the same evidence.
+
+    The sounds then decide in one of two ways.  If the choice sounds best, clearly better than every rival that means something different, it
+    is resolved.  If a rival sounds closer, the choice is still resolved when the readings contain the very words that tell it from that rival
+    and its own sounds are not poor: the phone recogniser hears a switch into isiZulu through an English-trained ear ("unga-", a prefix that
+    means "don't"), so a sound score alone must not overrule a reader of both languages whom the other sources back on the word that matters."""
+    if chosen < 0 or not (confidence == "high" or (confidence == "medium" and (agreed or english_agrees))):
         return False
     pick = candidates[chosen]
     closeness = [c.get("closeness") for c in candidates]
@@ -192,8 +218,44 @@ def is_resolved(candidates: Sequence[Mapping[str, Any]], chosen: int, confidence
     group = {chosen, *(int(i) for i in same_message if 0 <= int(i) < len(candidates))}
     group |= {i for i, c in enumerate(candidates) if _same_meaning(c["english_meaning"], pick["english_meaning"])}
     best_in_group = max(candidates[i]["closeness"] for i in group)
-    rivals = [c["closeness"] for i, c in enumerate(candidates) if i not in group]
-    return best_in_group >= max(closeness) - 1e-9 and all(best_in_group - r >= MIN_CLOSENESS_MARGIN for r in rivals)
+    rival_indexes = [i for i in range(len(candidates)) if i not in group]
+    rivals = [candidates[i]["closeness"] for i in rival_indexes]
+    if best_in_group >= max(closeness) - 1e-9 and all(best_in_group - r >= MIN_CLOSENESS_MARGIN for r in rivals):
+        return True
+    if not rival_indexes or best_in_group < MIN_SOUND_TO_OUTVOTE:
+        return False
+    closest_rival = candidates[max(rival_indexes, key=lambda i: candidates[i]["closeness"])]
+    return distinguishing_words_found(pick.get("words", ""), closest_rival.get("words", ""), readings)
+
+
+def english_agrees_with(english: str, words: Sequence[str]) -> bool:
+    """The English transcriber's text for the stretch is nearly what the model chose: two independent ears (the transcriber and, through the
+    sounds, the phone recogniser) are not in doubt, so the stretch was not garbled after all."""
+    left, right = re.sub(r"[^a-z]", "", str(english).lower()), re.sub(r"[^a-z]", "", "".join(str(w) for w in words).lower())
+    return bool(left and right) and SequenceMatcher(None, left, right).ratio() >= 0.85
+
+
+def reassess(doc: dict[str, Any]) -> int:
+    """Re-decide each uncertain stretch with the current rules from what was stored (no model calls); returns how many became resolved.
+
+    Only upgrades: a stretch resolved when the evidence was built used inputs that are not stored (the model's list of same-message
+    candidates, the Afrikaans reading), so it is never downgraded here."""
+    changed = 0
+    for stretch in doc.get("stretches") or []:
+        if stretch.get("status") == "resolved":
+            continue
+        reconstruction, candidates = stretch.get("reconstruction") or [], stretch.get("candidates") or []
+        if not reconstruction or not candidates:
+            continue
+        words = [str(w["text"]) for w in reconstruction]
+        chosen = next((i for i, c in enumerate(candidates) if c.get("words") == " ".join(words)), -1)
+        readings = [stretch.get("youtube_reading", ""), stretch.get("isizulu_reading", "")]
+        if is_resolved(candidates, chosen, str(stretch.get("confidence")), checked=True, agreed=corroborated(words, readings),
+                       english_agrees=english_agrees_with(stretch.get("english_reading", ""), words),
+                       readings=[*readings, stretch.get("english_reading", "")]):
+            stretch["status"] = "resolved"
+            changed += 1
+    return changed
 
 
 def solve_stretch(
@@ -237,8 +299,11 @@ def solve_stretch(
         schema=_choose_schema(len(candidates)), max_output_tokens=800).data
     chosen, confidence = int(choice["chosen"]), str(choice["confidence"])
     agreed = chosen >= 0 and corroborated([w["text"] for w in candidates[chosen]["words"]], [stretch.get("youtube", ""), stretch.get("isizulu", ""), stretch.get("afrikaans", "")])
+    english_agrees = chosen >= 0 and english_agrees_with(stretch.get("english", ""), [w["text"] for w in candidates[chosen]["words"]])
     return {"status": "resolved" if is_resolved(candidates, chosen, confidence, checked=speak is not None, agreed=agreed,
-                                                         same_message=choice.get("same_message_as_chosen") or []) else "uncertain", "candidates": candidates, "chosen": chosen,
+                                                         same_message=choice.get("same_message_as_chosen") or [], english_agrees=english_agrees,
+                                                         readings=[stretch.get("youtube", ""), stretch.get("isizulu", ""), stretch.get("afrikaans", ""),
+                                                                   stretch.get("english", "")]) else "uncertain", "candidates": candidates, "chosen": chosen,
             "confidence": confidence, "reason": str(choice.get("reason") or "")}
 
 
@@ -264,7 +329,10 @@ def build(
     target = native / FILE
     if target.is_file():
         try:
-            if json.loads(target.read_text(encoding="utf-8")).get("pass1_sha256") == sha:
+            cached = json.loads(target.read_text(encoding="utf-8"))
+            if cached.get("pass1_sha256") == sha:
+                if reassess(cached):                       # the rules may have changed since the evidence was built: no model call needed
+                    target.write_text(json.dumps(cached, ensure_ascii=False, indent=1), encoding="utf-8")
                 return target
         except ValueError:
             pass
@@ -450,13 +518,16 @@ def load(path: Path) -> dict[str, Any] | None:
 
 
 AGENT_NOTE = (
-    "Where the speaker switches language, the English transcript of that stretch is often nonsense. These are reconstructions of what he "
-    "really said, made from the sounds in the audio, several recognisers and the argument of the speech. status 'resolved' means the sounds "
-    "and the argument agree and it is clearly better than the other readings; 'uncertain' means another reading is still possible (it is "
-    "listed): do not rely on it. Use them to understand the MEANING of a garbled stretch; never translate the garbled English itself. Words "
-    "tagged isizulu are his own isiZulu: keep them as isiZulu, in plain wording. Words tagged sepedi, sesotho, setswana, siswati or xitsonga are "
-    "not understood by most isiZulu viewers: say the meaning in plain isiZulu (a short greeting or slogan the audience knows may stay). When "
-    "uncertain, use only what the clear parts of the English support and do not fill the rest in."
+    "Where the speaker switches language, the English transcript of that stretch is often wrong or partly wrong. These are reconstructions of "
+    "what he really said, made from the sounds, several recognisers, YouTube's captions and the argument of the speech, by a reader of both "
+    "languages. status 'resolved' means the evidence agrees. status 'uncertain' means another reading is still possible (listed as "
+    "'or_perhaps'): the reconstruction is still the best reading and 'why' gives the reasoning, so you, who read isiZulu and English, decide "
+    "from the argument of the speech which one he meant, and dub that. Never drop an uncertain stretch and never keep only the clear English "
+    "of it: a word that is easy to lose (the isiZulu 'unga-' that means 'do not', a number, a name) can turn the meaning round. If the two readings "
+    "differ in meaning, choose the one the argument supports and say in approach_notes which you chose and why. Use the reconstruction to "
+    "understand the MEANING of a garbled stretch; never translate the garbled English itself. Words tagged isizulu are his own isiZulu: keep "
+    "them as isiZulu, in plain wording. Words tagged sepedi, sesotho, setswana, siswati or xitsonga are not understood by most isiZulu viewers: "
+    "say the meaning in plain isiZulu (a short greeting or slogan the audience knows may stay)."
 )
 
 
@@ -471,7 +542,10 @@ def for_agent(doc: Mapping[str, Any], segment_ids: Sequence[str] | None = None) 
         row = {"segment_id": stretch.get("segment_id"), "at_s": stretch["start_s"], "english_transcript_has": stretch["english_reading"][:160],
                "he_said": " ".join(f"{p['text']} [{p['language']}]" for p in stretch["reconstruction"]),
                "meaning": stretch["english_meaning"], "status": stretch.get("status", "uncertain")}
-        if stretch.get("status") != "resolved" and stretch.get("alternative"):
-            row["or_perhaps"] = stretch["alternative"]
+        if stretch.get("status") != "resolved":
+            if stretch.get("alternative"):
+                row["or_perhaps"] = stretch["alternative"]
+            if stretch.get("reason"):
+                row["why"] = str(stretch["reason"])[:420]
         rows.append(row)
     return {"note": AGENT_NOTE, "stretches": rows} if rows else None

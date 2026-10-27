@@ -210,7 +210,10 @@ def test_independent_agreement_lets_a_medium_confidence_reading_count_as_resolve
     assert cs.is_resolved(clear, 0, "medium", agreed=True)                                                         # medium plus an independent source is
     assert not cs.is_resolved(clear, 0, "low", agreed=True)                                                        # low never is
     close = [{"english_meaning": "x", "closeness": 0.70}, {"english_meaning": "y", "closeness": 0.69}]
-    assert not cs.is_resolved(close, 0, "medium", agreed=True)                                                     # the sounds still need a clear margin
+    assert not cs.is_resolved(close, 0, "high")                                                                    # without an independent reading the sounds still need a clear margin
+    close = [{"english_meaning": "x", "closeness": 0.70, "words": "alpha beta"}, {"english_meaning": "y", "closeness": 0.69, "words": "gamma delta"}]
+    assert cs.is_resolved(close, 0, "medium", agreed=True, readings=["xx alpha yy"])                              # a reading has the choice's own words: a near tie does not block it
+    assert not cs.is_resolved(close, 0, "medium", agreed=True, readings=["xx gamma yy"])                          # it has only the rival's words
 
 
 
@@ -219,9 +222,61 @@ def test_candidates_that_say_the_same_thing_do_not_count_as_rivals_to_each_other
     cands = [{"english_meaning": "and the one for the children, we are increasing it", "closeness": 0.736},
              {"english_meaning": "we are increasing the children's money", "closeness": 0.686},
              {"english_meaning": "and the one for the children, we will increase it", "closeness": 0.791}]
-    assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=True)                          # as before: a closer rival blocks it
+    cands = [dict(c, words=w) for c, w in zip(cands, ["Nale yabantwana siyayinyusa", "Nale yabantwana imali", "Nale yabantwana sizoyinyusa"])]
+    assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=True)                          # agreed alone does not outvote a closer rival
+    assert cs.is_resolved(cands, 0, "medium", checked=True, agreed=True, readings=["nale yabantwana siyayinyusa"])      # but the words that tell it from the rival do
     assert cs.is_resolved(cands, 0, "medium", checked=True, agreed=True, same_message=[2])             # the model says 2 is the same message: resolved
-    assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=True, same_message=[1])         # a genuinely different rival (2) still blocks
+    assert not cs.is_resolved(cands, 0, "high", checked=True, same_message=[1])                        # sure but with no independent reading: a different closer rival (2) still blocks
     assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=False, same_message=[2])        # still needs the model's word or an independent source
     near = [dict(cands[0]), dict(cands[1], closeness=0.77), dict(cands[2])]
     assert not cs.is_resolved(near, 0, "high", checked=True, same_message=[2])                         # a different message must still be clearly worse
+
+
+def test_a_reader_of_both_languages_outvotes_a_closer_sounding_rival_when_other_sources_agree():
+    # the real case at 6:36: "Unga- confuse the two" (do not confuse) was the model's reading, backed by the English transcript, the isiZulu
+    # recogniser and YouTube's "ungacon"; "Confuse the two" sounds closer to an English-trained phone recogniser, but loses the negation
+    cands = [{"english_meaning": "Do not confuse the two.", "closeness": 0.536, "words": "Unga- confuse the two"},
+             {"english_meaning": "Confuse the two.", "closeness": 0.708, "words": "Confuse the two"}]
+    readings = ["Unga confuse the two.", "I confused itu?", "iphuma i izohamba our grand ayihambi i ANC yahamba ungacon"]
+    assert cs.is_resolved(cands, 0, "medium", checked=True, agreed=True, readings=readings)             # "unga" is what tells the choice from the rival, and two sources have it
+    assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=True, readings=["I confused itu?"])      # no reading has it: the sounds decide
+    assert not cs.is_resolved(cands, 0, "medium", checked=True, agreed=False, readings=readings)       # no independent agreement: the sounds decide
+    poor = [{"english_meaning": "a", "closeness": 0.30, "words": "unga"}, {"english_meaning": "b", "closeness": 0.60, "words": "other"}]
+    assert not cs.is_resolved(poor, 0, "medium", checked=True, agreed=True, readings=readings)         # readings cannot outvote poor sounds
+    # a word both candidates share proves nothing: the SASSA case, where the sounds and the English transcript both prefer "work for"
+    sassa = [{"english_meaning": "All those who are on SASSA", "closeness": 0.60, "words": "All those who are on SASSA"},
+             {"english_meaning": "All those who work for SASSA", "closeness": 0.78, "words": "All those who work for SASSA"}]
+    assert not cs.is_resolved(sassa, 0, "medium", checked=True, agreed=True, readings=["U-oldosuek fossasa.", "All those who work for SASA"])
+
+
+def test_the_english_transcriber_nearly_agreeing_with_the_choice_counts_as_an_independent_reading():
+    assert cs.english_agrees_with("All those who work for SASA", ["All", "those", "who", "work", "for", "SASSA"])
+    assert not cs.english_agrees_with("Rupert is", ["one thousand five hundred"])
+    cands = [{"english_meaning": "All those who work for SASSA", "closeness": 0.78}, {"english_meaning": "All those who are on SASSA", "closeness": 0.60}]
+    assert not cs.is_resolved(cands, 0, "medium", checked=True)                                         # medium alone is not enough
+    assert cs.is_resolved(cands, 0, "medium", checked=True, english_agrees=True)                       # the transcriber and the sounds agree
+
+
+def test_reassess_applies_the_current_rules_to_stored_evidence_without_a_model_call():
+    doc = {"stretches": [{"start_s": 506.7, "english_reading": "Unga confuse the two.", "isizulu_reading": "I confused itu?",
+                          "youtube_reading": "iphuma i izohamba our grand ayihambi i ANC yahamba ungacon",
+                          "reconstruction": [{"text": "Unga-", "language": "isizulu"}, {"text": "confuse", "language": "english"}, {"text": "the two", "language": "english"}],
+                          "confidence": "medium", "status": "uncertain",
+                          "candidates": [{"english_meaning": "Do not confuse the two.", "words": "Unga- confuse the two", "closeness": 0.536},
+                                         {"english_meaning": "Confuse the two.", "words": "Confuse the two", "closeness": 0.708}]},
+                         {"start_s": 1.0, "reconstruction": [], "candidates": [], "status": "none"}]}
+    assert cs.reassess(doc) == 1 and doc["stretches"][0]["status"] == "resolved"
+    assert cs.reassess(doc) == 0                                                                        # nothing more to change
+    doc["stretches"][0]["status"] = "resolved"
+    doc["stretches"][0]["candidates"][0]["closeness"] = 0.10                                            # a stretch already resolved is never downgraded
+    assert cs.reassess(doc) == 0 and doc["stretches"][0]["status"] == "resolved"
+
+
+def test_the_agent_is_told_to_decide_an_uncertain_stretch_and_is_given_the_reasoning():
+    doc = {"schema_version": cs.SCHEMA_VERSION, "stretches": [
+        {"segment_id": "s1", "start_s": 1.0, "english_reading": "Unga confuse", "reconstruction": [{"text": "Unga-", "language": "isizulu"}],
+         "english_meaning": "Do not confuse", "status": "uncertain", "alternative": "Confuse", "reason": "The recognisers and the caption have unga-."}]}
+    out = cs.for_agent(doc)
+    assert "never drop an uncertain stretch" in out["note"].lower() and "do not rely" not in out["note"].lower()
+    row = out["stretches"][0]
+    assert row["or_perhaps"] == "Confuse" and row["why"].startswith("The recognisers")
