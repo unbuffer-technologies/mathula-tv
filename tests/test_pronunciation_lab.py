@@ -427,3 +427,46 @@ def test_voiced_and_voiceless_partners_count_as_one_sound_when_the_recogniser_la
     flips = [["m", "e", "t", "i", "k", "a", "l"], ["m", "e", "t", "i", "ɡ", "a", "l"], ["m", "e", "d", "i", "k", "a", "l"]]
     assert lost_in_the_sentence(speaker, alone, flips) == [] and {"d", "k"} <= set(kept_in_the_sentence(speaker, flips))        # d/t and k/ɡ are voicing only
     assert lost_in_the_sentence(speaker, alone, [["m", "e", "i", "a", "l"]]) == ["d", "k"]                                        # a sound that is gone is gone
+
+
+def test_the_zulu_prefix_glued_on_an_english_word_is_not_what_is_judged():
+    from mathula_tv.pronunciation_lab import without_prefix, written_prefix
+
+    assert written_prefix("MaFighter") == "Ma" and written_prefix("weScience") == "we" and written_prefix("ITechnology") == "I"
+    assert written_prefix("Technology") == "" and written_prefix("ne-medical") == ""
+    assert without_prefix("maFayitha", "Ma") == "Fayitha" and without_prefix("Fayitas", "Ma") == "Fayitas"       # a spelling without it is judged as it is
+    assert without_prefix("weSayensi", "we") == "Sayensi" and without_prefix("Ma", "Ma") == "Ma"
+
+    class Heard(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["f", "aɪ", "t", "a", "s"], "occurrences": 2, "each_occurrence": []}
+
+        def english_hears(self, spelling):
+            return {"Fayitas": "Fighters.", "maFayitas": "My fighters."}[spelling]
+
+    heard = Heard({"Fayitas": ["f", "aɪ", "t", "a", "s"]})
+    out = heard.try_spellings("MaFighter", ["maFayitas"])
+    record = out["results"][0]
+    assert record["spelling"] == "maFayitas" and record["voice_sounds"] == "f aɪ t a s" and record["english_hears"] == "Fighters."
+    assert record["closeness"] == 1.0                                              # the "ma" is not counted as a sound the voice adds
+
+
+def test_the_speakers_word_is_found_under_any_glued_prefix_and_pause_markers_are_not_spoken():
+    fake = FakeLab({})
+    fake._transcript = [{"text": "science"}, {"text": "Fighters,"}]
+    fake._source_cache.clear()
+    assert fake._apply_readings("~pause800 Ma", "x") == "Ma" and fake._apply_readings("Leta ~en 5 amadoda", "x") == "Leta 5 amadoda"
+
+
+def test_matching_sounds_with_a_listener_that_wrote_another_word_are_put_to_the_agent_as_two_kinds_of_evidence():
+    class Listener(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["f", "aɪ", "t", "a", "s"], "occurrences": 2, "each_occurrence": []}
+
+        def english_hears(self, spelling):
+            return "Fight us."
+
+    out = Listener({"Fayitas": ["f", "aɪ", "t", "a", "s"]}).try_spellings("Fighters", ["Fayitas"])
+    assert "match the speaker's (closeness 1.0)" in out["advice"] and "weigh the two" in out["advice"] and "Change the sounds" not in out["advice"]
+    far = Listener({"Fayitas": ["m", "a", "f", "e", "k", "t", "o", "r"]}).try_spellings("Fighters", ["Fayitas"])
+    assert "No spelling is understood yet" in far["advice"]

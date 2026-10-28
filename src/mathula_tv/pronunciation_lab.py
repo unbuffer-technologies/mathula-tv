@@ -138,6 +138,20 @@ def _consonants(phones: Sequence[str]) -> Counter:
     return Counter(_same_sound(p) for p in phones if not _is_vowel(p))
 
 
+def written_prefix(word: str) -> str:
+    """The isiZulu prefix glued straight onto the English word as the Zulu writes it ("Ma" of "MaFighter", "we" of "weScience"); "" when none."""
+    found = _GLUED_PREFIX.match(word.split("-")[-1])
+    return found.group(0) if found else ""
+
+
+def without_prefix(spelling: str, prefix: str) -> str:
+    """``spelling`` without the Zulu prefix it starts with: the prefix is grammar, not the English word, so it is not what an English listener
+    or the speaker's sounds are compared with.  A spelling that does not start with the prefix (the agent dropped it) is judged as it is."""
+    if prefix and spelling.casefold().startswith(prefix.casefold()) and len(spelling) > len(prefix) + 1:
+        return spelling[len(prefix):].lstrip("-")
+    return spelling
+
+
 def lost_in_the_sentence(speaker: Sequence[str], alone: Sequence[str], in_sentence: Sequence[Any]) -> list[str]:
     """Consonants the speaker makes and the voice makes when the word is alone, that the voice does not make in the sentence the word is
     spoken in.  The voice reads the same letters differently in a sentence ("Technology" ended with j alone and with a hard g in its
@@ -279,7 +293,12 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
             parts.append(f"An English listener writes the word for {', '.join(repr(x) for x in understood)}. What the listener wrote: {shown}. "
                          "Use one of those; between them, the one whose sounds are closest.")
         elif not any(record.get("english_listener_understands") for record in tried.values()):
-            parts.append(f"No spelling is understood yet. What an English listener wrote: {shown}. Change the sounds that make them hear the wrong word.")
+            if best["closeness"] >= GOOD_ENOUGH and not best.get("lost_in_its_sentence"):
+                parts.append(f"The sounds of {best['spelling']!r} match the speaker's (closeness {best['closeness']}). What an English listener wrote: {shown}. "
+                             "The listener hears one short clip with no sentence around it and guesses a word from it (a plural, a name or a technical term often "
+                             "comes out as a different real word), so weigh the two: the sounds say it matches, the listener says it did not write the word.")
+            else:
+                parts.append(f"No spelling is understood yet. What an English listener wrote: {shown}. Change the sounds that make them hear the wrong word.")
     elif best["closeness"] >= GOOD_ENOUGH:
         return " ".join(parts + [f"{best['spelling']!r} is close to the speaker's sounds; use it."])
     distinct = {record["voice_sounds"] for record in tried.values()}
@@ -367,7 +386,7 @@ class PronunciationLab:
     def source(self, word: str) -> dict[str, Any]:
         """The sounds the speaker used for ``word`` (consensus over its occurrences in the source audio)."""
         spoken_stems = {_stem(str(w.get("text"))): str(w["text"]) for w in self.transcript}
-        stem = next((c for c in (_stem(word), _stem(re.sub(r"^[Mm]a(?=[A-Z])", "", word))) if c in spoken_stems), _stem(word))
+        stem = next((c for c in (_stem(word), _stem(without_prefix(word.split("-")[-1], written_prefix(word)))) if c in spoken_stems), _stem(word))
         if stem not in self._source_cache:
             from .pronunciation_evidence import heard_word
 
@@ -391,14 +410,14 @@ class PronunciationLab:
         return audio
 
     def _apply_readings(self, text: str, skip: str) -> str:
+        text = re.sub(r"~[a-z]+\d*\s*", "", text)          # ~pause800, ~en: markers for the renderer, not words to speak
         for display, spoken in self.readings.items():
             if _stem(display) != _stem(skip):
                 text = _word_pattern(display).sub(lambda m, spoken=spoken: m.group(1) + spoken, text)
         return text
 
-    def _context(self, word: str) -> Any:
-        """The first sentence of the Zulu text that has the word (and the one after it), as the context to hear a spelling in; None when no
-        sentence has it."""
+    def _located(self, word: str) -> tuple[Any, str]:
+        """The sentence context of the word (see ``_context``) and the Zulu prefix the sentence has on it ("" when none)."""
         from . import pronunciation_search as ps
 
         pattern = _word_pattern(word)
@@ -409,9 +428,14 @@ class PronunciationLab:
                 if found:
                     after = piece[found.end(2):] + (" " + pieces[index + 1] if index + 1 < len(pieces) else "")
                     after = after[:200].rsplit(" ", 1)[0] if len(after) > 200 else after
-                    return ps.Context(before=escape(self._apply_readings(piece[:found.start(2)], word)),
-                                      after=escape(self._apply_readings(after, word)), pitch="+0%")
-        return None
+                    return (ps.Context(before=escape(self._apply_readings(piece[:found.start(2)], word)),
+                                       after=escape(self._apply_readings(after, word)), pitch="+0%"), found.group(1))
+        return None, ""
+
+    def _context(self, word: str) -> Any:
+        """The first sentence of the Zulu text that has the word (and the one after it), as the context to hear a spelling in; None when no
+        sentence has it.  The Zulu prefix the sentence has on the word stays in the context: a spelling replaces the English word only."""
+        return self._located(word)[0]
 
     def sentence_shown(self, word: str) -> str | None:
         """The sentence a word is heard in, with the spelling's place marked, for the agent to read; None when no sentence has the word."""
@@ -430,7 +454,7 @@ class PronunciationLab:
         if key not in self._in_sentence:
             if self._windows is None:
                 self._windows = ps.NameWindows(ps.bookmark_synthesizer(self.voice, self.key, self.region), lambda wav: (), self.work_dir / "voice")
-            cuts = self._windows.audio_with_margins(context, ps.Candidate(spelling), IN_SENTENCE_MARGINS_MS)
+            cuts = self._windows.audio_with_margins(context, ps.Candidate(without_prefix(spelling, self._located(word)[1])), IN_SENTENCE_MARGINS_MS)
             self._in_sentence[key] = [list(self.gop.decode(Path(cut))) for cut in cuts]
         return self._in_sentence[key]
 
@@ -451,7 +475,7 @@ class PronunciationLab:
         source = self.source(word)
         if not source.get("found") or self._context(word) is None:
             return False
-        return bool(self.sounds_lost_in_sentence(word, spelling, source["phones"], self.voice_reading(spelling)))
+        return bool(self.sounds_lost_in_sentence(word, spelling, source["phones"], self.voice_reading(without_prefix(spelling, written_prefix(word)))))
 
     def voice_reading(self, spelling: str) -> list[str]:
         """The sounds the Zulu voice produces for ``spelling``, decoded from its own audio with the same recogniser."""
@@ -462,6 +486,7 @@ class PronunciationLab:
         and no try is spent: this re-checks a reading that was saved earlier."""
         key = (word.casefold(), spelling)
         if key not in self._reading_checks:
+            spelling = without_prefix(spelling, written_prefix(word))        # an English listener hears the English word, not the Zulu "ma"
             self._audio_for(spelling)
             heard = self.english_hears(spelling)
             self._reading_checks[key] = None if heard is None else understood_as(heard, word)
@@ -522,13 +547,14 @@ class PronunciationLab:
                 raise PronunciationBudgetExhausted(
                     f"pronunciation tries used: {self.tries_per_word.get(word, 0)}/{MAX_TRIES_PER_WORD} for {word!r}, {self.total_tries}/{MAX_TRIES_PER_CLIP} in all")
             self.tries_per_word[word] = self.tries_per_word.get(word, 0) + 1
-            heard = self.voice_reading(spelling)
+            judged = without_prefix(spelling, written_prefix(word))         # the Zulu prefix is spoken, but it is not what is compared with the speaker
+            heard = self.voice_reading(judged)
             comparison = align(source["phones"], heard)
             record = {"spelling": spelling, "voice_sounds": " ".join(heard), **comparison}
-            notes = self.sound_differences(source, spelling)
+            notes = self.sound_differences(source, judged)
             if notes:
                 record["how_the_sounds_are_made_differently"] = notes
-            listener = self.english_hears(spelling)
+            listener = self.english_hears(judged)
             if listener is not None:
                 record["english_hears"] = listener or "(nothing)"
                 record["english_listener_understands"] = understood_as(listener, source.get("spoken_form") or word)
