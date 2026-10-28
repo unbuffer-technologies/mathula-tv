@@ -210,7 +210,7 @@ class ListenerLab(FakeLab):
         return self._heard.get(spelling)
 
 
-def test_the_english_listener_leads_the_ranking_and_the_advice():
+def test_the_english_listener_and_the_sounds_agree_and_the_advice_says_so():
     lab_ = ListenerLab({"Sains": ["s", "aɪ", "n", "s"], "Sayinsi": ["s", "aɪ", "iː", "n", "s"]}, {"Sains": "Scenes.", "Sayinsi": "Science."})
     out = lab_.try_spellings("science", ["Sains", "Sayinsi"])
     by_spelling = {r["spelling"]: r for r in out["results"]}
@@ -530,3 +530,17 @@ def test_a_saved_reading_is_measured_in_its_sentence_without_spending_a_try(tmp_
     rows = workbench.saved_readings_evidence()
     assert [(r["word"], r["spelling"]) for r in rows] == [("Science", "Sayensi")]
     assert rows[0]["voice_sounds"] == "s aɪ j ɪ n" and rows[0]["closeness"] < 0.8 and saved.total_tries == 0
+
+
+def test_when_the_listener_and_the_sounds_point_at_different_spellings_both_are_shown_and_neither_leads():
+    class Disagree(ListenerLab):
+        def source(self, word):
+            return {"found": True, "phones": ["f", "aɪ", "t", "a", "s"], "occurrences": 2, "spoken_form": "Fighters", "each_occurrence": []}
+
+    lab_ = Disagree({"Fayitas": ["f", "aɪ", "t", "a", "s"], "Fayithaz": ["f", "a", "j", "iː", "t", "a", "z", "z"]},
+                    {"Fayitas": "Fight us.", "Fayithaz": "Fighters."})
+    out = lab_.try_spellings("Fighters", ["Fayitas", "Fayithaz"])
+    assert out["closest_so_far"]["spelling"] == "Fayitas" and out["understood_by_the_listener"] == ["Fayithaz"]          # the listener does not outrank the sounds
+    advice = out["advice"]
+    assert "point at different spellings" in advice and "'Fight us.'" in advice and "Each check is blind somewhere" in advice
+    assert "Use one of those" not in advice

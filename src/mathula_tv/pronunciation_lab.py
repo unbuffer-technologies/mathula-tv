@@ -293,8 +293,18 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
     if heard:
         shown = "; ".join(f"{spelling!r} -> {text!r}" for spelling, text in list(heard.items())[-4:])
         if understood:
-            parts.append(f"An English listener writes the word for {', '.join(repr(x) for x in understood)}. What the listener wrote: {shown}. "
-                         "Use one of those; between them, the one whose sounds are closest.")
+            top = max(understood, key=lambda spelling: tried[spelling]["closeness"])
+            if best["spelling"] not in understood and best["closeness"] > tried[top]["closeness"]:
+                parts.append(
+                    f"The listener and the sounds point at different spellings. The listener wrote the word for {', '.join(repr(x) for x in understood)} "
+                    f"(the closest of those in sounds: {top!r}, {tried[top]['closeness']}). The closest in sounds is {best['spelling']!r} "
+                    f"({best['closeness']}), for which the listener wrote {heard.get(best['spelling'])!r}. What the listener wrote: {shown}. "
+                    "Each check is blind somewhere: closeness skips the speaker's last sounds, so a missing ending can still score high, and the listener "
+                    "hears one short clip with no sentence around it and guesses a word (a plural, a name or a technical term often comes out as another "
+                    "real word). Compare the sounds and the measured differences of both before you choose.")
+            else:
+                parts.append(f"An English listener writes the word for {', '.join(repr(x) for x in understood)}. What the listener wrote: {shown}. "
+                             "Use one of those; between them, the one whose sounds are closest.")
         elif not any(record.get("english_listener_understands") for record in tried.values()):
             if best["closeness"] >= GOOD_ENOUGH and not best.get("lost_in_its_sentence"):
                 parts.append(f"The sounds of {best['spelling']!r} match the speaker's (closeness {best['closeness']}). What an English listener wrote: {shown}. "
@@ -631,11 +641,14 @@ class PronunciationLab:
                 record["same_sounds_as"] = twin                     # a different spelling, the same sounds: not a new idea
             self.tried.setdefault(word, {})[spelling] = record
             results.append(record)
-        best = max(self.tried[word].values(), key=lambda r: (bool(r.get("english_listener_understands")) and not r.get("lost_in_its_sentence"),
-                                                            not r.get("lost_in_its_sentence"), r["closeness"]))
+        # "closest" is by sounds only; the spellings the English listener wrote the word for are listed beside it, not ranked above it:
+        # closeness skips the speaker's last sounds and the listener guesses from one short clip, so neither check may decide alone
+        best = max(self.tried[word].values(), key=lambda r: (not r.get("lost_in_its_sentence"), r["closeness"]))
         left_word, left_clip = MAX_TRIES_PER_WORD - self.tries_per_word[word], MAX_TRIES_PER_CLIP - self.total_tries
         out = {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], "results": results,
                "closest_so_far": {"spelling": best["spelling"], "closeness": best["closeness"]},
+               "understood_by_the_listener": [r["spelling"] for r in self.tried[word].values()
+                                              if r.get("english_listener_understands") and not r.get("lost_in_its_sentence")],
                "advice": _advice(self.tried[word], best, left_word, left_clip, speaker=source["phones"]),
                "tries_left_for_word": left_word, "tries_left_in_clip": left_clip}
         shown = self.sentence_shown(word)
