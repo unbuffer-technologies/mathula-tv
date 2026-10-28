@@ -681,3 +681,31 @@ def test_loanwords_listed_are_only_english_nouns_the_speaker_says_one_per_word(t
     assert [(item["english"], item["zulu"]) for item in found] == [("Science", "isayensi"), ("benefit", "inzuzo")]       # not "aid" (too short), not an English word with no Zulu word
     workbench.judge = None
     assert workbench.loanwords() == []
+
+
+def test_a_final_vowel_the_recogniser_missed_is_put_back_in_the_voices_sounds_and_a_mismatched_ending_is_named():
+    class Ends(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["f", "aɪ", "t", "a", "s"], "occurrences": 2, "each_occurrence": []}
+
+        def voice_reading(self, spelling):
+            heard = ["f", "aɪ", "t", "a", "s"]
+            ending = self._ending.get(spelling)
+            return heard + ["ə"] if ending and ending["present"] and not heard[-1] in ("a", "ə") else heard
+
+    lab_ = Ends({})
+    lab_._ending["Faitasi"] = {"present": True, "ms": 70}
+    lab_._ending["Faitas"] = {"present": False, "ms": 0}
+    record = lab_._measure("Fighters", "Faitasi", lab_.source("Fighters"))
+    assert record["voice_sounds"].endswith("s ə") and "ends the word with a vowel of about 70 ms" in record["ending"] and "consonant s" in record["ending"]
+    assert "ending" not in lab_._measure("Fighters", "Faitas", lab_.source("Fighters"))                 # the same ending as the speaker's: nothing to say
+
+    class Science(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["s", "aɪ", "n", "ts", "ə"], "occurrences": 2, "each_occurrence": []}
+
+    s_ = Science({})
+    s_._ending["Seins"] = {"present": False, "ms": 0}
+    assert "ends at the last s with no vowel after it" in s_.ending_note("Science", "Seins", s_.source("Science"))
+    s_._ending["Seins"] = None
+    assert s_.ending_note("Science", "Seins", s_.source("Science")) is None                              # a word with no hiss to anchor on: no claim

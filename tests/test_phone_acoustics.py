@@ -124,3 +124,22 @@ def test_the_vowel_note_says_what_the_voices_own_open_a_reaches():
     voice = [{"token": "s"}, {"token": "aɪ", "onset_f1": 560, "offset_f1": 330}, {"token": "n"}]
     assert "this voice's own plain 'a' reaches about 1200 Hz" in pa.differences(speaker, voice, voice_open_f1=1200)[0]
     assert "plain 'a'" not in pa.differences(speaker, voice)[0]
+
+
+def _hiss_burst(seconds, level=0.2):
+    rng = np.random.default_rng(3)
+    noise = rng.standard_normal(int(seconds * pa.SAMPLE_RATE))
+    return np.diff(noise, prepend=0.0) * level                                  # differencing pushes the energy above 4 kHz: an s
+
+
+def _word(final_vowel_ms):
+    parts = [_vowel(750, 1300, 0.25) * 0.8, _hiss_burst(0.12), _vowel(700, 1200, final_vowel_ms / 1000) * 0.8 if final_vowel_ms else np.zeros(int(0.08 * pa.SAMPLE_RATE))]
+    return np.concatenate([*parts, np.zeros(int(0.05 * pa.SAMPLE_RATE))])
+
+
+def test_a_final_vowel_after_the_last_s_is_heard_in_the_signal_and_silence_there_is_not():
+    with_vowel = pa.final_vowel(_word(80), 0.0, len(_word(80)) / pa.SAMPLE_RATE)
+    without = pa.final_vowel(_word(0), 0.0, len(_word(0)) / pa.SAMPLE_RATE)
+    assert with_vowel["present"] and with_vowel["ms"] >= 40
+    assert not without["present"]
+    assert pa.final_vowel(_vowel(750, 1300, 0.3), 0.0, 0.3) is None                       # no hiss to anchor on: the check says nothing

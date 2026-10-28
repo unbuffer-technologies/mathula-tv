@@ -34,6 +34,9 @@ CLOSURE_DIFFERENCE_MS = 40.0
 VOICING_DIFFERENCE = 0.4
 VOT_DIFFERENCE_MS = 20.0
 HISS_DIFFERENCE = 0.25
+FINAL_HISS_WINDOW_S = 0.30                # the last hiss counts as the word's last consonant only if it is in the word's last 300 ms
+FINAL_VOWEL_BELOW_PEAK_DB = 15.0          # a final vowel is voiced, hiss-free and within this many dB of the word's loudest part
+FINAL_VOWEL_MIN_MS = 20
 VOWEL_F1_DIFFERENCE_HZ = 150.0            # vocal tracts differ by about 15%: a smaller difference in mouth opening is not the spelling's doing
 VOWEL_LETTERS = set("aeiouɑɒɔəɛɜɪʊʌæɐøɨ")
 FORMANT_ORDER = 12
@@ -293,3 +296,35 @@ def differences_over_cuts(speaker_occurrences: Sequence[Sequence[dict[str, Any]]
         else:
             voice_word.append({"token": f"·{i}"})                       # nothing paired here: a placeholder that matches no sound
     return differences(occurrences, voice_word, voice_open_f1=voice_open_f1)
+
+
+def final_vowel(samples: np.ndarray, start_s: float, end_s: float) -> dict[str, Any] | None:
+    """Whether the voice's word ends with a vowel after its last s / ts, measured on the signal itself.
+
+    The phone recogniser is a poor listener at the edge of a word: it missed 5 of 12 final vowels the voice really speaks ("Saensa" was heard as
+    "saens").  The signal is clear: after the hiss of the last s / ts comes a voiced stretch nearly as loud as the word's vowels, or silence.
+    Returns {"present": bool, "ms": int}, or None when the word does not end in a hiss to anchor on (the check says nothing then)."""
+    frames: list[tuple[float, float, float]] = []
+    t = start_s
+    while t < end_s:
+        centre = int(t * SAMPLE_RATE)
+        window = samples[max(0, centre - 160):centre + 160]
+        if len(window) < 160:
+            break
+        energy = float(10 * np.log10(np.mean(window ** 2) + 1e-10))
+        frames.append((t, energy, _hiss(samples, max(0, centre - 240), 480)))
+        t += 0.01
+    if not frames:
+        return None
+    peak = max(energy for _, energy, _ in frames)
+    hiss = [i for i, (when, energy, share) in enumerate(frames) if share > 0.5 and energy > peak - 22 and when >= end_s - FINAL_HISS_WINDOW_S]
+    if not hiss:
+        return None
+    run = best = 0
+    for _, energy, share in frames[max(hiss) + 1:]:
+        if share < 0.3 and energy > peak - FINAL_VOWEL_BELOW_PEAK_DB:
+            run += 1
+            best = max(best, run)
+        else:
+            run = 0
+    return {"present": best * 10 >= FINAL_VOWEL_MIN_MS, "ms": best * 10}

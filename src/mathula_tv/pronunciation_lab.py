@@ -382,6 +382,8 @@ class PronunciationLab:
         self._gop = gop
         self._stt = stt                                  # an Azure speech-to-text backend; made on first use when None
         self._voice_audio: dict[str, Path] = {}
+        self._ending: dict[str, dict[str, Any] | None] = {}                # spelling -> does its word end with a vowel (the signal), when the voice says it alone
+        self._in_sentence_ending: dict[tuple[str, str, str], dict[str, Any] | None] = {}
         self._word_end: dict[str, float] = {}             # audio file -> second (in that file) where the spelling's text ends; later sounds are the next word's
         self._reading_checks: dict[tuple[str, str], bool | None] = {}
         self.sentences: list[str] = []                    # the Zulu the agent has written: a word is also heard in the sentence it is spoken in
@@ -442,6 +444,10 @@ class PronunciationLab:
         try:
             marks = json.loads((self._windows.work_dir / f"{self._windows._key(context, candidate)}.json").read_text(encoding="utf-8"))
             self._word_end[str(audio)] = (float(marks["n1"]) - float(marks["n0"]) + ps.LEAD_MS) / 1000
+            from . import phone_acoustics as pa
+
+            whole = self._windows.work_dir / f"{self._windows._key(context, candidate)}.wav"
+            self._ending[spelling] = pa.final_vowel(pa.load(whole), float(marks["n0"]) / 1000, float(marks["n1"]) / 1000 + 0.02)
         except (OSError, ValueError, KeyError):
             pass
         self._voice_audio[spelling] = audio
@@ -504,10 +510,38 @@ class PronunciationLab:
             try:
                 from . import phone_acoustics as pa
 
+                whole, marks = self._windows.whole(context, ps.Candidate(without_prefix(spelling, self._located(word)[1])))
+                self._in_sentence_ending[key] = pa.final_vowel(pa.load(whole), float(marks["n0"]) / 1000, float(marks["n1"]) / 1000 + 0.02)
+            except Exception:
+                self._in_sentence_ending[key] = None
+            try:
+                from . import phone_acoustics as pa
+
                 self._in_sentence_acoustics[key] = [pa.timed_features(pa.load(Path(cut)), heard) for cut, heard in zip(cuts, timed)]
             except Exception:                                   # a measuring failure leaves out the acoustics, never the sounds
                 self._in_sentence_acoustics[key] = []
         return self._in_sentence[key]
+
+    def ending_note(self, word: str, spelling: str, source: Mapping[str, Any]) -> str | None:
+        """Where the voice's ending differs from the speaker's, in plain words: a final vowel the voice speaks that he does not (a Zulu voice says
+        every written vowel in full), or the opposite.  From the signal after the last s / ts, in the word's sentence; None when it matches or cannot
+        be judged (a word that does not end in a hiss)."""
+        context = self._context(word)
+        ending = None
+        if context is not None:
+            ending = self._in_sentence_ending.get((word.casefold(), spelling, f"{context.before}|{context.after}"))
+        if ending is None:
+            ending = self._ending.get(without_prefix(spelling, written_prefix(word)))
+        phones = list(source.get("phones") or [])
+        if not ending or not phones:
+            return None
+        speaker_vowel = _is_vowel(phones[-1])
+        if ending["present"] and not speaker_vowel:
+            return (f"the voice ends the word with a vowel of about {ending['ms']} ms after the last s (a Zulu voice says every written vowel in full), "
+                    f"and the speaker's word ends in the consonant {phones[-1]}")
+        if not ending["present"] and speaker_vowel:
+            return f"the voice's word ends at the last s with no vowel after it, and the speaker's word ends in a short vowel ({phones[-1]})"
+        return None
 
     def _speaker_features(self, source: Mapping[str, Any]) -> list[list[dict[str, Any]]]:
         from . import phone_acoustics as pa
@@ -556,7 +590,11 @@ class PronunciationLab:
 
     def voice_reading(self, spelling: str) -> list[str]:
         """The sounds the Zulu voice produces for ``spelling``, decoded from its own audio with the same recogniser."""
-        return [phone for phone, _, _ in self._word_timed(self._audio_for(spelling))]
+        phones = [phone for phone, _, _ in self._word_timed(self._audio_for(spelling))]
+        ending = self._ending.get(spelling)
+        if ending and ending["present"] and phones and not _is_vowel(phones[-1]):
+            phones.append("ə")                      # the recogniser did not list a final vowel that the signal shows: it is in the sounds the voice makes
+        return phones
 
     def reading_understood(self, word: str, spelling: str) -> bool | None:
         """Whether an English listener writes ``word`` when the voice says ``spelling``; None when that cannot be asked.  No sounds are decoded
@@ -634,6 +672,9 @@ class PronunciationLab:
             made = self.acoustics_in_sentence(word, spelling, source)
             if made:
                 record["how_the_sounds_are_made_in_its_sentence"] = made
+        note = self.ending_note(word, spelling, source)
+        if note:
+            record["ending"] = note
         record["_heard"] = heard
         return record
 

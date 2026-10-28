@@ -173,6 +173,12 @@ class NameWindows:
     def _key(context: Context, candidate: Candidate) -> str:
         return hashlib.sha1(f"{context.pitch}|{context.render_marked(candidate)}".encode("utf-8")).hexdigest()[:16]
 
+    def whole(self, context: Context, candidate: Candidate) -> tuple[Path, dict]:
+        """The whole synthesised sentence of ``audio`` and its bookmarks (n0, n1: the name's start and end, in ms)."""
+        self.audio(context, candidate)
+        key = self._key(context, candidate)
+        return self.work_dir / f"{key}.wav", json.loads((self.work_dir / f"{key}.json").read_text(encoding="utf-8"))
+
     def audio_with_margins(self, context: Context, candidate: Candidate, margins: Sequence[tuple[int, int]]) -> list[Path]:
         """The same synthesised sentence cut around the name with several margins (ms of real audio kept before and after it).  The audio is
         identical in every cut, so a recogniser that labels it differently from one cut to the next is unsure of the sound, not the voice."""
