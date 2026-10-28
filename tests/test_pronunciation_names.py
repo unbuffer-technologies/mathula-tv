@@ -118,3 +118,12 @@ def test_a_respelling_must_beat_the_current_reading_not_just_the_raw_spelling():
 def test_a_joint_recogniser_symbol_is_spelt_as_its_separate_sounds():
     spelling, _ = phones_to_spelling(["mj", "u", "n", "ɪ"], like="Municipality")
     assert spelling == "Myuni"
+
+
+def test_a_reading_saved_in_lowercase_still_finds_the_english_word_glued_to_a_zulu_prefix():
+    dictionary = _dictionary().with_job_overrides("job-1", [
+        {"display_text": "science", "spoken_text": "science", "tts_text": "sayensi", "kind": "english_code_switch"}])
+    assert dictionary.apply("ungqongqoshe weScience and Technology").tts_text == "ungqongqoshe wesayensi and Technology"     # capitalised in the text
+    assert dictionary.apply("Phela iScience kakhulu").tts_text == "Phela isayensi kakhulu"
+    assert dictionary.apply("Phela science kakhulu").tts_text == "Phela sayensi kakhulu"                                # a word on its own
+    assert dictionary.apply("ukuphela isifundoscience").tts_text == "ukuphela isifundoscience"                               # lowercase glue: not this word

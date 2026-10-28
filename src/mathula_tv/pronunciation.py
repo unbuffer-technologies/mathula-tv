@@ -1940,14 +1940,23 @@ class PronunciationDictionary:
                 # "MK", "ANC" -- are exactly the ones prone to an accidental substring
                 # collision under IGNORECASE (e.g. "da" inside "Rabanda"). Only relax
                 # the start boundary for a genuinely long-enough proper-noun match.
+                glue_needs_capital = False
                 if match_text[:1].isupper() and len(match_text) >= 4 and entry.kind not in {"initials", "acronym"}:
                     start_boundary = rf"(?:(?<!\w)|{_GLUED_PREFIX_LOOKBEHIND})"
+                elif len(match_text) >= 4 and entry.kind not in {"initials", "acronym"}:
+                    # A reading saved in lowercase ("science") must still find the English word the Zulu glues a prefix onto ("weScience"): the
+                    # Zulu writes that word with a capital, so a glued match is taken only when the text capitalises it, which keeps lowercase
+                    # vocabulary from being matched inside longer isiZulu words.
+                    start_boundary = rf"(?:(?<!\w)|{_GLUED_PREFIX_LOOKBEHIND})"
+                    glue_needs_capital = True
                 else:
                     start_boundary = r"(?<!\w)"
                 pattern = re.compile(
                     rf"{start_boundary}{re.escape(match_text)}(?!\w)", re.IGNORECASE | re.UNICODE
                 )
                 for match in pattern.finditer(text):
+                    if glue_needs_capital and match.start() > 0 and re.match(r"\w", text[match.start() - 1]) and not text[match.start()].isupper():
+                        continue
                     candidates.append(
                         (
                             match.start(),
