@@ -297,11 +297,28 @@ class Workbench:
                 region=os.environ["AZURE_SPEECH_REGION"].strip().lower(), work_dir=Path(episode["dir"]) / "pronunciation_lab")
         return self._pronunciation_lab
 
+    def _sync_lab_context(self) -> None:
+        """Give the lab the Zulu as written now and the readings already chosen, so a word is also heard in the sentence it is spoken in."""
+        from .pronunciation_memory import entries_for, memory_path
+
+        lab = self._lab()
+        submission = Path(self._episode()["dir"]) / "submission.json"
+        lab.sentences = [str(i.get("zulu_text") or "") for i in read_json(submission).get("items", [])] if submission.is_file() else []
+        readings: dict[str, str] = {}
+        lexicon = Path(self.store.clip_dir(self._episode()["clip_id"])) / "native_dub" / "pronunciation_names.json"
+        if lexicon.is_file():
+            readings.update({str(e["display_text"]): str(e["tts_text"]) for e in read_json(lexicon).get("entries", []) if e.get("display_text") and e.get("tts_text")})
+        for entry in entries_for(memory_path(Path(self.store.root).parent), lab.voice):
+            if entry.get("display_text") and entry.get("tts_text") and not entry.get("disabled"):
+                readings.setdefault(str(entry["display_text"]), str(entry["tts_text"]))
+        lab.readings = readings
+
     def _known_readings(self) -> set[str]:
         """Texts that already have a reading (the clip's lexicon and the shared memory): the lab does not need to look at them."""
         from .pronunciation_lab import failing_readings
         from .pronunciation_memory import entries_for, memory_path
 
+        self._sync_lab_context()
         known: set[str] = set()
         lexicon = Path(self.store.clip_dir(self._episode()["clip_id"])) / "native_dub" / "pronunciation_names.json"
         if lexicon.is_file():
@@ -351,6 +368,7 @@ class Workbench:
         from .pronunciation_lab import PronunciationBudgetExhausted
 
         try:
+            self._sync_lab_context()
             return self._lab().try_spellings(word, spellings)
         except PronunciationBudgetExhausted as exc:
             raise BudgetExhausted(str(exc)) from exc

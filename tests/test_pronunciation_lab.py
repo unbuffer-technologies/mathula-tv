@@ -278,3 +278,73 @@ def test_measured_sound_differences_are_shown_with_each_try_and_in_the_advice():
     assert "Measured in the closest ('Sains')" in out["advice"]
     quiet = Measured({"Sayinsi": ["s", "aɪ", "iː", "n", "s"]}, {"Sayinsi": "Science."}).try_spellings("science", ["Sayinsi"])
     assert "how_the_sounds_are_made_differently" not in quiet["results"][0]
+
+
+def test_a_sound_the_voice_makes_alone_and_loses_in_its_sentence_is_named():
+    from mathula_tv.pronunciation_lab import lost_in_the_sentence
+
+    speaker = ["t", "e", "k", "n", "o", "l", "o", "dʒ"]
+    alone = ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]
+    assert lost_in_the_sentence(speaker, alone, ["t", "e", "k", "n", "o", "l", "o"]) == ["dʒ"]             # the ending is gone
+    assert lost_in_the_sentence(speaker, alone, ["t", "e", "k", "n", "o", "l", "o", "ɡ"]) == ["dʒ"]        # a hard g instead of j
+    assert lost_in_the_sentence(speaker, alone, ["a", "t", "e", "k", "n", "o", "l", "o", "dʒ", "i", "p", "e"]) == []     # neighbours' sounds do not count
+    # a sound the voice never makes for the spelling is not blamed on the sentence; nor one the speaker does not make
+    assert lost_in_the_sentence(["f", "a", "n", "d"], ["f", "a", "n", "t"], ["f", "a", "n", "t"]) == []
+    assert lost_in_the_sentence(["s", "a"], ["s", "a", "k"], ["s", "a"]) == []
+
+
+def test_a_word_is_found_in_its_sentence_with_the_other_readings_applied():
+    fake = FakeLab({})
+    fake.sentences = ["Asibadingi abaningi. Kungani udinga ungqongqoshe weScience and Technology? Phela isayensi iyisifundo kwezemfundo, ifundiswa khona."]
+    fake.readings = {"Science": "Sayense", "Technology": "Technology"}
+    context = fake._context("Technology")
+    assert context.before == "Kungani udinga ungqongqoshe weSayense and " and context.after.startswith("? Phela isayensi")
+    glued = fake._context("weScience")                                            # the prefix stays on, only the English word is respelled
+    assert glued.before == "Kungani udinga ungqongqoshe we" and "and Technology?" in glued.after
+    assert fake._context("Gauteng") is None and fake.sentence_shown("Gauteng") is None
+    assert fake.sentence_shown("Technology").startswith("Kungani udinga ungqongqoshe weSayense and [the spelling]? Phela")
+    assert PronunciationLab("/x", voice="v", key="k", region="r", work_dir="/tmp/none").sounds_in_sentence("Technology", "Technology") is None
+
+
+def test_a_spelling_that_loses_a_sound_in_its_sentence_is_not_the_answer():
+    class Heard(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["t", "e", "k", "n", "o", "l", "o", "dʒ"], "occurrences": 2, "each_occurrence": []}
+
+        def sounds_in_sentence(self, word, spelling):
+            return {"Technology": ["t", "e", "k", "n", "o", "l", "o", "ɡ"], "Technolodgy": ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]}[spelling]
+
+    heard = Heard({"Technology": ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"], "Technolodgy": ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]})
+    heard.sentences = ["Kungani udinga weScience and Technology? Phela."]
+    out = heard.try_spellings("Technology", ["Technology", "Technolodgy"])
+    plain, respelled = out["results"]
+    assert plain["lost_in_its_sentence"] == ["dʒ"] and "lost_in_its_sentence" not in respelled and plain["said_in_its_sentence"].endswith("ɡ")
+    assert out["closest_so_far"]["spelling"] == "Technolodgy" and "'Technology' loses dʒ" in out["advice"]
+    assert out["also_heard_in_this_sentence"].endswith("[the spelling]? Phela.")
+
+
+def test_a_saved_reading_that_loses_a_sound_in_its_sentence_goes_back_on_the_list():
+    from mathula_tv.pronunciation_lab import failing_readings
+
+    class Heard(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["t", "e", "k", "n", "o", "l", "o", "dʒ"], "occurrences": 2, "each_occurrence": []}
+
+        def reading_understood(self, word, spelling):
+            return True
+
+        def voice_reading(self, spelling):
+            return ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]
+
+        def sounds_in_sentence(self, word, spelling):
+            return ["t", "e", "k", "n", "o", "l", "o", "ɡ"] if spelling == "Technology" else ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]
+
+    heard = Heard({})
+    heard.sentences = ["Kungani udinga weScience and Technology? Phela."]
+    entries = [{"display_text": "Technology", "tts_text": "Technology", "source": "agent", "kind": "english_code_switch"}]
+    assert failing_readings(heard, entries) == {"technology"}                           # understood, but said with a g where the speaker said j
+    entries[0]["tts_text"] = "Technolodgy"
+    assert failing_readings(heard, entries) == set()
+    heard.sentences = []                                                                # in no sentence: nothing to hear it in, so no complaint
+    entries[0]["tts_text"] = "Technology"
+    assert failing_readings(heard, entries) == set()

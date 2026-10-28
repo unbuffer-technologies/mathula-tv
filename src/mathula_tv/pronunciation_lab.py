@@ -17,7 +17,9 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from collections import Counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
+from xml.sax.saxutils import escape
 
 MAX_TRIES_PER_WORD = 5
 MAX_TRIES_PER_CLIP = 15
@@ -105,6 +107,26 @@ def align(source: Sequence[str], heard: Sequence[str]) -> dict[str, Any]:
 _GLUED_PREFIX = re.compile(r"^[A-Za-z][a-z]{0,3}(?=[A-Z][a-z]{3,})")
 
 
+def _word_pattern(word: str) -> "re.Pattern[str]":
+    """The English word wherever the Zulu text writes it, with a Zulu prefix glued on ("weScience", "i-Technology") or not.  Group 1 is the
+    prefix, group 2 the English word itself."""
+    english = _GLUED_PREFIX.sub("", word.split("-")[-1])
+    return re.compile(r"(?<![A-Za-z'])((?:[A-Za-z][a-z]{0,3}-|[A-Za-z][a-z]{0,3}(?=[A-Z]))?)((?i:" + re.escape(english) + r"))(?![A-Za-z'])")
+
+
+def lost_in_the_sentence(speaker: Sequence[str], alone: Sequence[str], in_sentence: Sequence[str]) -> list[str]:
+    """Consonants the speaker makes and the voice makes when the word is alone, that the voice does not make in the sentence the word is
+    spoken in.  The voice reads the same letters differently in a sentence ("Technology" ended with j alone and with a hard g or nothing in
+    its sentence), and a sound it can make alone is the one a spelling can be blamed for losing.  Neighbouring words' sounds in the window,
+    and sounds the voice never makes for this spelling, are not counted."""
+    def consonants(phones: Sequence[str]) -> Counter:
+        return Counter(_base(p) for p in phones if not _is_vowel(p))
+
+    wanted, can, did = consonants(speaker), consonants(alone), consonants(in_sentence)
+    return [sound for sound in dict.fromkeys(_base(p) for p in alone if not _is_vowel(p))
+            if sound in wanted and did[sound] < min(wanted[sound], can[sound])]
+
+
 def _stem(word: str) -> str:
     word = re.sub(r"[^a-z]", "", word.casefold())
     return word[:-1] if word.endswith("s") and len(word) > 4 else word
@@ -187,8 +209,13 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
     """What to do next, from the tries so far.  It reads what an English listener wrote and the differences; it adds no score and does not
     choose for the agent."""
     heard = {record["spelling"]: record["english_hears"] for record in tried.values() if record.get("english_hears") is not None}
-    understood = [record["spelling"] for record in tried.values() if record.get("english_listener_understands")]
+    understood = [record["spelling"] for record in tried.values() if record.get("english_listener_understands") and not record.get("lost_in_its_sentence")]
     parts = []
+    lost = {record["spelling"]: record["lost_in_its_sentence"] for record in tried.values() if record.get("lost_in_its_sentence")}
+    if lost:
+        parts.append("In the sentence the word is spoken in, the voice loses a sound it makes when the word is alone: "
+                     + "; ".join(f"{spelling!r} loses {' '.join(sounds)} (it says {tried[spelling].get('said_in_its_sentence')!r})" for spelling, sounds in lost.items())
+                     + ". A spelling is judged where it is heard, so one that loses a sound the speaker makes is not an answer; try letters that keep it.")
     if heard:
         shown = "; ".join(f"{spelling!r} -> {text!r}" for spelling, text in list(heard.items())[-4:])
         if understood:
@@ -197,7 +224,7 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
         else:
             parts.append(f"No spelling is understood yet. What an English listener wrote: {shown}. Change the sounds that make them hear the wrong word.")
     elif best["closeness"] >= GOOD_ENOUGH:
-        return f"{best['spelling']!r} is close to the speaker's sounds; use it."
+        return " ".join(parts + [f"{best['spelling']!r} is close to the speaker's sounds; use it."])
     distinct = {record["voice_sounds"] for record in tried.values()}
     if len(distinct) < len(tried):
         parts.append(f"{len(tried)} spellings gave only {len(distinct)} different sound(s): spellings that sound the same count as one idea, "
@@ -222,7 +249,8 @@ def understood_as(heard: str, word: str) -> bool:
 
 
 def failing_readings(lab: Any, entries: Iterable[Mapping[str, Any]]) -> set[str]:
-    """Display texts (casefolded) of saved English-word readings that an English listener does not understand.
+    """Display texts (casefolded) of saved English-word readings that an English listener does not understand, or that lose a sound in the
+    sentence they are spoken in.
 
     Only readings an agent chose or a repair made are re-checked: one a person approved by ear is not second-guessed, and a name or a Zulu
     word is not an English word to listen for.  A reading that cannot be checked counts as fine.  The ones returned go back on the
@@ -231,8 +259,10 @@ def failing_readings(lab: Any, entries: Iterable[Mapping[str, Any]]) -> set[str]
     for entry in entries:
         if entry.get("source") in ("agent",) and entry.get("kind") == "english_code_switch" and not entry.get("disabled"):
             try:
-                if lab.reading_understood(str(entry["display_text"]), str(entry["tts_text"])) is False:
-                    failing.add(str(entry["display_text"]).casefold())
+                word, spelling = str(entry["display_text"]), str(entry["tts_text"])
+                broken = lab.reading_fails(word, spelling) if hasattr(lab, "reading_fails") else lab.reading_understood(word, spelling) is False
+                if broken:
+                    failing.add(word.casefold())
             except Exception:
                 continue
     return failing
@@ -247,6 +277,9 @@ class PronunciationLab:
         self._stt = stt                                  # an Azure speech-to-text backend; made on first use when None
         self._voice_audio: dict[str, Path] = {}
         self._reading_checks: dict[tuple[str, str], bool | None] = {}
+        self.sentences: list[str] = []                    # the Zulu the agent has written: a word is also heard in the sentence it is spoken in
+        self.readings: dict[str, str] = {}                # readings already chosen for other words, applied in those sentences as the render does
+        self._in_sentence: dict[tuple[str, str, str], list[str] | None] = {}
         self._windows: Any = None
         self._transcript: list[Mapping[str, Any]] | None = None
         self.tries_per_word: dict[str, int] = {}
@@ -298,6 +331,62 @@ class PronunciationLab:
         audio = Path(self._windows.audio(ps.Context(before="", after=".", pitch="+0%"), ps.Candidate(spelling)))
         self._voice_audio[spelling] = audio
         return audio
+
+    def _apply_readings(self, text: str, skip: str) -> str:
+        for display, spoken in self.readings.items():
+            if _stem(display) != _stem(skip):
+                text = _word_pattern(display).sub(lambda m, spoken=spoken: m.group(1) + spoken, text)
+        return text
+
+    def _context(self, word: str) -> Any:
+        """The first sentence of the Zulu text that has the word (and the one after it), as the context to hear a spelling in; None when no
+        sentence has it."""
+        from . import pronunciation_search as ps
+
+        pattern = _word_pattern(word)
+        for text in self.sentences:
+            pieces = re.split(r"(?<=[.?!])\s+", text)
+            for index, piece in enumerate(pieces):
+                found = pattern.search(piece)
+                if found:
+                    after = piece[found.end(2):] + (" " + pieces[index + 1] if index + 1 < len(pieces) else "")
+                    after = after[:200].rsplit(" ", 1)[0] if len(after) > 200 else after
+                    return ps.Context(before=escape(self._apply_readings(piece[:found.start(2)], word)),
+                                      after=escape(self._apply_readings(after, word)), pitch="+0%")
+        return None
+
+    def sentence_shown(self, word: str) -> str | None:
+        """The sentence a word is heard in, with the spelling's place marked, for the agent to read; None when no sentence has the word."""
+        context = self._context(word)
+        return f"{context.before}[the spelling]{context.after}".strip() if context else None
+
+    def sounds_in_sentence(self, word: str, spelling: str) -> list[str] | None:
+        """The sounds the voice makes for ``spelling`` of ``word`` in the sentence the word is spoken in; None when no sentence has the word."""
+        from . import pronunciation_search as ps
+
+        context = self._context(word)
+        if context is None:
+            return None
+        key = (word.casefold(), spelling, f"{context.before}|{context.after}")
+        if key not in self._in_sentence:
+            if self._windows is None:
+                self._windows = ps.NameWindows(ps.bookmark_synthesizer(self.voice, self.key, self.region), lambda wav: (), self.work_dir / "voice")
+            self._in_sentence[key] = list(self.gop.decode(Path(self._windows.audio(context, ps.Candidate(spelling)))))
+        return self._in_sentence[key]
+
+    def sounds_lost_in_sentence(self, word: str, spelling: str, speaker: Sequence[str], alone: Sequence[str]) -> list[str]:
+        inside = self.sounds_in_sentence(word, spelling)
+        return [] if inside is None else lost_in_the_sentence(speaker, alone, inside)
+
+    def reading_fails(self, word: str, spelling: str) -> bool:
+        """Whether a saved reading should be looked at again: an English listener does not understand it, or the voice loses a sound of it in
+        the sentence it is spoken in.  A reading that cannot be checked counts as fine."""
+        if self.reading_understood(word, spelling) is False:
+            return True
+        source = self.source(word)
+        if not source.get("found") or self._context(word) is None:
+            return False
+        return bool(self.sounds_lost_in_sentence(word, spelling, source["phones"], self.voice_reading(spelling)))
 
     def voice_reading(self, spelling: str) -> list[str]:
         """The sounds the Zulu voice produces for ``spelling``, decoded from its own audio with the same recogniser."""
@@ -378,14 +467,25 @@ class PronunciationLab:
             if listener is not None:
                 record["english_hears"] = listener or "(nothing)"
                 record["english_listener_understands"] = understood_as(listener, source.get("spoken_form") or word)
+            inside = self.sounds_in_sentence(word, spelling)
+            if inside is not None:
+                record["said_in_its_sentence"] = " ".join(inside)
+                lost = lost_in_the_sentence(source["phones"], heard, inside)
+                if lost:
+                    record["lost_in_its_sentence"] = lost
             twin = next((other for other, tried in self.tried.get(word, {}).items() if tried["voice_sounds"] == record["voice_sounds"]), None)
             if twin:
                 record["same_sounds_as"] = twin                     # a different spelling, the same sounds: not a new idea
             self.tried.setdefault(word, {})[spelling] = record
             results.append(record)
-        best = max(self.tried[word].values(), key=lambda r: (bool(r.get("english_listener_understands")), r["closeness"]))
+        best = max(self.tried[word].values(), key=lambda r: (bool(r.get("english_listener_understands")) and not r.get("lost_in_its_sentence"),
+                                                            not r.get("lost_in_its_sentence"), r["closeness"]))
         left_word, left_clip = MAX_TRIES_PER_WORD - self.tries_per_word[word], MAX_TRIES_PER_CLIP - self.total_tries
-        return {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], "results": results,
-                "closest_so_far": {"spelling": best["spelling"], "closeness": best["closeness"]},
-                "advice": _advice(self.tried[word], best, left_word, left_clip),
-                "tries_left_for_word": left_word, "tries_left_in_clip": left_clip}
+        out = {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], "results": results,
+               "closest_so_far": {"spelling": best["spelling"], "closeness": best["closeness"]},
+               "advice": _advice(self.tried[word], best, left_word, left_clip),
+               "tries_left_for_word": left_word, "tries_left_in_clip": left_clip}
+        shown = self.sentence_shown(word)
+        if shown:
+            out["also_heard_in_this_sentence"] = shown
+        return out
