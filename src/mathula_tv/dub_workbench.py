@@ -411,9 +411,13 @@ class Workbench:
         if self.judge is None or not hasattr(self.judge, "foreign_words") or not submission.is_file():
             return []
         try:
+            from .pronunciation_lab import _stem
+
+            spoken = {_stem(str(w.get("text") or "")) for w in self._lab().transcript}          # only English the speaker really says in the source audio
             texts = [str(i.get("zulu_text") or "") for i in read_json(submission).get("items", [])]
-            return [{"written": w["written"], "english": w["english"], "zulu": w["zulu"]} for w in self.judge.foreign_words(texts)
-                    if w.get("kind") != "name" and w.get("zulu")]
+            found = [{"written": w["written"], "english": w["english"], "zulu": w["zulu"]} for w in self.judge.foreign_words(texts)
+                     if w.get("kind") != "name" and w.get("zulu") and len(_stem(w["english"])) >= 4 and _stem(w["english"]) in spoken]
+            return list({(item["english"].casefold()): item for item in found}.values())          # one entry per English word, whatever prefix it carries
         except Exception:
             return []
 

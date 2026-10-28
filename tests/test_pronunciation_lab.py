@@ -658,3 +658,26 @@ def test_a_word_listed_for_checking_carries_the_everyday_zulu_word_for_it():
     assert {f["speaker_says"]: f.get("zulu_word") for f in found} == {"science": "isayensi", "technology": "ubuchwepheshe"}
     none = candidate_words(["weScience"], words, looks_isizulu=looks_isizulu, named=[{"written": "weScience", "english": "science", "kind": "word", "zulu": ""}])
     assert "zulu_word" not in none[0]
+
+def test_loanwords_listed_are_only_english_nouns_the_speaker_says_one_per_word(tmp_path):
+    import json
+    from pathlib import Path
+
+    workbench, _ = make_workbench(tmp_path, {})
+    Path(workbench._episode()["dir"], "submission.json").write_text(json.dumps({"items": [{"item_id": "u1", "zulu_text": "weScience ne-medical ama-benefit ma-benefit aid and Malema"}]}))
+
+    class Judge:
+        def foreign_words(self, texts):
+            return [{"written": "weScience", "english": "Science", "kind": "word", "zulu": "isayensi"},
+                    {"written": "ne-medical", "english": "medical", "kind": "word", "zulu": ""},
+                    {"written": "ama-benefit", "english": "benefit", "kind": "word", "zulu": "inzuzo"},
+                    {"written": "ma-benefit", "english": "benefit", "kind": "word", "zulu": "inzuzo"},
+                    {"written": "aid", "english": "aid", "kind": "word", "zulu": "usizo"},
+                    {"written": "Malema", "english": "Malema", "kind": "name", "zulu": ""}]
+
+    workbench.judge = Judge()
+    workbench._pronunciation_lab._transcript = [{"text": "science"}, {"text": "benefits"}, {"text": "aid"}, {"text": "Malema"}]
+    found = workbench.loanwords()
+    assert [(item["english"], item["zulu"]) for item in found] == [("Science", "isayensi"), ("benefit", "inzuzo")]       # not "aid" (too short), not an English word with no Zulu word
+    workbench.judge = None
+    assert workbench.loanwords() == []
