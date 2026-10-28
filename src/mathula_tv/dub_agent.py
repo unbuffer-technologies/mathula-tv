@@ -631,6 +631,29 @@ def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) ->
     return note
 
 
+def pronunciation_evidence_note(workbench: Any, words: list[str]) -> str:
+    """The lab's measurement of each pending word as written, to put in the reminder: with it, "they are fine as they are" is a judgement from
+    evidence, not a guess.  Empty when nothing could be measured."""
+    measure = getattr(workbench, "pronunciation_evidence", None)
+    try:
+        rows = measure(words) if callable(measure) else []
+    except Exception:
+        rows = []
+    lines = []
+    for row in rows:
+        listener = row.get("english_hears")
+        line = (f"{row['word']}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] as written (closeness {row['closeness']})"
+                + (f"; differences: {'; '.join(row['differences'])}" if row.get("differences") else "; no sound differs")
+                + (f"; an English listener writes {listener!r}" if listener else ""))
+        if row.get("lost_in_its_sentence"):
+            line += f"; in its sentence the voice loses {' '.join(row['lost_in_its_sentence'])}"
+        lines.append(line)
+    if not lines:
+        return ""
+    return (" Measured now, with each word as you wrote it (no tries used): " + " | ".join(lines)
+            + ". Closeness is a guide, not a verdict; a short clip often makes the listener write another real word.")
+
+
 PRONUNCIATION_REMINDER = (
     "One reminder, once: your Zulu keeps English words that the speaker says and that have no checked reading yet, so the voice may read them "
     "with Zulu letters: {words}. If any of them may sound wrong, call list_foreign_words, check those with try_pronunciation, use "
@@ -724,7 +747,8 @@ def _run_agent(
             words = pending() if callable(pending) else []
             pronunciation_reminded = True                      # asked once whether or not there is anything to check
             if words:
-                text = PRONUNCIATION_LATE_NOTE.format(left=max_turns - turn + 1) + PRONUNCIATION_REMINDER.format(words=", ".join(words[:12]))
+                text = (PRONUNCIATION_LATE_NOTE.format(left=max_turns - turn + 1) + PRONUNCIATION_REMINDER.format(words=", ".join(words[:12]))
+                        + pronunciation_evidence_note(workbench, words))
                 messages.append({"role": "user", "content": text})
                 trace.log("pronunciation_reminder", turn=turn, words=words[:12], text=text, early=True)
         response = client.complete(messages, tools=TOOL_SPECS)
@@ -757,7 +781,7 @@ def _run_agent(
             words = pending() if callable(pending) and not pronunciation_reminded and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens else []
             if words:                                # only when there is something to check: no need, no reminder
                 pronunciation_reminded = True
-                text = PRONUNCIATION_REMINDER.format(words=", ".join(words[:12]))
+                text = PRONUNCIATION_REMINDER.format(words=", ".join(words[:12])) + pronunciation_evidence_note(workbench, words)
                 messages.append({"role": "user", "content": text})
                 trace.log("pronunciation_reminder", turn=turn, words=words[:12], text=text)
                 continue

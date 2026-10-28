@@ -533,6 +533,43 @@ class PronunciationLab:
         except Exception as exc:                          # an empty transcription is an answer ("nothing"); a real failure is "could not ask"
             return "" if "empty transcription" in str(exc).lower() else None
 
+    def _measure(self, word: str, spelling: str, source: Mapping[str, Any]) -> dict[str, Any]:
+        """Everything the lab measures about one spelling of ``word`` against the speaker: sounds, how the stops are made, what an English
+        listener writes, and what the voice does with it in its sentence.  Spends no try."""
+        judged = without_prefix(spelling, written_prefix(word))             # the Zulu prefix is spoken, but it is not what is compared with the speaker
+        heard = self.voice_reading(judged)
+        record: dict[str, Any] = {"spelling": spelling, "voice_sounds": " ".join(heard), **align(source["phones"], heard)}
+        notes = self.sound_differences(source, judged)
+        if notes:
+            record["how_the_sounds_are_made_differently"] = notes
+        listener = self.english_hears(judged)
+        if listener is not None:
+            record["english_hears"] = listener or "(nothing)"
+            record["english_listener_understands"] = understood_as(listener, source.get("spoken_form") or word)
+        readings = self.readings_in_sentence(word, spelling)
+        if readings is not None:
+            record["said_in_its_sentence"] = " ".join(_readings(readings)[0])
+            record["kept_in_its_sentence"] = kept_in_the_sentence(source["phones"], readings)
+            lost = lost_in_the_sentence(source["phones"], heard, readings)
+            if lost:
+                record["lost_in_its_sentence"] = lost
+                record["readings_of_the_audio"] = len(_readings(readings))
+        record["_heard"] = heard
+        return record
+
+    def as_written(self, word: str) -> dict[str, Any] | None:
+        """The same measurements for the word exactly as the Zulu text writes it, so that "does it need a look?" is answered from evidence.
+        Spends no try; None when the speaker never says the word."""
+        source = self.source(word)
+        if not source.get("found"):
+            return None
+        record = self._measure(word, word, source)
+        record.pop("_heard", None)
+        return {"word": word, "speaker_sounds": " ".join(source["phones"]), "voice_sounds": record["voice_sounds"], "closeness": record["closeness"],
+                "differences": record["differences"][:3], "english_hears": record.get("english_hears"),
+                "english_listener_understands": record.get("english_listener_understands"),
+                "lost_in_its_sentence": record.get("lost_in_its_sentence"), "made_differently": (record.get("how_the_sounds_are_made_differently") or [])[:2]}
+
     def try_spellings(self, word: str, spellings: Sequence[str]) -> dict[str, Any]:
         """Try up to three spellings of ``word``; each is compared with the speaker's sounds. Counts against the budget."""
         spellings = [s.strip() for s in spellings if str(s).strip()][:MAX_SPELLINGS_PER_CALL]
@@ -547,25 +584,8 @@ class PronunciationLab:
                 raise PronunciationBudgetExhausted(
                     f"pronunciation tries used: {self.tries_per_word.get(word, 0)}/{MAX_TRIES_PER_WORD} for {word!r}, {self.total_tries}/{MAX_TRIES_PER_CLIP} in all")
             self.tries_per_word[word] = self.tries_per_word.get(word, 0) + 1
-            judged = without_prefix(spelling, written_prefix(word))         # the Zulu prefix is spoken, but it is not what is compared with the speaker
-            heard = self.voice_reading(judged)
-            comparison = align(source["phones"], heard)
-            record = {"spelling": spelling, "voice_sounds": " ".join(heard), **comparison}
-            notes = self.sound_differences(source, judged)
-            if notes:
-                record["how_the_sounds_are_made_differently"] = notes
-            listener = self.english_hears(judged)
-            if listener is not None:
-                record["english_hears"] = listener or "(nothing)"
-                record["english_listener_understands"] = understood_as(listener, source.get("spoken_form") or word)
-            readings = self.readings_in_sentence(word, spelling)
-            if readings is not None:
-                record["said_in_its_sentence"] = " ".join(_readings(readings)[0])
-                record["kept_in_its_sentence"] = kept_in_the_sentence(source["phones"], readings)
-                lost = lost_in_the_sentence(source["phones"], heard, readings)
-                if lost:
-                    record["lost_in_its_sentence"] = lost
-                    record["readings_of_the_audio"] = len(_readings(readings))
+            record = self._measure(word, spelling, source)
+            heard = record.pop("_heard")
             twin = next((other for other, tried in self.tried.get(word, {}).items() if tried["voice_sounds"] == record["voice_sounds"]), None)
             if twin:
                 record["same_sounds_as"] = twin                     # a different spelling, the same sounds: not a new idea

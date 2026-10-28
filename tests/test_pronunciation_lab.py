@@ -470,3 +470,18 @@ def test_matching_sounds_with_a_listener_that_wrote_another_word_are_put_to_the_
     assert "match the speaker's (closeness 1.0)" in out["advice"] and "weigh the two" in out["advice"] and "Change the sounds" not in out["advice"]
     far = Listener({"Fayitas": ["m", "a", "f", "e", "k", "t", "o", "r"]}).try_spellings("Fighters", ["Fayitas"])
     assert "No spelling is understood yet" in far["advice"]
+
+
+def test_the_word_as_the_zulu_writes_it_is_measured_without_spending_a_try():
+    class Heard(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["f", "aɪ", "t", "a", "s"], "occurrences": 2, "each_occurrence": [], "spoken_form": "Fighters"}
+
+        def english_hears(self, spelling):
+            return {"Fighter": "Theta."}[spelling]
+
+    heard = Heard({"Fighter": ["f", "eɪ", "t", "ə"]})
+    row = heard.as_written("MaFighter")                                              # the prefix "Ma" is not judged
+    assert row["voice_sounds"] == "f eɪ t ə" and row["speaker_sounds"] == "f aɪ t a s" and row["english_hears"] == "Theta."
+    assert row["closeness"] < 0.8 and any("vowel" in d for d in row["differences"]) and heard.total_tries == 0
+    assert FakeLab({}).as_written("Unspoken") is None

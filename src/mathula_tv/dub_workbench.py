@@ -341,6 +341,23 @@ class Workbench:
         except Exception:
             return []
 
+    def pronunciation_evidence(self, words: list[str]) -> list[dict[str, Any]]:
+        """What the lab measures for each of these words as the Zulu writes them now, for the harness's reminder: no tries are spent, and a
+        word that cannot be measured is left out."""
+        found: list[dict[str, Any]] = []
+        try:
+            self._sync_lab_context()
+        except Exception:
+            return found
+        for word in words[:6]:
+            try:
+                measured = self._lab().as_written(word)
+            except Exception:
+                measured = None
+            if measured:
+                found.append(measured)
+        return found
+
     def list_foreign_words(self) -> dict[str, Any]:
         """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
         self.foreign_words_listed = True

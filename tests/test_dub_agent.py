@@ -651,3 +651,23 @@ def test_a_repair_run_is_told_which_units_the_english_changed_under():
     assert "u08" not in note.split("English source of these units")[1]                                  # an unchanged unit is not mentioned
     Bench.seed_unit_texts = None                                                                             # no earlier texts known: all corrections, as before
     assert "Abu Kogo" in _source_correction_note(Bench(), seed_items)
+
+
+def test_the_pronunciation_reminder_carries_the_labs_measurement_of_each_word_as_written():
+    from mathula_tv.dub_agent import pronunciation_evidence_note
+
+    class Bench:
+        def pronunciation_evidence(self, words):
+            return [{"word": "MaFighter", "speaker_sounds": "f aɪ t a s", "voice_sounds": "f eɪ t ə", "closeness": 0.7,
+                     "differences": ["speaker aɪ, voice eɪ (vowel)"], "english_hears": "Theta.", "lost_in_its_sentence": ["s"]}]
+
+    note = pronunciation_evidence_note(Bench(), ["MaFighter"])
+    assert "MaFighter: the speaker says [f aɪ t a s]; the voice says [f eɪ t ə] as written (closeness 0.7)" in note
+    assert "speaker aɪ, voice eɪ (vowel)" in note and "an English listener writes 'Theta.'" in note and "the voice loses s" in note and "no tries used" in note
+    assert pronunciation_evidence_note(object(), ["x"]) == ""
+
+    class Broken:
+        def pronunciation_evidence(self, words):
+            raise RuntimeError("synthesis down")
+
+    assert pronunciation_evidence_note(Broken(), ["x"]) == ""                         # a measuring failure never blocks the reminder
