@@ -561,3 +561,41 @@ def test_a_changed_reading_starts_a_new_folder_for_measured_speech(tmp_path):
     workbench.use_pronunciation("Fighters", "Fayitha")
     third = workbench._measure_dir()
     assert first.name == "measure" and second == first / "readings-1" and third == first / "readings-2"
+
+
+def test_suggested_spellings_are_spoken_measured_and_ready_to_use_and_cost_one_try():
+    from mathula_tv.pronunciation_lab import MAX_TRIES_PER_WORD
+
+    table = {"graphemes": {"f": ["f"], "ai": ["aɪ"], "ay": ["aɪ"], "t": ["t"], "a": ["a"], "s": ["s"], "z": ["z"], "i": ["i"]}}
+
+    class Suggest(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["f", "aɪ", "t", "a", "s"], "occurrences": 2, "spoken_form": "Fighters", "each_occurrence": []}
+
+        def _letter_table(self):
+            return table
+
+        def voice_reading(self, spelling):                      # a toy voice: aɪ for ai/ay, one sound per other letter
+            sounds, text = [], spelling.lower()
+            while text:
+                for letters in ("ai", "ay"):
+                    if text.startswith(letters):
+                        sounds.append("aɪ")
+                        text = text[2:]
+                        break
+                else:
+                    sounds.append(text[0])
+                    text = text[1:]
+            return sounds
+
+        def english_hears(self, spelling):
+            return "Fighters."
+
+    lab_ = Suggest({})
+    out = lab_.suggest_spellings("MaFighter")
+    assert out["results"] and len(out["results"]) <= 5 and "different sound sequences" in out["how_these_were_found"] and "varied by small edits" in out["how_these_were_found"]
+    first = out["results"][0]
+    assert first["spelling"].startswith("Ma") and first["closeness"] == 1.0 and first["english_hears"] == "Fighters."          # the Zulu prefix is kept on the spelling
+    assert len({r["voice_sounds"] for r in out["results"]}) == len(out["results"])                                        # different sounds, not the same idea twice
+    assert lab_.tries_per_word["MaFighter"] == 1 and out["tries_left_for_word"] == MAX_TRIES_PER_WORD - 1
+    assert first["spelling"] in lab_.tried["MaFighter"]                                                                   # so use_pronunciation accepts it

@@ -33,6 +33,9 @@ class StubWorkbench:
     def use_pronunciation(self, word, spelling):
         return {"ok": True}
 
+    def suggest_spellings(self, word):
+        return {"word": word, "results": []}
+
     def open_clip(self, clip_id, run_id, repeat=1, tts_budget=None, speed_policy="natural"):
         self.opened_repeat = repeat
         self.episode = {"clip_id": clip_id, "tts_used": 0, "submissions": 0}
@@ -714,3 +717,12 @@ def test_the_measured_words_say_which_units_speak_them_and_that_a_reading_is_not
     saved = saved_readings_note(Bench())
     assert "science -> 'sayensi' (said in u20, u21)" in saved and "not only in the units you changed" in saved and "not only by whether the listener wrote the word" in saved
     assert "science (said in u20, u21): the speaker says" in pronunciation_evidence_note(Bench(), ["science"])
+
+
+def test_the_agent_can_ask_for_spellings_worked_out_from_the_speakers_sounds(tmp_path):
+    from mathula_tv import dub_agent
+
+    assert "suggest_spellings" in [spec["function"]["name"] for spec in dub_agent.TOOL_SPECS]
+    tools = dub_agent.build_dispatch(StubWorkbench(tmp_path), clip_id="c1", run_id="r", tts_budget=5)
+    assert "suggest_spellings" in tools and tools["suggest_spellings"]("science") == {"word": "science", "results": []}
+    assert "Neither check is the main one" in dub_agent.SYSTEM_PROMPT and "main check" not in dub_agent.SYSTEM_PROMPT

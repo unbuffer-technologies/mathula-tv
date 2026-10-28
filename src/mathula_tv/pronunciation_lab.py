@@ -24,6 +24,10 @@ from xml.sax.saxutils import escape
 MAX_TRIES_PER_WORD = 5
 MAX_TRIES_PER_CLIP = 15
 MAX_SPELLINGS_PER_CALL = 3
+SUGGEST_ROUNDS = 2            # how many times the best spellings found are varied again
+SUGGEST_FIRST = 12            # spellings worked out backwards from the speaker's sounds that are spoken first
+SUGGEST_PER_ROUND = 12        # varied spellings spoken in each round
+SUGGEST_SHOWN = 5             # the distinct best of them that are measured in full and shown
 
 _VOWEL_LETTERS = set("aeiouɑɒɔəɛɜɪʊʌæɐøɨ")
 _VOICING = {("p", "b"), ("t", "d"), ("k", "ɡ"), ("k", "g"), ("s", "z"), ("f", "v"), ("ʃ", "ʒ"), ("tʃ", "dʒ"), ("θ", "ð")}
@@ -625,6 +629,88 @@ class PronunciationLab:
                 "differences": record["differences"][:3], "english_hears": record.get("english_hears"),
                 "english_listener_understands": record.get("english_listener_understands"),
                 "lost_in_its_sentence": record.get("lost_in_its_sentence"), "made_differently": (record.get("how_the_sounds_are_made_in_its_sentence") or record.get("how_the_sounds_are_made_differently") or [])[:2]}
+
+    def _letter_table(self) -> dict[str, Any]:
+        """Which sounds this voice makes for which letters (see ``letter_sounds``): built from its own audio once and kept with the shared memory."""
+        from . import letter_sounds
+
+        if getattr(self, "_letters", None) is None:
+            try:
+                path = Path(self.job_root).parents[1] / "experience" / f"letter_sounds_{self.voice}.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+            except (IndexError, OSError):
+                path = self.work_dir / f"letter_sounds_{self.voice}.json"
+            self._letters = letter_sounds.load_or_build(path, self.voice_reading, voice=self.voice)
+        return self._letters
+
+    def suggest_spellings(self, word: str) -> dict[str, Any]:
+        """Spellings of ``word`` worked out backwards from the speaker's sounds and the letters this voice turns into those sounds, spoken and
+        measured like any tried spelling (they can be used with ``use_pronunciation``).  Counts as one try: it replaces guessing from English
+        spelling with a search the agent could not do by hand, and the agent still decides."""
+        from . import letter_sounds
+
+        source = self.source(word)
+        if not source["found"]:
+            return {"word": word, "error": "the speaker never says this word in the source audio, so there is nothing to match"}
+        if self.total_tries >= MAX_TRIES_PER_CLIP or self.tries_per_word.get(word, 0) >= MAX_TRIES_PER_WORD:
+            raise PronunciationBudgetExhausted(
+                f"pronunciation tries used: {self.tries_per_word.get(word, 0)}/{MAX_TRIES_PER_WORD} for {word!r}, {self.total_tries}/{MAX_TRIES_PER_CLIP} in all")
+        self.tries_per_word[word] = self.tries_per_word.get(word, 0) + 1
+        prefix = written_prefix(word)
+        stem = without_prefix(word.split("-")[-1], prefix)
+        capital = stem[:1].isupper()
+        table = self._letter_table()
+        from itertools import zip_longest
+
+        def styled(spelling: str) -> str:
+            return spelling.capitalize() if capital else spelling
+
+        spoken: dict[str, tuple[float, tuple[str, ...]]] = {}          # spelling -> (closeness, sounds): everything spoken once
+
+        def speak(spellings: Iterable[str]) -> None:
+            for spelling in spellings:
+                spelling = styled(spelling.lower())
+                if spelling and spelling not in spoken:
+                    heard = tuple(self.voice_reading(spelling))
+                    spoken[spelling] = (align(source["phones"], list(heard))["closeness"], heard)
+
+        # seeds: spellings worked out backwards from the speaker's sounds, the word as it is, and the best of what has been tried for it
+        tried_best = sorted(self.tried.get(word, {}).values(), key=lambda r: -r["closeness"])[:3]
+        speak([spelling for spelling, _ in letter_sounds.candidates(source["phones"], table, limit=SUGGEST_FIRST)] + [stem]
+              + [without_prefix(r["spelling"], prefix) for r in tried_best])
+        for _ in range(SUGGEST_ROUNDS):                                # then the best so far are varied by small orthographic edits and spoken
+            leaders = sorted(spoken, key=lambda spelling: -spoken[spelling][0])[:4]
+            lists = [letter_sounds.neighbours(leader, table) for leader in leaders]
+            speak([edit for group in zip_longest(*lists) for edit in group if edit][:SUGGEST_PER_ROUND])         # one edit of each leader in turn
+        pool = list(spoken)
+        by_sounds: dict[tuple[str, ...], tuple[float, str]] = {}
+        for spelling, (closeness, heard) in spoken.items():
+            if heard not in by_sounds or (closeness, -len(spelling)) > (by_sounds[heard][0], -len(by_sounds[heard][1])):
+                by_sounds[heard] = (closeness, spelling)
+        best = sorted(by_sounds.values(), key=lambda item: (-item[0], len(item[1]), item[1]))[:SUGGEST_SHOWN]
+        results = []
+        for _, spelling in best:
+            full = prefix + spelling if prefix else spelling
+            record = self._measure(word, full, source)
+            record.pop("_heard", None)
+            self.tried.setdefault(word, {})[full] = record
+            results.append(record)
+        left_word, left_clip = MAX_TRIES_PER_WORD - self.tries_per_word[word], MAX_TRIES_PER_CLIP - self.total_tries
+        out: dict[str, Any] = {
+            "word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"],
+            "how_these_were_found": f"spellings were worked out backwards from the speaker's sounds through the letters this voice turns into them, "
+                                    f"then the best were varied by small edits (a letter group swapped, left out or added); {len(pool)} were spoken, "
+                                    f"{len(by_sounds)} different sound sequences came out, these are the closest in sounds",
+            "results": results, "tries_left_for_word": left_word, "tries_left_in_clip": left_clip}
+        if results:
+            nearest = max(results, key=lambda r: (not r.get("lost_in_its_sentence"), r["closeness"]))
+            out["closest_so_far"] = {"spelling": nearest["spelling"], "closeness": nearest["closeness"]}
+            out["understood_by_the_listener"] = [r["spelling"] for r in results if r.get("english_listener_understands") and not r.get("lost_in_its_sentence")]
+            out["advice"] = _advice(self.tried[word], nearest, left_word, left_clip, speaker=source["phones"])
+        shown = self.sentence_shown(word)
+        if shown:
+            out["also_heard_in_this_sentence"] = shown
+        return out
 
     def try_spellings(self, word: str, spellings: Sequence[str]) -> dict[str, Any]:
         """Try up to three spellings of ``word``; each is compared with the speaker's sounds. Counts against the budget."""

@@ -77,9 +77,13 @@ You work through tools and decide your own method. You are scored on:
    makes for your spelling, with the differences. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
    limited (5 per word, 15 per clip): spend them where the voice is clearly off, not on words that already sound right.
    Each result also says what an English listener wrote when the voice said your spelling ("english_hears"), and whether that is the word
-   ("english_listener_understands"). That is your main check: a spelling the listener writes as the word beats one that only matches sounds,
-   and a spelling they write as something else ("Scenes" for "science") is wrong however close its sounds score. Learn from what they wrote:
-   it tells you which sound to change.
+   ("english_listener_understands"). Neither check is the main one. The sounds (closeness and the listed differences) skip the speaker's last
+   sounds, so a missing ending can still score high; the listener hears one short clip and guesses a real word, so it can write "Saints" for a
+   spelling whose sounds are the speaker's own. When they disagree, read the differences and the measured acoustics of both and decide. A
+   spelling they write as something else ("Scenes" for "science") is a warning about a sound; learn from what they wrote.
+   Do not stay in one family of letters: if your spellings keep missing the same sound, call suggest_spellings. It works backwards from the
+   speaker's sounds through the letters this voice is known to turn into those sounds, speaks many combinations, and returns the closest
+   different ones, measured, so you see spellings you would not have guessed. It counts as one try.
    Two sounds can share a label: the recogniser says "b" for Zulu's soft plain b and for an English b. So each result may also carry
    "how_the_sounds_are_made_differently", measured from both audios for the stops (p b t d k g): how sharp the release is, how long the
    closure before it lasts, whether the vocal folds vibrate through the closure, how long until voicing starts after the release, and the
@@ -230,6 +234,11 @@ TOOL_SPECS = [
            "spellings": {"type": "array", "items": {"type": "string"}, "maxItems": 3,
                          "description": "spellings to try, e.g. [\"Fighters\", \"Fayitas\"]; respell with Zulu letters to steer the sounds"}},
           ["word", "spellings"]),
+    _tool("suggest_spellings", "Spellings of an English word worked out backwards from the speaker's own sounds: the sounds are cut into letter "
+          "groups that this Zulu voice is known to turn into those sounds, many combinations are spoken, and the closest different ones come back "
+          "measured like tried spellings (sounds, differences, english_hears, what happens in the sentence), ready for use_pronunciation. Use it "
+          "when your own spellings keep missing a sound or stay in one family of letters. Counts as one try.",
+          {"word": {"type": "string", "description": "the word as written in your Zulu, e.g. MaFighter or science"}}, ["word"]),
     _tool("use_pronunciation", "Make a spelling you tried the way this word is spoken: for your own measurements from now on, in the render, "
           "and remembered for later clips. Only a spelling you have tried can be used. The Zulu text keeps the word itself; do not type the spelling into it.",
           {"word": {"type": "string"}, "spelling": {"type": "string"}}, ["word", "spelling"]),
@@ -507,7 +516,7 @@ def build_dispatch(
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
         "get_submission": workbench.get_submission,
     }
-    for name in ("list_foreign_words", "try_pronunciation", "use_pronunciation"):       # the pronunciation lab, where the workbench has one
+    for name in ("list_foreign_words", "try_pronunciation", "suggest_spellings", "use_pronunciation"):       # the pronunciation lab, where the workbench has one
         if hasattr(workbench, name):
             tools[name] = getattr(workbench, name)
     return tools

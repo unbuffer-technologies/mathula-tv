@@ -436,6 +436,16 @@ class Workbench:
         except PronunciationBudgetExhausted as exc:
             raise BudgetExhausted(str(exc)) from exc
 
+    def suggest_spellings(self, word: str) -> dict[str, Any]:
+        """Spellings of ``word`` worked out from the speaker's sounds and what this voice turns letters into (counts as one try)."""
+        from .pronunciation_lab import PronunciationBudgetExhausted
+
+        try:
+            self._sync_lab_context()
+            return self._lab().suggest_spellings(word)
+        except PronunciationBudgetExhausted as exc:
+            raise BudgetExhausted(str(exc)) from exc
+
     def use_pronunciation(self, word: str, spelling: str) -> dict[str, Any]:
         """Make ``spelling`` the way ``word`` is spoken: in your own measurements now, in the render, and in the shared memory for later clips."""
         from . import dub_pronunciation
