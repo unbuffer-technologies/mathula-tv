@@ -343,6 +343,16 @@ class Workbench:
         except Exception:
             return []
 
+    def _restore_written_words(self, items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+        """Units whose text carries a chosen respelling instead of the word get the word back (see ``restore_written_words``)."""
+        from .pronunciation_memory import load, memory_path, restore_written_words
+
+        try:
+            entries = list(load(memory_path(Path(self.store.root).parent))["entries"].values())
+        except Exception:
+            return items, []
+        return restore_written_words(items, entries)
+
     def pronunciation_evidence(self, words: list[str]) -> list[dict[str, Any]]:
         """What the lab measures for each of these words as the Zulu writes them now, for the harness's reminder: no tries are spent, and a
         word that cannot be measured is left out."""
@@ -452,7 +462,7 @@ class Workbench:
         choice = {"word": word, "spelling": spelling, "closeness": tried["closeness"], "speaker_sounds": " ".join(lab.source(word)["phones"]),
                   "voice_sounds": tried["voice_sounds"]}
         self.pronunciation_choices = [c for c in self.pronunciation_choices if c["word"] != word] + [choice]
-        return {"ok": True, **choice, "note": "your measurements now use this reading; re-measure any unit that contains the word"}
+        return {"ok": True, **choice, "note": "your measurements and the render now use this reading wherever the word is written. Keep the WORD in the text: never type the spelling into it (the voice respells the word when it speaks it, and the text is what the captions show). Re-measure any unit that contains the word."}
 
     def measure_tts(
         self, text: str, start_ms: int, end_ms: int, next_start_ms: int | None = None,
@@ -589,6 +599,7 @@ class Workbench:
     ) -> dict[str, Any]:
         replaced: list[str] = []
         sent = len(items)
+        items, restored_words = self._restore_written_words(items)
         if partial:
             if not self.last_items:
                 return {"accepted": False, "errors": [
@@ -607,6 +618,7 @@ class Workbench:
         submission = {"clip_id": episode["clip_id"], "run_id": episode["run_id"], "repeat": episode["repeat"],
                       "approach_notes": approach_notes, "items": items}
         errors, warnings = validate_submission(submission, segments)
+        warnings = [*warnings, *restored_words]
         if errors:
             if partial:
                 errors = [*errors, f"(partial update: it replaced your current unit(s) {replaced or 'none'} by item_id; "

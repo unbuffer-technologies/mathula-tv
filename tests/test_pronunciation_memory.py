@@ -93,3 +93,25 @@ def test_a_jobs_lexicon_stops_carrying_an_entry_that_has_left_the_memory(tmp_pat
     assert apply_to_lexicon(lexicon, memory_file, "v") == ["fund"]
     texts = {e["display_text"] for e in json.loads(lexicon.read_text(encoding="utf-8"))["entries"]}
     assert texts == {"Zuma", "fund"}                                                               # Science is gone from the job; others stay
+
+
+def test_a_respelling_typed_into_a_units_text_is_put_back_as_the_word():
+    from mathula_tv.pronunciation_memory import restore_written_words
+
+    entries = [
+        {"display_text": "maFighter", "tts_text": "Fayithaz", "kind": "english_code_switch"},
+        {"display_text": "Technology", "tts_text": "Tekhnoloji", "kind": "english_code_switch"},
+        {"display_text": "science", "tts_text": "sayensi", "kind": "english_code_switch"},
+        {"display_text": "sick", "tts_text": "sik", "kind": "english_code_switch"},                         # too short to look for
+        {"display_text": "fund", "tts_text": "fund", "kind": "english_code_switch"},                        # no respelling at all
+        {"display_text": "benefit", "tts_text": "bhenefit", "kind": "english_code_switch", "disabled": True},
+        {"display_text": "hlu", "tts_text": "hluuu", "kind": "other"},
+    ]
+    items = [{"item_id": "u02", "zulu_text": "~pause800 Fayithaz, thina siyinhlangano. Phela maFayithaz kakhulu."},
+             {"item_id": "u20", "zulu_text": "ungqongqoshe weSayensi and Tekhnoloji? Phela Sayensi iyisifundo. Bhenefit kanye hluuu."}]
+    out, notes = restore_written_words(items, entries)
+    assert out[0]["zulu_text"] == "~pause800 MaFighter, thina siyinhlangano. Phela maFighter kakhulu."          # a capital stays a capital; the glued prefix is not doubled
+    assert out[1]["zulu_text"] == "ungqongqoshe weScience and Technology? Phela Science iyisifundo. Bhenefit kanye hluuu."
+    assert items[0]["zulu_text"].startswith("~pause800 Fayithaz")                                               # the caller's units are untouched
+    assert len(notes) == 3 and "'Fayithaz'" in notes[0] and "keeps the word 'maFighter'" in notes[0]
+    assert restore_written_words(items, [])[1] == []

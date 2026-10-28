@@ -74,7 +74,7 @@ You work through tools and decide your own method. You are scored on:
    English words you keep in the Zulu ("Fighters", "medical aid", names) are spoken by the Zulu voice with Zulu letter rules and can come
    out unrecognisable ("MaFighter" was heard as "mafactor"). Never glue a Zulu prefix onto an English word the speaker says as it is. Once the dub
    fits, call list_foreign_words; for the ones the speaker says in English, try_pronunciation shows the speaker's sounds and the sounds the voice
-   makes for your spelling, with the differences. Adjust the spelling from the differences, then use_pronunciation for the closest. Tries are
+   makes for your spelling, with the differences. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
    limited (5 per word, 15 per clip): spend them where the voice is clearly off, not on words that already sound right.
    Each result also says what an English listener wrote when the voice said your spelling ("english_hears"), and whether that is the word
    ("english_listener_understands"). That is your main check: a spelling the listener writes as the word beats one that only matches sounds,
@@ -231,7 +231,7 @@ TOOL_SPECS = [
                          "description": "spellings to try, e.g. [\"Fighters\", \"Fayitas\"]; respell with Zulu letters to steer the sounds"}},
           ["word", "spellings"]),
     _tool("use_pronunciation", "Make a spelling you tried the way this word is spoken: for your own measurements from now on, in the render, "
-          "and remembered for later clips. Only a spelling you have tried can be used.",
+          "and remembered for later clips. Only a spelling you have tried can be used. The Zulu text keeps the word itself; do not type the spelling into it.",
           {"word": {"type": "string"}, "spelling": {"type": "string"}}, ["word", "spelling"]),
     _tool("get_submission", "The units currently accepted (all, or only unit_ids), with their text and any flags from "
           "the last score. Use it to see your own current state, e.g. after your history was trimmed.",
@@ -700,7 +700,8 @@ def pronunciation_reminder_text(workbench: Any, words: list[str], *, left: int |
 PRONUNCIATION_REMINDER = (
     "One reminder, once: your Zulu keeps English words that the speaker says and that have no checked reading yet, so the voice may read them "
     "with Zulu letters: {words}. If any of them may sound wrong, call list_foreign_words, check those with try_pronunciation, use "
-    "use_pronunciation for a spelling that an English listener writes as the word, re-measure any unit whose words change, and finish. "
+    "use_pronunciation for a spelling that an English listener writes as the word, re-measure any unit that contains the word (the text keeps the "
+    "word itself: the spelling is applied when the voice speaks it, never typed into the text), and finish. "
     "If you judge they are fine as they are, you do not have to use the lab: finish.")
 
 
@@ -710,7 +711,7 @@ PRONUNCIATION_REMINDER = (
 PRONUNCIATION_SAVED_REMINDER = (
     "One reminder, once: earlier jobs saved readings for English words that your Zulu keeps, and the lab measures how each is spoken here "
     "(below). If any of them may sound wrong, check it with try_pronunciation, use use_pronunciation for a better spelling, re-measure any unit "
-    "whose words change, and finish. If you judge they are fine as they are, you do not have to use the lab: finish.")
+    "that contains the word (the text keeps the word itself: the spelling is applied when the voice speaks it, never typed into the text), and finish. If you judge they are fine as they are, you do not have to use the lab: finish.")
 PRONUNCIATION_RESERVE_TURNS = 20
 PRONUNCIATION_LATE_NOTE = "You have {left} turns left; spend at most 8 of them on this and keep the rest to re-measure and re-submit. "
 

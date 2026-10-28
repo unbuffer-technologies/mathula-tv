@@ -122,6 +122,38 @@ def record_outcomes(lexicon_path: Path, memory_file: Path, voice: str | None, dr
     return switched_off
 
 
+def restore_written_words(items: Sequence[Mapping[str, Any]], entries: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Put the word back where a unit's text carries its respelling instead.
+
+    A reading is applied when the voice speaks the word; the text keeps the word itself (it is what the captions show, and the only form the
+    reading can find again).  An agent that wrote the chosen spelling into the text to hear it ("Fayithaz" for "maFighter") gets the word back,
+    with a Zulu prefix glued on kept as it was written.  Returns the units (copies) and a plain sentence for each change."""
+    from .pronunciation_lab import without_prefix, written_prefix
+
+    respelt = [(str(e["display_text"]), str(e["tts_text"])) for e in entries
+               if e.get("kind") == "english_code_switch" and not e.get("disabled") and len(str(e.get("tts_text") or "")) >= 4
+               and str(e["tts_text"]).casefold() != str(e["display_text"]).casefold()]
+    notes: list[str] = []
+    restored: list[dict[str, Any]] = []
+    for item in items:
+        item = dict(item)
+        text = str(item.get("zulu_text") or "")
+        for display, spelling in respelt:
+            pattern = re.compile(r"(?<![A-Za-z])((?:[a-z]{1,5}(?=[A-Z]))?)((?i:" + re.escape(spelling) + r"))(?![A-Za-z])")
+
+            def put_back(match: re.Match[str], display: str = display) -> str:
+                word = without_prefix(display, written_prefix(display)) if match.group(1) else display
+                return match.group(1) + (word[:1].upper() + word[1:] if match.group(2)[:1].isupper() else word)
+
+            changed = pattern.sub(put_back, text)
+            if changed != text:
+                notes.append(f"{item.get('item_id')}: the text had the respelling {spelling!r}; it keeps the word {display!r} (the voice respells it when speaking)")
+                text = changed
+        item["zulu_text"] = text
+        restored.append(item)
+    return restored, notes
+
+
 def apply_for_job(job_root: Path) -> list[str]:
     """Give a job the memory's readings for its voice (called at the end of the names stage)."""
     lexicon = Path(job_root) / "native_dub" / "pronunciation_names.json"

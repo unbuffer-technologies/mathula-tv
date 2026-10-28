@@ -196,6 +196,14 @@ def run_production(
     seed_items = None
     if repair_from:
         seed_items = json.loads((store.repeat_dir(repair_from, clip_id, 1) / "submission.json").read_text(encoding="utf-8"))["items"]
+        try:        # an earlier run may have typed a chosen spelling into a unit's text: the word goes back, the render respells it
+            from .pronunciation_memory import load as load_memory, memory_path, restore_written_words
+
+            seed_items, restored = restore_written_words(seed_items, list(load_memory(memory_path(Path(settings.work_dir)))["entries"].values()))
+            for note in restored:
+                print(f"[repair] {note}")
+        except Exception as exc:
+            print(f"[repair] respellings in the seeded text were not checked: {type(exc).__name__}")
     judge = UnitJudge(ChatClient(client.config)) if judge_meaning and hasattr(client, "config") else None
     workbench = Workbench(store, lambda: create_tts_backend(settings), judge=judge)
     if repair_from:        # the English each unit of the earlier submission was written against
