@@ -205,7 +205,33 @@ def _one_entry_per_word(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any
 GOOD_ENOUGH = 0.85
 
 
-def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], left_word: int, left_clip: int) -> str:
+def who_keeps_each_sound(tried: Mapping[str, Mapping[str, Any]], speaker: Sequence[str]) -> str:
+    """For each consonant of the speaker that some spelling keeps in the sentence and another loses: which keep it and which lose it.  The
+    letters that keep a sound in one spelling can be put together with the letters that keep another; this only shows where each sound came
+    from, it does not write the spelling."""
+    rows = [r for r in tried.values() if r.get("said_in_its_sentence")]
+    if len(rows) < 2:
+        return ""
+
+    def consonants(phones: Iterable[str]) -> set[str]:
+        return {_base(p) for p in phones if not _is_vowel(p)}
+
+    makes = set().union(*(consonants(r["voice_sounds"].split()) for r in rows))
+    notes = []
+    for sound in dict.fromkeys(_base(p) for p in speaker if not _is_vowel(p)):
+        if sound not in makes:
+            continue
+        keep = [repr(r["spelling"]) for r in rows if sound in consonants(r["said_in_its_sentence"].split())]
+        lose = [repr(r["spelling"]) for r in rows if sound not in consonants(r["said_in_its_sentence"].split())]
+        if keep and lose:
+            notes.append(f"{sound}: kept by {', '.join(keep)}; lost by {', '.join(lose)}")
+    if not notes:
+        return ""
+    return ("In the sentence, the speaker's sounds that only some spellings keep: " + " | ".join(notes)
+            + ". Put the letters that keep each sound together in one spelling.")
+
+
+def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], left_word: int, left_clip: int, speaker: Sequence[str] = ()) -> str:
     """What to do next, from the tries so far.  It reads what an English listener wrote and the differences; it adds no score and does not
     choose for the agent."""
     heard = {record["spelling"]: record["english_hears"] for record in tried.values() if record.get("english_hears") is not None}
@@ -216,12 +242,15 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
         parts.append("In the sentence the word is spoken in, the voice loses a sound it makes when the word is alone: "
                      + "; ".join(f"{spelling!r} loses {' '.join(sounds)} (it says {tried[spelling].get('said_in_its_sentence')!r})" for spelling, sounds in lost.items())
                      + ". A spelling is judged where it is heard, so one that loses a sound the speaker makes is not an answer; try letters that keep it.")
+        keeping = who_keeps_each_sound(tried, speaker)
+        if keeping:
+            parts.append(keeping)
     if heard:
         shown = "; ".join(f"{spelling!r} -> {text!r}" for spelling, text in list(heard.items())[-4:])
         if understood:
             parts.append(f"An English listener writes the word for {', '.join(repr(x) for x in understood)}. What the listener wrote: {shown}. "
                          "Use one of those; between them, the one whose sounds are closest.")
-        else:
+        elif not any(record.get("english_listener_understands") for record in tried.values()):
             parts.append(f"No spelling is understood yet. What an English listener wrote: {shown}. Change the sounds that make them hear the wrong word.")
     elif best["closeness"] >= GOOD_ENOUGH:
         return " ".join(parts + [f"{best['spelling']!r} is close to the speaker's sounds; use it."])
@@ -483,7 +512,7 @@ class PronunciationLab:
         left_word, left_clip = MAX_TRIES_PER_WORD - self.tries_per_word[word], MAX_TRIES_PER_CLIP - self.total_tries
         out = {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], "results": results,
                "closest_so_far": {"spelling": best["spelling"], "closeness": best["closeness"]},
-               "advice": _advice(self.tried[word], best, left_word, left_clip),
+               "advice": _advice(self.tried[word], best, left_word, left_clip, speaker=source["phones"]),
                "tries_left_for_word": left_word, "tries_left_in_clip": left_clip}
         shown = self.sentence_shown(word)
         if shown:

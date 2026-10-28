@@ -126,6 +126,7 @@ class Workbench:
         self.seed_unit_texts: dict[str, str] | None = None       # repair runs: the English each unit of the earlier submission was written against
         self.glossary_changes: list[dict[str, str]] = []
         self._pronunciation_lab: Any = None
+        self._lost_sound_warned: set[tuple[str, str]] = set()
         self.foreign_words_listed = False                       # whether the agent has looked at the English words its Zulu keeps
         self.pronunciation_choices: list[dict[str, Any]] = []   # spellings the agent chose with the lab, for the report
         # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
@@ -382,6 +383,12 @@ class Workbench:
         tried = lab.tried.get(word, {}).get(spelling)
         if tried is None:
             raise ValueError(f"try {spelling!r} for {word!r} with try_pronunciation before using it")
+        if tried.get("lost_in_its_sentence") and (word, spelling) not in self._lost_sound_warned:
+            self._lost_sound_warned.add((word, spelling))       # said once: choosing it again after this is the agent's decision
+            raise ValueError(
+                f"in the sentence {word!r} is spoken in, the voice loses {' '.join(tried['lost_in_its_sentence'])} with {spelling!r} (it says "
+                f"{tried.get('said_in_its_sentence')!r}; the speaker says {' '.join(lab.source(word)['phones'])!r}), so it will sound different in the video "
+                "than in the lab. Try letters that keep the sound, then choose; if you still want this spelling, call use_pronunciation again.")
         clip_dir = Path(self.store.clip_dir(episode["clip_id"]))
         lexicon_path = clip_dir / "native_dub" / "pronunciation_names.json"
         lexicon = read_json(lexicon_path) if lexicon_path.is_file() else {"schema": "mathula-names-lexicon-v1", "voice": lab.voice, "entries": []}

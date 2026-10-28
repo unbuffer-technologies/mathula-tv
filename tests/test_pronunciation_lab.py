@@ -348,3 +348,37 @@ def test_a_saved_reading_that_loses_a_sound_in_its_sentence_goes_back_on_the_lis
     heard.sentences = []                                                                # in no sentence: nothing to hear it in, so no complaint
     entries[0]["tts_text"] = "Technology"
     assert failing_readings(heard, entries) == set()
+
+
+def test_the_lab_shows_which_spelling_keeps_each_sound_so_the_letters_can_be_put_together():
+    class Heard(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["t", "e", "k", "n", "o", "l", "o", "dʒ"], "occurrences": 2, "each_occurrence": []}
+
+        def sounds_in_sentence(self, word, spelling):
+            return {"Technology": ["t", "e", "k", "n", "o", "l", "o"], "Teknolodji": ["t", "e", "ɡ", "n", "o", "l", "o", "dʒ"]}[spelling]
+
+    heard = Heard({"Technology": ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"], "Teknolodji": ["t", "e", "k", "n", "o", "l", "o", "tʃ", "i"]})
+    heard.sentences = ["Kungani udinga weScience and Technology? Phela."]
+    advice = heard.try_spellings("Technology", ["Technology", "Teknolodji"])["advice"]
+    assert "k: kept by 'Technology'; lost by 'Teknolodji'" in advice and "dʒ: kept by 'Teknolodji'; lost by 'Technology'" in advice
+    assert "Put the letters that keep each sound together" in advice
+
+
+def test_choosing_a_spelling_that_loses_a_sound_in_its_sentence_is_answered_once_before_it_is_accepted(tmp_path):
+    class Heard(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["f", "aɪ", "t", "ə", "z"], "occurrences": 2, "each_occurrence": []}
+
+        def sounds_in_sentence(self, word, spelling):
+            return ["f", "aɪ"]
+
+    workbench, _ = make_workbench(tmp_path, {})
+    heard = Heard({"Fayitas": ["f", "aɪ", "t", "ə", "z"]})
+    heard.sentences = ["MaFighter, sifuna ukuthi ogogo bangakhokhi."]
+    workbench._pronunciation_lab = heard
+    heard.tried["Fighters"] = {"Fayitas": {"spelling": "Fayitas", "closeness": 0.9, "voice_sounds": "f aɪ t ə z", "lost_in_its_sentence": ["t", "z"],
+                                           "said_in_its_sentence": "f aɪ"}}
+    with pytest.raises(ValueError, match="loses t z"):
+        workbench.use_pronunciation("Fighters", "Fayitas")
+    assert workbench.use_pronunciation("Fighters", "Fayitas")["ok"] is True                 # asked again: the agent's decision
