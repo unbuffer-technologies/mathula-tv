@@ -169,9 +169,22 @@ class NameWindows:
     syntheses: int = 0
     _memo: dict[tuple[Candidate, Context], tuple[str, ...]] = field(default_factory=dict)
 
+    @staticmethod
+    def _key(context: Context, candidate: Candidate) -> str:
+        return hashlib.sha1(f"{context.pitch}|{context.render_marked(candidate)}".encode("utf-8")).hexdigest()[:16]
+
+    def audio_with_margins(self, context: Context, candidate: Candidate, margins: Sequence[tuple[int, int]]) -> list[Path]:
+        """The same synthesised sentence cut around the name with several margins (ms of real audio kept before and after it).  The audio is
+        identical in every cut, so a recogniser that labels it differently from one cut to the next is unsure of the sound, not the voice."""
+        self.audio(context, candidate)                                  # synthesises the sentence once and keeps it with its bookmarks
+        key = self._key(context, candidate)
+        marks = json.loads((self.work_dir / f"{key}.json").read_text(encoding="utf-8"))
+        return [slice_wav(self.work_dir / f"{key}.wav", marks["n0"] - before, marks["n1"] + after, self.work_dir / f"{key}.m{before}_{after}.wav")
+                for before, after in margins]
+
     def audio(self, context: Context, candidate: Candidate) -> Path:
         """The name's own audio (synthesised in its real sentence and cut out with the bookmarks)."""
-        key = hashlib.sha1(f"{context.pitch}|{context.render_marked(candidate)}".encode("utf-8")).hexdigest()[:16]
+        key = self._key(context, candidate)
         wav, marks_file = self.work_dir / f"{key}.wav", self.work_dir / f"{key}.json"
         if wav.is_file() and marks_file.is_file():
             marks = json.loads(marks_file.read_text(encoding="utf-8"))

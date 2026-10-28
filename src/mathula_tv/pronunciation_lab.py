@@ -114,17 +114,49 @@ def _word_pattern(word: str) -> "re.Pattern[str]":
     return re.compile(r"(?<![A-Za-z'])((?:[A-Za-z][a-z]{0,3}-|[A-Za-z][a-z]{0,3}(?=[A-Z]))?)((?i:" + re.escape(english) + r"))(?![A-Za-z'])")
 
 
-def lost_in_the_sentence(speaker: Sequence[str], alone: Sequence[str], in_sentence: Sequence[str]) -> list[str]:
-    """Consonants the speaker makes and the voice makes when the word is alone, that the voice does not make in the sentence the word is
-    spoken in.  The voice reads the same letters differently in a sentence ("Technology" ended with j alone and with a hard g or nothing in
-    its sentence), and a sound it can make alone is the one a spelling can be blamed for losing.  Neighbouring words' sounds in the window,
-    and sounds the voice never makes for this spelling, are not counted."""
-    def consonants(phones: Sequence[str]) -> Counter:
-        return Counter(_base(p) for p in phones if not _is_vowel(p))
+IN_SENTENCE_MARGINS_MS = ((40, 120), (300, 300), (600, 600), (1000, 1000), (2000, 2000))   # real audio kept before / after the word when it is decoded
 
-    wanted, can, did = consonants(speaker), consonants(alone), consonants(in_sentence)
+
+def _readings(in_sentence: Sequence[Any]) -> list[list[str]]:
+    """The decodes of one word's audio: a single list of sounds counts as one decode."""
+    if in_sentence and isinstance(in_sentence[0], str):
+        return [list(in_sentence)]
+    return [list(reading) for reading in in_sentence] or [[]]
+
+
+_VOICED_PARTNER = {voiced: voiceless for voiceless, voiced in _VOICING}
+
+
+def _same_sound(phone: str) -> str:
+    """A voiced and a voiceless partner (d/t, dʒ/tʃ, ɡ/k) count as one sound when the recogniser's labels are voted on: it flips between the two
+    on half-voiced stops, and how voiced a stop is gets measured on the audio itself (``phone_acoustics``), not read off a label."""
+    base = _base(phone)
+    return _VOICED_PARTNER.get("k" if base == "ɡ" else base, "k" if base == "ɡ" else base)
+
+
+def _consonants(phones: Sequence[str]) -> Counter:
+    return Counter(_same_sound(p) for p in phones if not _is_vowel(p))
+
+
+def lost_in_the_sentence(speaker: Sequence[str], alone: Sequence[str], in_sentence: Sequence[Any]) -> list[str]:
+    """Consonants the speaker makes and the voice makes when the word is alone, that the voice does not make in the sentence the word is
+    spoken in.  The voice reads the same letters differently in a sentence ("Technology" ended with j alone and with a hard g in its
+    sentence), and a sound it can make alone is the one a spelling can be blamed for losing.  Neighbouring words' sounds in the window, and
+    sounds the voice never makes for this spelling, are not counted.
+
+    ``in_sentence`` is one decode of the word's audio or several (the same audio cut with different margins): the recogniser is unsure of a
+    borderline sound (a half-voiced affricate came out as j in six decodes and ch in one), so a sound is lost only when most decodes lack it."""
+    readings = _readings(in_sentence)
+    wanted, can = _consonants(speaker), _consonants(alone)
     return [sound for sound in dict.fromkeys(_base(p) for p in alone if not _is_vowel(p))
-            if sound in wanted and did[sound] < min(wanted[sound], can[sound])]
+            if _same_sound(sound) in wanted and 2 * sum(1 for r in readings if _consonants(r)[_same_sound(sound)] >= min(wanted[_same_sound(sound)], can[_same_sound(sound)])) < len(readings)]
+
+
+def kept_in_the_sentence(speaker: Sequence[str], in_sentence: Sequence[Any]) -> list[str]:
+    """The speaker's consonants that most decodes of the word's audio in its sentence have."""
+    readings = _readings(in_sentence)
+    return [sound for sound in dict.fromkeys(_base(p) for p in speaker if not _is_vowel(p))
+            if 2 * sum(1 for r in readings if _consonants(r)[_same_sound(sound)] >= 1) >= len(readings)]
 
 
 def _stem(word: str) -> str:
@@ -209,20 +241,16 @@ def who_keeps_each_sound(tried: Mapping[str, Mapping[str, Any]], speaker: Sequen
     """For each consonant of the speaker that some spelling keeps in the sentence and another loses: which keep it and which lose it.  The
     letters that keep a sound in one spelling can be put together with the letters that keep another; this only shows where each sound came
     from, it does not write the spelling."""
-    rows = [r for r in tried.values() if r.get("said_in_its_sentence")]
+    rows = [r for r in tried.values() if "kept_in_its_sentence" in r]
     if len(rows) < 2:
         return ""
-
-    def consonants(phones: Iterable[str]) -> set[str]:
-        return {_base(p) for p in phones if not _is_vowel(p)}
-
-    makes = set().union(*(consonants(r["voice_sounds"].split()) for r in rows))
+    makes = set().union(*({_base(p) for p in r["voice_sounds"].split() if not _is_vowel(p)} | set(r["kept_in_its_sentence"]) for r in rows))
     notes = []
     for sound in dict.fromkeys(_base(p) for p in speaker if not _is_vowel(p)):
         if sound not in makes:
             continue
-        keep = [repr(r["spelling"]) for r in rows if sound in consonants(r["said_in_its_sentence"].split())]
-        lose = [repr(r["spelling"]) for r in rows if sound not in consonants(r["said_in_its_sentence"].split())]
+        keep = [repr(r["spelling"]) for r in rows if sound in r["kept_in_its_sentence"]]
+        lose = [repr(r["spelling"]) for r in rows if sound not in r["kept_in_its_sentence"]]
         if keep and lose:
             notes.append(f"{sound}: kept by {', '.join(keep)}; lost by {', '.join(lose)}")
     if not notes:
@@ -240,7 +268,7 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
     lost = {record["spelling"]: record["lost_in_its_sentence"] for record in tried.values() if record.get("lost_in_its_sentence")}
     if lost:
         parts.append("In the sentence the word is spoken in, the voice loses a sound it makes when the word is alone: "
-                     + "; ".join(f"{spelling!r} loses {' '.join(sounds)} (it says {tried[spelling].get('said_in_its_sentence')!r})" for spelling, sounds in lost.items())
+                     + "; ".join(f"{spelling!r} loses {' '.join(sounds)} (most of {tried[spelling].get('readings_of_the_audio', 1)} readings of its audio lack it; the tightest says {tried[spelling].get('said_in_its_sentence')!r})" for spelling, sounds in lost.items())
                      + ". A spelling is judged where it is heard, so one that loses a sound the speaker makes is not an answer; try letters that keep it.")
         keeping = who_keeps_each_sound(tried, speaker)
         if keeping:
@@ -308,7 +336,7 @@ class PronunciationLab:
         self._reading_checks: dict[tuple[str, str], bool | None] = {}
         self.sentences: list[str] = []                    # the Zulu the agent has written: a word is also heard in the sentence it is spoken in
         self.readings: dict[str, str] = {}                # readings already chosen for other words, applied in those sentences as the render does
-        self._in_sentence: dict[tuple[str, str, str], list[str] | None] = {}
+        self._in_sentence: dict[tuple[str, str, str], list[list[str]]] = {}
         self._windows: Any = None
         self._transcript: list[Mapping[str, Any]] | None = None
         self.tries_per_word: dict[str, int] = {}
@@ -389,8 +417,9 @@ class PronunciationLab:
         context = self._context(word)
         return f"{context.before}[the spelling]{context.after}".strip() if context else None
 
-    def sounds_in_sentence(self, word: str, spelling: str) -> list[str] | None:
-        """The sounds the voice makes for ``spelling`` of ``word`` in the sentence the word is spoken in; None when no sentence has the word."""
+    def readings_in_sentence(self, word: str, spelling: str) -> list[list[str]] | None:
+        """The sounds the voice makes for ``spelling`` of ``word`` in the sentence the word is spoken in, decoded from the same audio cut with
+        several margins (see ``IN_SENTENCE_MARGINS_MS``); None when no sentence has the word."""
         from . import pronunciation_search as ps
 
         context = self._context(word)
@@ -400,12 +429,18 @@ class PronunciationLab:
         if key not in self._in_sentence:
             if self._windows is None:
                 self._windows = ps.NameWindows(ps.bookmark_synthesizer(self.voice, self.key, self.region), lambda wav: (), self.work_dir / "voice")
-            self._in_sentence[key] = list(self.gop.decode(Path(self._windows.audio(context, ps.Candidate(spelling)))))
+            cuts = self._windows.audio_with_margins(context, ps.Candidate(spelling), IN_SENTENCE_MARGINS_MS)
+            self._in_sentence[key] = [list(self.gop.decode(Path(cut))) for cut in cuts]
         return self._in_sentence[key]
 
+    def sounds_in_sentence(self, word: str, spelling: str) -> list[str] | None:
+        """The tightest of those decodes, to show the agent what the voice says (the wider ones carry the neighbouring words' sounds)."""
+        readings = self.readings_in_sentence(word, spelling)
+        return None if readings is None else readings[0]
+
     def sounds_lost_in_sentence(self, word: str, spelling: str, speaker: Sequence[str], alone: Sequence[str]) -> list[str]:
-        inside = self.sounds_in_sentence(word, spelling)
-        return [] if inside is None else lost_in_the_sentence(speaker, alone, inside)
+        readings = self.readings_in_sentence(word, spelling)
+        return [] if readings is None else lost_in_the_sentence(speaker, alone, readings)
 
     def reading_fails(self, word: str, spelling: str) -> bool:
         """Whether a saved reading should be looked at again: an English listener does not understand it, or the voice loses a sound of it in
@@ -496,12 +531,14 @@ class PronunciationLab:
             if listener is not None:
                 record["english_hears"] = listener or "(nothing)"
                 record["english_listener_understands"] = understood_as(listener, source.get("spoken_form") or word)
-            inside = self.sounds_in_sentence(word, spelling)
-            if inside is not None:
-                record["said_in_its_sentence"] = " ".join(inside)
-                lost = lost_in_the_sentence(source["phones"], heard, inside)
+            readings = self.readings_in_sentence(word, spelling)
+            if readings is not None:
+                record["said_in_its_sentence"] = " ".join(_readings(readings)[0])
+                record["kept_in_its_sentence"] = kept_in_the_sentence(source["phones"], readings)
+                lost = lost_in_the_sentence(source["phones"], heard, readings)
                 if lost:
                     record["lost_in_its_sentence"] = lost
+                    record["readings_of_the_audio"] = len(_readings(readings))
             twin = next((other for other, tried in self.tried.get(word, {}).items() if tried["voice_sounds"] == record["voice_sounds"]), None)
             if twin:
                 record["same_sounds_as"] = twin                     # a different spelling, the same sounds: not a new idea

@@ -311,8 +311,8 @@ def test_a_spelling_that_loses_a_sound_in_its_sentence_is_not_the_answer():
         def source(self, word):
             return {"found": True, "phones": ["t", "e", "k", "n", "o", "l", "o", "dʒ"], "occurrences": 2, "each_occurrence": []}
 
-        def sounds_in_sentence(self, word, spelling):
-            return {"Technology": ["t", "e", "k", "n", "o", "l", "o", "ɡ"], "Technolodgy": ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]}[spelling]
+        def readings_in_sentence(self, word, spelling):
+            return [{"Technology": ["t", "e", "k", "n", "o", "l", "o", "ɡ"], "Technolodgy": ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]}[spelling]]
 
     heard = Heard({"Technology": ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"], "Technolodgy": ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]})
     heard.sentences = ["Kungani udinga weScience and Technology? Phela."]
@@ -336,8 +336,8 @@ def test_a_saved_reading_that_loses_a_sound_in_its_sentence_goes_back_on_the_lis
         def voice_reading(self, spelling):
             return ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]
 
-        def sounds_in_sentence(self, word, spelling):
-            return ["t", "e", "k", "n", "o", "l", "o", "ɡ"] if spelling == "Technology" else ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]
+        def readings_in_sentence(self, word, spelling):
+            return [["t", "e", "k", "n", "o", "l", "o", "ɡ"] if spelling == "Technology" else ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]]
 
     heard = Heard({})
     heard.sentences = ["Kungani udinga weScience and Technology? Phela."]
@@ -355,8 +355,8 @@ def test_the_lab_shows_which_spelling_keeps_each_sound_so_the_letters_can_be_put
         def source(self, word):
             return {"found": True, "phones": ["t", "e", "k", "n", "o", "l", "o", "dʒ"], "occurrences": 2, "each_occurrence": []}
 
-        def sounds_in_sentence(self, word, spelling):
-            return {"Technology": ["t", "e", "k", "n", "o", "l", "o"], "Teknolodji": ["t", "e", "ɡ", "n", "o", "l", "o", "dʒ"]}[spelling]
+        def readings_in_sentence(self, word, spelling):
+            return [{"Technology": ["t", "e", "k", "n", "o", "l", "o"], "Teknolodji": ["t", "e", "n", "o", "l", "o", "dʒ"]}[spelling]]
 
     heard = Heard({"Technology": ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"], "Teknolodji": ["t", "e", "k", "n", "o", "l", "o", "tʃ", "i"]})
     heard.sentences = ["Kungani udinga weScience and Technology? Phela."]
@@ -370,8 +370,8 @@ def test_choosing_a_spelling_that_loses_a_sound_in_its_sentence_is_answered_once
         def source(self, word):
             return {"found": True, "phones": ["f", "aɪ", "t", "ə", "z"], "occurrences": 2, "each_occurrence": []}
 
-        def sounds_in_sentence(self, word, spelling):
-            return ["f", "aɪ"]
+        def readings_in_sentence(self, word, spelling):
+            return [["f", "aɪ"]]
 
     workbench, _ = make_workbench(tmp_path, {})
     heard = Heard({"Fayitas": ["f", "aɪ", "t", "ə", "z"]})
@@ -382,3 +382,48 @@ def test_choosing_a_spelling_that_loses_a_sound_in_its_sentence_is_answered_once
     with pytest.raises(ValueError, match="loses t z"):
         workbench.use_pronunciation("Fighters", "Fayitas")
     assert workbench.use_pronunciation("Fighters", "Fayitas")["ok"] is True                 # asked again: the agent's decision
+
+
+def test_a_sound_the_recogniser_labels_differently_from_one_cut_to_the_next_is_not_called_lost():
+    from mathula_tv.pronunciation_lab import kept_in_the_sentence, lost_in_the_sentence
+
+    speaker = ["t", "e", "k", "n", "o", "l", "o", "dʒ"]
+    alone = ["t", "e", "k", "n", "o", "l", "o", "dʒ", "i"]
+    half_voiced = [["t", "e", "k", "n", "o", "l", "o", "dʒ"], ["t", "e", "k", "n", "o", "l", "o", "tʃ"], ["t", "e", "k", "n", "o", "l", "o", "dʒ"], ["t", "e", "k", "n", "o", "l", "o", "dʒ", "p", "e"], ["t", "e", "k", "n", "o", "l", "o", "dʒ"]]
+    hard_g = [["t", "e", "k", "n", "o", "l", "o"], ["t", "e", "k", "n", "o", "l", "o", "ɡ"], ["t", "e", "k", "n", "o", "l", "o", "ɡ"], ["t", "e", "k", "n", "o", "l", "o", "dʒ", "p", "e"], ["t", "e", "k", "n", "o", "l", "o", "k"]]
+    assert lost_in_the_sentence(speaker, alone, half_voiced) == [] and "dʒ" in kept_in_the_sentence(speaker, half_voiced)       # 4 of 5 have it
+    assert lost_in_the_sentence(speaker, alone, hard_g) == ["dʒ"] and "dʒ" not in kept_in_the_sentence(speaker, hard_g)         # 1 of 5 has it
+    assert lost_in_the_sentence(speaker, alone, hard_g[0]) == ["dʒ"]                                                            # one decode still works as before
+
+
+def test_the_same_synthesised_sentence_is_cut_with_several_margins(tmp_path):
+    import json
+    import wave
+
+    from mathula_tv import pronunciation_search as ps
+
+    def synthesize(marked, pitch, wav):
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(1000)
+            w.writeframes(b"\x00\x00" * 5000)                                                 # 5 s at 1 kHz: one sample per millisecond
+        return {"n0": 2000.0, "n1": 2500.0}
+
+    windows = ps.NameWindows(synthesize, lambda wav: (), tmp_path)
+    cuts = windows.audio_with_margins(ps.Context(before="a ", after=".", pitch="+0%"), ps.Candidate("word"), ((40, 120), (1000, 1000)))
+    sizes = []
+    for cut in cuts:
+        with wave.open(str(cut), "rb") as w:
+            sizes.append(w.getnframes())
+    assert sizes == [500 + 40 + 120, 500 + 2000] and windows.syntheses == 1                          # one synthesis, two cuts
+
+
+def test_voiced_and_voiceless_partners_count_as_one_sound_when_the_recogniser_labels_are_voted_on():
+    from mathula_tv.pronunciation_lab import kept_in_the_sentence, lost_in_the_sentence
+
+    speaker = ["m", "e", "d", "i", "k", "a", "l"]
+    alone = ["m", "e", "d", "i", "k", "a", "l"]
+    flips = [["m", "e", "t", "i", "k", "a", "l"], ["m", "e", "t", "i", "ɡ", "a", "l"], ["m", "e", "d", "i", "k", "a", "l"]]
+    assert lost_in_the_sentence(speaker, alone, flips) == [] and {"d", "k"} <= set(kept_in_the_sentence(speaker, flips))        # d/t and k/ɡ are voicing only
+    assert lost_in_the_sentence(speaker, alone, [["m", "e", "i", "a", "l"]]) == ["d", "k"]                                        # a sound that is gone is gone
