@@ -550,3 +550,14 @@ def test_the_lab_says_which_units_speak_a_word():
     fake = FakeLab({})
     fake.sentences = ["Phela weScience iyisifundo.", "Sifuna ukwazi.", "Ngithi iScience nayo."]
     assert fake.units_with("Science", ["u1", "u2", "u3"]) == ["u1", "u3"] and fake.units_with("Gauteng", ["u1", "u2", "u3"]) == []
+
+
+def test_a_changed_reading_starts_a_new_folder_for_measured_speech(tmp_path):
+    workbench, _ = make_workbench(tmp_path, {"Fayitas": ["f", "aɪ", "t", "ə", "z"], "Fayitha": ["f", "aɪ", "t", "ə", "z"]})
+    first = workbench._measure_dir()
+    workbench.try_pronunciation("Fighters", ["Fayitas", "Fayitha"])
+    workbench.use_pronunciation("Fighters", "Fayitas")
+    second = workbench._measure_dir()
+    workbench.use_pronunciation("Fighters", "Fayitha")
+    third = workbench._measure_dir()
+    assert first.name == "measure" and second == first / "readings-1" and third == first / "readings-2"

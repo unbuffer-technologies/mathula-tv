@@ -127,6 +127,7 @@ class Workbench:
         self.glossary_changes: list[dict[str, str]] = []
         self._pronunciation_lab: Any = None
         self._lost_sound_warned: set[tuple[str, str]] = set()
+        self._readings_changed = 0                                # how many times a reading was changed in this run
         self.foreign_words_listed = False                       # whether the agent has looked at the English words its Zulu keeps
         self.pronunciation_choices: list[dict[str, Any]] = []   # spellings the agent chose with the lab, for the report
         # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
@@ -151,7 +152,11 @@ class Workbench:
         return self.episode
 
     def _measure_dir(self) -> Path:
-        return self._measure_root or Path(self._episode()["dir"]) / "measure"
+        """Where measured speech is kept.  Outputs are named by the unit's text, but what the voice says for a text depends on the readings in
+        force, so every change of reading starts a new folder: the same text measured again then makes new speech instead of colliding with
+        the old (the run that changed a reading re-measured a unit, and every measure and submit after it failed with a TTS idempotency error)."""
+        base = self._measure_root or Path(self._episode()["dir"]) / "measure"
+        return base / f"readings-{self._readings_changed}" if self._readings_changed else base
 
     def _spend(self, count: int) -> int:
         episode = self._episode()
@@ -456,6 +461,7 @@ class Workbench:
         lexicon_path.write_text(json.dumps(lexicon, ensure_ascii=False, indent=1), encoding="utf-8")
         dub_pronunciation._REGISTERED.discard(str(clip_dir))                 # measure from now on with the new reading
         self.pronunciation_root = dub_pronunciation.register_clip_pronunciation(self.store, episode["clip_id"])
+        self._readings_changed += 1
         entry = self.store.load_corpus()["clips"][episode["clip_id"]]
         remember(memory_path(Path(self.store.root).parent), word, spelling, source="agent", voice=lab.voice, job_id=str(entry["job_id"]),
                  kind="english_code_switch", note=f"chosen by the agent with the lab; closeness {tried['closeness']}; voice sounds {tried['voice_sounds']}")
