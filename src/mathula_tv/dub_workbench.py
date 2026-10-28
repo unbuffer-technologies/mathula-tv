@@ -404,9 +404,9 @@ class Workbench:
         return sorted(rows, key=lambda row: row["closeness"])
 
     def loanwords(self) -> list[dict[str, str]]:
-        """English common nouns the Zulu text keeps although Zulu has an everyday word for them ({"written", "english", "zulu"}), from a model's
-        reading of the Zulu text.  Every such word is listed, whether or not a pronunciation was already chosen for it: a reading is for the English
-        words that stay, and the Zulu word comes first.  Empty when it cannot be asked."""
+        """English common nouns the Zulu text keeps ({"written", "english", "zulu"}), from a model's reading of the Zulu text.  ``zulu`` is the everyday
+        Zulu word for it, or the form created for it in an earlier clip, or "" when Zulu has none (then one can be created).  Every such word is
+        listed, whether or not a pronunciation was already chosen for it.  Empty when it cannot be asked."""
         submission = Path(self._episode()["dir"]) / "submission.json"
         if self.judge is None or not hasattr(self.judge, "foreign_words") or not submission.is_file():
             return []
@@ -415,8 +415,12 @@ class Workbench:
 
             spoken = {_stem(str(w.get("text") or "")) for w in self._lab().transcript}          # only English the speaker really says in the source audio
             texts = [str(i.get("zulu_text") or "") for i in read_json(submission).get("items", [])]
-            found = [{"written": w["written"], "english": w["english"], "zulu": w["zulu"]} for w in self.judge.foreign_words(texts)
-                     if w.get("kind") != "name" and w.get("zulu") and len(_stem(w["english"])) >= 4 and _stem(w["english"]) in spoken]
+            from .created_loanwords import path_for, zulu_for
+
+            created = path_for(Path(self.store.root).parent)
+            found = [{"written": w["written"], "english": w["english"], "zulu": zulu_for(created, w["english"]) or w.get("zulu") or ""}
+                     for w in self.judge.foreign_words(texts)
+                     if w.get("kind") != "name" and len(_stem(w["english"])) >= 4 and _stem(w["english"]) in spoken]
             return list({(item["english"].casefold()): item for item in found}.values())          # one entry per English word, whatever prefix it carries
         except Exception:
             return []
@@ -465,6 +469,30 @@ class Workbench:
             return self._lab().suggest_spellings(word)
         except PronunciationBudgetExhausted as exc:
             raise BudgetExhausted(str(exc)) from exc
+
+    def create_loanword(self, word: str) -> dict[str, Any]:
+        """Zulu words made for an English word that has none (counts as one try); see ``PronunciationLab.create_loanword``."""
+        from .pronunciation_lab import PronunciationBudgetExhausted
+
+        try:
+            return self._lab().create_loanword(word)
+        except PronunciationBudgetExhausted as exc:
+            raise BudgetExhausted(str(exc)) from exc
+
+    def use_loanword(self, word: str, zulu_word: str) -> dict[str, Any]:
+        """Remember the Zulu word chosen for an English word, for every later clip.  The agent writes it in the Zulu text itself."""
+        from .created_loanwords import path_for, remember
+
+        lab, episode = self._lab(), self._episode()
+        if zulu_word not in lab._created.get(word, set()):
+            raise ValueError(f"create {zulu_word!r} for {word!r} with create_loanword before using it")
+        entry = self.store.load_corpus()["clips"][episode["clip_id"]]
+        remember(path_for(Path(self.store.root).parent), word, zulu_word, job_id=str(entry["job_id"]),
+                 note=f"created from the speaker's sounds {' '.join(lab.source(word)['phones'])}")
+        return {"ok": True, "word": word, "zulu_word": zulu_word,
+                "note": f"remembered for later clips. Write {zulu_word!r} in the Zulu text where {word!r} stands, with the noun prefix the sentence needs "
+                        "(i-, isi-, ama-, u-), then re-measure and resubmit the units you change. A created word is Zulu text: the captions show it and the "
+                        "voice reads it as Zulu, so it needs no respelling."}
 
     def use_pronunciation(self, word: str, spelling: str) -> dict[str, Any]:
         """Make ``spelling`` the way ``word`` is spoken: in your own measurements now, in the render, and in the shared memory for later clips."""

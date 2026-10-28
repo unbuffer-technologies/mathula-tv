@@ -25,6 +25,8 @@ MAX_TRIES_PER_WORD = 5
 MAX_TRIES_PER_CLIP = 15
 MAX_SPELLINGS_PER_CALL = 3
 SUGGEST_ROUNDS = 1            # how many times the best spellings found are varied again
+LOAN_POOL = 10               # Zulu forms made for a word, each spoken once
+LOAN_SHOWN = 5
 STANDALONE_AFTER = " kakhulu."   # what follows a spelling when it is spoken alone: a word that ends the utterance loses or devoices its last vowel
 SUGGEST_FIRST = 28            # spellings worked out backwards from the speaker's sounds that are spoken first
 SUGGEST_PER_ROUND = 20        # varied spellings spoken in each round
@@ -384,6 +386,7 @@ class PronunciationLab:
         self._voice_audio: dict[str, Path] = {}
         self._ending: dict[str, dict[str, Any] | None] = {}                # spelling -> does its word end with a vowel (the signal), when the voice says it alone
         self._in_sentence_ending: dict[tuple[str, str, str], dict[str, Any] | None] = {}
+        self._created: dict[str, set[str]] = {}                          # word -> the Zulu forms create_loanword made for it in this run
         self._word_end: dict[str, float] = {}             # audio file -> second (in that file) where the spelling's text ends; later sounds are the next word's
         self._reading_checks: dict[tuple[str, str], bool | None] = {}
         self.sentences: list[str] = []                    # the Zulu the agent has written: a word is also heard in the sentence it is spoken in
@@ -737,6 +740,41 @@ class PronunciationLab:
             return None
         readings = [value for value in readings if value is not None]
         return float(sorted(readings)[len(readings) // 2]) if readings else None
+
+    def create_loanword(self, word: str) -> dict[str, Any]:
+        """A Zulu word made for an English word with none, the way Zulu adapts loans (see ``loan_adapt``), from the speaker's own sounds: the forms
+        are spoken by the Zulu voice and measured.  Counts as one try.  Nothing here is scored against the speaker's English sounds: a loanword
+        differs from them by design (isayensi is not ``s aɪ ə n s``), so those figures are shown for information only."""
+        from . import loan_adapt
+
+        source = self.source(word)
+        if not source["found"]:
+            return {"word": word, "error": "the speaker never says this word in the source audio, so there are no sounds to build a Zulu word from"}
+        if self.total_tries >= MAX_TRIES_PER_CLIP or self.tries_per_word.get(word, 0) >= MAX_TRIES_PER_WORD:
+            raise PronunciationBudgetExhausted(
+                f"pronunciation tries used: {self.tries_per_word.get(word, 0)}/{MAX_TRIES_PER_WORD} for {word!r}, {self.total_tries}/{MAX_TRIES_PER_CLIP} in all")
+        self.tries_per_word[word] = self.tries_per_word.get(word, 0) + 1
+        candidates = loan_adapt.adapt(source["phones"], limit=LOAN_POOL)
+        rows, seen = [], set()
+        for candidate in candidates:
+            heard = self.voice_reading(candidate["stem"])
+            if tuple(heard) in seen:
+                continue                                                         # another way of writing sounds already shown
+            seen.add(tuple(heard))
+            listener = self.english_hears(candidate["stem"])
+            rows.append({"zulu_word": candidate["stem"], "with_i": candidate["with_i"], "syllables": candidate["syllables"],
+                         "changes_from_the_most_typical": candidate["choices"], "voice_sounds": " ".join(heard),
+                         "an_english_listener_writes": listener, "closeness_to_the_speakers_english": align(source["phones"], heard)["closeness"]})
+            self._created.setdefault(word, set()).add(candidate["stem"])
+            if len(rows) >= LOAN_SHOWN:
+                break
+        return {"word": word, "speaker_sounds": " ".join(source["phones"]), "zulu_words": rows,
+                "how_these_were_made": "the speaker's sounds rebuilt in Zulu syllables: English p/t/k/b written ph/th/kh/bh, vowels reduced to a e i o u, a vowel "
+                                       "inserted where Zulu has no cluster (u after a labial or velar, i after the others) and at the end of the word; the first "
+                                       "is the most typical, the others change one choice each (see changes_from_the_most_typical)",
+                "next": "choose one, write it in the Zulu text where the English word stands, with the noun prefix the sentence needs (i-, isi-, ama-, u-), "
+                        "then call use_loanword so later clips use the same word",
+                "tries_left_for_word": MAX_TRIES_PER_WORD - self.tries_per_word[word], "tries_left_in_clip": MAX_TRIES_PER_CLIP - self.total_tries}
 
     def suggest_spellings(self, word: str) -> dict[str, Any]:
         """Spellings of ``word`` worked out backwards from the speaker's sounds and the letters this voice turns into those sounds, spoken and

@@ -676,9 +676,9 @@ def test_loanwords_listed_are_only_english_nouns_the_speaker_says_one_per_word(t
                     {"written": "Malema", "english": "Malema", "kind": "name", "zulu": ""}]
 
     workbench.judge = Judge()
-    workbench._pronunciation_lab._transcript = [{"text": "science"}, {"text": "benefits"}, {"text": "aid"}, {"text": "Malema"}]
+    workbench._pronunciation_lab._transcript = [{"text": "science"}, {"text": "medical"}, {"text": "benefits"}, {"text": "aid"}, {"text": "Malema"}]
     found = workbench.loanwords()
-    assert [(item["english"], item["zulu"]) for item in found] == [("Science", "isayensi"), ("benefit", "inzuzo")]       # not "aid" (too short), not an English word with no Zulu word
+    assert [(item["english"], item["zulu"]) for item in found] == [("Science", "isayensi"), ("medical", ""), ("benefit", "inzuzo")]       # "medical" has no Zulu word: listed so one can be created; not "aid" (too short)
     workbench.judge = None
     assert workbench.loanwords() == []
 
@@ -725,3 +725,47 @@ def test_a_reading_chosen_for_a_word_with_a_zulu_prefix_keeps_the_prefix(tmp_pat
     assert out["spelling"] == "wesaynsi" and "prefix 'we' stays" in out["note"]                                      # only the English part was tried: "we" is kept
     assert [e["tts_text"] for e in entries_for(memory_path(tmp_path), "zu-ZA-ThembaNeural") if e["display_text"] == "weScience"] == ["wesaynsi"]
     assert workbench.use_pronunciation("weScience", "weSaynsi")["spelling"] == "weSaynsi"                         # it already carries the prefix: as chosen
+
+
+def test_a_zulu_word_is_created_for_an_english_word_from_the_speakers_sounds_spoken_and_remembered(tmp_path):
+    from mathula_tv.pronunciation_lab import MAX_TRIES_PER_WORD
+
+    class Loan(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["b", "ʌ", "s"], "occurrences": 2, "each_occurrence": []}
+
+        def voice_reading(self, spelling):
+            return ["b", "a", "s", "i"] if "bh" in spelling else ["p", "a", "s", "i"]
+
+        def english_hears(self, spelling):
+            return "Bus."
+
+    lab_ = Loan({})
+    out = lab_.create_loanword("bus")
+    first = out["zulu_words"][0]
+    assert first["zulu_word"] == "bhasi" and first["with_i"] == "ibhasi" and first["an_english_listener_writes"] == "Bus."
+    assert len({row["voice_sounds"] for row in out["zulu_words"]}) == len(out["zulu_words"])         # different sounds, not the same idea twice
+    assert lab_.tries_per_word["bus"] == 1 and out["tries_left_for_word"] == MAX_TRIES_PER_WORD - 1 and "use_loanword" in out["next"]
+    assert "bhasi" in lab_._created["bus"]
+    assert "never says" in FakeLab({}).create_loanword("Unspoken")["error"]
+
+
+def test_a_chosen_loanword_is_remembered_for_later_clips_but_only_if_it_was_created(tmp_path):
+    from mathula_tv.created_loanwords import path_for, zulu_for
+
+    workbench, _ = make_workbench(tmp_path, {})
+
+    class Loan(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["b", "ʌ", "s"], "occurrences": 2, "each_occurrence": []}
+
+        def voice_reading(self, spelling):
+            return ["b", "a", "s", "i"]
+
+    workbench._pronunciation_lab = Loan({})
+    with pytest.raises(ValueError, match="create 'bhasi'"):
+        workbench.use_loanword("bus", "bhasi")
+    workbench.create_loanword("bus")
+    out = workbench.use_loanword("bus", "bhasi")
+    assert out["ok"] and "needs no respelling" in out["note"]
+    assert zulu_for(path_for(tmp_path), "Bus") == "bhasi" and zulu_for(path_for(tmp_path), "train") is None

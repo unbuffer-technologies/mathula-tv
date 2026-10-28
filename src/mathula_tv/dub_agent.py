@@ -75,7 +75,10 @@ You work through tools and decide your own method. You are scored on:
    ubuchwepheshe for technology, ibhiliyoni for billion), write that Zulu word, with the prefix the sentence needs, instead of keeping the
    English: a Zulu voice says a Zulu word naturally, a Zulu listener hears ordinary Zulu, and the dub stops fighting the voice's rule that every
    written vowel is spoken in full. Keep an English word only for a name, a title, an acronym, or a word with no everyday Zulu word. The
-   pronunciation lab below is for the English words you keep.
+   pronunciation lab below is for the names, acronyms and titles you keep.
+   When there is no everyday Zulu word for an English noun the speaker says, create one the way Zulu adapts loans: create_loanword rebuilds the
+   speaker's sounds in Zulu syllables (a vowel inserted where Zulu has no cluster and at the end, p t k b written ph th kh bh), speaks the forms,
+   and shows what each changes; write the one you choose in the text with the prefix the sentence needs, and call use_loanword to remember it.
 
    English words you keep in the Zulu ("Fighters", "medical aid", names) are spoken by the Zulu voice with Zulu letter rules and can come
    out unrecognisable ("MaFighter" was heard as "mafactor"). Never glue a Zulu prefix onto an English word the speaker says as it is. Once the dub
@@ -245,6 +248,13 @@ TOOL_SPECS = [
           "measured like tried spellings (sounds, differences, english_hears, what happens in the sentence), ready for use_pronunciation. Use it "
           "when your own spellings keep missing a sound or stay in one family of letters. Counts as one try.",
           {"word": {"type": "string", "description": "the word as written in your Zulu, e.g. MaFighter or science"}}, ["word"]),
+    _tool("create_loanword", "For an English noun the speaker says that has NO everyday Zulu word: make a Zulu word for it the way Zulu adapts loans "
+          "(science -> isayensi, bus -> ibhasi, spoon -> isipunu). The speaker's sounds are rebuilt in Zulu syllables (p t k b written ph th kh bh, vowels "
+          "reduced to a e i o u, a vowel inserted where Zulu has no cluster and at the end of the word); the forms come back spoken by the Zulu voice, with "
+          "what each changes from the most typical. Not for names, acronyms or titles. Counts as one try.",
+          {"word": {"type": "string", "description": "the English word as written in your Zulu, e.g. provident"}}, ["word"]),
+    _tool("use_loanword", "Remember the Zulu word you chose from create_loanword so every later clip uses the same one. You still write it in the Zulu text yourself, "
+          "with the noun prefix the sentence needs.", {"word": {"type": "string"}, "zulu_word": {"type": "string"}}, ["word", "zulu_word"]),
     _tool("use_pronunciation", "Make a spelling you tried the way this word is spoken: for your own measurements from now on, in the render, "
           "and remembered for later clips. Only a spelling you have tried can be used. The Zulu text keeps the word itself; do not type the spelling into it.",
           {"word": {"type": "string"}, "spelling": {"type": "string"}}, ["word", "spelling"]),
@@ -522,7 +532,7 @@ def build_dispatch(
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
         "get_submission": workbench.get_submission,
     }
-    for name in ("list_foreign_words", "try_pronunciation", "suggest_spellings", "use_pronunciation"):       # the pronunciation lab, where the workbench has one
+    for name in ("list_foreign_words", "try_pronunciation", "suggest_spellings", "create_loanword", "use_loanword", "use_pronunciation"):       # the pronunciation lab, where the workbench has one
         if hasattr(workbench, name):
             tools[name] = getattr(workbench, name)
     return tools
@@ -711,10 +721,19 @@ def loanwords_note(workbench: Any) -> str:
         found = []
     if not found:
         return ""
-    return (" Loanwords first: your Zulu keeps these English words although Zulu has an everyday word for them: "
-            + "; ".join(f"{item['written']} -> {item['zulu']}" for item in found[:10])
-            + ". Write the Zulu word (with the prefix the sentence needs) unless it would change what the speaker said, then re-measure and resubmit the "
-              "units you changed. Keep an English word only for a name, a title, an acronym or a word with no everyday Zulu word, and check those with the lab.")
+    with_word = [item for item in found if item.get("zulu")]
+    without = [item for item in found if not item.get("zulu")]
+    note = ""
+    if with_word:
+        note += (" Loanwords first: your Zulu keeps these English words although Zulu has an everyday word for them: "
+                 + "; ".join(f"{item['written']} -> {item['zulu']}" for item in with_word[:10])
+                 + ". Write the Zulu word (with the prefix the sentence needs) unless it would change what the speaker said, then re-measure and resubmit the "
+                   "units you changed.")
+    if without:
+        note += (" No everyday Zulu word is known for: " + ", ".join(item["written"] for item in without[:10])
+                 + ". Create one with create_loanword (the speaker's sounds rebuilt in Zulu syllables) and remember it with use_loanword; keep English only for a "
+                   "name, an acronym or a title, and check those with the lab.")
+    return note
 
 
 def pronunciation_reminder_text(workbench: Any, words: list[str], *, left: int | None = None) -> str:

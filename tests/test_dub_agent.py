@@ -36,6 +36,12 @@ class StubWorkbench:
     def suggest_spellings(self, word):
         return {"word": word, "results": []}
 
+    def create_loanword(self, word):
+        return {"word": word, "zulu_words": []}
+
+    def use_loanword(self, word, zulu_word):
+        return {"ok": True}
+
     def open_clip(self, clip_id, run_id, repeat=1, tts_budget=None, speed_policy="natural"):
         self.opened_repeat = repeat
         self.episode = {"clip_id": clip_id, "tts_used": 0, "submissions": 0}
@@ -751,3 +757,25 @@ def test_loanwords_come_first_in_the_prompt_and_in_the_one_reminder_even_when_no
     assert summary["turns"] == 4 and reminder
     assert "Loanwords first" in reminder[0] and "weScience -> isayensi" in reminder[0] and "Technology -> ubuchwepheshe" in reminder[0]
     assert dub_agent.loanwords_note(object()) == ""
+
+
+def test_the_agent_can_create_and_remember_a_loanword_and_the_reminder_names_words_with_no_zulu_word(tmp_path):
+    from mathula_tv import dub_agent
+
+    names = [spec["function"]["name"] for spec in dub_agent.TOOL_SPECS]
+    assert "create_loanword" in names and "use_loanword" in names and "create_loanword" in dub_agent.SYSTEM_PROMPT
+
+    class Loan(StubWorkbench):
+        def create_loanword(self, word):
+            return {"word": word, "zulu_words": []}
+
+        def use_loanword(self, word, zulu_word):
+            return {"ok": True}
+
+        def loanwords(self):
+            return [{"written": "weScience", "english": "science", "zulu": "isayensi"}, {"written": "ne-medical", "english": "medical", "zulu": ""}]
+
+    tools = dub_agent.build_dispatch(Loan(tmp_path), clip_id="c1", run_id="r", tts_budget=5)
+    assert tools["create_loanword"]("medical") == {"word": "medical", "zulu_words": []} and tools["use_loanword"]("medical", "mediki") == {"ok": True}
+    note = dub_agent.loanwords_note(Loan(tmp_path))
+    assert "weScience -> isayensi" in note and "No everyday Zulu word is known for: ne-medical" in note and "create_loanword" in note
