@@ -77,3 +77,12 @@ def test_a_spelling_is_varied_by_swapping_in_the_groups_the_voice_reads_the_same
     assert "sainsa" in near and "saints" in near and "saintsha" in near                            # nts -> ns; the last group left out; a breath added
     assert any(spelling.startswith("sa") and spelling.endswith("a") and len(spelling) == len("saintsa") + 1 for spelling in near)    # a letter added
     assert "saintsa" not in near
+
+
+def test_the_vowels_of_a_spelling_are_varied_before_its_consonants():
+    table = {"graphemes": {}}
+    near = ls.neighbours("sainsa", table, limit=100)
+    first_vowel_swap = next(i for i, spelling in enumerate(near) if spelling.startswith("s") and spelling != "sainsa" and spelling[1:3] in ("ay", "ei", "ey"))
+    first_consonant_swap = next(i for i, spelling in enumerate(near) if spelling.startswith(("z", "ss", "zai", "ssai")))
+    assert first_vowel_swap < first_consonant_swap                                                # "sayn..." before "zain..."
+    assert "saainsa" in ls.neighbours("sainsa", table, limit=200)                                  # the open-start way of writing the diphthong is reachable

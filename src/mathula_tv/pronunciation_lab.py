@@ -24,10 +24,11 @@ from xml.sax.saxutils import escape
 MAX_TRIES_PER_WORD = 5
 MAX_TRIES_PER_CLIP = 15
 MAX_SPELLINGS_PER_CALL = 3
-SUGGEST_ROUNDS = 2            # how many times the best spellings found are varied again
-SUGGEST_FIRST = 12            # spellings worked out backwards from the speaker's sounds that are spoken first
-SUGGEST_PER_ROUND = 12        # varied spellings spoken in each round
+SUGGEST_ROUNDS = 1            # how many times the best spellings found are varied again
+SUGGEST_FIRST = 28            # spellings worked out backwards from the speaker's sounds that are spoken first
+SUGGEST_PER_ROUND = 20        # varied spellings spoken in each round
 SUGGEST_SHOWN = 5             # the distinct best of them that are measured in full and shown
+SUGGEST_BY_OPENING = 2        # of those, how many are chosen for the speaker's vowel opening instead of for sounds
 
 _VOWEL_LETTERS = set("aeiouɑɒɔəɛɜɪʊʌæɐøɨ")
 _VOICING = {("p", "b"), ("t", "d"), ("k", "ɡ"), ("k", "g"), ("s", "z"), ("f", "v"), ("ʃ", "ʒ"), ("tʃ", "dʒ"), ("θ", "ð")}
@@ -505,7 +506,7 @@ class PronunciationLab:
         cuts = self._in_sentence_acoustics.get((word.casefold(), spelling, f"{context.before}|{context.after}")) or []
         try:
             speaker = self._speaker_features(source)
-            return pa.differences_over_cuts(speaker, cuts) if speaker and cuts else []
+            return pa.differences_over_cuts(speaker, cuts, voice_open_f1=self.voice_open_f1()) if speaker and cuts else []
         except Exception:
             return []
 
@@ -643,6 +644,34 @@ class PronunciationLab:
             self._letters = letter_sounds.load_or_build(path, self.voice_reading, voice=self.voice)
         return self._letters
 
+    def voice_open_f1(self) -> float | None:
+        """How open the mouth is when this voice says a plain "a" (F1 in Hz): the scale the opening of any vowel is read against."""
+        if getattr(self, "_open_reference", "unset") == "unset":
+            readings = [self.first_vowel_opening(word) for word in ("baba", "mama")]
+            readings = [value for value in readings if value]
+            self._open_reference = float(sorted(readings)[len(readings) // 2]) if readings else None
+        return self._open_reference
+
+    def first_vowel_opening(self, spelling: str) -> float | None:
+        """How open the mouth is at the start of the first vowel when the voice says ``spelling`` alone (F1 in Hz); None when not measurable."""
+        from . import phone_acoustics as pa
+
+        try:
+            audio = Path(self._audio_for(spelling))
+            features = pa.timed_features(pa.load(audio), self.gop.decode_timed(audio))
+        except Exception:
+            return None
+        return next((f["onset_f1"] for f in features if "onset_f1" in f), None)
+
+    def _speaker_opening(self, source: Mapping[str, Any]) -> float | None:
+        """The speaker's mouth opening at the start of his first vowel of the word (median over his occurrences)."""
+        try:
+            readings = [next((f["onset_f1"] for f in occurrence if "onset_f1" in f), None) for occurrence in self._speaker_features(source)]
+        except Exception:
+            return None
+        readings = [value for value in readings if value is not None]
+        return float(sorted(readings)[len(readings) // 2]) if readings else None
+
     def suggest_spellings(self, word: str) -> dict[str, Any]:
         """Spellings of ``word`` worked out backwards from the speaker's sounds and the letters this voice turns into those sounds, spoken and
         measured like any tried spelling (they can be used with ``use_pronunciation``).  Counts as one try: it replaces guessing from English
@@ -687,7 +716,18 @@ class PronunciationLab:
         for spelling, (closeness, heard) in spoken.items():
             if heard not in by_sounds or (closeness, -len(spelling)) > (by_sounds[heard][0], -len(by_sounds[heard][1])):
                 by_sounds[heard] = (closeness, spelling)
-        best = sorted(by_sounds.values(), key=lambda item: (-item[0], len(item[1]), item[1]))[:SUGGEST_SHOWN]
+        ranked = sorted(by_sounds.values(), key=lambda item: (-item[0], len(item[1]), item[1]))
+        best = ranked[:SUGGEST_SHOWN - SUGGEST_BY_OPENING]
+        # a portfolio, not one score: the closest in sounds (closeness is nearly blind to the quality of a vowel), and the closest in how open the
+        # mouth is at the start of the first vowel, which a person hears at once ("Seinsa" starts nearly shut where the speaker's mouth is wide open)
+        wanted = self._speaker_opening(source)
+        if wanted is not None:
+            # every spelling spoken is a candidate here, even one that sounds like a better-scoring one: the same decoded sounds can open the mouth differently
+            rest = sorted(((closeness, spelling) for spelling, (closeness, _) in spoken.items() if (closeness, spelling) not in best),
+                          key=lambda item: (-item[0], len(item[1]), item[1]))
+            opening = {item[1]: self.first_vowel_opening(item[1]) for item in rest[:16]}
+            best += sorted((item for item in rest if opening.get(item[1]) is not None), key=lambda item: abs(opening[item[1]] - wanted))[:SUGGEST_BY_OPENING]
+        best = (best + [item for item in ranked if item not in best])[:SUGGEST_SHOWN]
         results = []
         for _, spelling in best:
             full = prefix + spelling if prefix else spelling
@@ -700,7 +740,8 @@ class PronunciationLab:
             "word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"],
             "how_these_were_found": f"spellings were worked out backwards from the speaker's sounds through the letters this voice turns into them, "
                                     f"then the best were varied by small edits (a letter group swapped, left out or added); {len(pool)} were spoken, "
-                                    f"{len(by_sounds)} different sound sequences came out, these are the closest in sounds",
+                                    f"{len(by_sounds)} different sound sequences came out; shown are the closest in sounds and the closest in how open the mouth is "
+                                    "at the start of the first vowel",
             "results": results, "tries_left_for_word": left_word, "tries_left_in_clip": left_clip}
         if results:
             nearest = max(results, key=lambda r: (not r.get("lost_in_its_sentence"), r["closeness"]))

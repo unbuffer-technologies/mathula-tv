@@ -599,3 +599,34 @@ def test_suggested_spellings_are_spoken_measured_and_ready_to_use_and_cost_one_t
     assert len({r["voice_sounds"] for r in out["results"]}) == len(out["results"])                                        # different sounds, not the same idea twice
     assert lab_.tries_per_word["MaFighter"] == 1 and out["tries_left_for_word"] == MAX_TRIES_PER_WORD - 1
     assert first["spelling"] in lab_.tried["MaFighter"]                                                                   # so use_pronunciation accepts it
+
+
+def test_suggestions_include_the_spellings_that_open_the_mouth_like_the_speaker_not_only_the_closest_in_sounds():
+    table = {"graphemes": {"s": ["s"], "n": ["n"], "ts": ["ts"], "a": ["a"], "ai": ["aɪ"], "ei": ["eɪ"], "ay": ["aɪ"]}}
+
+    class Opening(FakeLab):
+        openings = {"ay": 960.0, "ai": 560.0, "ei": 380.0}
+
+        def source(self, word):
+            return {"found": True, "phones": ["s", "aɪ", "n", "ts", "a"], "occurrences": 1, "spoken_form": "science", "each_occurrence": []}
+
+        def _letter_table(self):
+            return table
+
+        def voice_reading(self, spelling):
+            text, out = spelling.lower(), []
+            for letters, sound in (("ts", "ts"), ("ai", "aɪ"), ("ay", "aɪ"), ("ei", "eɪ"), ("aa", "a")):
+                text = text.replace(letters, "|" + sound + "|")
+            for part in text.split("|"):
+                out += [part] if part in ("ts", "aɪ", "eɪ", "a") else list(part)
+            return out
+
+        def _speaker_opening(self, source):
+            return 950.0
+
+        def first_vowel_opening(self, spelling):
+            return next((value for letters, value in self.openings.items() if letters in spelling.lower()), 700.0)
+
+    lab_ = Opening({})
+    shown = [r["spelling"] for r in lab_.suggest_spellings("science")["results"]]
+    assert len(shown) <= 5 and any("ay" in spelling.lower() for spelling in shown)                    # a spelling that opens the mouth like the speaker is measured

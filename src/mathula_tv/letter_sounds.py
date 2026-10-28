@@ -45,7 +45,7 @@ PRIOR: dict[str, list[str]] = {
     "ə": ["a", "e", "u", "ah", "uh"], "ʌ": ["a", "u", "ah", "uh"], "ɜ": ["e", "a", "u"], "æ": ["a", "e"], "ɒ": ["o", "a"],
     "ɪ": ["i", "e", "ih"], "i": ["i", "ee"], "iː": ["ii", "ee", "i"], "ɔ": ["o", "oh"], "o": ["o", "oh"], "oː": ["oo", "o"],
     "ʊ": ["u", "uh", "oo"], "u": ["u", "oo"], "uː": ["uu", "oo", "u"],
-    "aɪ": ["ai", "ay", "ei", "ey", "ayi", "ahi"], "eɪ": ["ei", "ey", "ay", "ai", "aye"], "əɪ": ["ai", "ay", "ei"], "aʊ": ["au", "aw", "ow"],
+    "aɪ": ["ai", "ay", "ei", "ey", "ae", "ayi", "ahi", "aai", "aayi"], "eɪ": ["ei", "ey", "ay", "ai", "aye"], "əɪ": ["ai", "ay", "ei"], "aʊ": ["au", "aw", "ow"],
     "oʊ": ["ou", "ow", "o"], "əʊ": ["ou", "ow", "o"], "ɔɪ": ["oi", "oy"],
     "p": ["p", "ph", "b"], "b": ["b", "bh", "mb"], "t": ["t", "th", "d"], "d": ["d", "nd", "t"], "k": ["k", "kh", "g"], "ɡ": ["g", "k", "ng"],
     "g": ["g", "k"], "tʃ": ["tsh", "j", "tj"], "dʒ": ["j", "dj"], "f": ["f", "ph"], "v": ["v", "f"], "s": ["s", "ss", "z"], "z": ["z", "s"],
@@ -211,8 +211,11 @@ def neighbours(spelling: str, table: Mapping, *, limit: int = 60) -> list[str]:
     parts = split(spelling, table)
     swaps = substitutes(table)
     found: dict[str, None] = {}
-    for index, part in enumerate(parts):
-        for other in swaps.get(part, []):
+    # the vowels first: the nucleus of a syllable is what a listener hears first ("sei" for "sai" is a different word), and its letters are the
+    # ones with the most ways of being written; consonants after
+    order = sorted(range(len(parts)), key=lambda index: (0 if any(letter in "aeiou" for letter in parts[index]) else 1, index))
+    for index in order:
+        for other in swaps.get(parts[index], []):
             found.setdefault("".join(parts[:index] + [other] + parts[index + 1:]), None)
     for index in range(len(parts)):
         if len(parts) > 2:

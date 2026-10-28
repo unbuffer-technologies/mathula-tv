@@ -7,7 +7,9 @@ voice's audio, and reports the differences in plain words.  It reports; it does 
 
 Measured per stop (p b t d k g and affricates): the release (how sharply the sound rises when the lips or tongue let go), the closure
 before it, whether the vocal folds vibrate during that closure, the delay until voicing starts after the release (aspiration), and the
-hiss (energy above 4 kHz) just after the release.  For every sound: duration.
+hiss (energy above 4 kHz) just after the release.  Measured per vowel: the first formant (F1) at its start and at its end, which is how open
+the mouth is (open "a" about 700-1000 Hz, closed "i" about 300-400 Hz): "science" has an open "ai", and an "ei" spelling starts nearly shut.
+For every sound: duration.
 """
 from __future__ import annotations
 
@@ -32,6 +34,9 @@ CLOSURE_DIFFERENCE_MS = 40.0
 VOICING_DIFFERENCE = 0.4
 VOT_DIFFERENCE_MS = 20.0
 HISS_DIFFERENCE = 0.25
+VOWEL_F1_DIFFERENCE_HZ = 150.0            # vocal tracts differ by about 15%: a smaller difference in mouth opening is not the spelling's doing
+VOWEL_LETTERS = set("aeiouɑɒɔəɛɜɪʊʌæɐøɨ")
+FORMANT_ORDER = 12
 
 
 def load(path: Path) -> np.ndarray:
@@ -70,9 +75,62 @@ def _hiss(samples: np.ndarray, start: int, length: int) -> float:
     return float(spectrum[freqs >= 4000].sum() / (spectrum.sum() + 1e-12))
 
 
+def is_vowel(token: str) -> bool:
+    return any(c in VOWEL_LETTERS for c in token)
+
+
+def first_formant(frame: np.ndarray) -> float | None:
+    """F1 of a short frame by linear prediction (autocorrelation method), or None when no clear resonance is found."""
+    if len(frame) < 300 or float(np.dot(frame, frame)) < 1e-9:
+        return None
+    x = np.append(frame[0], frame[1:] - 0.97 * frame[:-1]) * np.hamming(len(frame))
+    r = np.correlate(x, x, "full")[len(x) - 1:len(x) + FORMANT_ORDER]
+    if len(r) <= FORMANT_ORDER or r[0] <= 0:
+        return None
+    matrix = np.array([[r[abs(i - j)] for j in range(FORMANT_ORDER)] for i in range(FORMANT_ORDER)]) + np.eye(FORMANT_ORDER) * 1e-6 * r[0]
+    try:
+        coefficients = np.linalg.solve(matrix, r[1:FORMANT_ORDER + 1])
+        roots = np.roots(np.concatenate(([1.0], -coefficients)))
+    except np.linalg.LinAlgError:
+        return None
+    roots = roots[np.imag(roots) > 0.01]
+    frequencies = np.angle(roots) * SAMPLE_RATE / (2 * np.pi)
+    widths = -np.log(np.abs(roots)) * SAMPLE_RATE / np.pi
+    clear = sorted(float(f) for f, w in zip(frequencies, widths) if 200 < f < 1300 and w < 350)
+    return clear[0] if clear else None
+
+
+def vowel_features(samples: np.ndarray, start_s: float, end_s: float) -> dict[str, float]:
+    """How open the mouth is at the start and at the end of a vowel (F1 in Hz); empty when no clear resonance was found there.
+
+    The span runs to the next sound's first frame, in 25 ms frames every 20 ms: the start is the median of the first frames, the end the median
+    of the last ones (a vowel that does not move has the same value at both ends, a diphthong like "ai" falls from open to closed)."""
+    end_s = min(end_s, start_s + 0.30)
+    if end_s - start_s < 0.05:
+        return {}
+    track: list[tuple[float, float]] = []
+    t = start_s
+    while t + 0.025 <= end_s + 1e-9:
+        a = int(t * SAMPLE_RATE)
+        value = first_formant(samples[a:a + int(0.025 * SAMPLE_RATE)])
+        if value is not None:
+            track.append((t - start_s, value))
+        t += 0.02
+    first = [v for offset, v in track if offset <= 0.05]
+    last = [v for offset, v in track if offset >= (end_s - start_s) - 0.08]
+    if not first:
+        return {}
+    features = {"onset_f1": round(float(np.median(first)))}
+    if last:
+        features["offset_f1"] = round(float(np.median(last)))
+    return features
+
+
 def phone_features(samples: np.ndarray, token: str, start_s: float, end_s: float) -> dict[str, Any]:
     """The measurable properties of one sound, from its start and end in ``samples``."""
     features: dict[str, Any] = {"token": token, "duration_ms": round((end_s - start_s) * 1000)}
+    if token not in STOPS and is_vowel(token):
+        features.update(vowel_features(samples, start_s, end_s))
     if token not in STOPS:
         return features
     lo, hi = max(0, int((start_s - 0.04) * SAMPLE_RATE)), min(len(samples), int((end_s + 0.06) * SAMPLE_RATE))
@@ -105,7 +163,12 @@ def phone_features(samples: np.ndarray, token: str, start_s: float, end_s: float
 
 
 def timed_features(samples: np.ndarray, timed: Sequence[tuple[str, float, float]]) -> list[dict[str, Any]]:
-    return [phone_features(samples, token, start, end) for token, start, end in timed]
+    out = []
+    for index, (token, start, end) in enumerate(timed):
+        if token not in STOPS and is_vowel(token):             # the recogniser's frame for a vowel is one 20 ms step: its span runs to the next sound
+            end = timed[index + 1][1] if index + 1 < len(timed) else end + 0.12
+        out.append(phone_features(samples, token, start, end))
+    return out
 
 
 def _same(a: float, b: float, limit: float) -> bool:
@@ -123,15 +186,37 @@ _PLACE.update({"tʃ": "postalveolar-affricate", "dʒ": "postalveolar-affricate",
 
 
 def _place(token: str) -> str:
-    """Stops made in the same place pair up whatever their labels (p, b and the recogniser's other b's are all 'lips')."""
+    """Stops made in the same place pair up whatever their labels (p, b and the recogniser's other b's are all 'lips'); vowels pair in order."""
+    if token not in STOPS and is_vowel(token):
+        return "V"
     return _PLACE.get(token, token)
+
+
+def _measured(feature: dict[str, Any]) -> bool:
+    return ("release_rise_db" in feature and feature["token"] in STOPS) or ("onset_f1" in feature and is_vowel(feature["token"]) and feature["token"] not in STOPS)
+
+
+def _vowel_note(index: int, voice: dict[str, Any], group: list[dict[str, Any]], voice_open_f1: float | None = None) -> str | None:
+    onset = _median([g["onset_f1"] for g in group])
+    found = []
+    if abs(voice["onset_f1"] - onset) >= VOWEL_F1_DIFFERENCE_HZ:
+        reference = f"; this voice's own plain 'a' reaches about {round(voice_open_f1)} Hz" if voice_open_f1 else ""
+        found.append(f"it starts {'more closed' if voice['onset_f1'] < onset else 'more open'}: the first formant is {voice['onset_f1']} Hz "
+                     f"against the speaker's {round(onset)} Hz (the higher, the wider the mouth is open{reference})")
+    ends = [g["offset_f1"] for g in group if "offset_f1" in g]
+    if ends and "offset_f1" in voice:
+        speaker_fall, voice_fall = onset - _median(ends), voice["onset_f1"] - voice["offset_f1"]
+        if abs(voice_fall - speaker_fall) >= 2 * VOWEL_F1_DIFFERENCE_HZ:
+            found.append(f"it {'closes more' if voice_fall > speaker_fall else 'closes less'} through the vowel (F1 falls {round(voice_fall)} Hz "
+                         f"against the speaker's {round(speaker_fall)} Hz)")
+    return (f"the voice's vowel number {index + 1} ({voice['token']}), against {len(group)} of the speaker's occurrence(s): " + "; ".join(found)) if found else None
 
 
 def _median(values: Sequence[float]) -> float:
     return float(np.median(values))
 
 
-def differences(speaker_occurrences: Sequence[Sequence[dict[str, Any]]], voice: Sequence[dict[str, Any]]) -> list[str]:
+def differences(speaker_occurrences: Sequence[Sequence[dict[str, Any]]], voice: Sequence[dict[str, Any]], *, voice_open_f1: float | None = None) -> list[str]:
     """Plain-words differences between the stops of the voice's word and the speaker's, paired by where in the mouth they are made.
 
     Each stop of the voice is compared with the same stop in every occurrence of the speaker's word (the speaker's measures are the median
@@ -141,14 +226,21 @@ def differences(speaker_occurrences: Sequence[Sequence[dict[str, Any]]], voice: 
         matcher = difflib.SequenceMatcher(a=[_place(f["token"]) for f in occurrence], b=[_place(f["token"]) for f in voice], autojunk=False)
         for block in matcher.get_matching_blocks():
             for k in range(block.size):
-                if occurrence[block.a + k]["token"] in STOPS and "release_rise_db" in occurrence[block.a + k]:
+                if _measured(occurrence[block.a + k]):
                     paired.setdefault(block.b + k, []).append(occurrence[block.a + k])
     notes: list[str] = []
     for index in sorted(paired):
         v = voice[index]
-        if v["token"] not in STOPS or "release_rise_db" not in v:
+        if not _measured(v):
             continue
-        group = paired[index]
+        group = [g for g in paired[index] if g["token"] in STOPS] if v["token"] in STOPS else [g for g in paired[index] if "onset_f1" in g]
+        if not group:
+            continue
+        if v["token"] not in STOPS:
+            note = _vowel_note(index, v, group, voice_open_f1)
+            if note:
+                notes.append(note)
+            continue
         s = {key: _median([g[key] for g in group]) for key in ("release_rise_db", "closure_ms", "voiced_closure", "voicing_delay_ms", "hiss_after_release")}
         found = []
         if not _same(s["release_rise_db"], v["release_rise_db"], RELEASE_DIFFERENCE_DB):
@@ -171,7 +263,8 @@ def differences(speaker_occurrences: Sequence[Sequence[dict[str, Any]]], voice: 
 _STAT_KEYS = ("release_rise_db", "closure_ms", "voiced_closure", "voicing_delay_ms", "hiss_after_release")
 
 
-def differences_over_cuts(speaker_occurrences: Sequence[Sequence[dict[str, Any]]], cuts: Sequence[Sequence[dict[str, Any]]]) -> list[str]:
+def differences_over_cuts(speaker_occurrences: Sequence[Sequence[dict[str, Any]]], cuts: Sequence[Sequence[dict[str, Any]]],
+                          *, voice_open_f1: float | None = None) -> list[str]:
     """``differences`` for a voice word measured in several cuts of the same audio.
 
     The audio is identical in every cut, but where the recogniser puts a sound's edges moves with the amount of audio around it, and the
@@ -188,14 +281,15 @@ def differences_over_cuts(speaker_occurrences: Sequence[Sequence[dict[str, Any]]
         for block in matcher.get_matching_blocks():
             for k in range(block.size):
                 i, j = block.a + k, block.b + k
-                if base[i]["token"] in STOPS and voice[j]["token"] in STOPS and "release_rise_db" in voice[j]:
+                if _measured(base[i]) and _measured(voice[j]) and (base[i]["token"] in STOPS) == (voice[j]["token"] in STOPS):
                     found.setdefault(i, []).append(voice[j])
     voice_word: list[dict[str, Any]] = []
     for i, feature in enumerate(base):
         group = found.get(i, [])
-        if feature["token"] in STOPS and group and 2 * len(group) >= len(cuts):
+        if _measured(feature) and group and 2 * len(group) >= len(cuts):
             token = Counter(g["token"] for g in group).most_common(1)[0][0]
-            voice_word.append({"token": token, "duration_ms": feature.get("duration_ms", 0), **{key: _median([g[key] for g in group]) for key in _STAT_KEYS}})
+            keys = _STAT_KEYS if feature["token"] in STOPS else tuple(key for key in ("onset_f1", "offset_f1") if all(key in g for g in group))
+            voice_word.append({"token": token, "duration_ms": feature.get("duration_ms", 0), **{key: _median([g[key] for g in group]) for key in keys}})
         else:
             voice_word.append({"token": f"·{i}"})                       # nothing paired here: a placeholder that matches no sound
-    return differences(occurrences, voice_word)
+    return differences(occurrences, voice_word, voice_open_f1=voice_open_f1)

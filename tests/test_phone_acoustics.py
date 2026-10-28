@@ -34,9 +34,11 @@ def test_a_plosive_has_a_sharp_release_after_a_silent_closure_and_an_implosive_d
     assert plosive["voiced_closure"] < 0.3 and implosive["voiced_closure"] > 0.5
 
 
-def test_only_stops_get_stop_measures():
-    features = pa.phone_features(vowel(0.3), "a", 0.05, 0.15)
-    assert features == {"token": "a", "duration_ms": 100}
+def test_only_stops_get_stop_measures_and_only_vowels_get_vowel_measures():
+    features = pa.phone_features(vowel(0.3), "n", 0.05, 0.15)                     # a nasal: neither
+    assert features == {"token": "n", "duration_ms": 100}
+    vowel_measures = pa.phone_features(vowel(0.3), "a", 0.05, 0.15)
+    assert "release_rise_db" not in vowel_measures and vowel_measures["token"] == "a"           # a vowel has no release; its mouth opening is measured
 
 
 def test_differences_name_what_is_made_differently_even_when_the_labels_differ():
@@ -79,3 +81,46 @@ def test_measures_from_several_cuts_of_the_same_audio_are_compared_by_their_medi
     assert pa.differences_over_cuts(speaker, near) == []                                      # tʃ or dʒ, the voicing is the speaker's: nothing to report
     assert pa.differences_over_cuts(speaker, [[{"token": "o", "duration_ms": 80}]]) == []      # no stop found in the cut: no claim
     assert pa.differences_over_cuts([], near) == [] and pa.differences_over_cuts(speaker, []) == []
+
+
+def _vowel(f1, f2, seconds=0.2, pitch=110.0):
+    """A voiced sound whose resonances sit at f1 and f2: a pulse train through two resonators."""
+    n = int(seconds * pa.SAMPLE_RATE)
+    source = np.zeros(n)
+    source[::int(pa.SAMPLE_RATE / pitch)] = 1.0
+    out = source
+    for centre, width in ((f1, 80.0), (f2, 120.0)):
+        radius = np.exp(-np.pi * width / pa.SAMPLE_RATE)
+        a1, a2 = -2 * radius * np.cos(2 * np.pi * centre / pa.SAMPLE_RATE), radius * radius
+        y = np.zeros(n)
+        for i in range(n):
+            y[i] = out[i] - a1 * (y[i - 1] if i > 0 else 0) - a2 * (y[i - 2] if i > 1 else 0)
+        out = y
+    return out / (np.abs(out).max() + 1e-9) * 0.5
+
+
+def test_how_open_the_mouth_is_comes_from_the_first_formant():
+    open_a = pa.vowel_features(_vowel(750, 1300), 0.0, 0.2)
+    closed_i = pa.vowel_features(_vowel(380, 2200), 0.0, 0.2)
+    assert abs(open_a["onset_f1"] - 750) < 120 and abs(closed_i["onset_f1"] - 380) < 90
+    assert open_a["onset_f1"] - closed_i["onset_f1"] > 250
+    assert pa.vowel_features(np.zeros(3200), 0.0, 0.2) == {} and pa.vowel_features(_vowel(750, 1300), 0.0, 0.03) == {}       # silence or a sliver: no claim
+
+
+def test_a_vowel_that_starts_more_closed_than_the_speakers_is_named_in_plain_words():
+    speaker = [[{"token": "s", "duration_ms": 80}, {"token": "aɪ", "duration_ms": 160, "onset_f1": 880, "offset_f1": 480}, {"token": "n", "duration_ms": 60}]]
+    shut = [{"token": "s", "duration_ms": 80}, {"token": "eɪ", "duration_ms": 160, "onset_f1": 394, "offset_f1": 311}, {"token": "n", "duration_ms": 60}]
+    notes = pa.differences(speaker, shut)
+    assert len(notes) == 1 and "vowel number 2 (eɪ)" in notes[0] and "starts more closed" in notes[0] and "394 Hz against the speaker's 880 Hz" in notes[0]
+    assert "closes less" in notes[0]                                                                      # it hardly moves, the speaker's falls 400 Hz
+    near = [{"token": "s", "duration_ms": 80}, {"token": "aɪ", "duration_ms": 160, "onset_f1": 780, "offset_f1": 420}, {"token": "n", "duration_ms": 60}]
+    assert pa.differences(speaker, near) == []                                                            # a different vocal tract, not a different vowel
+    cuts = [[{"token": "s"}, {"token": "eɪ", "onset_f1": value, "offset_f1": 320}, {"token": "n"}] for value in (390, 400, 700)]
+    assert "starts more closed" in pa.differences_over_cuts(speaker, cuts)[0]                            # the median of the cuts, one odd cut does not decide
+
+
+def test_the_vowel_note_says_what_the_voices_own_open_a_reaches():
+    speaker = [[{"token": "s"}, {"token": "aɪ", "onset_f1": 940, "offset_f1": 500}, {"token": "n"}]]
+    voice = [{"token": "s"}, {"token": "aɪ", "onset_f1": 560, "offset_f1": 330}, {"token": "n"}]
+    assert "this voice's own plain 'a' reaches about 1200 Hz" in pa.differences(speaker, voice, voice_open_f1=1200)[0]
+    assert "plain 'a'" not in pa.differences(speaker, voice)[0]
