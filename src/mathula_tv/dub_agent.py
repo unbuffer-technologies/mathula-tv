@@ -654,6 +654,42 @@ def pronunciation_evidence_note(workbench: Any, words: list[str]) -> str:
             + ". Closeness is a guide, not a verdict; a short clip often makes the listener write another real word.")
 
 
+def saved_readings_note(workbench: Any) -> str:
+    """How each reading already saved for an English word of this text measures now, in its sentence: shown as it is (weakest first), with no
+    cut-off, so the agent can decide whether another spelling would be closer."""
+    measure = getattr(workbench, "saved_readings_evidence", None)
+    try:
+        rows = measure() if callable(measure) else []
+    except Exception:
+        rows = []
+    lines = []
+    for row in rows[:6]:
+        listener = row.get("english_hears")
+        line = (f"{row['word']} -> {row.get('spelling')!r}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] "
+                f"(closeness {row['closeness']})"
+                + (f"; differences: {'; '.join(row['differences'])}" if row.get("differences") else "; no sound differs")
+                + (f"; an English listener writes {listener!r}" if listener else ""))
+        if row.get("lost_in_its_sentence"):
+            line += f"; in its sentence the voice loses {' '.join(row['lost_in_its_sentence'])}"
+        if row.get("made_differently"):
+            line += "; measured on the audio: " + " / ".join(note[:170] for note in row["made_differently"][:2])
+        lines.append(line)
+    if not lines:
+        return ""
+    return (" Readings already saved for English words in this text, measured now in their sentences (no tries used): " + " | ".join(lines)
+            + ". If one differs from the speaker in a way other letters could fix, try_pronunciation and use_pronunciation replace it.")
+
+
+def pronunciation_reminder_text(workbench: Any, words: list[str], *, left: int | None = None) -> str:
+    """The one pronunciation reminder: the words with no checked reading (with the lab's measurement of each as written) and the readings
+    already saved for words of this text (as they measure now).  Empty when there is nothing of either."""
+    saved = saved_readings_note(workbench)
+    if not words and not saved:
+        return ""
+    body = (PRONUNCIATION_REMINDER.format(words=", ".join(words[:12])) + pronunciation_evidence_note(workbench, words)) if words else PRONUNCIATION_SAVED_REMINDER
+    return (PRONUNCIATION_LATE_NOTE.format(left=left) if left is not None else "") + body + saved
+
+
 PRONUNCIATION_REMINDER = (
     "One reminder, once: your Zulu keeps English words that the speaker says and that have no checked reading yet, so the voice may read them "
     "with Zulu letters: {words}. If any of them may sound wrong, call list_foreign_words, check those with try_pronunciation, use "
@@ -664,6 +700,10 @@ PRONUNCIATION_REMINDER = (
 # The agent fits timing first and looks at pronunciation last, so a run that spends all its turns on timing never reaches the lab (prod-21
 # stopped at max_turns with the lab untouched).  Once an accepted draft exists and this few turns remain, the same one reminder is sent
 # early, with the turns left, so there is room to check the words and re-measure.
+PRONUNCIATION_SAVED_REMINDER = (
+    "One reminder, once: earlier jobs saved readings for English words that your Zulu keeps, and the lab measures how each is spoken here "
+    "(below). If any of them may sound wrong, check it with try_pronunciation, use use_pronunciation for a better spelling, re-measure any unit "
+    "whose words change, and finish. If you judge they are fine as they are, you do not have to use the lab: finish.")
 PRONUNCIATION_RESERVE_TURNS = 20
 PRONUNCIATION_LATE_NOTE = "You have {left} turns left; spend at most 8 of them on this and keep the rest to re-measure and re-submit. "
 
@@ -746,9 +786,8 @@ def _run_agent(
             pending = getattr(workbench, "pronunciation_check_pending", None)
             words = pending() if callable(pending) else []
             pronunciation_reminded = True                      # asked once whether or not there is anything to check
-            if words:
-                text = (PRONUNCIATION_LATE_NOTE.format(left=max_turns - turn + 1) + PRONUNCIATION_REMINDER.format(words=", ".join(words[:12]))
-                        + pronunciation_evidence_note(workbench, words))
+            text = pronunciation_reminder_text(workbench, words, left=max_turns - turn + 1)
+            if text:
                 messages.append({"role": "user", "content": text})
                 trace.log("pronunciation_reminder", turn=turn, words=words[:12], text=text, early=True)
         response = client.complete(messages, tools=TOOL_SPECS)
@@ -778,10 +817,11 @@ def _run_agent(
             # The pronunciation lab is optional in the prompt, so an agent can finish without ever looking at the English words it kept
             # (prod-19 did).  If the sweep finds words with no checked reading, one reminder, once, naming them; with none, no reminder.
             pending = getattr(workbench, "pronunciation_check_pending", None)
-            words = pending() if callable(pending) and not pronunciation_reminded and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens else []
-            if words:                                # only when there is something to check: no need, no reminder
+            may_remind = not pronunciation_reminded and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens
+            words = pending() if callable(pending) and may_remind else []
+            text = pronunciation_reminder_text(workbench, words) if may_remind else ""
+            if text:                                 # only when there is something to check: no need, no reminder
                 pronunciation_reminded = True
-                text = PRONUNCIATION_REMINDER.format(words=", ".join(words[:12])) + pronunciation_evidence_note(workbench, words)
                 messages.append({"role": "user", "content": text})
                 trace.log("pronunciation_reminder", turn=turn, words=words[:12], text=text)
                 continue

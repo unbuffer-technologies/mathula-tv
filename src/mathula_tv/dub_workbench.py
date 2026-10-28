@@ -358,6 +358,32 @@ class Workbench:
                 found.append(measured)
         return found
 
+    def saved_readings_evidence(self) -> list[dict[str, Any]]:
+        """How the readings the shared memory already holds measure now, in the sentences of this text, for the harness's reminder.  Only
+        readings of English words that this text has; no tries are spent, nothing is scored or cut off, and one that cannot be measured is left out."""
+        from .pronunciation_memory import entries_for, memory_path
+
+        rows: list[dict[str, Any]] = []
+        try:
+            self._sync_lab_context()
+            lab = self._lab()
+            saved = [e for e in entries_for(memory_path(Path(self.store.root).parent), lab.voice) if e.get("kind") == "english_code_switch"]
+        except Exception:
+            return rows
+        for entry in saved:
+            word, spelling = str(entry["display_text"]), str(entry["tts_text"])
+            if lab._context(word) is None:
+                continue
+            try:
+                measured = lab.as_written(word, spelling)
+            except Exception:
+                measured = None
+            if measured:
+                rows.append(measured)
+            if len(rows) >= 10:
+                break
+        return sorted(rows, key=lambda row: row["closeness"])
+
     def list_foreign_words(self) -> dict[str, Any]:
         """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
         self.foreign_words_listed = True

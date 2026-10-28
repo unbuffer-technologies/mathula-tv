@@ -287,6 +287,9 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
         keeping = who_keeps_each_sound(tried, speaker)
         if keeping:
             parts.append(keeping)
+    if best.get("how_the_sounds_are_made_in_its_sentence"):
+        parts.append(f"Measured in its sentence ({best['spelling']!r}; the median over several cuts of the same audio): "
+                     + " | ".join(best["how_the_sounds_are_made_in_its_sentence"]) + ".")
     if heard:
         shown = "; ".join(f"{spelling!r} -> {text!r}" for spelling, text in list(heard.items())[-4:])
         if understood:
@@ -357,6 +360,7 @@ class PronunciationLab:
         self.sentences: list[str] = []                    # the Zulu the agent has written: a word is also heard in the sentence it is spoken in
         self.readings: dict[str, str] = {}                # readings already chosen for other words, applied in those sentences as the render does
         self._in_sentence: dict[tuple[str, str, str], list[list[str]]] = {}
+        self._in_sentence_acoustics: dict[tuple[str, str, str], list[list[dict[str, Any]]]] = {}
         self._windows: Any = None
         self._transcript: list[Mapping[str, Any]] | None = None
         self.tries_per_word: dict[str, int] = {}
@@ -455,8 +459,41 @@ class PronunciationLab:
             if self._windows is None:
                 self._windows = ps.NameWindows(ps.bookmark_synthesizer(self.voice, self.key, self.region), lambda wav: (), self.work_dir / "voice")
             cuts = self._windows.audio_with_margins(context, ps.Candidate(without_prefix(spelling, self._located(word)[1])), IN_SENTENCE_MARGINS_MS)
-            self._in_sentence[key] = [list(self.gop.decode(Path(cut))) for cut in cuts]
+            timed = [self.gop.decode_timed(Path(cut)) for cut in cuts]
+            self._in_sentence[key] = [[phone for phone, _, _ in heard] for heard in timed]
+            try:
+                from . import phone_acoustics as pa
+
+                self._in_sentence_acoustics[key] = [pa.timed_features(pa.load(Path(cut)), heard) for cut, heard in zip(cuts, timed)]
+            except Exception:                                   # a measuring failure leaves out the acoustics, never the sounds
+                self._in_sentence_acoustics[key] = []
         return self._in_sentence[key]
+
+    def _speaker_features(self, source: Mapping[str, Any]) -> list[list[dict[str, Any]]]:
+        from . import phone_acoustics as pa
+
+        timed, clips = source.get("_timed"), source.get("_clips")
+        if not timed or not clips:
+            return []
+        if "_speaker_features" not in source:
+            source["_speaker_features"] = [pa.timed_features(pa.load(Path(clip)), occurrence) for clip, occurrence in zip(clips, timed) if occurrence]  # type: ignore[index]
+        return source["_speaker_features"]                                                      # type: ignore[index]
+
+    def acoustics_in_sentence(self, word: str, spelling: str, source: Mapping[str, Any]) -> list[str]:
+        """How the stops and affricates of the voice's word in its sentence are made differently from the speaker's, measured on the audio in
+        every cut and compared by the median (see ``phone_acoustics.differences_over_cuts``): the answer to "j or ch?" that the recogniser's
+        label, which flips, cannot give."""
+        from . import phone_acoustics as pa
+
+        if self.readings_in_sentence(word, spelling) is None:
+            return []
+        context = self._context(word)
+        cuts = self._in_sentence_acoustics.get((word.casefold(), spelling, f"{context.before}|{context.after}")) or []
+        try:
+            speaker = self._speaker_features(source)
+            return pa.differences_over_cuts(speaker, cuts) if speaker and cuts else []
+        except Exception:
+            return []
 
     def sounds_in_sentence(self, word: str, spelling: str) -> list[str] | None:
         """The tightest of those decodes, to show the agent what the voice says (the wider ones carry the neighbouring words' sounds)."""
@@ -554,21 +591,24 @@ class PronunciationLab:
             if lost:
                 record["lost_in_its_sentence"] = lost
                 record["readings_of_the_audio"] = len(_readings(readings))
+            made = self.acoustics_in_sentence(word, spelling, source)
+            if made:
+                record["how_the_sounds_are_made_in_its_sentence"] = made
         record["_heard"] = heard
         return record
 
-    def as_written(self, word: str) -> dict[str, Any] | None:
-        """The same measurements for the word exactly as the Zulu text writes it, so that "does it need a look?" is answered from evidence.
-        Spends no try; None when the speaker never says the word."""
+    def as_written(self, word: str, spelling: str | None = None) -> dict[str, Any] | None:
+        """The same measurements for the word exactly as the Zulu text writes it (or, given ``spelling``, for a reading saved for it), so that
+        "does it need a look?" is answered from evidence.  Spends no try; None when the speaker never says the word."""
         source = self.source(word)
         if not source.get("found"):
             return None
-        record = self._measure(word, word, source)
+        record = self._measure(word, spelling or word, source)
         record.pop("_heard", None)
-        return {"word": word, "speaker_sounds": " ".join(source["phones"]), "voice_sounds": record["voice_sounds"], "closeness": record["closeness"],
+        return {"word": word, "spelling": spelling, "speaker_sounds": " ".join(source["phones"]), "voice_sounds": record["voice_sounds"], "closeness": record["closeness"],
                 "differences": record["differences"][:3], "english_hears": record.get("english_hears"),
                 "english_listener_understands": record.get("english_listener_understands"),
-                "lost_in_its_sentence": record.get("lost_in_its_sentence"), "made_differently": (record.get("how_the_sounds_are_made_differently") or [])[:2]}
+                "lost_in_its_sentence": record.get("lost_in_its_sentence"), "made_differently": (record.get("how_the_sounds_are_made_in_its_sentence") or record.get("how_the_sounds_are_made_differently") or [])[:2]}
 
     def try_spellings(self, word: str, spellings: Sequence[str]) -> dict[str, Any]:
         """Try up to three spellings of ``word``; each is compared with the speaker's sounds. Counts against the budget."""

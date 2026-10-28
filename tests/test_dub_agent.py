@@ -671,3 +671,28 @@ def test_the_pronunciation_reminder_carries_the_labs_measurement_of_each_word_as
             raise RuntimeError("synthesis down")
 
     assert pronunciation_evidence_note(Broken(), ["x"]) == ""                         # a measuring failure never blocks the reminder
+
+
+def test_readings_saved_for_words_of_this_text_are_put_to_the_agent_even_when_no_word_is_new(tmp_path):
+    class SavedOnly(PendingWorkbench):
+        def pronunciation_check_pending(self):
+            return []
+
+        def saved_readings_evidence(self):
+            return [{"word": "science", "spelling": "sayensi", "speaker_sounds": "s aɪ n ts ə", "voice_sounds": "s aɪ j ɪ n", "closeness": 0.48,
+                     "differences": ["the voice adds j"], "english_hears": "Science.", "made_differently": ["the closure is shorter"]}]
+
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),                                                        # reminded here
+        _reply(content="done again"),
+    ])
+    summary = run_agent(client, SavedOnly(tmp_path), clip_id="c1", run_id="r")
+    reminder = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "One reminder" in str(m.get("content"))]
+    assert summary["turns"] == 4 and reminder
+    assert "science -> 'sayensi'" in reminder[0] and "the voice adds j" in reminder[0] and "measured on the audio: the closure is shorter" in reminder[0]
+    assert "you do not have to use the lab" in reminder[0] and "no tries used" in reminder[0]
+    from mathula_tv.dub_agent import saved_readings_note
+
+    assert saved_readings_note(object()) == ""

@@ -15,6 +15,7 @@ import difflib
 import subprocess
 import tempfile
 import wave
+from collections import Counter
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -116,6 +117,11 @@ _PLACE = {"p": "lips", "b": "lips", "ɓ": "lips", "pʰ": "lips", "bʱ": "lips", 
           "k'": "tongue-back", "q": "tongue-back", "c": "tongue-back", "ɟ": "tongue-back"}
 
 
+# Affricates are paired by where they are made too, so a recogniser that calls the same half-voiced sound tʃ in one cut and dʒ in the next
+# still has its voicing compared with the speaker's (the labels differ; the voicing is what is measured).
+_PLACE.update({"tʃ": "postalveolar-affricate", "dʒ": "postalveolar-affricate", "ts": "alveolar-affricate", "dz": "alveolar-affricate"})
+
+
 def _place(token: str) -> str:
     """Stops made in the same place pair up whatever their labels (p, b and the recogniser's other b's are all 'lips')."""
     return _PLACE.get(token, token)
@@ -160,3 +166,36 @@ def differences(speaker_occurrences: Sequence[Sequence[dict[str, Any]]], voice: 
         if found:
             notes.append(f"the voice's stop number {index + 1} ({v['token']}), against {len(group)} of the speaker's occurrence(s): " + "; ".join(found))
     return notes
+
+
+_STAT_KEYS = ("release_rise_db", "closure_ms", "voiced_closure", "voicing_delay_ms", "hiss_after_release")
+
+
+def differences_over_cuts(speaker_occurrences: Sequence[Sequence[dict[str, Any]]], cuts: Sequence[Sequence[dict[str, Any]]]) -> list[str]:
+    """``differences`` for a voice word measured in several cuts of the same audio.
+
+    The audio is identical in every cut, but where the recogniser puts a sound's edges moves with the amount of audio around it, and the
+    measures follow (one half-voiced affricate measured 33% and 67% voiced in two cuts of the same samples).  Each of the speaker's stops is
+    paired, cut by cut, with the voice's stop made in the same place, and the median of each measure over the cuts is what is compared; a stop
+    found in fewer than half the cuts is left out."""
+    occurrences = [occurrence for occurrence in speaker_occurrences if occurrence]
+    if not occurrences or not cuts:
+        return []
+    base = occurrences[0]
+    found: dict[int, list[dict[str, Any]]] = {}
+    for voice in cuts:
+        matcher = difflib.SequenceMatcher(a=[_place(f["token"]) for f in base], b=[_place(f["token"]) for f in voice], autojunk=False)
+        for block in matcher.get_matching_blocks():
+            for k in range(block.size):
+                i, j = block.a + k, block.b + k
+                if base[i]["token"] in STOPS and voice[j]["token"] in STOPS and "release_rise_db" in voice[j]:
+                    found.setdefault(i, []).append(voice[j])
+    voice_word: list[dict[str, Any]] = []
+    for i, feature in enumerate(base):
+        group = found.get(i, [])
+        if feature["token"] in STOPS and group and 2 * len(group) >= len(cuts):
+            token = Counter(g["token"] for g in group).most_common(1)[0][0]
+            voice_word.append({"token": token, "duration_ms": feature.get("duration_ms", 0), **{key: _median([g[key] for g in group]) for key in _STAT_KEYS}})
+        else:
+            voice_word.append({"token": f"·{i}"})                       # nothing paired here: a placeholder that matches no sound
+    return differences(occurrences, voice_word)

@@ -485,3 +485,48 @@ def test_the_word_as_the_zulu_writes_it_is_measured_without_spending_a_try():
     assert row["voice_sounds"] == "f eɪ t ə" and row["speaker_sounds"] == "f aɪ t a s" and row["english_hears"] == "Theta."
     assert row["closeness"] < 0.8 and any("vowel" in d for d in row["differences"]) and heard.total_tries == 0
     assert FakeLab({}).as_written("Unspoken") is None
+
+
+def test_the_acoustic_differences_in_the_sentence_are_shown_with_each_try_and_in_the_advice():
+    class Measured(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["f", "aɪ", "t", "a", "s"], "occurrences": 2, "each_occurrence": []}
+
+        def acoustics_in_sentence(self, word, spelling, source):
+            return ["the voice's stop number 7 (tʃ), against 2 of the speaker's occurrence(s): the vocal folds vibrate through 0% of the closure against the speaker's 100%"]
+
+        def readings_in_sentence(self, word, spelling):
+            return [["f", "aɪ", "t", "a", "s"]]
+
+    out = Measured({"Fayitas": ["f", "aɪ", "t", "a", "s"]}).try_spellings("Fighters", ["Fayitas"])
+    assert out["results"][0]["how_the_sounds_are_made_in_its_sentence"][0].startswith("the voice's stop number 7 (tʃ)")
+    assert "Measured in its sentence ('Fayitas'; the median over several cuts of the same audio)" in out["advice"]
+
+
+def test_a_saved_reading_is_measured_in_its_sentence_without_spending_a_try(tmp_path):
+    from mathula_tv.pronunciation_memory import memory_path, remember
+
+    class Saved(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["s", "aɪ", "n", "ts", "ə"], "occurrences": 2, "each_occurrence": []}
+
+        def readings_in_sentence(self, word, spelling):
+            return None
+
+        def english_hears(self, spelling):
+            return "Science."
+
+    workbench, _ = make_workbench(tmp_path, {})
+    saved = Saved({"Sayensi": ["s", "aɪ", "j", "ɪ", "n"]})
+    workbench._pronunciation_lab = saved
+    run_dir = tmp_path / "x"
+    import json
+    from pathlib import Path
+
+    Path(workbench._episode()["dir"], "submission.json").write_text(json.dumps({"items": [{"item_id": "u1", "zulu_text": "Phela weScience iyisifundo kakhulu."}]}))
+    remember(memory_path(tmp_path), "Science", "Sayensi", source="agent", voice="zu-ZA-ThembaNeural", job_id="j", kind="english_code_switch")
+    remember(memory_path(tmp_path), "Gauteng", "Gautheng", source="agent", voice="zu-ZA-ThembaNeural", job_id="j", kind="english_code_switch")    # not in this text
+    remember(memory_path(tmp_path), "hlu", "hluuu", source="repair", voice="zu-ZA-ThembaNeural", job_id="j", kind="other")                        # not an English word
+    rows = workbench.saved_readings_evidence()
+    assert [(r["word"], r["spelling"]) for r in rows] == [("Science", "Sayensi")]
+    assert rows[0]["voice_sounds"] == "s aɪ j ɪ n" and rows[0]["closeness"] < 0.8 and saved.total_tries == 0
