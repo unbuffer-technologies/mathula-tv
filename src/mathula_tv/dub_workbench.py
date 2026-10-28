@@ -403,6 +403,20 @@ class Workbench:
                 break
         return sorted(rows, key=lambda row: row["closeness"])
 
+    def loanwords(self) -> list[dict[str, str]]:
+        """English common nouns the Zulu text keeps although Zulu has an everyday word for them ({"written", "english", "zulu"}), from a model's
+        reading of the Zulu text.  Every such word is listed, whether or not a pronunciation was already chosen for it: a reading is for the English
+        words that stay, and the Zulu word comes first.  Empty when it cannot be asked."""
+        submission = Path(self._episode()["dir"]) / "submission.json"
+        if self.judge is None or not hasattr(self.judge, "foreign_words") or not submission.is_file():
+            return []
+        try:
+            texts = [str(i.get("zulu_text") or "") for i in read_json(submission).get("items", [])]
+            return [{"written": w["written"], "english": w["english"], "zulu": w["zulu"]} for w in self.judge.foreign_words(texts)
+                    if w.get("kind") != "name" and w.get("zulu")]
+        except Exception:
+            return []
+
     def list_foreign_words(self) -> dict[str, Any]:
         """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
         self.foreign_words_listed = True
@@ -423,7 +437,9 @@ class Workbench:
             except Exception:                                    # an outage leaves the rule-based sweep, never an empty list
                 named = []
         found = candidate_words(texts, self._lab().transcript, looks_isizulu=looks_isizulu, exclude=self._known_readings(), named=named)
-        return {"words": found, "note": "Check only the ones that matter. Never glue a Zulu prefix onto an English word the speaker says as it is.",
+        return {"words": found, "note": "Loanwords first: an entry with zulu_word has an everyday Zulu word; write that word in the text instead of keeping the "
+                                         "English one, unless it would change what the speaker said. Check with the lab only the English words you keep. "
+                                         "Never glue a Zulu prefix onto an English word the speaker says as it is.",
                 "tries_left_in_clip": MAX_TRIES_PER_CLIP - self._lab().total_tries}
 
     def try_pronunciation(self, word: str, spellings: list[str]) -> dict[str, Any]:

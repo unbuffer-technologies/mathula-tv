@@ -648,3 +648,13 @@ def test_a_spelling_is_heard_followed_by_a_word_and_the_following_words_sounds_a
     from mathula_tv import pronunciation_lab as module
 
     assert module.STANDALONE_AFTER.startswith(" ") and module.STANDALONE_AFTER.strip(". ") != ""     # a word follows: the utterance does not end on the spelling
+
+
+def test_a_word_listed_for_checking_carries_the_everyday_zulu_word_for_it():
+    words = [{"text": "science"}, {"text": "technology"}]
+    named = [{"written": "weScience", "english": "science", "kind": "word", "zulu": "isayensi"},
+             {"written": "Technology", "english": "technology", "kind": "word", "zulu": "ubuchwepheshe"}]
+    found = candidate_words(["Kungani udinga weScience and Technology?"], words, looks_isizulu=looks_isizulu, named=named)
+    assert {f["speaker_says"]: f.get("zulu_word") for f in found} == {"science": "isayensi", "technology": "ubuchwepheshe"}
+    none = candidate_words(["weScience"], words, looks_isizulu=looks_isizulu, named=[{"written": "weScience", "english": "science", "kind": "word", "zulu": ""}])
+    assert "zulu_word" not in none[0]

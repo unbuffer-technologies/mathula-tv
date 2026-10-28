@@ -213,7 +213,7 @@ SCIENCE = {"written": "iScience", "english": "science"}
 def test_foreign_words_are_read_from_the_zulu_text_alone():
     client = ForeignClient({"Phela iScience iyisifundo.": [SCIENCE, {"written": "", "english": "x"}, "junk"]})
     usage = {}
-    assert foreign_words(client, ["Phela iScience iyisifundo.", "Sawubona."], usage) == [{**SCIENCE, "kind": "word"}]
+    assert foreign_words(client, ["Phela iScience iyisifundo.", "Sawubona."], usage) == [{**SCIENCE, "kind": "word", "zulu": ""}]
     assert usage == {"prompt_tokens": 7, "completion_tokens": 3}
 
 
@@ -221,8 +221,8 @@ def test_pauses_are_not_sent_to_the_model_and_a_text_keeps_its_answer():
     client = ForeignClient({"Phela iScience iyisifundo. Kunjalo.": [SCIENCE]})
     judge = UnitJudge(client)
     text = "Phela iScience iyisifundo. ~pause600 Kunjalo."
-    assert judge.foreign_words([text]) == [{**SCIENCE, "kind": "word"}]
-    assert judge.foreign_words([text, text]) == [{**SCIENCE, "kind": "word"}]
+    assert judge.foreign_words([text]) == [{**SCIENCE, "kind": "word", "zulu": ""}]
+    assert judge.foreign_words([text, text]) == [{**SCIENCE, "kind": "word", "zulu": ""}]
     assert client.calls == 1                                 # asked once, remembered
 
 
@@ -230,3 +230,14 @@ def test_the_model_can_mark_a_word_as_a_name():
     client = ForeignClient({"Lapha eNkomazi.": [{"written": "eNkomazi", "english": "Nkomazi", "kind": "name"}, {"written": "x", "english": "y", "kind": "bogus"}]})
     found = foreign_words(client, ["Lapha eNkomazi."], {})
     assert [(w["english"], w["kind"]) for w in found] == [("Nkomazi", "name"), ("y", "word")]
+
+
+def test_the_reading_of_the_zulu_gives_the_everyday_zulu_word_for_a_kept_english_word():
+    text = "Kungani weScience weTechnology Malema medical"
+    client = ForeignClient({text: [
+        {"written": "weScience", "english": "science", "kind": "word", "zulu": "isayensi"},
+        {"written": "Malema", "english": "Malema", "kind": "name", "zulu": "isayensi"},
+        {"written": "medical", "english": "medical", "kind": "word"}]})
+    found = {w["english"]: w for w in foreign_words(client, [text], {})}
+    assert found["science"]["zulu"] == "isayensi" and found["medical"]["zulu"] == ""        # no everyday word: empty
+    assert found["Malema"]["zulu"] == ""                                                       # a name never has one, whatever the model says

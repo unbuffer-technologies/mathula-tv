@@ -726,3 +726,28 @@ def test_the_agent_can_ask_for_spellings_worked_out_from_the_speakers_sounds(tmp
     tools = dub_agent.build_dispatch(StubWorkbench(tmp_path), clip_id="c1", run_id="r", tts_budget=5)
     assert "suggest_spellings" in tools and tools["suggest_spellings"]("science") == {"word": "science", "results": []}
     assert "Neither check is the main one" in dub_agent.SYSTEM_PROMPT and "main check" not in dub_agent.SYSTEM_PROMPT
+
+
+def test_loanwords_come_first_in_the_prompt_and_in_the_one_reminder_even_when_no_word_is_new(tmp_path):
+    from mathula_tv import dub_agent
+
+    assert "Loanwords first" in dub_agent.SYSTEM_PROMPT and "isayensi" in dub_agent.SYSTEM_PROMPT
+
+    class Loan(PendingWorkbench):
+        def pronunciation_check_pending(self):
+            return []
+
+        def loanwords(self):
+            return [{"written": "weScience", "english": "science", "zulu": "isayensi"}, {"written": "Technology", "english": "technology", "zulu": "ubuchwepheshe"}]
+
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),                                                        # reminded here
+        _reply(content="done again"),
+    ])
+    summary = run_agent(client, Loan(tmp_path), clip_id="c1", run_id="r")
+    reminder = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "One reminder" in str(m.get("content"))]
+    assert summary["turns"] == 4 and reminder
+    assert "Loanwords first" in reminder[0] and "weScience -> isayensi" in reminder[0] and "Technology -> ubuchwepheshe" in reminder[0]
+    assert dub_agent.loanwords_note(object()) == ""

@@ -59,7 +59,10 @@ whatever form it has: bare ("medical aid"), with a hyphen prefix ("ne-medical"),
 the name of a person, place, party or organisation, or an acronym ("Malema", "Nkomazi", "EFF", "Leopard Creek"): names are handled
 elsewhere, from the speaker's audio, and an English listener cannot judge a South African name. Do not list ordinary isiZulu words, nor
 English words that are fully adapted into Zulu spelling ("isikole", "ibhasi"), nor numbers.
-Reply with JSON only: {"items":[{"id":"...","words":[{"written":"...","english":"...","kind":"word|name"}]}]} with one entry per input id.
+For an ordinary English word (kind "word") also give "zulu": the word everyday isiZulu speakers use for it, if there is one, a native word
+or an established loanword ("science" -> "isayensi", "technology" -> "ubuchwepheshe", "billion" -> "ibhiliyoni", "bus" -> "ibhasi"), written
+without any prefix the sentence adds ("sayensi" is not it: give "isayensi"). Give "" when Zulu has no everyday word for it, and always for a name.
+Reply with JSON only: {"items":[{"id":"...","words":[{"written":"...","english":"...","kind":"word|name","zulu":"..."}]}]} with one entry per input id.
 """
 
 CONFIRM_PROMPT = """A reviewer flagged each item below as losing material meaning. Check that claim strictly; flags are often wrong,
@@ -166,7 +169,8 @@ def foreign_words(client: Any, texts: Sequence[str], usage: dict[str, int], *, c
                 if isinstance(word, dict) and str(word.get("written") or "").strip() and str(word.get("english") or "").strip():
                     written, english = str(word["written"]).strip(), str(word["english"]).strip()
                     kind = "name" if str(word.get("kind") or "").strip().lower() == "name" else "word"
-                    found.setdefault((written.casefold(), english.casefold()), {"written": written, "english": english, "kind": kind})
+                    zulu = "" if kind == "name" else str(word.get("zulu") or "").strip()
+                    found.setdefault((written.casefold(), english.casefold()), {"written": written, "english": english, "kind": kind, "zulu": zulu})
     return list(found.values())
 
 

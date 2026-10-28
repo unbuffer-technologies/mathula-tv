@@ -196,6 +196,8 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
     by meaning, whatever their spelling or prefix.  Only the speaker's side (the transcript) is still matched here, because the lab needs
     the speaker's own sounds for the word."""
     texts = list(texts)
+    zulu_by_stem = {_stem(str(item.get("english") or "")): str(item.get("zulu") or "").strip() for item in named
+                    if str(item.get("kind") or "").lower() != "name" and str(item.get("zulu") or "").strip()}
     name_stems = {_stem(str(item.get("english") or "")) for item in named if str(item.get("kind") or "").lower() == "name"} - {""}
     name_written = {str(item.get("written") or "").casefold() for item in named if str(item.get("kind") or "").lower() == "name"}
     spoken: dict[str, dict[str, Any]] = {}
@@ -220,6 +222,8 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
                     "times_the_speaker_says_it": spoken[stem]["count"],
                     "note": "a Zulu prefix is glued on: the speaker says the English word as it is" if glued else ""})
                 entry["occurrences_in_dub"] += 1
+                if zulu_by_stem.get(stem):
+                    entry["zulu_word"] = zulu_by_stem[stem]
                 break
     for item in named:
         written, english = str(item.get("written") or "").strip(), str(item.get("english") or "").strip()
@@ -231,7 +235,7 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
         count = sum(text.count(written) for text in texts)
         if count:
             found[written] = {"word": written, "occurrences_in_dub": count, "speaker_says": spoken[stem]["as_spoken"],
-                              "times_the_speaker_says_it": spoken[stem]["count"],
+                              "times_the_speaker_says_it": spoken[stem]["count"], **({"zulu_word": zulu_by_stem[stem]} if zulu_by_stem.get(stem) else {}),
                               "note": "a Zulu prefix is glued on: the speaker says the English word as it is" if written.casefold() != english.casefold() else ""}
     return _one_entry_per_word(found.values())[:limit]
 
@@ -250,6 +254,12 @@ def _one_entry_per_word(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any
         if len(group) > 1:
             lead["also_written"] = [e["word"] for e in group[1:]]
         lead["note"] = next((e["note"] for e in group if e["note"]), "")
+        if not lead.get("zulu_word"):
+            lead.pop("zulu_word", None)
+            for member in group:
+                if member.get("zulu_word"):
+                    lead["zulu_word"] = member["zulu_word"]
+                    break
         merged.append(lead)
     return sorted(merged, key=lambda e: (-e["occurrences_in_dub"], e["word"]))
 

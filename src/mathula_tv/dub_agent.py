@@ -71,6 +71,12 @@ You work through tools and decide your own method. You are scored on:
    ("four thousand fayiv hundred rand"). The ~en is never spoken, and the digits stay for the number checks.
    Use it only where the time requires it; native is the default.
 
+   Loanwords first. When Zulu has an everyday word for an English word, a native word or an established loanword (isayensi for science,
+   ubuchwepheshe for technology, ibhiliyoni for billion), write that Zulu word, with the prefix the sentence needs, instead of keeping the
+   English: a Zulu voice says a Zulu word naturally, a Zulu listener hears ordinary Zulu, and the dub stops fighting the voice's rule that every
+   written vowel is spoken in full. Keep an English word only for a name, a title, an acronym, or a word with no everyday Zulu word. The
+   pronunciation lab below is for the English words you keep.
+
    English words you keep in the Zulu ("Fighters", "medical aid", names) are spoken by the Zulu voice with Zulu letter rules and can come
    out unrecognisable ("MaFighter" was heard as "mafactor"). Never glue a Zulu prefix onto an English word the speaker says as it is. Once the dub
    fits, call list_foreign_words; for the ones the speaker says in English, try_pronunciation shows the speaker's sounds and the sounds the voice
@@ -696,14 +702,35 @@ def saved_readings_note(workbench: Any) -> str:
               "use_pronunciation replace it.")
 
 
+def loanwords_note(workbench: Any) -> str:
+    """English common nouns the Zulu keeps although Zulu has an everyday word for them: the loanword comes first."""
+    ask = getattr(workbench, "loanwords", None)
+    try:
+        found = ask() if callable(ask) else []
+    except Exception:
+        found = []
+    if not found:
+        return ""
+    return (" Loanwords first: your Zulu keeps these English words although Zulu has an everyday word for them: "
+            + "; ".join(f"{item['written']} -> {item['zulu']}" for item in found[:10])
+            + ". Write the Zulu word (with the prefix the sentence needs) unless it would change what the speaker said, then re-measure and resubmit the "
+              "units you changed. Keep an English word only for a name, a title, an acronym or a word with no everyday Zulu word, and check those with the lab.")
+
+
 def pronunciation_reminder_text(workbench: Any, words: list[str], *, left: int | None = None) -> str:
     """The one pronunciation reminder: the words with no checked reading (with the lab's measurement of each as written) and the readings
     already saved for words of this text (as they measure now).  Empty when there is nothing of either."""
     saved = saved_readings_note(workbench)
-    if not words and not saved:
+    loan = loanwords_note(workbench)
+    if not words and not saved and not loan:
         return ""
-    body = (PRONUNCIATION_REMINDER.format(words=", ".join(words[:12])) + pronunciation_evidence_note(workbench, words)) if words else PRONUNCIATION_SAVED_REMINDER
-    return (PRONUNCIATION_LATE_NOTE.format(left=left) if left is not None else "") + body + saved
+    if words:
+        body = PRONUNCIATION_REMINDER.format(words=", ".join(words[:12])) + pronunciation_evidence_note(workbench, words)
+    elif saved:
+        body = PRONUNCIATION_SAVED_REMINDER
+    else:
+        body = "One reminder, once:"
+    return (PRONUNCIATION_LATE_NOTE.format(left=left) if left is not None else "") + body + loan + saved
 
 
 PRONUNCIATION_REMINDER = (
