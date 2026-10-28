@@ -152,11 +152,11 @@ def test_a_spelling_must_be_tried_before_it_is_used_and_using_it_reaches_the_lex
     assert workbench.pronunciation_choices[0]["spelling"] == "Fighters"
 
 
-def test_a_person_approved_reading_is_not_replaced_by_the_agents_choice(tmp_path):
+def test_a_verified_repair_is_not_replaced_by_the_agents_choice(tmp_path):
     from mathula_tv.pronunciation_memory import entries_for, memory_path, remember
 
     workbench, _ = make_workbench(tmp_path, {"Fayitas": ["f", "aɪ", "t", "ə", "z"]})
-    remember(memory_path(tmp_path), "Fighters", "Fayitha", source="person", voice="zu-ZA-ThembaNeural", job_id="manual")
+    remember(memory_path(tmp_path), "Fighters", "Fayitha", source="repair", voice="zu-ZA-ThembaNeural", job_id="job-a")
     workbench.try_pronunciation("Fighters", ["Fayitas"])
     workbench.use_pronunciation("Fighters", "Fayitas")
     assert entries_for(memory_path(tmp_path), "zu-ZA-ThembaNeural")[0]["tts_text"] == "Fayitha"
@@ -245,7 +245,7 @@ def test_saved_agent_readings_an_english_listener_rejects_go_back_on_the_list():
         {"display_text": "sick", "tts_text": "sick", "source": "agent", "kind": "english_code_switch"},
         {"display_text": "fund", "tts_text": "fund", "source": "agent", "kind": "english_code_switch"},
         {"display_text": "deputy", "tts_text": "dephuthi", "source": "agent", "kind": "english_code_switch"},          # could not be asked: fine
-        {"display_text": "Fighters", "tts_text": "Fayitas", "source": "person", "kind": "english_code_switch"},        # chosen by ear: checked like any other
+        {"display_text": "Fighters", "tts_text": "Fayitas", "source": "repair", "kind": "english_code_switch"},        # whoever chose it: checked like any other
         {"display_text": "hlu", "tts_text": "hluuu", "source": "repair", "kind": "other"},                              # not an English word
         {"display_text": "old", "tts_text": "old", "source": "agent", "kind": "english_code_switch", "disabled": True},
     ]

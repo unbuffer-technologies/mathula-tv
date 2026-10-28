@@ -4,12 +4,11 @@ What one job learns about how the voice says a word is kept here and applied to 
 
 * a spelling the dubbing agent chose with the pronunciation lab (``source="agent"``, lowest priority: a person's reading and a verified
   repair outrank it);
-* a swallowed word that a repair brought back (``source="repair"``), stored only after the real render's check confirmed it;
-* a name or word whose reading a person approved (``source="person"``), stored with the CLI.
+* a swallowed word that a repair brought back (``source="repair"``), stored only after the real render's check confirmed it.
 
-Each entry is for one voice: a respelling verified on Themba says nothing about Thando. Each job that uses an entry is a
-test of it: when the post-render check finds the word swallowed again, the entry counts a failure, and two failures switch
-it off. A person's entry outranks a repair, and a repair outranks nothing else here.
+No person puts a reading here: the agent has to learn each word from the audio, and every entry is rechecked by later jobs.  Each entry is
+for one voice: a respelling verified on Themba says nothing about Thando. Each job that uses an entry is a test of it: when the post-render
+check finds the word swallowed again, the entry counts a failure, and two failures switch it off. A verified repair outranks an agent's choice.
 
 The file is ``<work_dir>/experience/pronunciation_memory.json``. Jobs receive its entries through their own
 ``native_dub/pronunciation_names.json`` lexicon, so no renderer code needs to know about it.
@@ -25,7 +24,7 @@ from typing import Any, Mapping, Sequence
 SCHEMA = "mathula-pronunciation-memory-v1"
 MEMORY_SOURCE = "memory"
 MAX_FAILURES = 2
-_PRIORITY = {"person": 2, "repair": 1, "agent": 0}
+_PRIORITY = {"repair": 1, "agent": 0}
 
 
 def memory_path(work_dir: Path) -> Path:
@@ -56,7 +55,7 @@ def _save(path: Path, data: dict[str, Any]) -> None:
 def remember(path: Path, display_text: str, tts_text: str, *, source: str, voice: str | None, job_id: str,
              kind: str = "other", note: str = "") -> dict[str, Any]:
     """Record a verified reading. Same reading again = one more confirming job; a different one replaces it only from an
-    equal or higher-priority source."""
+    equal or higher-priority source.  Only the agent's choices and verified repairs can be recorded: a person's reading is refused."""
     if source not in _PRIORITY:
         raise ValueError(f"source must be one of {sorted(_PRIORITY)}")
     data = load(path)
@@ -65,10 +64,9 @@ def remember(path: Path, display_text: str, tts_text: str, *, source: str, voice
     entry = data["entries"].get(key)
     if entry and entry["tts_text"] == tts_text:
         entry["jobs"] = sorted({*entry["jobs"], job_id})
-        entry["source"] = max(entry["source"], source, key=_PRIORITY.get)
-        entry["disabled"] = False if source == "person" else entry.get("disabled", False)
+        entry["source"] = max(entry["source"], source, key=lambda name: _PRIORITY.get(name, -1))
     elif entry and _PRIORITY[source] < _PRIORITY[entry["source"]] and not entry.get("disabled"):
-        return entry                                          # a person's reading is not overwritten by a repair
+        return entry                                          # a verified repair is not overwritten by an agent's choice
     else:
         entry = {"display_text": display_text, "tts_text": tts_text, "voice": voice, "kind": kind, "source": source,
                  "jobs": [job_id], "failures": 0, "disabled": False, "first_seen": now, "note": note}
@@ -117,7 +115,7 @@ def record_outcomes(lexicon_path: Path, memory_file: Path, voice: str | None, dr
         if entry["display_text"].casefold() in applied and entry.get("voice") in (None, voice) and (
                 respelt in swallowed or re.sub(r"[^a-z]", "", entry["display_text"].casefold()) in swallowed):
             entry["failures"] = entry.get("failures", 0) + 1
-            if entry["failures"] >= MAX_FAILURES and entry["source"] != "person":
+            if entry["failures"] >= MAX_FAILURES:
                 entry["disabled"] = True
                 switched_off.append(entry["display_text"])
     _save(memory_file, data)
@@ -149,12 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mathula_tv.pronunciation_memory")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list")
-    add = sub.add_parser("remember", help="record a reading a person approved")
-    add.add_argument("display_text")
-    add.add_argument("tts_text")
-    add.add_argument("--voice", default="zu-ZA-ThembaNeural")
-    add.add_argument("--kind", default="personal_name")
-    forget = sub.add_parser("forget")
+    forget = sub.add_parser("forget", help="remove an entry (there is no way to add one by hand: the agent learns the readings)")
     forget.add_argument("display_text")
     forget.add_argument("--voice", default="zu-ZA-ThembaNeural")
     args = parser.parse_args(argv)
@@ -164,9 +157,6 @@ def main(argv: list[str] | None = None) -> int:
             state = "OFF" if entry.get("disabled") else "on"
             print(f"{state:>3} {entry['source']:<6} {entry['display_text']!r} -> {entry['tts_text']!r} [{entry.get('voice')}] "
                   f"jobs={len(entry['jobs'])} failures={entry.get('failures', 0)}")
-    elif args.command == "remember":
-        remember(path, args.display_text, args.tts_text, source="person", voice=args.voice, job_id="manual", kind=args.kind)
-        print("remembered")
     else:
         data = load(path)
         removed = data["entries"].pop(_key(args.display_text, args.voice), None)
