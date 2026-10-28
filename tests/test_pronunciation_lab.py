@@ -544,3 +544,9 @@ def test_when_the_listener_and_the_sounds_point_at_different_spellings_both_are_
     advice = out["advice"]
     assert "point at different spellings" in advice and "'Fight us.'" in advice and "Each check is blind somewhere" in advice
     assert "Use one of those" not in advice
+
+
+def test_the_lab_says_which_units_speak_a_word():
+    fake = FakeLab({})
+    fake.sentences = ["Phela weScience iyisifundo.", "Sifuna ukwazi.", "Ngithi iScience nayo."]
+    assert fake.units_with("Science", ["u1", "u2", "u3"]) == ["u1", "u3"] and fake.units_with("Gauteng", ["u1", "u2", "u3"]) == []

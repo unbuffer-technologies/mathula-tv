@@ -696,3 +696,21 @@ def test_readings_saved_for_words_of_this_text_are_put_to_the_agent_even_when_no
     from mathula_tv.dub_agent import saved_readings_note
 
     assert saved_readings_note(object()) == ""
+
+
+def test_the_measured_words_say_which_units_speak_them_and_that_a_reading_is_not_only_for_changed_units():
+    from mathula_tv.dub_agent import pronunciation_evidence_note, saved_readings_note
+
+    row = {"word": "science", "spelling": "sayensi", "speaker_sounds": "s aɪ n ts ə", "voice_sounds": "s aɪ j ɪ n", "closeness": 0.48,
+           "differences": ["the voice adds j"], "english_hears": "Science.", "units": ["u20", "u21"]}
+
+    class Bench:
+        def saved_readings_evidence(self):
+            return [row]
+
+        def pronunciation_evidence(self, words):
+            return [row]
+
+    saved = saved_readings_note(Bench())
+    assert "science -> 'sayensi' (said in u20, u21)" in saved and "not only in the units you changed" in saved and "not only by whether the listener wrote the word" in saved
+    assert "science (said in u20, u21): the speaker says" in pronunciation_evidence_note(Bench(), ["science"])

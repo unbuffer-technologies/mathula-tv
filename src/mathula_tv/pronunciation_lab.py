@@ -607,6 +607,12 @@ class PronunciationLab:
         record["_heard"] = heard
         return record
 
+    def units_with(self, word: str, item_ids: Sequence[str] = ()) -> list[str]:
+        """Which of the Zulu units say the word (by their ids, in the order of the text given to the lab)."""
+        pattern = _word_pattern(word)
+        ids = list(item_ids) or [str(index + 1) for index in range(len(self.sentences))]
+        return [ids[index] for index, text in enumerate(self.sentences) if index < len(ids) and pattern.search(text)]
+
     def as_written(self, word: str, spelling: str | None = None) -> dict[str, Any] | None:
         """The same measurements for the word exactly as the Zulu text writes it (or, given ``spelling``, for a reading saved for it), so that
         "does it need a look?" is answered from evidence.  Spends no try; None when the speaker never says the word."""

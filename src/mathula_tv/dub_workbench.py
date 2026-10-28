@@ -304,7 +304,9 @@ class Workbench:
 
         lab = self._lab()
         submission = Path(self._episode()["dir"]) / "submission.json"
-        lab.sentences = [str(i.get("zulu_text") or "") for i in read_json(submission).get("items", [])] if submission.is_file() else []
+        items = read_json(submission).get("items", []) if submission.is_file() else []
+        lab.sentences = [str(i.get("zulu_text") or "") for i in items]
+        self._lab_item_ids = [str(i.get("item_id") or "") for i in items]
         readings: dict[str, str] = {}
         lexicon = Path(self.store.clip_dir(self._episode()["clip_id"])) / "native_dub" / "pronunciation_names.json"
         if lexicon.is_file():
@@ -355,6 +357,7 @@ class Workbench:
             except Exception:
                 measured = None
             if measured:
+                measured["units"] = self._lab().units_with(word, getattr(self, "_lab_item_ids", ()))
                 found.append(measured)
         return found
 
@@ -379,6 +382,7 @@ class Workbench:
             except Exception:
                 measured = None
             if measured:
+                measured["units"] = lab.units_with(word, getattr(self, "_lab_item_ids", ()))
                 rows.append(measured)
             if len(rows) >= 10:
                 break

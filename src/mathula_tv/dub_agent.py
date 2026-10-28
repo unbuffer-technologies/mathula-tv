@@ -642,7 +642,7 @@ def pronunciation_evidence_note(workbench: Any, words: list[str]) -> str:
     lines = []
     for row in rows:
         listener = row.get("english_hears")
-        line = (f"{row['word']}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] as written (closeness {row['closeness']})"
+        line = (f"{row['word']}{_units_text(row)}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] as written (closeness {row['closeness']})"
                 + (f"; differences: {'; '.join(row['differences'])}" if row.get("differences") else "; no sound differs")
                 + (f"; an English listener writes {listener!r}" if listener else ""))
         if row.get("lost_in_its_sentence"):
@@ -652,6 +652,11 @@ def pronunciation_evidence_note(workbench: Any, words: list[str]) -> str:
         return ""
     return (" Measured now, with each word as you wrote it (no tries used): " + " | ".join(lines)
             + ". Closeness is a guide, not a verdict; a short clip often makes the listener write another real word.")
+
+
+def _units_text(row: dict[str, Any]) -> str:
+    units = [str(u) for u in row.get("units") or []]
+    return f" (said in {', '.join(units[:6])}{', ...' if len(units) > 6 else ''})" if units else ""
 
 
 def saved_readings_note(workbench: Any) -> str:
@@ -665,7 +670,7 @@ def saved_readings_note(workbench: Any) -> str:
     lines = []
     for row in rows[:6]:
         listener = row.get("english_hears")
-        line = (f"{row['word']} -> {row.get('spelling')!r}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] "
+        line = (f"{row['word']} -> {row.get('spelling')!r}{_units_text(row)}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] "
                 f"(closeness {row['closeness']})"
                 + (f"; differences: {'; '.join(row['differences'])}" if row.get("differences") else "; no sound differs")
                 + (f"; an English listener writes {listener!r}" if listener else ""))
@@ -677,7 +682,9 @@ def saved_readings_note(workbench: Any) -> str:
     if not lines:
         return ""
     return (" Readings already saved for English words in this text, measured now in their sentences (no tries used): " + " | ".join(lines)
-            + ". If one differs from the speaker in a way other letters could fix, try_pronunciation and use_pronunciation replace it.")
+            + ". A reading is spoken everywhere its word is said in the video, not only in the units you changed. Judge each by the differences listed, "
+              "not only by whether the listener wrote the word: if one differs from the speaker in a way other letters could fix, try_pronunciation and "
+              "use_pronunciation replace it.")
 
 
 def pronunciation_reminder_text(workbench: Any, words: list[str], *, left: int | None = None) -> str:
