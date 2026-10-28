@@ -630,3 +630,21 @@ def test_suggestions_include_the_spellings_that_open_the_mouth_like_the_speaker_
     lab_ = Opening({})
     shown = [r["spelling"] for r in lab_.suggest_spellings("science")["results"]]
     assert len(shown) <= 5 and any("ay" in spelling.lower() for spelling in shown)                    # a spelling that opens the mouth like the speaker is measured
+
+
+def test_a_spelling_is_heard_followed_by_a_word_and_the_following_words_sounds_are_cut_off():
+    from pathlib import Path
+
+    class Fake(PronunciationLab):
+        gop = type("Gop", (), {"decode_timed": staticmethod(lambda wav: [("s", 0.0, 0.02), ("aɪ", 0.08, 0.1), ("n", 0.2, 0.22), ("ts", 0.3, 0.32),
+                                                                         ("a", 0.4, 0.42), ("k", 0.62, 0.64), ("a", 0.7, 0.72)])})()
+
+        def _audio_for(self, spelling):
+            self._word_end["x.wav"] = 0.5                    # the spelling's text ends 0.5 s into the clip
+            return "x.wav"
+
+    lab_ = Fake("/nonexistent", voice="v", key="k", region="r", work_dir="/tmp/none")
+    assert lab_.voice_reading("Saensa") == ["s", "aɪ", "n", "ts", "a"]                  # the final vowel is kept, the next word's k and a are not
+    from mathula_tv import pronunciation_lab as module
+
+    assert module.STANDALONE_AFTER.startswith(" ") and module.STANDALONE_AFTER.strip(". ") != ""     # a word follows: the utterance does not end on the spelling

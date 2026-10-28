@@ -25,6 +25,7 @@ MAX_TRIES_PER_WORD = 5
 MAX_TRIES_PER_CLIP = 15
 MAX_SPELLINGS_PER_CALL = 3
 SUGGEST_ROUNDS = 1            # how many times the best spellings found are varied again
+STANDALONE_AFTER = " kakhulu."   # what follows a spelling when it is spoken alone: a word that ends the utterance loses or devoices its last vowel
 SUGGEST_FIRST = 28            # spellings worked out backwards from the speaker's sounds that are spoken first
 SUGGEST_PER_ROUND = 20        # varied spellings spoken in each round
 SUGGEST_SHOWN = 5             # the distinct best of them that are measured in full and shown
@@ -371,6 +372,7 @@ class PronunciationLab:
         self._gop = gop
         self._stt = stt                                  # an Azure speech-to-text backend; made on first use when None
         self._voice_audio: dict[str, Path] = {}
+        self._word_end: dict[str, float] = {}             # audio file -> second (in that file) where the spelling's text ends; later sounds are the next word's
         self._reading_checks: dict[tuple[str, str], bool | None] = {}
         self.sentences: list[str] = []                    # the Zulu the agent has written: a word is also heard in the sentence it is spoken in
         self.readings: dict[str, str] = {}                # readings already chosen for other words, applied in those sentences as the render does
@@ -423,10 +425,23 @@ class PronunciationLab:
 
         if self._windows is None:
             self._windows = ps.NameWindows(ps.bookmark_synthesizer(self.voice, self.key, self.region), lambda wav: (), self.work_dir / "voice")
-        # the word alone, with nothing before or after it, so the neighbouring words' sounds do not leak into its window
-        audio = Path(self._windows.audio(ps.Context(before="", after=".", pitch="+0%"), ps.Candidate(spelling)))
+        # the word alone, but followed by a word: said as the last thing before silence it loses or devoices its final vowel ("Saensa" came out as
+        # "saens"), which made every spelling ending in a vowel look closer to the speaker than it sounds.  The next word's sounds are cut off by time.
+        context, candidate = ps.Context(before="", after=STANDALONE_AFTER, pitch="+0%"), ps.Candidate(spelling)
+        audio = Path(self._windows.audio(context, candidate))
+        try:
+            marks = json.loads((self._windows.work_dir / f"{self._windows._key(context, candidate)}.json").read_text(encoding="utf-8"))
+            self._word_end[str(audio)] = (float(marks["n1"]) - float(marks["n0"]) + ps.LEAD_MS) / 1000
+        except (OSError, ValueError, KeyError):
+            pass
         self._voice_audio[spelling] = audio
         return audio
+
+    def _word_timed(self, audio: Path) -> list[tuple[str, float, float]]:
+        """The sounds of the voice's audio for a spelling, without the sounds of the word that follows it."""
+        timed = self.gop.decode_timed(Path(audio))
+        end = self._word_end.get(str(audio))
+        return timed if end is None else [heard for heard in timed if heard[1] <= end]
 
     def _apply_readings(self, text: str, skip: str) -> str:
         text = re.sub(r"~[a-z]+\d*\s*", "", text)          # ~pause800, ~en: markers for the renderer, not words to speak
@@ -531,7 +546,7 @@ class PronunciationLab:
 
     def voice_reading(self, spelling: str) -> list[str]:
         """The sounds the Zulu voice produces for ``spelling``, decoded from its own audio with the same recogniser."""
-        return list(self.gop.decode(self._audio_for(spelling)))
+        return [phone for phone, _, _ in self._word_timed(self._audio_for(spelling))]
 
     def reading_understood(self, word: str, spelling: str) -> bool | None:
         """Whether an English listener writes ``word`` when the voice says ``spelling``; None when that cannot be asked.  No sounds are decoded
@@ -556,7 +571,7 @@ class PronunciationLab:
         try:
             if "_speaker_features" not in source:
                 source["_speaker_features"] = [pa.timed_features(pa.load(Path(clip)), occurrence) for clip, occurrence in zip(clips, timed) if occurrence]
-            voice = pa.timed_features(pa.load(Path(audio)), self.gop.decode_timed(audio))
+            voice = pa.timed_features(pa.load(Path(audio)), self._word_timed(audio))
             return pa.differences(source["_speaker_features"], voice)
         except Exception:                                       # a measuring failure leaves out the extra information, never the try
             return []
@@ -658,7 +673,7 @@ class PronunciationLab:
 
         try:
             audio = Path(self._audio_for(spelling))
-            features = pa.timed_features(pa.load(audio), self.gop.decode_timed(audio))
+            features = pa.timed_features(pa.load(audio), self._word_timed(audio))
         except Exception:
             return None
         return next((f["onset_f1"] for f in features if "onset_f1" in f), None)
