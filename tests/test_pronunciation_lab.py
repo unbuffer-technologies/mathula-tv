@@ -239,17 +239,17 @@ def test_saved_agent_readings_an_english_listener_rejects_go_back_on_the_list():
 
     class Checker:
         def reading_understood(self, word, spelling):
-            return {("sick", "sick"): False, ("fund", "fund"): True, ("deputy", "dephuthi"): None}[(word, spelling)]
+            return {("sick", "sick"): False, ("fund", "fund"): True, ("deputy", "dephuthi"): None, ("Fighters", "Fayitas"): False}[(word, spelling)]
 
     entries = [
         {"display_text": "sick", "tts_text": "sick", "source": "agent", "kind": "english_code_switch"},
         {"display_text": "fund", "tts_text": "fund", "source": "agent", "kind": "english_code_switch"},
         {"display_text": "deputy", "tts_text": "dephuthi", "source": "agent", "kind": "english_code_switch"},          # could not be asked: fine
-        {"display_text": "Fighters", "tts_text": "Fayitas", "source": "person", "kind": "english_code_switch"},        # approved by ear: never re-checked
+        {"display_text": "Fighters", "tts_text": "Fayitas", "source": "person", "kind": "english_code_switch"},        # chosen by ear: checked like any other
         {"display_text": "hlu", "tts_text": "hluuu", "source": "repair", "kind": "other"},                              # not an English word
         {"display_text": "old", "tts_text": "old", "source": "agent", "kind": "english_code_switch", "disabled": True},
     ]
-    assert failing_readings(Checker(), entries) == {"sick"}
+    assert failing_readings(Checker(), entries) == {"sick", "fighters"}
 
 
 def test_reading_understood_asks_once_and_spends_no_try():

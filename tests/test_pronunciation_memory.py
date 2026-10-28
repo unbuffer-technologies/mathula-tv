@@ -61,3 +61,22 @@ def test_a_repair_is_remembered_only_after_the_real_render_no_longer_drops_the_w
     still_dropped = {"units": [{"unit": "u4", "dropped": [{"words": ["hlu."]}]}]}
     assert remember_verified_fixes(work, "job-a", fixes, still_dropped) == []
     assert remember_verified_fixes(work, "job-a", fixes, {"units": []}) == ["hlu"]
+
+
+def test_a_jobs_lexicon_stops_carrying_an_entry_that_has_left_the_memory(tmp_path):
+    import json
+
+    from mathula_tv.pronunciation_memory import apply_to_lexicon, memory_path, remember
+
+    memory_file = memory_path(tmp_path)
+    remember(memory_file, "Science", "Sayense", source="person", voice="v", job_id="j1", kind="english_code_switch")
+    remember(memory_file, "fund", "fund", source="agent", voice="v", job_id="j1", kind="english_code_switch")
+    lexicon = tmp_path / "pronunciation_names.json"
+    lexicon.write_text(json.dumps({"entries": [{"display_text": "Zuma", "tts_text": "Zuuma", "source": "web"}]}), encoding="utf-8")
+    assert sorted(apply_to_lexicon(lexicon, memory_file, "v")) == ["Science", "fund"]
+    data = json.loads(memory_file.read_text(encoding="utf-8"))
+    del data["entries"]["science|v"]                                                               # the entry is cleared from the memory
+    memory_file.write_text(json.dumps(data), encoding="utf-8")
+    assert apply_to_lexicon(lexicon, memory_file, "v") == ["fund"]
+    texts = {e["display_text"] for e in json.loads(lexicon.read_text(encoding="utf-8"))["entries"]}
+    assert texts == {"Zuma", "fund"}                                                               # Science is gone from the job; others stay

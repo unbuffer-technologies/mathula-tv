@@ -85,12 +85,15 @@ def entries_for(path: Path, voice: str | None) -> list[dict[str, Any]]:
 
 
 def apply_to_lexicon(lexicon_path: Path, memory_file: Path, voice: str | None) -> list[str]:
-    """Add the memory's entries to a job's names lexicon (replacing an automatic reading of the same text). Returns the texts added."""
+    """Make a job's names lexicon carry the memory's entries (replacing an automatic reading of the same text). Returns the texts added.
+
+    Readings an earlier call copied from the memory are dropped first: an entry that has since left the memory (cleared, or switched off)
+    must not go on being spoken from a job's stale copy."""
     lexicon_path = Path(lexicon_path)
     lexicon = json.loads(lexicon_path.read_text(encoding="utf-8")) if lexicon_path.is_file() else {"schema": "mathula-names-lexicon-v1", "entries": []}
     wanted = entries_for(memory_file, voice)
     taken = {e["display_text"].casefold() for e in wanted}
-    kept = [e for e in lexicon.get("entries", []) if e["display_text"].casefold() not in taken]
+    kept = [e for e in lexicon.get("entries", []) if e["display_text"].casefold() not in taken and e.get("source") != MEMORY_SOURCE]
     added = [{"display_text": e["display_text"], "tts_text": e["tts_text"], "kind": e.get("kind", "other"), "confidence": 0.9,
               "source": MEMORY_SOURCE, "memory_source": e["source"]} for e in wanted]
     lexicon["entries"] = [*kept, *added]

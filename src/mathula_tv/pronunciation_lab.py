@@ -309,12 +309,13 @@ def failing_readings(lab: Any, entries: Iterable[Mapping[str, Any]]) -> set[str]
     """Display texts (casefolded) of saved English-word readings that an English listener does not understand, or that lose a sound in the
     sentence they are spoken in.
 
-    Only readings an agent chose or a repair made are re-checked: one a person approved by ear is not second-guessed, and a name or a Zulu
-    word is not an English word to listen for.  A reading that cannot be checked counts as fine.  The ones returned go back on the
-    agent's list, so a run corrects a bad earlier pick instead of trusting it for ever."""
+    Every saved reading of an English word is re-checked, whoever chose it (a person's ear included: the agent has audio tools that hear more
+    than an ear does, and a pick made once should not outlast a better measurement); a name or a Zulu word is not an English word to listen
+    for.  A reading that cannot be checked counts as fine.  The ones returned go back on the agent's list, so a run corrects a bad earlier pick
+    instead of trusting it for ever."""
     failing: set[str] = set()
     for entry in entries:
-        if entry.get("source") in ("agent",) and entry.get("kind") == "english_code_switch" and not entry.get("disabled"):
+        if entry.get("kind") == "english_code_switch" and not entry.get("disabled"):
             try:
                 word, spelling = str(entry["display_text"]), str(entry["tts_text"])
                 broken = lab.reading_fails(word, spelling) if hasattr(lab, "reading_fails") else lab.reading_understood(word, spelling) is False
