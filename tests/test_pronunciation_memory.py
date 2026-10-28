@@ -115,3 +115,19 @@ def test_a_respelling_typed_into_a_units_text_is_put_back_as_the_word():
     assert items[0]["zulu_text"].startswith("~pause800 Fayithaz")                                               # the caller's units are untouched
     assert len(notes) == 3 and "'Fayithaz'" in notes[0] and "keeps the word 'maFighter'" in notes[0]
     assert restore_written_words(items, [])[1] == []
+
+
+def test_an_entry_saved_without_the_zulu_prefix_of_its_word_gets_the_prefix_back_when_applied(tmp_path):
+    import json
+
+    from mathula_tv.pronunciation_memory import apply_to_lexicon, remember
+
+    memory, lexicon = tmp_path / "memory.json", tmp_path / "pronunciation_names.json"
+    remember(memory, "weScience", "saynsi", source="agent", voice=THEMBA, job_id="a", kind="english_code_switch")
+    remember(memory, "MaFighter", "MaFayitas", source="agent", voice=THEMBA, job_id="a", kind="english_code_switch")        # already carries it
+    remember(memory, "Technology", "Teknoloji", source="agent", voice=THEMBA, job_id="a", kind="english_code_switch")        # no prefix on the word
+    remember(memory, "hlu", "hluuu", source="repair", voice=THEMBA, job_id="a", kind="other")
+    lexicon.write_text(json.dumps({"voice": THEMBA, "entries": []}))
+    apply_to_lexicon(lexicon, memory, THEMBA)
+    spoken = {e["display_text"]: e["tts_text"] for e in json.loads(lexicon.read_text())["entries"]}
+    assert spoken == {"weScience": "wesaynsi", "MaFighter": "MaFayitas", "Technology": "Teknoloji", "hlu": "hluuu"}

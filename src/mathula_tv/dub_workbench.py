@@ -481,6 +481,13 @@ class Workbench:
                 f"in the sentence {word!r} is spoken in, the voice loses {' '.join(tried['lost_in_its_sentence'])} with {spelling!r} (it says "
                 f"{tried.get('said_in_its_sentence')!r}; the speaker says {' '.join(lab.source(word)['phones'])!r}), so it will sound different in the video "
                 "than in the lab. Try letters that keep the sound, then choose; if you still want this spelling, call use_pronunciation again.")
+        # A reading respells the English word, not the Zulu grammar around it: the prefix glued on in the text ("we" of "weScience", the possessive
+        # that makes "minister of science") stays on the spoken form even when the spelling tried was only the English part.
+        from .pronunciation_lab import written_prefix
+
+        prefix, tried_spelling = written_prefix(word), spelling
+        if prefix and not spelling.casefold().startswith(prefix.casefold()):
+            spelling = prefix + spelling
         clip_dir = Path(self.store.clip_dir(episode["clip_id"]))
         lexicon_path = clip_dir / "native_dub" / "pronunciation_names.json"
         lexicon = read_json(lexicon_path) if lexicon_path.is_file() else {"schema": "mathula-names-lexicon-v1", "voice": lab.voice, "entries": []}
@@ -498,7 +505,8 @@ class Workbench:
         choice = {"word": word, "spelling": spelling, "closeness": tried["closeness"], "speaker_sounds": " ".join(lab.source(word)["phones"]),
                   "voice_sounds": tried["voice_sounds"]}
         self.pronunciation_choices = [c for c in self.pronunciation_choices if c["word"] != word] + [choice]
-        return {"ok": True, **choice, "note": "your measurements and the render now use this reading wherever the word is written. Keep the WORD in the text: never type the spelling into it (the voice respells the word when it speaks it, and the text is what the captions show). Re-measure any unit that contains the word."}
+        kept = f" The Zulu prefix {prefix!r} stays on it: the spoken form is {spelling!r}." if spelling != tried_spelling else ""
+        return {"ok": True, **choice, "note": "your measurements and the render now use this reading wherever the word is written." + kept + " Keep the WORD in the text: never type the spelling into it (the voice respells the word when it speaks it, and the text is what the captions show). Re-measure any unit that contains the word."}
 
     def measure_tts(
         self, text: str, start_ms: int, end_ms: int, next_start_ms: int | None = None,

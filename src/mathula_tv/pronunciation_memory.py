@@ -92,7 +92,15 @@ def apply_to_lexicon(lexicon_path: Path, memory_file: Path, voice: str | None) -
     wanted = entries_for(memory_file, voice)
     taken = {e["display_text"].casefold() for e in wanted}
     kept = [e for e in lexicon.get("entries", []) if e["display_text"].casefold() not in taken and e.get("source") != MEMORY_SOURCE]
-    added = [{"display_text": e["display_text"], "tts_text": e["tts_text"], "kind": e.get("kind", "other"), "confidence": 0.9,
+    from .pronunciation_lab import written_prefix
+
+    def spoken(entry: Mapping[str, Any]) -> str:
+        """The Zulu prefix glued on the word in the text ("we" of "weScience") stays on its spoken form: a reading respells the English word, not
+        the grammar (an entry saved with only the English part would drop the prefix and the sentence would lose its "of")."""
+        prefix, text = written_prefix(str(entry["display_text"])), str(entry["tts_text"])
+        return prefix + text if prefix and entry.get("kind") == "english_code_switch" and not text.casefold().startswith(prefix.casefold()) else text
+
+    added = [{"display_text": e["display_text"], "tts_text": spoken(e), "kind": e.get("kind", "other"), "confidence": 0.9,
               "source": MEMORY_SOURCE, "memory_source": e["source"]} for e in wanted]
     lexicon["entries"] = [*kept, *added]
     lexicon_path.write_text(json.dumps(lexicon, indent=1, ensure_ascii=False), encoding="utf-8")

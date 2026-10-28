@@ -709,3 +709,19 @@ def test_a_final_vowel_the_recogniser_missed_is_put_back_in_the_voices_sounds_an
     assert "ends at the last s with no vowel after it" in s_.ending_note("Science", "Seins", s_.source("Science"))
     s_._ending["Seins"] = None
     assert s_.ending_note("Science", "Seins", s_.source("Science")) is None                              # a word with no hiss to anchor on: no claim
+
+
+def test_a_reading_chosen_for_a_word_with_a_zulu_prefix_keeps_the_prefix(tmp_path):
+    from mathula_tv.pronunciation_memory import entries_for, memory_path
+
+    class Heard(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["s", "aɪ", "n", "ts", "ə"], "occurrences": 2, "each_occurrence": []}
+
+    workbench, _ = make_workbench(tmp_path, {})
+    workbench._pronunciation_lab = Heard({"saynsi": ["s", "aɪ", "n", "ts", "ɪ"], "Saynsi": ["s", "aɪ", "n", "ts", "ɪ"]})
+    workbench.try_pronunciation("weScience", ["saynsi", "weSaynsi"])
+    out = workbench.use_pronunciation("weScience", "saynsi")
+    assert out["spelling"] == "wesaynsi" and "prefix 'we' stays" in out["note"]                                      # only the English part was tried: "we" is kept
+    assert [e["tts_text"] for e in entries_for(memory_path(tmp_path), "zu-ZA-ThembaNeural") if e["display_text"] == "weScience"] == ["wesaynsi"]
+    assert workbench.use_pronunciation("weScience", "weSaynsi")["spelling"] == "weSaynsi"                         # it already carries the prefix: as chosen
