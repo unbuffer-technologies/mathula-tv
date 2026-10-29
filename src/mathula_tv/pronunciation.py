@@ -2404,6 +2404,11 @@ def with_web_researched_organisation_pronunciations(
             and (pronunciation_urls or has_confirmed_round_trip)
             and round_trip_verified
         ):
+            if pronunciation_tts_text.casefold() == canonical.casefold():
+                # "say it as written" changes nothing, but as a phrase entry it would shadow every reading chosen for one of its words
+                # (the name "Tshela Thupa" hid the agent's Tsela and Tupa, which the audio had shown were right)
+                known.add(canonical.casefold())
+                continue
             kind = {
                 "person": "personal_name",
                 "place": "place_name",
@@ -2560,3 +2565,21 @@ __all__ = [
     "normalize_numbers_for_tts",
     "with_default_organisation_initialisms",
 ]
+
+
+def test_a_researched_name_to_be_said_as_written_does_not_shadow_the_readings_chosen_for_its_words():
+    from mathula_tv.pronunciation import PronunciationEntry, with_web_researched_organisation_pronunciations
+
+    base = with_default_organisation_initialisms(PronunciationDictionary(dictionary_version="v1", language="zu-ZA", job_id="job"))
+
+    def research(tts_text):
+        return {"accepted_corrections": [{"canonical_text": "Tshela Thupa", "entity_type": "organisation", "confidence": 0.94, "pronunciation_mode": "word_name",
+                                          "pronunciation_confidence": 0.9, "pronunciation_tts_text": tts_text, "grounded_pronunciation_evidence_urls": ["https://example.test/a"],
+                                          "grounded_source_urls": ["https://example.test/a"]}]}
+
+    words = [PronunciationEntry(display_text=w, spoken_text=w, tts_text=t, source="names_stage", reviewed_by="automatic", confidence=0.9, kind="english_code_switch")
+             for w, t in (("Tshela", "Tsela"), ("Thupa", "Tupa"))]
+    as_written = with_web_researched_organisation_pronunciations(base, research("Tshela Thupa"))
+    assert as_written.with_job_overrides("job", [*as_written.job_overrides, *words]).apply("i-Tshela Thupa").tts_text == "i-Tsela Tupa"
+    respelt = with_web_researched_organisation_pronunciations(base, research("Tsela Tupa"))
+    assert any(e.display_text == "Tshela Thupa" for e in respelt.job_overrides)                  # a real respelling of the phrase is still kept
