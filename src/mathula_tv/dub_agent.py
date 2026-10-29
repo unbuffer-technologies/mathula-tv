@@ -80,7 +80,10 @@ You work through tools and decide your own method. You are scored on:
    speaker's sounds in Zulu syllables (a vowel inserted where Zulu has no cluster and at the end, p t k b written ph th kh bh), speaks the forms,
    and shows what each changes; write the one you choose in the text with the prefix the sentence needs, and call use_loanword to remember it.
 
-   English words you keep in the Zulu ("Fighters", "medical aid", names) are spoken by the Zulu voice with Zulu letter rules and can come
+   A kind of thing is not a name: "medical aid", "pension fund", "provident fund" are common nouns, so each noun takes its everyday Zulu
+   word (or one you create), even though the speaker says them in English.
+
+   English words you keep in the Zulu ("Fighters", names) are spoken by the Zulu voice with Zulu letter rules and can come
    out unrecognisable ("MaFighter" was heard as "mafactor"). Never glue a Zulu prefix onto an English word the speaker says as it is. Once the dub
    fits, call list_foreign_words; for the ones the speaker says in English, try_pronunciation shows the speaker's sounds and the sounds the voice
    makes for your spelling, with the differences. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
@@ -830,6 +833,7 @@ def _run_agent(
     stop_reason = "max_turns"
     nudged = False
     pronunciation_reminded = False
+    loanwords_noted = False
     pushbacks = 0
     unmet: list[str] = []
     turn = 0
@@ -845,6 +849,15 @@ def _run_agent(
                           messages_after=len(compacted), prompt_tokens_before=last_prompt_tokens)
                 messages[:] = compacted
                 compactions += 1
+        if not loanwords_noted and accepted():
+            # The Zulu draft exists now, so the English words it keeps can be named while the agent is still fitting units: at the end a swap means
+            # fitting again, and prod-41 kept "provident fund", "pension fund" and "medical aid" for that reason.
+            loanwords_noted = True
+            early = loanwords_note(workbench)
+            if early:
+                early_text = "Your first accepted submission keeps English words that may have a Zulu word." + early
+                messages.append({"role": "user", "content": early_text})
+                trace.log("loanwords_early", turn=turn, text=early_text)
         if not pronunciation_reminded and accepted() and turn >= max_turns - PRONUNCIATION_RESERVE_TURNS:
             pending = getattr(workbench, "pronunciation_check_pending", None)
             words = pending() if callable(pending) else []

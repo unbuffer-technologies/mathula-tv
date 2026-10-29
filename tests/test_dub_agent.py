@@ -779,3 +779,23 @@ def test_the_agent_can_create_and_remember_a_loanword_and_the_reminder_names_wor
     assert tools["create_loanword"]("medical") == {"word": "medical", "zulu_words": []} and tools["use_loanword"]("medical", "mediki") == {"ok": True}
     note = dub_agent.loanwords_note(Loan(tmp_path))
     assert "weScience -> isayensi" in note and "No everyday Zulu word is known for: ne-medical" in note and "create_loanword" in note
+
+
+def test_the_loanwords_are_named_once_right_after_the_first_accepted_submission_not_only_at_the_end(tmp_path):
+    from mathula_tv import dub_agent
+
+    class Loans(StubWorkbench):
+        def loanwords(self):
+            return [{"written": "ne-medical", "english": "medical", "zulu": "ezokwelapha"}]
+
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),
+        _reply(content="done"),                                                        # the end-of-run reminder still names them once more
+    ])
+    run_agent(client, Loans(tmp_path), clip_id="c1", run_id="r")
+    named = [str(m.get("content")) for m in client.seen[2] if m["role"] == "user" and "first accepted submission" in str(m.get("content"))]
+    assert len(named) == 1 and "ne-medical -> ezokwelapha" in named[0]
+    assert not [m for m in client.seen[1] if "first accepted submission" in str(m.get("content"))]            # nothing before a submission exists
+    assert "common nouns" in dub_agent.SYSTEM_PROMPT and '("Fighters", "medical aid", names)' not in dub_agent.SYSTEM_PROMPT
