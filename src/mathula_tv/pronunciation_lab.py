@@ -110,6 +110,19 @@ def align(source: Sequence[str], heard: Sequence[str]) -> dict[str, Any]:
     return {"distance": round(distance, 3), "closeness": round(max(0.0, 1.0 - distance), 3), "differences": differences[:6]}
 
 
+def final_consonant_lost(occurrences: Sequence[str], heard: Sequence[str]) -> str | None:
+    """The speaker's final consonant when the voice's word has none like it.  ``align`` lets the speaker's last sound go almost free because it is
+    cut from running speech, so a plural s that the voice drops ("MaFighter" says f aɪ t a for the speaker's f aɪ t a s) scored 0.94 with no
+    difference named.  It is believed only when every decode of the speaker's word (at least two) ends with the same consonant."""
+    finals = [seq.split()[-1] for seq in occurrences if seq.strip()]
+    if len(finals) < 2 or any(_is_vowel(f) for f in finals) or len({_same_sound(f) for f in finals}) != 1:
+        return None
+    wanted = _same_sound(finals[0])
+    if any(_same_sound(p) == wanted for p in list(heard)[-2:] if not _is_vowel(p)):
+        return None
+    return f"the voice's word ends without the final {finals[0]} that all {len(finals)} of the speaker's occurrences end with"
+
+
 # A Zulu prefix written straight onto an English word, no hyphen ("weScience", "iScience", "NeTechnology", "MaFighter"): one to four letters,
 # then a capital that starts the English word.  Missed before, so "Science" was never offered for checking and was spoken with Zulu letter rules.
 _GLUED_PREFIX = re.compile(r"^[A-Za-z][a-z]{0,3}(?=[A-Z][a-z]{3,})")
@@ -707,6 +720,9 @@ class PronunciationLab:
         judged = without_prefix(spelling, written_prefix(word))             # the Zulu prefix is spoken, but it is not what is compared with the speaker
         heard = self.voice_reading(judged)
         record: dict[str, Any] = {"spelling": spelling, "voice_sounds": " ".join(heard), **align(source["phones"], heard)}
+        lost_end = final_consonant_lost(source.get("each_occurrence") or [], heard)
+        if lost_end:
+            record["differences"] = [lost_end, *record["differences"]][:6]
         notes = self.sound_differences(source, judged)
         if notes:
             record["how_the_sounds_are_made_differently"] = notes
@@ -746,7 +762,7 @@ class PronunciationLab:
         record = self._measure(word, spelling or word, source)
         record.pop("_heard", None)
         return {"word": word, "spelling": spelling, "speaker_sounds": " ".join(source["phones"]), "voice_sounds": record["voice_sounds"], "closeness": record["closeness"],
-                "differences": record["differences"][:3], "english_hears": record.get("english_hears"),
+                "differences": record["differences"][:3], "ending": record.get("ending"), "english_hears": record.get("english_hears"),
                 "english_listener_understands": record.get("english_listener_understands"),
                 "lost_in_its_sentence": record.get("lost_in_its_sentence"), "made_differently": (record.get("how_the_sounds_are_made_in_its_sentence") or record.get("how_the_sounds_are_made_differently") or [])[:2]}
 

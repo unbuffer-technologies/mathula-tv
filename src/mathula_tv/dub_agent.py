@@ -699,7 +699,7 @@ def saved_readings_note(workbench: Any) -> str:
     except Exception:
         rows = []
     lines = []
-    for row in rows[:6]:
+    for row in rows[:10]:
         listener = row.get("english_hears")
         line = (f"{row['word']} -> {row.get('spelling')!r}{_units_text(row)}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] "
                 f"(closeness {row['closeness']})"
@@ -707,6 +707,8 @@ def saved_readings_note(workbench: Any) -> str:
                 + (f"; an English listener writes {listener!r}" if listener else ""))
         if row.get("lost_in_its_sentence"):
             line += f"; in its sentence the voice loses {' '.join(row['lost_in_its_sentence'])}"
+        if row.get("ending"):
+            line += f"; ending: {row['ending']}"
         if row.get("made_differently"):
             line += "; measured on the audio: " + " / ".join(note[:170] for note in row["made_differently"][:2])
         lines.append(line)

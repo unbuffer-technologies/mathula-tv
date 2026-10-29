@@ -429,7 +429,8 @@ class Workbench:
                 rows.append(measured)
             if len(rows) >= SAVED_READINGS_MEASURED:
                 break
-        return sorted(rows, key=lambda row: row["closeness"])
+        # readings with something named wrong come first, then by closeness: a missing final s costs the score almost nothing but is heard at once
+        return sorted(rows, key=lambda row: (0 if (row.get("differences") or row.get("ending") or row.get("lost_in_its_sentence")) else 1, row["closeness"]))
 
     def loanwords(self) -> list[dict[str, str]]:
         """English common nouns the Zulu text keeps ({"written", "english", "zulu"}), from a model's reading of the Zulu text.  ``zulu`` is the everyday

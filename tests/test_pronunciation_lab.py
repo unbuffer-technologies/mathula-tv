@@ -816,3 +816,15 @@ def test_using_a_spelling_that_measures_less_close_than_the_saved_reading_is_sto
     with pytest.raises(ValueError, match="already holds 'MaFighters'.*closeness 1.0.*try_pronunciation"):
         workbench.use_pronunciation("Fighters", "Fayitas")
     assert [e["tts_text"] for e in entries_for(memory_path(tmp_path), "zu-ZA-ThembaNeural")] == ["MaFighters"]
+
+
+def test_a_final_consonant_every_decode_of_the_speaker_has_and_the_voice_drops_is_named():
+    from mathula_tv.pronunciation_lab import final_consonant_lost
+
+    speaker = ["f aɪ t a s", "f aɪ t t a s"]
+    assert "ends without the final s that all 2" in final_consonant_lost(speaker, ["f", "aɪ", "t", "a"])
+    assert final_consonant_lost(speaker, ["f", "aɪ", "t", "a", "s"]) is None                          # the voice has it
+    assert final_consonant_lost(speaker, ["f", "aɪ", "t", "a", "z"]) is None                          # z and s count as one sound here
+    assert final_consonant_lost(["f aɪ t a s"], ["f", "aɪ", "t", "a"]) is None                         # one decode is too noisy to believe
+    assert final_consonant_lost(["f aɪ t a s", "f aɪ t a t"], ["f", "aɪ", "t", "a"]) is None           # the decodes disagree
+    assert final_consonant_lost(["ts e l a", "ts e l a"], ["ts", "e", "l"]) is None                    # the speaker's word ends in a vowel: another check
