@@ -127,3 +127,21 @@ def test_a_reading_saved_in_lowercase_still_finds_the_english_word_glued_to_a_zu
     assert dictionary.apply("Phela iScience kakhulu").tts_text == "Phela isayensi kakhulu"
     assert dictionary.apply("Phela science kakhulu").tts_text == "Phela sayensi kakhulu"                                # a word on its own
     assert dictionary.apply("ukuphela isifundoscience").tts_text == "ukuphela isifundoscience"                               # lowercase glue: not this word
+
+
+def test_a_researched_name_to_be_said_as_written_does_not_shadow_the_readings_chosen_for_its_words():
+    from mathula_tv.pronunciation import PronunciationEntry, with_web_researched_organisation_pronunciations
+
+    base = with_default_organisation_initialisms(PronunciationDictionary(dictionary_version="v1", language="zu-ZA", job_id="job"))
+
+    def research(tts_text):
+        return {"accepted_corrections": [{"canonical_text": "Tshela Thupa", "entity_type": "organisation", "confidence": 0.94, "pronunciation_mode": "word_name",
+                                          "pronunciation_confidence": 0.9, "pronunciation_tts_text": tts_text, "grounded_pronunciation_evidence_urls": ["https://example.test/a"],
+                                          "grounded_source_urls": ["https://example.test/a"]}]}
+
+    words = [PronunciationEntry(display_text=w, spoken_text=w, tts_text=t, source="names_stage", reviewed_by="automatic", confidence=0.9, kind="english_code_switch")
+             for w, t in (("Tshela", "Tsela"), ("Thupa", "Tupa"))]
+    as_written = with_web_researched_organisation_pronunciations(base, research("Tshela Thupa"))
+    assert as_written.with_job_overrides("job", [*as_written.job_overrides, *words]).apply("i-Tshela Thupa").tts_text == "i-Tsela Tupa"
+    respelt = with_web_researched_organisation_pronunciations(base, research("Tsela Tupa"))
+    assert any(e.display_text == "Tshela Thupa" for e in respelt.job_overrides)                  # a real respelling of the phrase is still kept
