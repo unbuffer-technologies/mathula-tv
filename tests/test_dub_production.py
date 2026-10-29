@@ -90,3 +90,28 @@ def test_training_mode_renders_the_dub_audio_only_and_never_a_hook(tmp_path, mon
     assert summary["audio_only"] is True and summary["video"].endswith("master_bus.wav")
     full = dub_render.render_submission(SimpleNamespace(work_dir=tmp_path), run_id="r", clip_id="c")
     assert seen["audio_only"] is False and full["audio_only"] is False
+
+
+def test_speakers_who_share_a_voice_are_separated_by_their_measured_pitch_the_lower_speaker_gets_the_lower_setting(tmp_path):
+    import json
+
+    from mathula_tv.voice_personas import features_from_sheet, refresh
+
+    def person(sid, slot_pitch):
+        return {"speaker_id": sid, "selected_voice": "zu-ZA-ThembaNeural", "voice_family": "masculine", "resolution_status": "legacy_ecapa_voice_family_classifier",
+                "source_features": {}, "base_prosody": {"pitch_percent": slot_pitch, "rate_percent": 0}}
+
+    path = tmp_path / "voice_resolution.json"
+    path.write_text(json.dumps({"assignments": {"SPEAKER_00": person("SPEAKER_00", 6), "SPEAKER_01": person("SPEAKER_01", -6)}}), encoding="utf-8")
+    sheet = {"speakers": {"SPEAKER_00": {"pitch_hz_usual": 158.0, "pace_wps": {"usual": 2.33}},          # the anchor is the lower voice
+                          "SPEAKER_01": {"pitch_hz_usual": 215.0, "pace_wps": {"usual": 2.01}}}}
+    assert features_from_sheet(sheet, "SPEAKER_00") == {"median_f0_hz": 158.0, "source_speech_rate_wps": 2.33} and features_from_sheet(sheet, "SPEAKER_09") == {}
+    changed = refresh(path, sheet)
+    after = json.loads(path.read_text(encoding="utf-8"))["assignments"]
+    assert changed["SPEAKER_00"]["pitch_percent_after"] < 0 < changed["SPEAKER_01"]["pitch_percent_after"]            # was backwards: +6 and -6
+    assert after["SPEAKER_00"]["base_prosody"]["rate_percent"] == 0 and after["SPEAKER_01"]["source_features"]["median_f0_hz"] == 215.0
+    assert after["SPEAKER_01"]["base_prosody"]["pitch_percent"] - after["SPEAKER_00"]["base_prosody"]["pitch_percent"] >= 12
+    assert refresh(path, sheet) is None                                                                              # nothing is missing now: left as it is
+    solo = tmp_path / "solo.json"
+    solo.write_text(json.dumps({"assignments": {"SPEAKER_00": person("SPEAKER_00", 0)}}), encoding="utf-8")
+    assert refresh(solo, sheet) is None

@@ -133,6 +133,23 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
         ensure_sheet(job_root, progress=progress)
     except Exception as exc:
         progress(f"[prepare] delivery sheet skipped: {type(exc).__name__}: {str(exc)[:200]}")
+    try:        # speakers who share a voice differ by pitch: take each speaker's from the sheet where the voice resolution has none (see voice_personas)
+        import shutil
+
+        from .delivery import SHEET_NAME, load_sheet
+        from .experience_store import ExperienceStore
+        from .voice_personas import refresh
+
+        sheet = load_sheet(job_root / "native_dub" / SHEET_NAME)
+        changed = refresh(Path(voices), sheet) if sheet else None
+        if changed:
+            progress("[prepare] voice personas set from the speakers' measured pitch: "
+                     + ", ".join(f"{s} {c['pitch_percent_before']:+d}% -> {c['pitch_percent_after']:+d}%" for s, c in changed.items()))
+            frozen = ExperienceStore(settings.work_dir).clip_dir(job_id[:8]) / "voice_resolution.json"
+            if frozen.is_file():                     # the clip keeps its own copy of the voices; it follows the job's
+                shutil.copyfile(Path(voices), frozen)
+    except Exception as exc:
+        progress(f"[prepare] voice personas not refreshed: {type(exc).__name__}: {str(exc)[:200]}")
     return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices), "names_lexicon": str(names) if names else None,
             "glossary": paths.zulu_glossary.is_file(), "pronunciation_research": paths.pronunciation_research.is_file()}
 
