@@ -698,7 +698,7 @@ def saved_readings_note(workbench: Any) -> str:
         rows = measure() if callable(measure) else []
     except Exception:
         rows = []
-    lines = []
+    lines, quiet = [], []
     for row in rows[:10]:
         listener = row.get("english_hears")
         line = (f"{row['word']} -> {row.get('spelling')!r}{_units_text(row)}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] "
@@ -711,13 +711,21 @@ def saved_readings_note(workbench: Any) -> str:
             line += f"; ending: {row['ending']}"
         if row.get("made_differently"):
             line += "; measured on the audio: " + " / ".join(note[:170] for note in row["made_differently"][:2])
-        lines.append(line)
-    if not lines:
+        if row.get("differences") or row.get("ending") or row.get("lost_in_its_sentence"):
+            lines.append(line)
+        else:
+            quiet.append(f"{row['word']} -> {row.get('spelling')!r} (closeness {row['closeness']})")
+    if not lines and not quiet:
         return ""
-    return (" Readings already saved for English words in this text, measured now in their sentences (no tries used): " + " | ".join(lines)
-            + ". A reading is spoken everywhere its word is said in the video, not only in the units you changed. Judge each by the differences listed, "
-              "not only by whether the listener wrote the word: if one differs from the speaker in a way other letters could fix, try_pronunciation and "
-              "use_pronunciation replace it.")
+    text = ""
+    if lines:
+        text += (" Saved readings with something named wrong, measured now in their sentences (no tries used). A reading is spoken everywhere its word is said "
+                 "in the video, not only in the units you changed. Decide for each whether another spelling would be closer, judging by the differences "
+                 "listed, not only by whether the listener wrote the word: if one differs from the speaker in a way other letters could fix, "
+                 "try_pronunciation and use_pronunciation replace it: " + " | ".join(lines) + ".")
+    if quiet:
+        text += " Saved readings with nothing named wrong: " + "; ".join(quiet) + "."
+    return text
 
 
 def loanwords_note(workbench: Any) -> str:

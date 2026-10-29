@@ -248,6 +248,12 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
     name_written = {str(item.get("written") or "").casefold() for item in named if str(item.get("kind") or "").lower() == "name"}
     spoken: dict[str, dict[str, Any]] = {}
     spelt_alike = {re.sub(r"[^a-z']", "", str(w.get("text") or "").casefold()) for w in source_words} - {""}     # words as the transcript spells them
+    # the Zulu-shaped words that are names or another language's words, not Zulu: a word the transcript restorer corrected to a name, or one the model
+    # read as a name in the Zulu text.  "Imali" is Zulu (the speaker code-switches) and the Zulu voice says it right: it is not offered.
+    name_words = {re.sub(r"[^a-z']", "", w.casefold()) for item in named if str(item.get("kind") or "").lower() == "name"
+                  for field in ("written", "english") for w in re.split(r"[\s\-]+", str(item.get(field) or ""))}
+    name_words |= {re.sub(r"[^a-z']", "", str(w.get("text") or "").casefold()) for w in source_words if w.get("heard_as")}
+    name_words -= {""}
     for word in source_words:
         text = str(word.get("text") or "")
         stem = _stem(text)
@@ -262,7 +268,7 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
                 stem = _stem(variant)
                 if stem in name_stems or written.casefold() in name_written:
                     continue                                 # the model says it is a name: not an English word to listen for
-                carried = looks_isizulu(variant) and not glued and variant[:1].isupper() and re.sub(r"[^a-z']", "", variant.casefold()) in spelt_alike     # capitalised: a name
+                carried = looks_isizulu(variant) and not glued and variant[:1].isupper() and re.sub(r"[^a-z']", "", variant.casefold()) in (spelt_alike & name_words)     # capitalised: a name
                 if len(stem) < 4 or stem not in spoken or (looks_isizulu(variant) and not glued and not carried) or written.casefold() in exclude or variant.casefold() in exclude:
                     continue
                 entry = found.setdefault(written, {

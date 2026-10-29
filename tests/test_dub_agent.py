@@ -799,3 +799,18 @@ def test_the_loanwords_are_named_once_right_after_the_first_accepted_submission_
     assert len(named) == 1 and "ne-medical -> ezokwelapha" in named[0]
     assert not [m for m in client.seen[1] if "first accepted submission" in str(m.get("content"))]            # nothing before a submission exists
     assert "common nouns" in dub_agent.SYSTEM_PROMPT and '("Fighters", "medical aid", names)' not in dub_agent.SYSTEM_PROMPT
+
+
+def test_saved_readings_with_something_named_wrong_come_first_and_are_marked_as_needing_a_decision():
+    from mathula_tv import dub_agent
+
+    class Saved(StubWorkbench):
+        def saved_readings_evidence(self):
+            return [{"word": "MaFighter", "spelling": "MaFighter", "speaker_sounds": "f aɪ t a s", "voice_sounds": "f aɪ t a", "closeness": 0.94,
+                     "differences": ["the voice's word ends without the final s that all 2 of the speaker's occurrences end with"], "ending": None, "units": ["u02"]},
+                    {"word": "Creek", "spelling": "Kreet", "speaker_sounds": "k r iː t", "voice_sounds": "k r iː t", "closeness": 1.0, "differences": [], "units": ["u10"]}]
+
+    note = dub_agent.saved_readings_note(Saved(Path(".")))
+    assert note.index("something named wrong") < note.index("MaFighter") and "final s" in note
+    assert note.index("MaFighter") < note.index("nothing named wrong") < note.index("Creek -> 'Kreet' (closeness 1.0)")
+    assert dub_agent.saved_readings_note(StubWorkbench(Path("."))) == ""

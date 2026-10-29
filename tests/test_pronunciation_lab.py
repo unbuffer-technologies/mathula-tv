@@ -796,14 +796,17 @@ def test_the_length_guide_gives_each_segment_the_zulu_length_that_fills_its_wind
     assert length_guide(segments, voices) == {"s1": 125}                         # 10 s x 12.4 = 124 -> 125; unknown voice and empty window: no guide
 
 
-def test_a_zulu_shaped_word_the_transcript_spells_the_same_is_a_name_or_foreign_word_to_check():
-    # the speaker says "Tshela Thupa" in Sesotho; the voice reads Tshela with a Zulu tsh (dʒ), not the speaker's ts
-    transcript = [{"text": "Tshela"}, {"text": "Thupa"}, {"text": "rally"}]
-    shaped = lambda w: w.casefold() in {"tshela", "thupa", "sifuna"}                      # noqa: E731
-    found = {f["word"]: f for f in candidate_words(["ye-EFF i-Tshela Thupa sifuna ukuthi"], transcript, looks_isizulu=shaped)}
+def test_a_zulu_shaped_name_the_transcript_spells_the_same_is_offered_but_a_zulu_word_is_not():
+    # the speaker says "Tshela Thupa" in Sesotho; the voice reads Tshela with a Zulu tsh (dʒ), not the speaker's ts.  The restorer corrected the
+    # transcript to the name (heard_as), and the model read Thupa as a name; "Imali" is plain Zulu that the speaker code-switches into.
+    transcript = [{"text": "Tshela", "heard_as": "Tela"}, {"text": "Thupa", "heard_as": "Tupa"}, {"text": "rally"}, {"text": "Imali"}]
+    shaped = lambda w: w.casefold() in {"tshela", "thupa", "sifuna", "imali"}                      # noqa: E731
+    named = [{"written": "Mpumalanga", "english": "Mpumalanga", "kind": "name"}]
+    found = {f["word"]: f for f in candidate_words(["ye-EFF i-Tshela Thupa sifuna ukuthi. Imali yethu."], transcript, looks_isizulu=shaped, named=named)}
     assert set(found) == {"Tshela", "Thupa"}
     assert "same in the speaker's transcript" in found["Tshela"]["note"] and "Sesotho" in found["Thupa"]["note"]
-    assert candidate_words(["i-Tshela Thupa"], transcript, looks_isizulu=shaped, exclude={"tshela", "thupa"}) == []        # a reading already chosen
+    assert candidate_words(["i-Tshela Thupa"], transcript, looks_isizulu=shaped, named=named, exclude={"tshela", "thupa"}) == []        # a reading already chosen
+
 
 
 def test_using_a_spelling_that_measures_less_close_than_the_saved_reading_is_stopped_with_the_way_forward(tmp_path):
