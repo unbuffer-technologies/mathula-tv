@@ -234,6 +234,7 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
     name_stems = {_stem(str(item.get("english") or "")) for item in named if str(item.get("kind") or "").lower() == "name"} - {""}
     name_written = {str(item.get("written") or "").casefold() for item in named if str(item.get("kind") or "").lower() == "name"}
     spoken: dict[str, dict[str, Any]] = {}
+    spelt_alike = {re.sub(r"[^a-z']", "", str(w.get("text") or "").casefold()) for w in source_words} - {""}     # words as the transcript spells them
     for word in source_words:
         text = str(word.get("text") or "")
         stem = _stem(text)
@@ -248,12 +249,15 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
                 stem = _stem(variant)
                 if stem in name_stems or written.casefold() in name_written:
                     continue                                 # the model says it is a name: not an English word to listen for
-                if len(stem) < 4 or stem not in spoken or (looks_isizulu(variant) and not glued) or written.casefold() in exclude or variant.casefold() in exclude:
+                carried = looks_isizulu(variant) and not glued and variant[:1].isupper() and re.sub(r"[^a-z']", "", variant.casefold()) in spelt_alike     # capitalised: a name
+                if len(stem) < 4 or stem not in spoken or (looks_isizulu(variant) and not glued and not carried) or written.casefold() in exclude or variant.casefold() in exclude:
                     continue
                 entry = found.setdefault(written, {
                     "word": written, "occurrences_in_dub": 0, "speaker_says": spoken[stem]["as_spoken"],
                     "times_the_speaker_says_it": spoken[stem]["count"],
-                    "note": "a Zulu prefix is glued on: the speaker says the English word as it is" if glued else ""})
+                    "note": ("a Zulu prefix is glued on: the speaker says the English word as it is" if glued else
+                             "written the same in the speaker's transcript although it is shaped like isiZulu: a name or a word of another language "
+                             "(Sesotho, Afrikaans); the voice reads it with Zulu letter rules, so compare the speaker's sounds" if carried else "")})
                 entry["occurrences_in_dub"] += 1
                 if zulu_by_stem.get(stem):
                     entry["zulu_word"] = zulu_by_stem[stem]

@@ -794,3 +794,13 @@ def test_the_length_guide_gives_each_segment_the_zulu_length_that_fills_its_wind
                 {"segment_id": "s3", "speaker_id": "A", "start_ms": 12000, "end_ms": 12000}]
     voices = {"A": {"selected_voice": "zu-ZA-ThembaNeural"}, "B": {"selected_voice": "zu-ZA-SomeOtherNeural"}}
     assert length_guide(segments, voices) == {"s1": 125}                         # 10 s x 12.4 = 124 -> 125; unknown voice and empty window: no guide
+
+
+def test_a_zulu_shaped_word_the_transcript_spells_the_same_is_a_name_or_foreign_word_to_check():
+    # the speaker says "Tshela Thupa" in Sesotho; the voice reads Tshela with a Zulu tsh (dʒ), not the speaker's ts
+    transcript = [{"text": "Tshela"}, {"text": "Thupa"}, {"text": "rally"}]
+    shaped = lambda w: w.casefold() in {"tshela", "thupa", "sifuna"}                      # noqa: E731
+    found = {f["word"]: f for f in candidate_words(["ye-EFF i-Tshela Thupa sifuna ukuthi"], transcript, looks_isizulu=shaped)}
+    assert set(found) == {"Tshela", "Thupa"}
+    assert "same in the speaker's transcript" in found["Tshela"]["note"] and "Sesotho" in found["Thupa"]["note"]
+    assert candidate_words(["i-Tshela Thupa"], transcript, looks_isizulu=shaped, exclude={"tshela", "thupa"}) == []        # a reading already chosen
