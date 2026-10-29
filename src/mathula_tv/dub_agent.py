@@ -886,7 +886,12 @@ def _run_agent(
                           messages_after=len(compacted), prompt_tokens_before=last_prompt_tokens)
                 messages[:] = compacted
                 compactions += 1
-        if not loanwords_noted and accepted():
+        text_exists = True
+        try:                                    # a repair run is accepted from its first turn, before its seeded text has been written out
+            text_exists = (Path(workbench.episode["dir"]) / "submission.json").is_file()
+        except Exception:
+            pass
+        if not loanwords_noted and accepted() and text_exists:
             # The Zulu draft exists now, so the English words it keeps can be named while the agent is still fitting units: at the end a swap means
             # fitting again, and prod-41 kept "provident fund", "pension fund" and "medical aid" for that reason.
             loanwords_noted = True

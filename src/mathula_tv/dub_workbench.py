@@ -491,7 +491,7 @@ class Workbench:
         import re
 
         try:
-            found = self._foreign_candidates().get("words", [])
+            found = self._foreign_candidates(with_known=True).get("words", [])      # a word that already has a saved reading is still written with the prefix
         except Exception:
             return []
         prefix = re.compile(r"^(?i:ma|ama|i|isi|izi|u|o|aba|abe|imi|izin)(?=[A-Z][a-z])")      # "MaFighter" at the start of a sentence or "iSkhokho"
@@ -506,7 +506,7 @@ class Workbench:
             self._ledger("shown", item["word"], "listed by list_foreign_words")
         return result
 
-    def _foreign_candidates(self) -> dict[str, Any]:
+    def _foreign_candidates(self, *, with_known: bool = False) -> dict[str, Any]:
         from .pronunciation_lab import MAX_TRIES_PER_CLIP, candidate_words
         from .pronunciation_search import looks_isizulu
 
@@ -520,7 +520,7 @@ class Workbench:
                 named = self.judge.foreign_words(texts)          # the English words a model reads out of the Zulu, whatever their spelling
             except Exception:                                    # an outage leaves the rule-based sweep, never an empty list
                 named = []
-        found = candidate_words(texts, self._lab().transcript, looks_isizulu=looks_isizulu, exclude=self._known_readings(), named=named)
+        found = candidate_words(texts, self._lab().transcript, looks_isizulu=looks_isizulu, exclude=set() if with_known else self._known_readings(), named=named)
         return {"words": found, "note": "Loanwords first: an entry with zulu_word has an everyday Zulu word; write that word in the text instead of keeping the "
                                          "English one, unless it would change what the speaker said. Check with the lab only the English words you keep. "
                                          "Never glue a Zulu prefix onto an English word the speaker says as it is.",

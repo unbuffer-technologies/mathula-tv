@@ -870,3 +870,32 @@ def test_a_noun_prefix_glued_on_a_word_the_speaker_says_as_it_is_is_named_in_the
     run_agent(client, Glued(tmp_path), clip_id="c1", run_id="r")
     named = [str(m.get("content")) for m in client.seen[2] if m["role"] == "user" and "first accepted submission" in str(m.get("content"))]
     assert len(named) == 1 and "MaFighter" in named[0]
+
+
+def test_the_early_note_waits_for_the_text_when_a_repair_run_is_accepted_from_its_first_turn(tmp_path):
+    from mathula_tv import dub_agent
+
+    class Glued(StubWorkbench):
+        written = False
+
+        def open_clip(self, clip_id, run_id, repeat=1, tts_budget=None, speed_policy="natural"):
+            out = super().open_clip(clip_id, run_id, repeat, tts_budget, speed_policy)
+            self.episode = {**self.episode, "dir": str(tmp_path), "submissions": 1}               # accepted from the start, no submission.json yet
+            return out
+
+        def submit_dub(self, items, **kw):
+            (tmp_path / "submission.json").write_text("{}", encoding="utf-8")
+            return super().submit_dub(items, **kw)
+
+        def glued_class_prefix_words(self):
+            return [{"written": "MaFighter", "speaker_says": "Fighters"}]
+
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),
+        _reply(content="done"),
+    ])
+    run_agent(client, Glued(tmp_path), clip_id="c1", run_id="r")
+    assert not [m for m in client.seen[1] if "first accepted submission" in str(m.get("content"))]            # not before the text exists
+    assert len([m for m in client.seen[2] if "first accepted submission" in str(m.get("content"))]) == 1
