@@ -116,6 +116,9 @@ def length_guide(segments: list[dict[str, Any]], voices: dict[str, Any]) -> dict
     return guide
 
 
+SAVED_READINGS_MEASURED = 24     # saved readings measured for the reminder (the weakest six are shown): the cost is one clip each, once per run
+
+
 class BudgetExhausted(RuntimeError):
     """Raised when the agent asks for more measurements than its episode budget allows."""
 
@@ -424,7 +427,7 @@ class Workbench:
             if measured:
                 measured["units"] = lab.units_with(word, getattr(self, "_lab_item_ids", ()))
                 rows.append(measured)
-            if len(rows) >= 10:
+            if len(rows) >= SAVED_READINGS_MEASURED:
                 break
         return sorted(rows, key=lambda row: row["closeness"])
 
@@ -546,6 +549,14 @@ class Workbench:
         prefix, tried_spelling = written_prefix(word), spelling
         if prefix and not spelling.casefold().startswith(prefix.casefold()):
             spelling = prefix + spelling
+        from .pronunciation_memory import beaten_by_saved, saved as saved_reading
+
+        held = saved_reading(memory_path(Path(self.store.root).parent), word, lab.voice)
+        if beaten_by_saved(held, spelling, float(tried["closeness"])):
+            raise ValueError(
+                f"the shared memory already holds {held['tts_text']!r} for {word!r}, which measured closer to the speaker (closeness {held['closeness']}; "
+                f"{tried_spelling!r} measures {tried['closeness']}), and the render uses saved readings. Measure {held['tts_text']!r} here with "
+                f"try_pronunciation and choose between them, or find a spelling that beats it.")
         clip_dir = Path(self.store.clip_dir(episode["clip_id"]))
         lexicon_path = clip_dir / "native_dub" / "pronunciation_names.json"
         lexicon = read_json(lexicon_path) if lexicon_path.is_file() else {"schema": "mathula-names-lexicon-v1", "voice": lab.voice, "entries": []}
@@ -559,7 +570,8 @@ class Workbench:
         self._readings_changed += 1
         entry = self.store.load_corpus()["clips"][episode["clip_id"]]
         remember(memory_path(Path(self.store.root).parent), word, spelling, source="agent", voice=lab.voice, job_id=str(entry["job_id"]),
-                 kind="english_code_switch", note=f"chosen by the agent with the lab; closeness {tried['closeness']}; voice sounds {tried['voice_sounds']}")
+                 kind="english_code_switch", note=f"chosen by the agent with the lab; closeness {tried['closeness']}; voice sounds {tried['voice_sounds']}",
+                 closeness=float(tried["closeness"]))
         choice = {"word": word, "spelling": spelling, "closeness": tried["closeness"], "speaker_sounds": " ".join(lab.source(word)["phones"]),
                   "voice_sounds": tried["voice_sounds"]}
         self.pronunciation_choices = [c for c in self.pronunciation_choices if c["word"] != word] + [choice]

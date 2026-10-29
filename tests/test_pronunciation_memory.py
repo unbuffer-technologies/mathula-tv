@@ -131,3 +131,19 @@ def test_an_entry_saved_without_the_zulu_prefix_of_its_word_gets_the_prefix_back
     apply_to_lexicon(lexicon, memory, THEMBA)
     spoken = {e["display_text"]: e["tts_text"] for e in json.loads(lexicon.read_text())["entries"]}
     assert spoken == {"weScience": "wesaynsi", "MaFighter": "MaFayitas", "Technology": "Teknoloji", "hlu": "hluuu"}
+
+
+def test_a_saved_reading_that_measured_closer_is_not_replaced_by_one_that_measured_less_close(tmp_path):
+    from mathula_tv.pronunciation_memory import beaten_by_saved, entries_for, remember, saved
+
+    path = tmp_path / "experience" / "pronunciation_memory.json"
+    voice = "zu-ZA-ThembaNeural"
+    remember(path, "MaFighter", "MaFighters", source="agent", voice=voice, job_id="a", closeness=1.0)
+    kept = remember(path, "MaFighter", "MaFighter", source="agent", voice=voice, job_id="b", closeness=0.94)         # a run out of turns, a worse pick
+    assert kept["tts_text"] == "MaFighters" and entries_for(path, voice)[0]["tts_text"] == "MaFighters"
+    assert beaten_by_saved(saved(path, "MaFighter", voice), "MaFighter", 0.94) and not beaten_by_saved(saved(path, "MaFighter", voice), "MaFighter", 0.99)
+    remember(path, "MaFighter", "Fayitas", source="agent", voice=voice, job_id="c", closeness=0.99)                  # within the margin: the newer one stands
+    assert entries_for(path, voice)[0]["tts_text"] == "Fayitas" and entries_for(path, voice)[0]["closeness"] == 0.99
+    remember(path, "Plain", "Plane", source="agent", voice=voice, job_id="a")                                         # no closeness recorded: replaced as before
+    remember(path, "Plain", "Plein", source="agent", voice=voice, job_id="b", closeness=0.5)
+    assert [e["tts_text"] for e in entries_for(path, voice) if e["display_text"] == "Plain"] == ["Plein"]

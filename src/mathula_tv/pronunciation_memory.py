@@ -25,6 +25,7 @@ SCHEMA = "mathula-pronunciation-memory-v1"
 MEMORY_SOURCE = "memory"
 MAX_FAILURES = 2
 _PRIORITY = {"repair": 1, "agent": 0}
+CLOSENESS_MARGIN = 0.02        # a reading that measures this much closer to the speaker is not replaced by one that measures less close
 
 
 def memory_path(work_dir: Path) -> Path:
@@ -52,10 +53,25 @@ def _save(path: Path, data: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def saved(path: Path, display_text: str, voice: str | None) -> dict[str, Any] | None:
+    """The memory's enabled entry for this word and voice, or None."""
+    entry = load(path)["entries"].get(_key(display_text, voice))
+    return entry if entry and not entry.get("disabled") else None
+
+
+def beaten_by_saved(entry: Mapping[str, Any] | None, tts_text: str, closeness: float | None) -> bool:
+    """Whether the saved reading measured closer to the speaker than this one: then the saved one stays (a run that ran out of turns once
+    replaced a closeness 1.0 reading of "Fighters" with a 0.94 one that lost the final s)."""
+    if not entry or closeness is None or entry.get("closeness") is None or str(entry["tts_text"]).casefold() == tts_text.casefold():
+        return False
+    return float(closeness) < float(entry["closeness"]) - CLOSENESS_MARGIN
+
+
 def remember(path: Path, display_text: str, tts_text: str, *, source: str, voice: str | None, job_id: str,
-             kind: str = "other", note: str = "") -> dict[str, Any]:
+             kind: str = "other", note: str = "", closeness: float | None = None) -> dict[str, Any]:
     """Record a verified reading. Same reading again = one more confirming job; a different one replaces it only from an
-    equal or higher-priority source.  Only the agent's choices and verified repairs can be recorded: a person's reading is refused."""
+    equal or higher-priority source, and not when the saved one measured closer to the speaker (``closeness``).  Only the agent's
+    choices and verified repairs can be recorded: a person's reading is refused."""
     if source not in _PRIORITY:
         raise ValueError(f"source must be one of {sorted(_PRIORITY)}")
     data = load(path)
@@ -65,11 +81,16 @@ def remember(path: Path, display_text: str, tts_text: str, *, source: str, voice
     if entry and entry["tts_text"] == tts_text:
         entry["jobs"] = sorted({*entry["jobs"], job_id})
         entry["source"] = max(entry["source"], source, key=lambda name: _PRIORITY.get(name, -1))
+        if closeness is not None:
+            entry["closeness"] = float(closeness)
     elif entry and _PRIORITY[source] < _PRIORITY[entry["source"]] and not entry.get("disabled"):
         return entry                                          # a verified repair is not overwritten by an agent's choice
+    elif entry and not entry.get("disabled") and _PRIORITY[source] <= _PRIORITY[entry["source"]] and beaten_by_saved(entry, tts_text, closeness):
+        return entry                                          # a reading that measured closer stays
     else:
         entry = {"display_text": display_text, "tts_text": tts_text, "voice": voice, "kind": kind, "source": source,
-                 "jobs": [job_id], "failures": 0, "disabled": False, "first_seen": now, "note": note}
+                 "jobs": [job_id], "failures": 0, "disabled": False, "first_seen": now, "note": note,
+                 **({"closeness": float(closeness)} if closeness is not None else {})}
     entry["last_confirmed"] = now
     data["entries"][key] = entry
     _save(path, data)

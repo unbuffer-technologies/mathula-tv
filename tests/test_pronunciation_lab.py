@@ -804,3 +804,15 @@ def test_a_zulu_shaped_word_the_transcript_spells_the_same_is_a_name_or_foreign_
     assert set(found) == {"Tshela", "Thupa"}
     assert "same in the speaker's transcript" in found["Tshela"]["note"] and "Sesotho" in found["Thupa"]["note"]
     assert candidate_words(["i-Tshela Thupa"], transcript, looks_isizulu=shaped, exclude={"tshela", "thupa"}) == []        # a reading already chosen
+
+
+def test_using_a_spelling_that_measures_less_close_than_the_saved_reading_is_stopped_with_the_way_forward(tmp_path):
+    from mathula_tv.pronunciation_memory import entries_for, memory_path, remember
+
+    workbench, _ = make_workbench(tmp_path, {"Fayitas": ["f", "aɪ", "t", "ə", "z"], "MaFighters": ["f", "aɪ", "t", "ə", "z", "s"]})
+    remember(memory_path(tmp_path), "Fighters", "MaFighters", source="agent", voice="zu-ZA-ThembaNeural", job_id="job-a", closeness=1.0)
+    workbench.try_pronunciation("Fighters", ["Fayitas"])
+    workbench._pronunciation_lab.tried["Fighters"]["Fayitas"]["closeness"] = 0.9
+    with pytest.raises(ValueError, match="already holds 'MaFighters'.*closeness 1.0.*try_pronunciation"):
+        workbench.use_pronunciation("Fighters", "Fayitas")
+    assert [e["tts_text"] for e in entries_for(memory_path(tmp_path), "zu-ZA-ThembaNeural")] == ["MaFighters"]
