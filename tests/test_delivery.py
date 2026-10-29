@@ -127,11 +127,12 @@ if __name__ == "__main__":
 
 
 class VoicePitchTest(unittest.TestCase):
-    def test_persona_pitch_is_off_unless_switched_on(self):
+    def test_persona_pitch_is_on_unless_switched_off_and_bounded(self):
         from mathula_tv.native_dub import _voice_pitch_percent
 
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("MATHULA_PERSONA_PITCH", None)
+            self.assertEqual(_voice_pitch_percent({"pitch_percent": -9}), -9)
+            self.assertEqual(_voice_pitch_percent({"pitch_percent": 40}), 10)
+        with mock.patch.dict(os.environ, {"MATHULA_PERSONA_PITCH": "0"}):
             self.assertEqual(_voice_pitch_percent({"pitch_percent": -6}), 0)
-        with mock.patch.dict(os.environ, {"MATHULA_PERSONA_PITCH": "1"}):
-            self.assertEqual(_voice_pitch_percent({"pitch_percent": -6}), -6)

@@ -8929,8 +8929,10 @@ def _native_dub_tts_ready_parts(
 
 
 def _voice_pitch_percent(prosody: Mapping[str, Any]) -> int:
-    """0 unless MATHULA_PERSONA_PITCH=1: a speaker's persona pitch offset (+-6 %) was only there to tell two speakers on one voice apart."""
-    if os.environ.get("MATHULA_PERSONA_PITCH", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+    """A speaker's fixed persona pitch (within +-10 %), the only thing that tells two speakers on one Zulu voice apart (see voice_personas).  It is the
+    same for every unit of the speaker, so nothing bends mid-speech; the per-unit pitch nudge stays removed.  MATHULA_PERSONA_PITCH=0 turns it off.
+    It was off by default from 2026-10-27 to 2026-10-29, when it was dropped together with the per-unit nudge and every speaker came out as one voice."""
+    if os.environ.get("MATHULA_PERSONA_PITCH", "1").strip().lower() in {"0", "false", "no", "off"}:
         return 0
     return bounded_prosody_int(prosody.get("pitch_percent"), default=0, lower=-10, upper=10)
 
