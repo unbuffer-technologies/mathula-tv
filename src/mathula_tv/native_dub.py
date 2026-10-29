@@ -6586,8 +6586,12 @@ def render_native_dub(
     sdk_boundary: AzureSpeechSDKBoundary | None = None,
     lite: bool = False,
     progress: Callable[[str], None] | None = None,
+    audio_only: bool = False,
 ) -> dict[str, Any]:
     """Render an untouched-video dub from the one natural translation.
+
+    ``audio_only=True`` (training mode) stops after the dialogue is mixed: every phrase is synthesised and timed exactly as in a full render and the
+    mixed dub audio (``audio/master_bus.wav``) is written, but no video is encoded and no hook or footer is made.  ``output_video`` is then that audio file.
 
     ``lite=True`` caps ffmpeg's own encode threads at half the machine's
     logical CPU count and lowers the ffmpeg subprocess's OS scheduling
@@ -6889,7 +6893,9 @@ def render_native_dub(
     )
     _emit_progress(progress, "[native dub] Rendering dubbed master without changing video timing...")
     master_started = time.monotonic()
-    if progress is None:
+    if audio_only:
+        _emit_progress(progress, "[native dub] Audio only: the mixed dub audio is ready, no video is encoded")
+    elif progress is None:
         render_video(source_video, master_audio, paths.video)
     else:
         _render_native_master_with_ffmpeg_progress(
@@ -6903,8 +6909,8 @@ def render_native_dub(
     _emit_progress(progress, f"[native dub] Dubbed master render complete in {master_wall_seconds:.1f}s")
 
     publication: dict[str, Any] | None = None
-    final_video = paths.video
-    if render_hook_overlay:
+    final_video = Path(master_audio) if audio_only else paths.video
+    if render_hook_overlay and not audio_only:
         if editorial_provider is None:
             raise ValueError(
                 "Native dub hook overlay requires a Foundry Grok editorial provider"
@@ -6954,10 +6960,11 @@ def render_native_dub(
         "timing_quality_review_required": bool(timing_quality_flags),
         "timing_quality_flags": timing_quality_flags,
         "dialogue": dialogue,
-        "native_master_video": str(paths.video),
-        "native_master_video_sha256": checksum(paths.video),
-        "hook_overlay_enabled": bool(render_hook_overlay),
-        "hook_edit_enabled": bool(render_hook_overlay and apply_opening_cut),
+        "native_master_video": None if audio_only else str(paths.video),
+        "native_master_video_sha256": None if audio_only else checksum(paths.video),
+        "audio_only": bool(audio_only),
+        "hook_overlay_enabled": bool(render_hook_overlay and not audio_only),
+        "hook_edit_enabled": bool(render_hook_overlay and apply_opening_cut and not audio_only),
         "hook_publication": publication,
         "output_video": str(final_video),
         "output_video_sha256": checksum(final_video),

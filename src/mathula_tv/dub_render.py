@@ -179,9 +179,12 @@ def prepare_render_root(
 
 def render_submission(
     settings: Any, *, run_id: str, clip_id: str, repeat: int = 1, force: bool = False, lite: bool = False,
-    progress: Any = None, hook: bool = False,
+    progress: Any = None, hook: bool = False, audio_only: bool = False,
 ) -> dict[str, Any]:
     """Prepare the render root and run the production renderer.
+
+    ``audio_only=True`` is training mode: the dub audio is synthesised, timed and mixed (``render/native_dub/audio/master_bus.wav``) and nothing
+    else, so a run can be listened to and checked without waiting for a video encode; ``hook`` is then ignored.
 
     By default this is the plain dubbed master with no hook work. ``hook=True`` additionally runs the production
     publication step on that master: an editorial model call picks the opening anchor, the footer title and the TikTok
@@ -199,6 +202,7 @@ def render_submission(
     ensure_free_space(store.root, keep_run_dir=store.repeat_dir(run_id, clip_id, repeat), progress=progress or print)
     root, info, voice_map = prepare_render_root(store, settings.work_dir, run_id=run_id, clip_id=clip_id, repeat=repeat)
     job = Orchestrator(settings).jobs.load(info["job_id"])               # read-only: used for the source video path
+    hook = hook and not audio_only
     editorial = None
     if hook:
         from .cli import create_native_gpt_backend
@@ -209,10 +213,11 @@ def render_submission(
         apply_opening_cut=hook, render_hook_overlay=hook, editorial_provider=editorial,
         voice_map_path=voice_map, enable_island_timing=False,
         enable_sdk_group_synthesis=False, enable_turn_group_synthesis=False, progress=progress,
+        audio_only=audio_only,
     )
     groups = result.get("groups") or []
     summary = {
-        "run": run_id, "clip": clip_id, "repeat": repeat, "video": str(result["output_video"]),
+        "run": run_id, "clip": clip_id, "repeat": repeat, "video": str(result["output_video"]), "audio_only": audio_only,
         "groups": result.get("phrase_group_count"), "video_retimed": result.get("video_retimed"),
         "hook_overlay_enabled": result.get("hook_overlay_enabled"), "hook_edit_enabled": result.get("hook_edit_enabled"),
         "timing_quality_review_required": result.get("timing_quality_review_required", False),
@@ -242,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-only", action="store_true", help="build the committed translation, do not render")
     parser.add_argument("--hook", action="store_true",
                         help="also run the publication step: opening cut, footer hook overlay, TikTok caption and hashtags")
+    parser.add_argument("--audio-only", action="store_true",
+                        help="training mode: mix the dub audio only, encode no video and make no hook")
     args = parser.parse_args(argv)
 
     from .config import load_settings
@@ -254,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"render_root": str(root), **info}, indent=2))
         return 0
     print(json.dumps(render_submission(settings, run_id=args.run, clip_id=args.clip, repeat=args.repeat,
-                                       force=args.force, lite=args.lite, hook=args.hook), indent=2,
+                                       force=args.force, lite=args.lite, hook=args.hook, audio_only=args.audio_only), indent=2,
                      ensure_ascii=False))
     return 0
 

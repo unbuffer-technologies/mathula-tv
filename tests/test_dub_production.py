@@ -69,3 +69,24 @@ def test_the_primary_voice_is_read_from_the_real_voice_resolution_layout(tmp_pat
     assert primary_voice(tmp_path / "missing.json") == "zu-ZA-ThembaNeural"                       # falls back, never raises
     path.write_text("not json", encoding="utf-8")
     assert primary_voice(path) == "zu-ZA-ThembaNeural"
+
+
+def test_training_mode_renders_the_dub_audio_only_and_never_a_hook(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from mathula_tv import cli, dub_render, experience_store, housekeeping, native_dub, orchestrator
+
+    seen = {}
+    monkeypatch.setattr(native_dub, "render_native_dub", lambda **kw: seen.update(kw) or {
+        "output_video": tmp_path / "master_bus.wav", "groups": [], "phrase_group_count": 0, "video_retimed": False})
+    monkeypatch.setattr(dub_render, "prepare_render_root", lambda *a, **k: (tmp_path, {"job_id": "j", "groups": 0, "sentences": 0}, tmp_path / "voices.json"))
+    monkeypatch.setattr(housekeeping, "ensure_free_space", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "create_tts_backend", lambda settings: object())
+    monkeypatch.setattr(orchestrator, "Orchestrator", lambda settings: SimpleNamespace(jobs=SimpleNamespace(load=lambda job_id: object())))
+    monkeypatch.setattr(experience_store, "ExperienceStore", lambda work_dir: SimpleNamespace(root=tmp_path, repeat_dir=lambda *a: tmp_path))
+
+    summary = dub_render.render_submission(SimpleNamespace(work_dir=tmp_path), run_id="r", clip_id="c", hook=True, audio_only=True)
+    assert seen["audio_only"] is True and seen["render_hook_overlay"] is False and seen["apply_opening_cut"] is False
+    assert summary["audio_only"] is True and summary["video"].endswith("master_bus.wav")
+    full = dub_render.render_submission(SimpleNamespace(work_dir=tmp_path), run_id="r", clip_id="c")
+    assert seen["audio_only"] is False and full["audio_only"] is False
