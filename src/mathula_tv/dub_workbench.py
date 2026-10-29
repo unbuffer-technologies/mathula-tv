@@ -150,6 +150,9 @@ class Workbench:
         self._readings_changed = 0                                # how many times a reading was changed in this run
         self.foreign_words_listed = False                       # whether the agent has looked at the English words its Zulu keeps
         self.pronunciation_choices: list[dict[str, Any]] = []   # spellings the agent chose with the lab, for the report
+        from .pronunciation_ledger import Ledger
+
+        self.ledger = Ledger()                                   # what the agent was shown about each word and what it did (see pronunciation_ledger)
         # Timing ratchet: once a source segment has fitted its time frame in an accepted submission it must
         # keep fitting. A submission that breaks one is rejected, so fixing one unit can never silently
         # break another, and the clip's flow only ever improves.
@@ -402,6 +405,9 @@ class Workbench:
             if measured:
                 measured["units"] = self._lab().units_with(word, getattr(self, "_lab_item_ids", ()))
                 found.append(measured)
+                from .pronunciation_ledger import problems_of
+
+                self._ledger("shown", measured["word"], "measured as written, in the reminder", closeness=measured.get("closeness"), problems=problems_of(measured))
         return found
 
     def saved_readings_evidence(self) -> list[dict[str, Any]]:
@@ -427,6 +433,9 @@ class Workbench:
             if measured:
                 measured["units"] = lab.units_with(word, getattr(self, "_lab_item_ids", ()))
                 rows.append(measured)
+                from .pronunciation_ledger import problems_of
+
+                self._ledger("shown", word, "saved reading, in the reminder", closeness=measured.get("closeness"), problems=problems_of(measured))
             if len(rows) >= SAVED_READINGS_MEASURED:
                 break
         # readings with something named wrong come first, then by closeness: a missing final s costs the score almost nothing but is heard at once
@@ -454,10 +463,35 @@ class Workbench:
         except Exception:
             return []
 
+    def _ledger(self, method: str, *args: Any, **kwargs: Any) -> None:
+        """Record in the ledger; a recording problem never touches the run."""
+        try:
+            getattr(self.ledger, method)(*args, **kwargs)
+        except Exception:
+            pass
+
+    def note_pronunciation(self, word: str, decision: str, why: str) -> dict[str, Any]:
+        """The agent's own reason for a word it checked and left or changed (decision: kept_as_is, changed or not_a_problem)."""
+        return self.ledger.note(word, decision, why)
+
+    def ledger_unexamined(self) -> list[dict[str, Any]]:
+        return self.ledger.unexamined()
+
+    def ledger_summary(self) -> dict[str, Any]:
+        return self.ledger.summary()
+
+    def write_pronunciation_ledger(self, directory: Path) -> Path:
+        path = Path(directory) / "pronunciation_ledger.json"
+        path.write_text(json.dumps(self.ledger.to_dict(), indent=1, ensure_ascii=False), encoding="utf-8")
+        return path
+
     def list_foreign_words(self) -> dict[str, Any]:
         """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
         self.foreign_words_listed = True
-        return self._foreign_candidates()
+        result = self._foreign_candidates()
+        for item in result.get("words", []):
+            self._ledger("shown", item["word"], "listed by list_foreign_words")
+        return result
 
     def _foreign_candidates(self) -> dict[str, Any]:
         from .pronunciation_lab import MAX_TRIES_PER_CLIP, candidate_words
@@ -485,7 +519,9 @@ class Workbench:
 
         try:
             self._sync_lab_context()
-            return self._lab().try_spellings(word, spellings)
+            result = self._lab().try_spellings(word, spellings)
+            self._ledger("tried", word, spellings)
+            return result
         except PronunciationBudgetExhausted as exc:
             raise BudgetExhausted(str(exc)) from exc
 
@@ -495,7 +531,9 @@ class Workbench:
 
         try:
             self._sync_lab_context()
-            return self._lab().suggest_spellings(word)
+            result = self._lab().suggest_spellings(word)
+            self._ledger("tried", word, ["suggest_spellings"])
+            return result
         except PronunciationBudgetExhausted as exc:
             raise BudgetExhausted(str(exc)) from exc
 
@@ -504,7 +542,9 @@ class Workbench:
         from .pronunciation_lab import PronunciationBudgetExhausted
 
         try:
-            return self._lab().create_loanword(word)
+            result = self._lab().create_loanword(word)
+            self._ledger("tried", word, ["create_loanword"])
+            return result
         except PronunciationBudgetExhausted as exc:
             raise BudgetExhausted(str(exc)) from exc
 
@@ -523,6 +563,7 @@ class Workbench:
         entry = self.store.load_corpus()["clips"][episode["clip_id"]]
         remember(path_for(Path(self.store.root).parent), word, zulu_word, job_id=str(entry["job_id"]),
                  note=f"created from the speaker's sounds {' '.join(lab.source(word)['phones'])}")
+        self._ledger("used", word, zulu_word)
         return {"ok": True, "word": word, "zulu_word": zulu_word,
                 "note": f"remembered for later clips. Write {zulu_word!r} in the Zulu text where {word!r} stands, with the noun prefix the sentence needs "
                         "(i-, isi-, ama-, u-), then re-measure and resubmit the units you change. A created word is Zulu text: the captions show it and the "
@@ -576,6 +617,7 @@ class Workbench:
         choice = {"word": word, "spelling": spelling, "closeness": tried["closeness"], "speaker_sounds": " ".join(lab.source(word)["phones"]),
                   "voice_sounds": tried["voice_sounds"]}
         self.pronunciation_choices = [c for c in self.pronunciation_choices if c["word"] != word] + [choice]
+        self._ledger("used", word, spelling, tried["closeness"])
         kept = f" The Zulu prefix {prefix!r} stays on it: the spoken form is {spelling!r}." if spelling != tried_spelling else ""
         return {"ok": True, **choice, "note": "your measurements and the render now use this reading wherever the word is written." + kept + " Keep the WORD in the text: never type the spelling into it (the voice respells the word when it speaks it, and the text is what the captions show). Re-measure any unit that contains the word."}
 

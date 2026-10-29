@@ -39,6 +39,9 @@ class StubWorkbench:
     def create_loanword(self, word):
         return {"word": word, "zulu_words": []}
 
+    def note_pronunciation(self, word, decision, why):
+        return {"ok": True}
+
     def use_loanword(self, word, zulu_word):
         return {"ok": True}
 
@@ -814,3 +817,34 @@ def test_saved_readings_with_something_named_wrong_come_first_and_are_marked_as_
     assert note.index("something named wrong") < note.index("MaFighter") and "final s" in note
     assert note.index("MaFighter") < note.index("nothing named wrong") < note.index("Creek -> 'Kreet' (closeness 1.0)")
     assert dub_agent.saved_readings_note(StubWorkbench(Path("."))) == ""
+
+
+def test_an_agent_that_finishes_with_a_word_shown_wrong_and_untouched_is_asked_for_its_reason_once(tmp_path):
+    from mathula_tv import dub_agent
+
+    class Led(StubWorkbench):
+        def __init__(self, root):
+            super().__init__(root)
+            self.noted = []
+
+        def ledger_unexamined(self):
+            return [] if self.noted else [{"word": "MaFighter", "problems": ["the voice's word ends without the final s"]}]
+
+        def note_pronunciation(self, word, decision, why):
+            self.noted.append((word, decision, why))
+            return {"ok": True}
+
+    names = [spec["function"]["name"] for spec in dub_agent.TOOL_SPECS]
+    assert "note_pronunciation" in names and "note_pronunciation" in dub_agent.SYSTEM_PROMPT
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),                                                                   # asked here, not finished
+        _reply(calls=[_call("c", "note_pronunciation", {"word": "MaFighter", "decision": "kept_as_is", "why": "the final s is soft in the speaker"})]),
+        _reply(content="done"),
+    ])
+    workbench = Led(tmp_path)
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r")
+    asked = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "put in front of you with something named wrong" in str(m.get("content"))]
+    assert len(asked) == 1 and "MaFighter" in asked[0] and workbench.noted == [("MaFighter", "kept_as_is", "the final s is soft in the speaker")]
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5

@@ -245,6 +245,7 @@ def run_production(
     }
 
     report["pronunciation_choices"] = workbench.pronunciation_choices          # for a person's ear: what the agent chose with the lab
+    report["pronunciation_ledger"] = summary.get("pronunciation_ledger")        # what it was shown and did, and the words nobody looked at
     try:        # stretches where the language switch could not be settled: a short list for a person to listen to
         from .code_switch import FILE as CODE_SWITCH_FILE, load as load_code_switch, review_items
 

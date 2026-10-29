@@ -96,6 +96,8 @@ You work through tools and decide your own method. You are scored on:
    sounds, so a missing ending can still score high; the listener hears one short clip and guesses a real word, so it can write "Saints" for a
    spelling whose sounds are the speaker's own. When they disagree, read the differences and the measured acoustics of both and decide. A
    spelling they write as something else ("Scenes" for "science") is a warning about a sound; learn from what they wrote.
+   The harness keeps a ledger of what you are shown about each word and what you do with it. For a word you check and leave as it is, or change,
+   note_pronunciation(word, decision, why) puts your reason in it, so that a word that later sounds wrong can be traced to what was seen and why.
    Do not stay in one family of letters: if your spellings keep missing the same sound, call suggest_spellings. It works backwards from the
    speaker's sounds through the letters this voice is known to turn into those sounds, speaks many combinations, and returns the closest
    different ones, measured, so you see spellings you would not have guessed. It counts as one try.
@@ -264,6 +266,11 @@ TOOL_SPECS = [
     _tool("use_pronunciation", "Make a spelling you tried the way this word is spoken: for your own measurements from now on, in the render, "
           "and remembered for later clips. Only a spelling you have tried can be used. The Zulu text keeps the word itself; do not type the spelling into it.",
           {"word": {"type": "string"}, "spelling": {"type": "string"}}, ["word", "spelling"]),
+    _tool("note_pronunciation", "Write down your reason for an English word or name you checked with the lab (or were shown) and decided to leave "
+          "as it is, or changed: decision is kept_as_is, changed or not_a_problem, why is a few words. The harness records what you were shown and what you "
+          "tried; this is your side of it, so a word that sounds wrong later can be traced to what was seen and why it was left.",
+          {"word": {"type": "string"}, "decision": {"type": "string", "enum": ["kept_as_is", "changed", "not_a_problem"]},
+           "why": {"type": "string", "description": "your reason, in a few words"}}, ["word", "decision", "why"]),
     _tool("get_submission", "The units currently accepted (all, or only unit_ids), with their text and any flags from "
           "the last score. Use it to see your own current state, e.g. after your history was trimmed.",
           {"unit_ids": {"type": "array", "items": {"type": "string"}}}, []),
@@ -538,7 +545,7 @@ def build_dispatch(
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
         "get_submission": workbench.get_submission,
     }
-    for name in ("list_foreign_words", "try_pronunciation", "suggest_spellings", "create_loanword", "use_loanword", "use_pronunciation"):       # the pronunciation lab, where the workbench has one
+    for name in ("list_foreign_words", "try_pronunciation", "suggest_spellings", "create_loanword", "use_loanword", "use_pronunciation", "note_pronunciation"):       # the pronunciation lab, where the workbench has one
         if hasattr(workbench, name):
             tools[name] = getattr(workbench, name)
     return tools
@@ -846,6 +853,7 @@ def _run_agent(
     stop_reason = "max_turns"
     nudged = False
     pronunciation_reminded = False
+    ledger_asked = False
     loanwords_noted = False
     pushbacks = 0
     unmet: list[str] = []
@@ -914,6 +922,19 @@ def _run_agent(
                 messages.append({"role": "user", "content": text})
                 trace.log("pronunciation_reminder", turn=turn, words=words[:12], text=text)
                 continue
+            # Words shown with something named wrong that the agent neither tried, used nor wrote a reason for: asked about once, so the ledger has
+            # the agent's side of them (leaving a word as it is is allowed; it needs a reason).
+            unexamined = getattr(workbench, "ledger_unexamined", None)
+            if not ledger_asked and callable(unexamined) and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens:
+                items = unexamined()
+                if items:
+                    ledger_asked = True
+                    from .pronunciation_ledger import request_text
+
+                    text = request_text(items)
+                    messages.append({"role": "user", "content": text})
+                    trace.log("ledger_request", turn=turn, words=[item["word"] for item in items], text=text)
+                    continue
             # The agent says it is done. The harness checks that against its own score instead of
             # taking its word for it -- bounded, and only while budget remains to act on it.
             unmet = unmet_targets(getattr(workbench, "last_submit", None), max_dead_air_pct=max_dead_air_pct)
@@ -950,6 +971,13 @@ def _run_agent(
         "tts_used": (workbench.episode or {}).get("tts_used"), "submissions": (workbench.episode or {}).get("submissions"),
         "model": client.config.deployment,
     }
+    ledger_summary = getattr(workbench, "ledger_summary", None)
+    if callable(ledger_summary):
+        try:
+            summary["pronunciation_ledger"] = ledger_summary()
+            workbench.write_pronunciation_ledger(directory)
+        except Exception:                                     # the ledger is a record; it never changes a run's outcome
+            pass
     trace.log("end", **summary)
     (directory / "agent_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary

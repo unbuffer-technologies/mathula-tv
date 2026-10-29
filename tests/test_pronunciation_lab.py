@@ -831,3 +831,19 @@ def test_a_final_consonant_every_decode_of_the_speaker_has_and_the_voice_drops_i
     assert final_consonant_lost(["f aɪ t a s"], ["f", "aɪ", "t", "a"]) is None                         # one decode is too noisy to believe
     assert final_consonant_lost(["f aɪ t a s", "f aɪ t a t"], ["f", "aɪ", "t", "a"]) is None           # the decodes disagree
     assert final_consonant_lost(["ts e l a", "ts e l a"], ["ts", "e", "l"]) is None                    # the speaker's word ends in a vowel: another check
+
+
+def test_the_workbench_records_what_the_agent_was_shown_and_did_in_the_ledger_and_writes_it(tmp_path):
+    import json
+
+    workbench, _ = make_workbench(tmp_path, {"Fayitas": ["f", "aɪ", "t", "ə", "z"]})
+    workbench.list_foreign_words()
+    workbench.try_pronunciation("Fighters", ["Fayitas"])
+    workbench.use_pronunciation("Fighters", "Fayitas")
+    assert workbench.note_pronunciation("Fighters", "changed", "Fayitas matched the speaker's sounds")["ok"] is True
+    entry = workbench.ledger.to_dict()["words"][0]
+    assert entry["tried"] == [["Fayitas"]] and entry["used"]["spelling"] == "Fayitas" and entry["note"]["decision"] == "changed"
+    assert any(row["where"] == "listed by list_foreign_words" for row in entry["shown"]) or entry["shown"] == []
+    path = workbench.write_pronunciation_ledger(tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8"))["words"][0]["word"] == "Fighters"
+    assert workbench.ledger_summary()["used"] == 1 and workbench.ledger_unexamined() == []
