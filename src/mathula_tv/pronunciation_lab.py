@@ -152,6 +152,37 @@ def written_prefix(word: str) -> str:
     return found.group(0) if found else ""
 
 
+def _token(text: Any) -> str:
+    return re.sub(r"[^a-z0-9']", "", str(text).casefold())
+
+
+def restore_words(words: Sequence[Mapping[str, Any]], corrections: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The recogniser's timed words with the transcript restorer's word-for-word corrections applied ("patient fund" -> "pension fund", "SASA" -> "SASSA",
+    "Leopard creed" -> "Leopard Creek"), so a word the recogniser misheard is still found in the audio at the time it was said.  A correction that
+    changes the number of words has no word-to-word match and is left as heard; the original text stays in ``heard_as``."""
+    from difflib import SequenceMatcher
+
+    out = [dict(w) for w in words]
+    tokens = [_token(w.get("text")) for w in out]
+    cursor = 0
+    for correction in corrections:
+        original, corrected = str(correction.get("original_text") or "").split(), str(correction.get("corrected_text") or "").split()
+        wanted = [_token(t) for t in original]
+        if not wanted:
+            continue
+        start = next((i for i in list(range(cursor, len(tokens) - len(wanted) + 1)) + list(range(0, min(cursor, len(tokens) - len(wanted) + 1)))
+                      if tokens[i:i + len(wanted)] == wanted), -1)
+        if start < 0:
+            continue
+        cursor = start + len(wanted)
+        for tag, a1, a2, b1, b2 in SequenceMatcher(None, wanted, [_token(t) for t in corrected], autojunk=False).get_opcodes():
+            if tag == "replace" and a2 - a1 == b2 - b1:
+                for n in range(a2 - a1):
+                    out[start + a1 + n]["heard_as"] = out[start + a1 + n].get("text")
+                    out[start + a1 + n]["text"] = corrected[b1 + n].strip(".,!?;:\"")
+    return out
+
+
 def without_prefix(spelling: str, prefix: str) -> str:
     """``spelling`` without the Zulu prefix it starts with: the prefix is grammar, not the English word, so it is not what an English listener
     or the speaker's sounds are compared with.  A spelling that does not start with the prefix (the agent dropped it) is judged as it is."""
@@ -412,7 +443,14 @@ class PronunciationLab:
     def transcript(self) -> list[Mapping[str, Any]]:
         if self._transcript is None:
             path = self.job_root / "analysis" / "azure_diarization.json"
-            self._transcript = json.loads(path.read_text(encoding="utf-8")).get("words") or [] if path.is_file() else []
+            words = json.loads(path.read_text(encoding="utf-8")).get("words") or [] if path.is_file() else []
+            restored = self.job_root / "native_dub" / "pass1_restored_transcript.json"
+            try:
+                corrections = json.loads(restored.read_text(encoding="utf-8")).get("corrections") or [] if restored.is_file() else []
+                words = restore_words(words, corrections)
+            except (OSError, ValueError):                       # the restorer's file is an extra; without it the words are as heard
+                pass
+            self._transcript = words
         return self._transcript
 
     @property
@@ -627,7 +665,15 @@ class PronunciationLab:
         except Exception:                                       # a measuring failure leaves out the extra information, never the try
             return []
 
+    def zulu_hears(self, spelling: str) -> str | None:
+        """What a Zulu listener (Azure speech-to-text, zu-ZA) writes for the voice saying ``spelling`` alone; None when it cannot be asked.  For a word
+        made in Zulu: a listener that writes it back has understood it."""
+        return self._hears(spelling, "zu-ZA")
+
     def english_hears(self, spelling: str) -> str | None:
+        return self._hears(spelling, "en-ZA")
+
+    def _hears(self, spelling: str, locale: str) -> str | None:
         """What an English listener (Azure speech-to-text, en-ZA) writes for the voice saying ``spelling`` alone; None when it cannot be asked.
 
         The recogniser is trained on real speech and knows which sound sequences are words, so it hears what a person would, where the phone
@@ -643,10 +689,10 @@ class PronunciationLab:
                 self._stt = create_speech_backend(load_settings())
             from .azure_stt import normalize
 
-            clip = self.work_dir / "english_ear" / f"{abs(hash(spelling))}.wav"
+            clip = self.work_dir / f"{locale}_ear" / f"{abs(hash(spelling))}.wav"
             clip.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(audio), "-ac", "1", "-ar", "16000", str(clip)], check=True)
-            words = normalize(self._stt.transcribe(clip, locale="en-ZA")).get("words") or []
+            words = normalize(self._stt.transcribe(clip, locale=locale)).get("words") or []
             return " ".join(str(w.get("text")) for w in words).strip()
         except Exception as exc:                          # an empty transcription is an answer ("nothing"); a real failure is "could not ask"
             return "" if "empty transcription" in str(exc).lower() else None
@@ -745,6 +791,8 @@ class PronunciationLab:
         """A Zulu word made for an English word with none, the way Zulu adapts loans (see ``loan_adapt``), from the speaker's own sounds: the forms
         are spoken by the Zulu voice and measured.  Counts as one try.  Nothing here is scored against the speaker's English sounds: a loanword
         differs from them by design (isayensi is not ``s aɪ ə n s``), so those figures are shown for information only."""
+        from difflib import SequenceMatcher
+
         from . import loan_adapt
 
         source = self.source(word)
@@ -761,10 +809,11 @@ class PronunciationLab:
             if tuple(heard) in seen:
                 continue                                                         # another way of writing sounds already shown
             seen.add(tuple(heard))
-            listener = self.english_hears(candidate["stem"])
+            listener = self.zulu_hears(candidate["stem"])
             rows.append({"zulu_word": candidate["stem"], "with_i": candidate["with_i"], "syllables": candidate["syllables"],
                          "changes_from_the_most_typical": candidate["choices"], "voice_sounds": " ".join(heard),
-                         "an_english_listener_writes": listener, "closeness_to_the_speakers_english": align(source["phones"], heard)["closeness"]})
+                         "a_zulu_listener_writes": listener, "zulu_listener_similarity": None if listener is None else round(SequenceMatcher(None, _token(listener), _token(candidate["stem"])).ratio(), 2),
+                         "closeness_to_the_speakers_english": align(source["phones"], heard)["closeness"]})
             self._created.setdefault(word, set()).add(candidate["stem"])
             if len(rows) >= LOAN_SHOWN:
                 break

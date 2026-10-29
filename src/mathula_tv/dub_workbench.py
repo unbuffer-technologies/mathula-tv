@@ -484,8 +484,13 @@ class Workbench:
         from .created_loanwords import path_for, remember
 
         lab, episode = self._lab(), self._episode()
-        if zulu_word not in lab._created.get(word, set()):
-            raise ValueError(f"create {zulu_word!r} for {word!r} with create_loanword before using it")
+        made = lab._created.get(word, set())
+        if zulu_word not in made:
+            # the form with its noun prefix (iphurovideni, isayensi) is the word made (phurovideni, sayensi): the prefix is the sentence's
+            stem = next((m for m in made if zulu_word.casefold().endswith(m.casefold()) and 0 < len(zulu_word) - len(m) <= 4), None)
+            if stem is None:
+                raise ValueError(f"create {zulu_word!r} for {word!r} with create_loanword before using it")
+            zulu_word = stem
         entry = self.store.load_corpus()["clips"][episode["clip_id"]]
         remember(path_for(Path(self.store.root).parent), word, zulu_word, job_id=str(entry["job_id"]),
                  note=f"created from the speaker's sounds {' '.join(lab.source(word)['phones'])}")

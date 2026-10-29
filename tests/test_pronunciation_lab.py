@@ -737,13 +737,14 @@ def test_a_zulu_word_is_created_for_an_english_word_from_the_speakers_sounds_spo
         def voice_reading(self, spelling):
             return ["b", "a", "s", "i"] if "bh" in spelling else ["p", "a", "s", "i"]
 
-        def english_hears(self, spelling):
-            return "Bus."
+        def zulu_hears(self, spelling):
+            return "Bhasi." if spelling == "bhasi" else ""
 
     lab_ = Loan({})
     out = lab_.create_loanword("bus")
     first = out["zulu_words"][0]
-    assert first["zulu_word"] == "bhasi" and first["with_i"] == "ibhasi" and first["an_english_listener_writes"] == "Bus."
+    assert first["zulu_word"] == "bhasi" and first["with_i"] == "ibhasi"
+    assert first["a_zulu_listener_writes"] == "Bhasi." and first["zulu_listener_similarity"] == 1.0 and out["zulu_words"][1]["zulu_listener_similarity"] == 0.0
     assert len({row["voice_sounds"] for row in out["zulu_words"]}) == len(out["zulu_words"])         # different sounds, not the same idea twice
     assert lab_.tries_per_word["bus"] == 1 and out["tries_left_for_word"] == MAX_TRIES_PER_WORD - 1 and "use_loanword" in out["next"]
     assert "bhasi" in lab_._created["bus"]
@@ -766,6 +767,20 @@ def test_a_chosen_loanword_is_remembered_for_later_clips_but_only_if_it_was_crea
     with pytest.raises(ValueError, match="create 'bhasi'"):
         workbench.use_loanword("bus", "bhasi")
     workbench.create_loanword("bus")
+    prefixed = workbench.use_loanword("bus", "ibhasi")                                   # the form with its noun prefix is the word made
+    assert prefixed["zulu_word"] == "bhasi"
     out = workbench.use_loanword("bus", "bhasi")
     assert out["ok"] and "needs no respelling" in out["note"]
     assert zulu_for(path_for(tmp_path), "Bus") == "bhasi" and zulu_for(path_for(tmp_path), "train") is None
+
+
+def test_the_recognisers_words_take_the_restorers_word_for_word_corrections_and_keep_the_timing():
+    heard = [{"text": t, "start": float(i)} for i, t in enumerate(
+        ["Must", "have", "provident", "fund", "Must", "have", "patient", "fund.", "near", "the", "Leopard", "creed", "today"])]
+    out = lab.restore_words(heard, [
+        {"original_text": "Must have patient fund.", "corrected_text": "Must have pension fund."},
+        {"original_text": "near the Leopard creed today", "corrected_text": "near the Leopard Creek today"},
+        {"original_text": "Must have provident", "corrected_text": "Must really have provident"}])           # a different number of words: left as heard
+    assert [w["text"] for w in out] == ["Must", "have", "provident", "fund", "Must", "have", "pension", "fund.", "near", "the", "Leopard", "Creek", "today"]
+    assert out[6]["heard_as"] == "patient" and out[6]["start"] == 6.0 and "heard_as" not in out[0]
+    assert lab.restore_words(heard, [{"original_text": "never said this", "corrected_text": "x"}]) == heard
