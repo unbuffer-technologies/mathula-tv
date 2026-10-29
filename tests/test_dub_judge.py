@@ -241,3 +241,9 @@ def test_the_reading_of_the_zulu_gives_the_everyday_zulu_word_for_a_kept_english
     found = {w["english"]: w for w in foreign_words(client, [text], {})}
     assert found["science"]["zulu"] == "isayensi" and found["medical"]["zulu"] == ""        # no everyday word: empty
     assert found["Malema"]["zulu"] == ""                                                       # a name never has one, whatever the model says
+
+
+def test_the_foreign_word_prompt_treats_titles_numbered_labels_and_dates_as_names_not_loanword_candidates():
+    from mathula_tv.dub_judge import FOREIGN_PROMPT
+
+    assert "Fighters" in FOREIGN_PROMPT and "Ward 11" in FOREIGN_PROMPT and "November" in FOREIGN_PROMPT and "dates stay English by design" in FOREIGN_PROMPT

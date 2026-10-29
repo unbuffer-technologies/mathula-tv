@@ -99,6 +99,23 @@ def ratchet_regressions(locked: set[str], status: dict[str, dict[str, Any]]) -> 
     ]
 
 
+# How much Zulu fills a source window at a voice's natural speed: characters (spaces included, pauses and ~markers excluded) per second of
+# window.  Measured on the finished, accepted dubs of one 25-unit clip from three runs (12.4, 12.5, 12.4; per unit 8 to 15: figures and
+# English words run longer).  Known for the voice measured only; a voice without an entry gets no guide.
+CHARS_PER_SECOND = {"zu-ZA-ThembaNeural": 12.4}
+
+
+def length_guide(segments: list[dict[str, Any]], voices: dict[str, Any]) -> dict[str, int]:
+    """segment_id -> the Zulu length (characters, to the nearest 5) that fills the segment's window at its speaker's voice's natural speed."""
+    guide: dict[str, int] = {}
+    for s in segments:
+        rate = CHARS_PER_SECOND.get(str((voices.get(s.get("speaker_id")) or {}).get("selected_voice") or ""))
+        seconds = (int(s["end_ms"]) - int(s["start_ms"])) / 1000
+        if rate and seconds > 0:
+            guide[str(s["segment_id"])] = max(5, int(round(seconds * rate / 5)) * 5)
+    return guide
+
+
 class BudgetExhausted(RuntimeError):
     """Raised when the agent asks for more measurements than its episode budget allows."""
 
@@ -234,11 +251,13 @@ class Workbench:
         previous_path = native / "previous_glossary.json"
         self.glossary_changes = (glossary_changes(read_json(previous_path), glossary_doc)
                                  if previous_path.is_file() else [])
+        guide = length_guide(list(pass1["segments"]), self.voices)
         opened = {
             "clip_id": clip_id,
             "segments": [
                 {"segment_id": s["segment_id"], "speaker_id": s.get("speaker_id"), "start_ms": s["start_ms"],
                  "end_ms": s["end_ms"], "english": s.get("restored_text") or s.get("source_text"),
+                 **({"fits_about_chars": guide[str(s["segment_id"])]} if str(s["segment_id"]) in guide else {}),
                  **({"yours": s["segment_id"] in mine} if mine is not None else {})}
                 for s in pass1["segments"]
             ],
@@ -249,6 +268,12 @@ class Workbench:
             # Measurements use each speaker's assigned voice, the one the renderer will use.
             "voices": {sid: v.get("selected_voice") for sid, v in self.voices.items()},
         }
+        if guide:
+            opened["length_guide"] = (
+                "fits_about_chars is the Zulu length (characters, spaces included, pauses and ~markers not counted) that fills a segment's window at "
+                "this voice's natural speed, about 12 characters per second. Dubs that fitted landed within roughly 20% of it; first drafts that "
+                "retold compactly landed about 30% short, which then took most of the run to close unit by unit. Draft to this length from the start, "
+                "with what the speaker said (padding with additions fails the restatement and fabrication gates).")
         if mine is not None:
             opened["your_scope"] = (
                 "You dub ONLY the segments marked yours:true (one speaker turn). The rest of the clip is "

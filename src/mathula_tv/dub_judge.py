@@ -56,8 +56,9 @@ wrong unless someone checks them. For each item list every English (or other non
 whatever form it has: bare ("medical aid"), with a hyphen prefix ("ne-medical"), or with a Zulu prefix written straight onto it
 ("weScience", "iScience", "NeTechnology", "MaFighter"). Give "written" exactly as it appears in the text (the whole token) and
 "english" as the bare English word, and "kind": "word" for an ordinary English word ("medical", "science", "benefit") or "name" for
-the name of a person, place, party or organisation, or an acronym ("Malema", "Nkomazi", "EFF", "Leopard Creek"): names are handled
-elsewhere, from the speaker's audio, and an English listener cannot judge a South African name. Do not list ordinary isiZulu words, nor
+the name of a person, place, party or organisation, or an acronym ("Malema", "Nkomazi", "EFF", "Leopard Creek"), a title or form of
+address ("Fighters", "Commander"), a numbered label ("Ward 11"), or a month, weekday or date ("November", "Monday"): names are handled
+elsewhere, from the speaker's audio, and an English listener cannot judge a South African name; dates stay English by design. Do not list ordinary isiZulu words, nor
 English words that are fully adapted into Zulu spelling ("isikole", "ibhasi"), nor numbers.
 For an ordinary English word (kind "word") also give "zulu": the word everyday isiZulu speakers use for it, if there is one, a native word
 or an established loanword ("science" -> "isayensi", "technology" -> "ubuchwepheshe", "billion" -> "ibhiliyoni", "bus" -> "ibhasi"), written

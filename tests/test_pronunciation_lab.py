@@ -784,3 +784,13 @@ def test_the_recognisers_words_take_the_restorers_word_for_word_corrections_and_
     assert [w["text"] for w in out] == ["Must", "have", "provident", "fund", "Must", "have", "pension", "fund.", "near", "the", "Leopard", "Creek", "today"]
     assert out[6]["heard_as"] == "patient" and out[6]["start"] == 6.0 and "heard_as" not in out[0]
     assert lab.restore_words(heard, [{"original_text": "never said this", "corrected_text": "x"}]) == heard
+
+
+def test_the_length_guide_gives_each_segment_the_zulu_length_that_fills_its_window_for_a_voice_it_knows():
+    from mathula_tv.dub_workbench import length_guide
+
+    segments = [{"segment_id": "s1", "speaker_id": "A", "start_ms": 0, "end_ms": 10000},
+                {"segment_id": "s2", "speaker_id": "B", "start_ms": 10000, "end_ms": 12000},
+                {"segment_id": "s3", "speaker_id": "A", "start_ms": 12000, "end_ms": 12000}]
+    voices = {"A": {"selected_voice": "zu-ZA-ThembaNeural"}, "B": {"selected_voice": "zu-ZA-SomeOtherNeural"}}
+    assert length_guide(segments, voices) == {"s1": 125}                         # 10 s x 12.4 = 124 -> 125; unknown voice and empty window: no guide

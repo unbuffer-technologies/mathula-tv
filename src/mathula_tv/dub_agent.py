@@ -63,6 +63,9 @@ You work through tools and decide your own method. You are scored on:
    speaker turn of several consecutive units it can spread a larger shortfall over the real gaps between
    them (each gap widened by at most 1.5 s; nothing if the units are back to back). That is a fallback,
    not a goal: a viewer hears padding as a pause, so prefer wording that fills the time.
+   Length guide: open_clip gives each segment fits_about_chars, the Zulu length that fills its window at this voice's natural speed (about 12
+   characters per second). Write your first draft to that length, with what the speaker said: a compact first draft has landed 30% short and
+   cost most of the run to close unit by unit.
 
    Figures. Write numbers and amounts as digits ("u-4,500", "abantu abangu-500"). They are spoken in native
    isiZulu (izinkulungwane ezine namakhulu amahlanu zamaRandi), which takes longer than English. Dates and
