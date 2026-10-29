@@ -847,3 +847,24 @@ def test_the_workbench_records_what_the_agent_was_shown_and_did_in_the_ledger_an
     path = workbench.write_pronunciation_ledger(tmp_path)
     assert json.loads(path.read_text(encoding="utf-8"))["words"][0]["word"] == "Fighters"
     assert workbench.ledger_summary()["used"] == 1 and workbench.ledger_unexamined() == []
+
+
+def test_a_reading_that_drops_the_speakers_final_consonant_falls_below_the_good_enough_line():
+    class Ends(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["f", "aɪ", "t", "a", "s"], "occurrences": 2, "each_occurrence": ["f aɪ t a s", "f aɪ t t a s"]}
+
+    fake = Ends({"MaFighter": ["f", "aɪ", "t", "a"], "Fighters": ["f", "aɪ", "t", "a", "s"]})
+    dropped = fake.try_spellings("Fighters", ["MaFighter"])["results"][0]
+    kept = fake.try_spellings("Fighters", ["Fighters"])["results"][0]
+    assert dropped["closeness"] < lab.GOOD_ENOUGH and "ends without the final s" in dropped["differences"][0]
+    assert kept["closeness"] == 1.0 and kept["differences"] == []
+
+
+def test_the_workbench_lists_noun_prefixed_english_words_but_not_particles_or_words_with_a_zulu_word(tmp_path):
+    workbench, _ = make_workbench(tmp_path, {})
+    workbench._foreign_candidates = lambda: {"words": [
+        {"word": "MaFighter", "speaker_says": "Fighters"}, {"word": "ne-medical", "speaker_says": "medical"}, {"word": "eLeopard", "speaker_says": "Leopard"},
+        {"word": "weScience", "speaker_says": "science", "zulu_word": "isayensi"}, {"word": "amaBenefit", "speaker_says": "benefits", "zulu_word": "inzuzo"},
+        {"word": "iSkhokho", "speaker_says": "Skhokho"}]}
+    assert [w["written"] for w in workbench.glued_class_prefix_words()] == ["MaFighter", "iSkhokho"]

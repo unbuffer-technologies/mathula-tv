@@ -729,6 +729,11 @@ class PronunciationLab:
         lost_end = final_consonant_lost(source.get("each_occurrence") or [], heard)
         if lost_end:
             record["differences"] = [lost_end, *record["differences"]][:6]
+            # align lets the speaker's last sound go for _EDGE_COST because it is cut from running speech; every decode agreeing on it makes it real, so
+            # it counts in full: a reading that drops it can no longer sit above the "good enough" line with the loss named beside it
+            size = max(len(source["phones"]), len(heard), 1)
+            record["distance"] = round(record["distance"] + (1.0 - _EDGE_COST) / size, 3)
+            record["closeness"] = round(max(0.0, 1.0 - record["distance"]), 3)
         notes = self.sound_differences(source, judged)
         if notes:
             record["how_the_sounds_are_made_differently"] = notes

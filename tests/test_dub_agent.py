@@ -848,3 +848,25 @@ def test_an_agent_that_finishes_with_a_word_shown_wrong_and_untouched_is_asked_f
     asked = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "put in front of you with something named wrong" in str(m.get("content"))]
     assert len(asked) == 1 and "MaFighter" in asked[0] and workbench.noted == [("MaFighter", "kept_as_is", "the final s is soft in the speaker")]
     assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5
+
+
+def test_a_noun_prefix_glued_on_a_word_the_speaker_says_as_it_is_is_named_in_the_early_note_and_the_reminder(tmp_path):
+    from mathula_tv import dub_agent
+
+    class Glued(StubWorkbench):
+        def glued_class_prefix_words(self):
+            return [{"written": "MaFighter", "speaker_says": "Fighters"}]
+
+    note = dub_agent.glued_prefix_note(Glued(tmp_path))
+    assert "MaFighter (the speaker says 'Fighters')" in note and "without the prefix" in note and "ne- or ye-" in note
+    assert dub_agent.glued_prefix_note(StubWorkbench(tmp_path)) == ""
+    assert "MaFighter" in dub_agent.pronunciation_reminder_text(Glued(tmp_path), [])
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),
+        _reply(content="done"),
+    ])
+    run_agent(client, Glued(tmp_path), clip_id="c1", run_id="r")
+    named = [str(m.get("content")) for m in client.seen[2] if m["role"] == "user" and "first accepted submission" in str(m.get("content"))]
+    assert len(named) == 1 and "MaFighter" in named[0]

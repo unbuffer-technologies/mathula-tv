@@ -759,11 +759,27 @@ def loanwords_note(workbench: Any) -> str:
     return note
 
 
+def glued_prefix_note(workbench: Any) -> str:
+    """English words the Zulu text carries with a noun-class prefix glued on although the speaker says them as they are: the text should carry the
+    word as spoken (the prompt already says so), and a prefix makes it a different word that the lab cannot judge against the speaker's."""
+    ask = getattr(workbench, "glued_class_prefix_words", None)
+    try:
+        found = ask() if callable(ask) else []
+    except Exception:
+        found = []
+    if not found:
+        return ""
+    return (" A Zulu noun prefix is glued straight onto an English word the speaker says as it is: "
+            + "; ".join(f"{item['written']} (the speaker says {item['speaker_says']!r})" for item in found[:8])
+            + ". Write the word as the speaker says it, without the prefix (a hyphenated particle such as ne- or ye- before it is ordinary Zulu), change it "
+              "where it stands, then re-measure and resubmit the units you changed.")
+
+
 def pronunciation_reminder_text(workbench: Any, words: list[str], *, left: int | None = None) -> str:
     """The one pronunciation reminder: the words with no checked reading (with the lab's measurement of each as written) and the readings
     already saved for words of this text (as they measure now).  Empty when there is nothing of either."""
     saved = saved_readings_note(workbench)
-    loan = loanwords_note(workbench)
+    loan = loanwords_note(workbench) + glued_prefix_note(workbench)
     if not words and not saved and not loan:
         return ""
     if words:
@@ -874,7 +890,7 @@ def _run_agent(
             # The Zulu draft exists now, so the English words it keeps can be named while the agent is still fitting units: at the end a swap means
             # fitting again, and prod-41 kept "provident fund", "pension fund" and "medical aid" for that reason.
             loanwords_noted = True
-            early = loanwords_note(workbench)
+            early = loanwords_note(workbench) + glued_prefix_note(workbench)
             if early:
                 early_text = "Your first accepted submission keeps English words that may have a Zulu word." + early
                 messages.append({"role": "user", "content": early_text})

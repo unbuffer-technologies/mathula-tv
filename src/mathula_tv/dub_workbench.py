@@ -485,6 +485,19 @@ class Workbench:
         path.write_text(json.dumps(self.ledger.to_dict(), indent=1, ensure_ascii=False), encoding="utf-8")
         return path
 
+    def glued_class_prefix_words(self) -> list[dict[str, str]]:
+        """English words (with no everyday Zulu word) that the Zulu text carries with a noun-class prefix glued straight on ("MaFighter") although the speaker
+        says the English word as it is ("Fighters").  A hyphenated particle (ne-, ye-, ku-) or a locative e- is ordinary Zulu grammar and is not listed."""
+        import re
+
+        try:
+            found = self._foreign_candidates().get("words", [])
+        except Exception:
+            return []
+        prefix = re.compile(r"^(?i:ma|ama|i|isi|izi|u|o|aba|abe|imi|izin)(?=[A-Z][a-z])")      # "MaFighter" at the start of a sentence or "iSkhokho"
+        return [{"written": item["word"], "speaker_says": item["speaker_says"]} for item in found
+                if not item.get("zulu_word") and prefix.match(str(item["word"]))]
+
     def list_foreign_words(self) -> dict[str, Any]:
         """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
         self.foreign_words_listed = True
