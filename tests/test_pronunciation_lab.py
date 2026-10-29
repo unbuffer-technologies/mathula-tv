@@ -861,25 +861,14 @@ def test_a_reading_that_drops_the_speakers_final_consonant_falls_below_the_good_
     assert kept["closeness"] == 1.0 and kept["differences"] == []
 
 
-def test_the_workbench_lists_noun_prefixed_english_words_but_not_particles_or_words_with_a_zulu_word(tmp_path):
-    workbench, _ = make_workbench(tmp_path, {})
-    workbench._foreign_candidates = lambda **kw: {"words": [
-        {"word": "MaFighter", "speaker_says": "Fighters"}, {"word": "ne-medical", "speaker_says": "medical"}, {"word": "eLeopard", "speaker_says": "Leopard"},
-        {"word": "weScience", "speaker_says": "science", "zulu_word": "isayensi"}, {"word": "amaBenefit", "speaker_says": "benefits", "zulu_word": "inzuzo"},
-        {"word": "iSkhokho", "speaker_says": "Skhokho"}]}
-    assert [w["written"] for w in workbench.glued_class_prefix_words()] == ["MaFighter", "iSkhokho"]
-
-
-def test_a_noun_prefixed_word_is_listed_even_when_a_reading_is_already_saved_for_it(tmp_path):
-    from mathula_tv.pronunciation_memory import memory_path, remember
+def test_noun_prefixed_english_words_are_found_in_the_text_but_not_particles_personal_names_or_words_with_a_zulu_word(tmp_path):
+    import json
+    from pathlib import Path
 
     workbench, _ = make_workbench(tmp_path, {})
-    remember(memory_path(tmp_path), "MaFighter", "MaFighter", source="agent", voice="zu-ZA-ThembaNeural", job_id="job-a")
-    seen = []
-
-    def candidates(*, with_known=False):
-        seen.append(with_known)
-        return {"words": [{"word": "MaFighter", "speaker_says": "Fighters"}]}
-
-    workbench._foreign_candidates = candidates
-    assert [w["written"] for w in workbench.glued_class_prefix_words()] == ["MaFighter"] and seen == [True]
+    Path(workbench._episode()["dir"], "submission.json").write_text(json.dumps({"items": [
+        {"item_id": "u1", "zulu_text": "MaFighter, ne-medical aid, eLeopard weScience uMalema iSkhokho amaBenefit."}]}), encoding="utf-8")
+    workbench._pronunciation_lab._transcript = WORDS + [{"text": "Leopard"}, {"text": "science"}, {"text": "Malema"}, {"text": "Skhokho"}, {"text": "benefits"}]
+    workbench.loanwords = lambda: [{"written": "amaBenefit", "english": "benefit", "zulu": "inzuzo"}]
+    found = workbench.glued_class_prefix_words()
+    assert [(w["written"], w["speaker_says"]) for w in found] == [("MaFighter", "Fighters"), ("iSkhokho", "Skhokho")]

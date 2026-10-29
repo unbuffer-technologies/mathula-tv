@@ -486,17 +486,32 @@ class Workbench:
         return path
 
     def glued_class_prefix_words(self) -> list[dict[str, str]]:
-        """English words (with no everyday Zulu word) that the Zulu text carries with a noun-class prefix glued straight on ("MaFighter") although the speaker
-        says the English word as it is ("Fighters").  A hyphenated particle (ne-, ye-, ku-) or a locative e- is ordinary Zulu grammar and is not listed."""
+        """English words that the Zulu text carries with a noun-class prefix glued straight on ("MaFighter") although the speaker says the English
+        word as it is ("Fighters").  Found in the text itself: the candidate list for the lab leaves out names, the model reads "Fighters" as a form of
+        address, and words that already have a saved reading, and MaFighter was all three.  A hyphenated particle (ne-, ye-), a locative e-, the u- / o- of
+        a personal name (uMalema) and a word that has an everyday Zulu word (the loanword note covers it) are ordinary Zulu and are not listed."""
         import re
 
+        from .pronunciation_lab import _stem
+
         try:
-            found = self._foreign_candidates(with_known=True).get("words", [])      # a word that already has a saved reading is still written with the prefix
+            submission = Path(self._episode()["dir"]) / "submission.json"
+            texts = [str(i.get("zulu_text") or "") for i in read_json(submission).get("items", [])] if submission.is_file() else []
+            spoken = {_stem(str(w.get("text") or "")): str(w.get("text")) for w in self._lab().transcript}
         except Exception:
             return []
-        prefix = re.compile(r"^(?i:ma|ama|i|isi|izi|u|o|aba|abe|imi|izin)(?=[A-Z][a-z])")      # "MaFighter" at the start of a sentence or "iSkhokho"
-        return [{"written": item["word"], "speaker_says": item["speaker_says"]} for item in found
-                if not item.get("zulu_word") and prefix.match(str(item["word"]))]
+        prefix = re.compile(r"(?<![A-Za-z])((?i:ma|ama|isi|izi|aba|abe|imi|izin|i))(?=[A-Z][a-z]{3,})([A-Za-z]+)")
+        found: dict[str, dict[str, str]] = {}
+        for text in texts:
+            for match in prefix.finditer(text):
+                stem = _stem(match.group(2))
+                if len(stem) >= 4 and stem in spoken and match.group(0) not in found:
+                    found[match.group(0)] = {"written": match.group(0), "speaker_says": re.sub(r"[^A-Za-z']", "", spoken[stem]), "_stem": stem}
+        try:
+            has_zulu = {_stem(str(item.get("english") or "")) for item in self.loanwords() if item.get("zulu")}
+        except Exception:
+            has_zulu = set()
+        return [{k: v for k, v in item.items() if k != "_stem"} for item in found.values() if item["_stem"] not in has_zulu]
 
     def list_foreign_words(self) -> dict[str, Any]:
         """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
