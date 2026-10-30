@@ -733,6 +733,11 @@ class Workbench:
         prefixed = find_prefixed_english(zulu_text, source_text)
         if prefixed:
             problems.append({"gate": "english_with_class_prefix", "evidence": prefixed})
+        from .english_prefix import find_soft_prefixed_english
+
+        soft_prefixed = find_soft_prefixed_english(zulu_text, source_text)
+        if soft_prefixed:
+            problems.append({"flag": "english_word_with_noun_prefix", "evidence": soft_prefixed})
         doubled = find_unsupported_doubling(zulu_text, source_text)
         if doubled:
             problems.append({"flag": "unsupported_doubling", "evidence": doubled})

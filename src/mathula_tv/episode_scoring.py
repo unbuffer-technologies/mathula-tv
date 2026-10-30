@@ -340,6 +340,10 @@ def _score_group(
         flags.append("english_leakage")
     if find_unsupported_doubling(spoken, source_text):
         flags.append("unsupported_doubling")
+    from .english_prefix import find_soft_prefixed_english
+
+    if find_soft_prefixed_english(spoken, source_text):          # an attested noun prefix on an English word the speaker says as it is: a flag, not a failure
+        flags.append("english_word_with_noun_prefix")
     if soft_restated:
         flags.append("possible_restatement")
 
