@@ -277,7 +277,7 @@ TOOL_SPECS = [
            "why": {"type": "string", "description": "your reason, in a few words"}}, ["word", "decision", "why"]),
     _tool("attested_zulu", "What real written isiZulu does with an English word, from 233,691 aligned sentence pairs of translated text (2.9 million Zulu words) and the "
           "NCHLT lexicon: the Zulu forms that real text pairs with the word (shared sentences, score), how often the English word itself stays English in the "
-          "Zulu sentence, and, for forms you give, how often each has really been written (corpus_count, in_lexicon). Free: no try, no model. Use it before "
+          "Zulu sentence, and, for forms you give, how often each has really been written (corpus_count, in_lexicon; a phrase or a form with a hyphenated particle is counted exactly and word by word). Free: no try, no model. Use it before "
           "you adapt or create a word: a form that real text never writes (corpus_count 0) is not to be invented.",
           {"word": {"type": "string", "description": "the English word, e.g. pension"},
            "zulu_forms": {"type": "array", "items": {"type": "string"}, "description": "forms you are thinking of writing, e.g. [\"impesheni\"]"}}, ["word"]),

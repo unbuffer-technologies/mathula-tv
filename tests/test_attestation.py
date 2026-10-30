@@ -53,3 +53,18 @@ def test_a_prefixed_place_and_an_everyday_word_are_ordinary_zulu_but_a_rare_capi
     assert a.written_count("Imali") == 3 and a.written_count("imali") >= 130                              # a capital that starts a line proves nothing
     assert a.ordinary_zulu("Imali")                                                                       # an everyday word capitalised by its place in the sentence
     assert not a.ordinary_zulu("Tshela") and not a.ordinary_zulu("Fighters")                             # a name real text does not write that way
+
+
+def test_a_phrase_and_a_form_with_a_hyphenated_particle_are_counted_exactly_and_word_by_word():
+    zulu = (["Wathola isikhwama sempesheni namuhla ."] * 4 + ["Sebenzisa isikhwama futhi ."] * 3 + ["Ibhalwe ngu-pension kanye se-provident ."] * 2
+            + ["Sithenga sempesheni ."] * 2)
+    a = Attestation(zulu, ["x ."] * len(zulu), ["umhlomulo"])
+    phrase = a.status("isikhwama sempesheni")
+    assert phrase["corpus_count"] == 4 and [w["corpus_count"] for w in phrase["words"]] == [7, 6] and phrase["all_words_attested"] is True
+    assert a.attested("isikhwama sempesheni") and a.attested("Isikhwama  Sempesheni")                    # spacing and capitals do not matter
+    new = a.status("isikhwama sepension")                                                                 # a new combination: the parts are real, the phrase is not
+    assert new["corpus_count"] == 0 and new["all_words_attested"] is False and a.attested("isikhwama sepension") is False
+    particle = a.status("se-provident")
+    assert particle["corpus_count"] == 2 and [w["token"] for w in particle["words"]] == ["se", "provident"] and a.attested("se-provident")
+    assert a.status("sempesheni")["corpus_count"] == 6 and "words" not in a.status("sempesheni")          # a single form is as before
+    assert a.attested("umhlomulo") and not a.attested("")

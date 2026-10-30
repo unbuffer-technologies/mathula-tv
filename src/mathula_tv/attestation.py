@@ -57,6 +57,7 @@ class Attestation:
             position += len(line) + 1
         self.lexicon = {entry.lower() for entry in lexicon if entry}
         self._zulu_text = "\n".join(self.zulu_lines)
+        self._zulu_lower = self._zulu_text.lower()
         self._zulu_line_starts: set[int] = set()
         position = 0
         for line in self.zulu_lines:
@@ -76,14 +77,25 @@ class Attestation:
         return cls(zulu[:size], english[:size], entries)
 
     # -- a Zulu form -----------------------------------------------------------------
-    def status(self, token: str) -> dict[str, Any]:
-        """How often real text writes this exact form, and whether the lexicon knows it."""
-        key = token.lower()
-        return {"token": token, "corpus_count": self.frequency.get(key, 0), "in_lexicon": key in self.lexicon}
+    def status(self, form: str) -> dict[str, Any]:
+        """How often real text writes this exact form, and whether the lexicon knows it.  A form of several words ("isikhwama sempesheni") or with a
+        hyphenated particle ("se-provident") is counted as written, exactly, and each of its words is counted on its own."""
+        key = " ".join(form.lower().split())
+        parts = [p for p in re.split(r"[\s\-]+", key) if p]
+        if len(parts) <= 1 and "-" not in key:
+            return {"token": form, "corpus_count": self.frequency.get(key, 0), "in_lexicon": key in self.lexicon}
+        written = len(re.findall(r"(?<![a-z'])" + re.escape(key) + r"(?![a-z'])", self._zulu_lower)) if key else 0
+        words = [{"token": p, "corpus_count": self.frequency.get(p, 0), "in_lexicon": p in self.lexicon} for p in parts]
+        return {"token": form, "corpus_count": written, "in_lexicon": False, "words": words,
+                "all_words_attested": bool(words) and all(w["corpus_count"] > 0 or w["in_lexicon"] for w in words)}
 
-    def attested(self, token: str) -> bool:
-        key = token.lower()
-        return self.frequency.get(key, 0) > 0 or key in self.lexicon
+    def attested(self, form: str) -> bool:
+        """A single form is attested when real text writes it or the lexicon has it; a phrase when real text writes the phrase or every one of its
+        words is attested (the parts of a new combination are real words)."""
+        found = self.status(form)
+        if "words" in found:
+            return found["corpus_count"] > 0 or found["all_words_attested"]
+        return found["corpus_count"] > 0 or found["in_lexicon"]
 
     def written_count(self, token: str) -> int:
         """How many times real text writes exactly this form, with this capitalisation (a capital at the start of a sentence proves nothing and is not
