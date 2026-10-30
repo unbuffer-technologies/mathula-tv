@@ -490,6 +490,16 @@ class Workbench:
         path.write_text(json.dumps(self.ledger.to_dict(), indent=1, ensure_ascii=False), encoding="utf-8")
         return path
 
+    def attested_zulu(self, word: str, zulu_forms: list[str] | None = None) -> dict[str, Any]:
+        """What real written isiZulu does with an English word, and how often forms the agent is thinking of have been written (see attestation).  No try
+        is spent and no model is asked."""
+        from . import attestation
+
+        resources = attestation.load(Path(self.store.root).parent)
+        if resources is None:
+            return {"error": "the attestation resources are not installed on this machine; decide as you would without them and keep an English word as the speaker says it"}
+        return attestation.lookup(resources, word, [str(f) for f in zulu_forms or []])
+
     def glued_class_prefix_words(self) -> list[dict[str, str]]:
         """English words that the Zulu text carries with a noun-class prefix glued straight on ("MaFighter") although the speaker says the English
         word as it is ("Fighters").  Found in the text itself: the candidate list for the lab leaves out names, the model reads "Fighters" as a form of

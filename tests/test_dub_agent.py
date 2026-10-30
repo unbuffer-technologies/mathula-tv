@@ -42,6 +42,9 @@ class StubWorkbench:
     def note_pronunciation(self, word, decision, why):
         return {"ok": True}
 
+    def attested_zulu(self, word, zulu_forms=None):
+        return {"english": word, "forms": []}
+
     def use_loanword(self, word, zulu_word):
         return {"ok": True}
 
@@ -899,3 +902,33 @@ def test_the_early_note_waits_for_the_text_when_a_repair_run_is_accepted_from_it
     run_agent(client, Glued(tmp_path), clip_id="c1", run_id="r")
     assert not [m for m in client.seen[1] if "first accepted submission" in str(m.get("content"))]            # not before the text exists
     assert len([m for m in client.seen[2] if "first accepted submission" in str(m.get("content"))]) == 1
+
+
+def test_the_agent_can_ask_what_real_zulu_does_and_is_told_when_the_resources_are_missing(tmp_path):
+    from pathlib import Path
+
+    from mathula_tv import attestation, dub_agent
+    from mathula_tv.dub_workbench import Workbench
+
+    assert "attested_zulu" in [spec["function"]["name"] for spec in dub_agent.TOOL_SPECS] and "code-switch" in dub_agent.SYSTEM_PROMPT
+    note = dub_agent.loanwords_note(type("W", (), {"loanwords": lambda self: [{"written": "ne-provident", "english": "provident", "zulu": ""}]})())
+    assert "attested_zulu" in note and "code-switch" in note and "create_loanword" in note
+    work = Path(tmp_path)
+    directory = attestation.resources_dir(work)
+    (directory / "lexicon").mkdir(parents=True)
+    (directory / "autshumato.zu.txt").write_text("Ibhasi sekwephuzile .\nIbhasi iyama lapha .\nWenyuka ibhasi waya .\n", encoding="utf-8")
+    (directory / "autshumato.en.txt").write_text("The bus is late .\nThe bus stops here .\nHe took the bus .\n", encoding="utf-8")
+    (directory / "lexicon" / "nouns.txt").write_text("imali\n", encoding="utf-8")
+
+    class Bench:
+        class store:
+            root = work / "experience"
+
+        attested_zulu = Workbench.attested_zulu
+
+    answer = Bench().attested_zulu("bus", ["ibhasi", "maBus"])
+    assert answer["forms"][0]["form"] == "ibhasi" and [c["corpus_count"] for c in answer["checked_forms"]] == [3, 0]
+    attestation._cache.clear()
+    empty = Path(tmp_path) / "elsewhere"
+    Bench.store.root = empty / "experience"
+    assert "not installed" in Bench().attested_zulu("bus")["error"]

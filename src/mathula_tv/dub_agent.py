@@ -79,9 +79,13 @@ You work through tools and decide your own method. You are scored on:
    English: a Zulu voice says a Zulu word naturally, a Zulu listener hears ordinary Zulu, and the dub stops fighting the voice's rule that every
    written vowel is spoken in full. Keep an English word only for a name, a title, an acronym, or a word with no everyday Zulu word. The
    pronunciation lab below is for the names, acronyms and titles you keep.
-   When there is no everyday Zulu word for an English noun the speaker says, create one the way Zulu adapts loans: create_loanword rebuilds the
-   speaker's sounds in Zulu syllables (a vowel inserted where Zulu has no cluster and at the end, p t k b written ph th kh bh), speaks the forms,
-   and shows what each changes; write the one you choose in the text with the prefix the sentence needs, and call use_loanword to remember it.
+   When you are not sure what to do with an English word, ask what real Zulu does: attested_zulu(word, zulu_forms) shows the Zulu forms that
+   translated text pairs with it, whether the English word stays English there, and how often a form you are thinking of has been written. The ladder:
+   an attested Zulu word or loan if there is one; otherwise code-switch, which means keeping the English word as the speaker says it (same number, plural
+   -s included), with a hyphenated particle if the grammar needs one (ne-, ye-), and checking with the lab how the voice says it. Never invent a form
+   that real text does not write. Only when real text itself adapts such a word, create_loanword rebuilds the speaker's sounds in Zulu syllables (a vowel
+   inserted where Zulu has no cluster and at the end, p t k b written ph th kh bh), speaks the forms, and shows what each changes; write the one you
+   choose in the text with the prefix the sentence needs, and call use_loanword to remember it.
 
    A kind of thing is not a name: "medical aid", "pension fund", "provident fund" are common nouns, so each noun takes its everyday Zulu
    word (or one you create), even though the speaker says them in English.
@@ -271,6 +275,12 @@ TOOL_SPECS = [
           "tried; this is your side of it, so a word that sounds wrong later can be traced to what was seen and why it was left.",
           {"word": {"type": "string"}, "decision": {"type": "string", "enum": ["kept_as_is", "changed", "not_a_problem"]},
            "why": {"type": "string", "description": "your reason, in a few words"}}, ["word", "decision", "why"]),
+    _tool("attested_zulu", "What real written isiZulu does with an English word, from 233,691 aligned sentence pairs of translated text (2.9 million Zulu words) and the "
+          "NCHLT lexicon: the Zulu forms that real text pairs with the word (shared sentences, score), how often the English word itself stays English in the "
+          "Zulu sentence, and, for forms you give, how often each has really been written (corpus_count, in_lexicon). Free: no try, no model. Use it before "
+          "you adapt or create a word: a form that real text never writes (corpus_count 0) is not to be invented.",
+          {"word": {"type": "string", "description": "the English word, e.g. pension"},
+           "zulu_forms": {"type": "array", "items": {"type": "string"}, "description": "forms you are thinking of writing, e.g. [\"impesheni\"]"}}, ["word"]),
     _tool("get_submission", "The units currently accepted (all, or only unit_ids), with their text and any flags from "
           "the last score. Use it to see your own current state, e.g. after your history was trimmed.",
           {"unit_ids": {"type": "array", "items": {"type": "string"}}}, []),
@@ -545,7 +555,7 @@ def build_dispatch(
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
         "get_submission": workbench.get_submission,
     }
-    for name in ("list_foreign_words", "try_pronunciation", "suggest_spellings", "create_loanword", "use_loanword", "use_pronunciation", "note_pronunciation"):       # the pronunciation lab, where the workbench has one
+    for name in ("list_foreign_words", "try_pronunciation", "suggest_spellings", "create_loanword", "use_loanword", "use_pronunciation", "note_pronunciation", "attested_zulu"):       # the pronunciation lab, where the workbench has one
         if hasattr(workbench, name):
             tools[name] = getattr(workbench, name)
     return tools
@@ -754,8 +764,9 @@ def loanwords_note(workbench: Any) -> str:
                    "units you changed.")
     if without:
         note += (" No everyday Zulu word is known for: " + ", ".join(item["written"] for item in without[:10])
-                 + ". Create one with create_loanword (the speaker's sounds rebuilt in Zulu syllables) and remember it with use_loanword; keep English only for a "
-                   "name, an acronym or a title, and check those with the lab.")
+                 + ". Look each up with attested_zulu: use an attested form if real text has one; if none is attested, code-switch (keep the English word as the "
+                   "speaker says it, and check how the voice says it with the lab). Create a word with create_loanword (and remember it with use_loanword) only "
+                   "when real text itself adapts that word.")
     return note
 
 
