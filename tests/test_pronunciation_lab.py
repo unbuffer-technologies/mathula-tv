@@ -90,6 +90,22 @@ def test_the_number_of_tries_is_capped_per_word_and_per_clip():
     assert fake.total_tries == lab.MAX_TRIES_PER_WORD
 
 
+def test_every_word_keeps_its_guaranteed_tries_so_one_busy_word_cannot_starve_the_others():
+    fake = FakeLab({})
+    guaranteed, cap, pool = lab.GUARANTEED_TRIES_PER_WORD, lab.MAX_TRIES_PER_WORD, lab.SHARED_EXTRA_TRIES
+    assert fake.tries_left_for_word("anything") == cap and fake.shared_extra_tries_left == pool
+    busy = pool // (cap - guaranteed)                           # words that take both of their extras
+    for number in range(busy):
+        fake.tries_per_word[f"busy{number}"] = cap
+    assert fake.shared_extra_tries_left == pool - busy * (cap - guaranteed) == 1
+    assert fake.tries_left_for_word("late") == guaranteed + 1   # its 3, and the last extra
+    fake.tries_per_word["another"] = guaranteed + 1
+    assert fake.shared_extra_tries_left == 0 and fake.tries_left_for_word("late") == guaranteed      # the pool is empty, the word still has its 3
+    fake.tries_per_word["late"] = guaranteed
+    with pytest.raises(PronunciationBudgetExhausted, match="shared pool"):
+        fake._require_try("late")
+
+
 # ---- the tools on a real workbench (the audio parts of the lab are faked) -------------------------------------------------
 
 def make_workbench(tmp_path, voice_sounds):
@@ -131,7 +147,7 @@ def test_the_agent_has_the_three_pronunciation_tools_and_they_are_dispatched():
 def test_the_agent_is_pointed_at_the_english_words_its_dub_keeps(tmp_path):
     workbench, _ = make_workbench(tmp_path, {})
     found = workbench.list_foreign_words()
-    assert [w["word"] for w in found["words"]] == ["MaFighter"] and found["tries_left_in_clip"] == lab.MAX_TRIES_PER_CLIP
+    assert [w["word"] for w in found["words"]] == ["MaFighter"] and found["shared_extra_tries_left"] == lab.SHARED_EXTRA_TRIES
 
 
 def test_a_spelling_must_be_tried_before_it_is_used_and_using_it_reaches_the_lexicon_and_the_shared_memory(tmp_path):

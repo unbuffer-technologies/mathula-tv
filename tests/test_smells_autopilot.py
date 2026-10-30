@@ -52,6 +52,10 @@ def test_declined_to_submit_budget_and_ceiling_problems_are_found(tmp_path):
     assert "declined_to_submit" in _smells([nudged])
     spent = _run(tmp_path, "s", tts=598, budget=600)
     assert "budget_exhausted" in _smells([spent])
+    refused = {"t": 9, "kind": "tool", "name": "try_pronunciation", "ok": False,
+               "result": json.dumps({"error": "budget_exhausted", "detail": "pronunciation tries used: 0/5 for 'provident'"})}
+    lab_cap = [f for f in find_smells([_run(tmp_path, "l", tts=100, budget=600, records=[refused])]) if f["smell"] == "budget_exhausted"]
+    assert len(lab_cap) == 1 and "pronunciation try" in lab_cap[0]["evidence"] and "TTS measurements" not in lab_cap[0]["evidence"]
     ceiling = _run(tmp_path, "m", stop="max_turns")
     assert "ceiling_stop" in _smells([ceiling])
 

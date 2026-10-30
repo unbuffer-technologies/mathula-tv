@@ -122,18 +122,26 @@ def declined_to_submit(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         flagged, "The agent withheld work; look at what the prompt or playbook implies about when to submit.")]
 
 
+_LAB_TOOLS = ("try_pronunciation", "suggest_spellings", "create_loanword")
+
+
 def budget_exhaustion(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     findings = []
     for run in runs:
         episode = Path(run["dir"]) / "episode.json"
         budget = json.loads(episode.read_text(encoding="utf-8")).get("tts_budget") if episode.is_file() else None
         used = run.get("tts_used") or 0
-        hit = any(r["kind"] == "tool" and "budget_exhausted" in r.get("result", "") for r in _trace(run))
-        if hit or (budget and used >= 0.95 * budget):
+        refused = [r for r in _trace(run) if r["kind"] == "tool" and "budget_exhausted" in r.get("result", "")]
+        tries = [r for r in refused if r.get("name") in _LAB_TOOLS]
+        if len(tries) < len(refused) or (budget and used >= 0.95 * budget):
             findings.append(_finding(
                 "budget_exhausted", "high", f"{_label(run)} used {used} of {budget} TTS measurements",
                 [_label(run)], "The measurement budget ended the run, not the agent's judgement; raise it or make "
                                "measurements cheaper."))
+        if tries:
+            findings.append(_finding(
+                "budget_exhausted", "medium", f"{_label(run)} was refused {len(tries)} pronunciation try call(s) by the lab's cap on tries",
+                [_label(run)], "Words were refused tries that other words had spent: check how the cap is shared, not the agent's choices."))
     return findings
 
 

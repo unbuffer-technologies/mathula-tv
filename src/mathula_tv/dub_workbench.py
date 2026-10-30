@@ -576,7 +576,7 @@ class Workbench:
         return result
 
     def _foreign_candidates(self, *, with_known: bool = False) -> dict[str, Any]:
-        from .pronunciation_lab import MAX_TRIES_PER_CLIP, candidate_words
+        from .pronunciation_lab import GUARANTEED_TRIES_PER_WORD, candidate_words
         from .pronunciation_search import looks_isizulu
 
         submission = Path(self._episode()["dir"]) / "submission.json"
@@ -594,7 +594,8 @@ class Workbench:
         return {"words": found, "note": "Loanwords first: an entry with zulu_word has an everyday Zulu word; write that word in the text instead of keeping the "
                                          "English one, unless it would change what the speaker said. Check with the lab only the English words you keep. "
                                          "Never glue a Zulu prefix onto an English word the speaker says as it is.",
-                "tries_left_in_clip": MAX_TRIES_PER_CLIP - self._lab().total_tries}
+                "tries_per_word": f"every word can be tried {GUARANTEED_TRIES_PER_WORD} times; a 4th and 5th come from a shared pool, {self._lab().shared_extra_tries_left} left",
+                "shared_extra_tries_left": self._lab().shared_extra_tries_left}
 
     def try_pronunciation(self, word: str, spellings: list[str]) -> dict[str, Any]:
         """Hear what the Zulu voice does with up to three spellings of ``word`` and how they differ from the speaker's sounds."""

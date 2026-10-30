@@ -22,7 +22,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from xml.sax.saxutils import escape
 
 MAX_TRIES_PER_WORD = 5
-MAX_TRIES_PER_CLIP = 15
+GUARANTEED_TRIES_PER_WORD = 3        # every word can always be tried this often: one call over many words cannot starve the last of them
+SHARED_EXTRA_TRIES = 15              # tries 4 and 5 of a word come from this pool, shared by all words: the ceiling is 3 per word plus 15
 MAX_SPELLINGS_PER_CALL = 3
 SUGGEST_ROUNDS = 1            # how many times the best spellings found are varied again
 LOAN_POOL = 10               # Zulu forms made for a word, each spoken once
@@ -397,8 +398,8 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
         parts.append(f"Measured in the closest ({best['spelling']!r}): " + " | ".join(best["how_the_sounds_are_made_differently"]) + ".")
     if not understood and best.get("differences"):
         parts.append(f"Still different in the closest ({best['spelling']!r}, {best['closeness']}): " + "; ".join(best["differences"]) + ".")
-    if not understood and min(left_word, left_clip) > 0:
-        parts.append(f"{left_word} tries left for this word, {left_clip} in the clip: try spellings that change those sounds before settling.")
+    if not understood and left_word > 0:
+        parts.append(f"{left_word} tries left for this word: try spellings that change those sounds before settling.")
     return " ".join(parts)
 
 
@@ -482,6 +483,21 @@ class PronunciationLab:
     @property
     def total_tries(self) -> int:
         return sum(self.tries_per_word.values())
+
+    @property
+    def shared_extra_tries_left(self) -> int:
+        return max(0, SHARED_EXTRA_TRIES - sum(max(0, n - GUARANTEED_TRIES_PER_WORD) for n in self.tries_per_word.values()))
+
+    def tries_left_for_word(self, word: str) -> int:
+        """What this word can still be tried: its guaranteed tries, then the shared extras, never past the per-word cap."""
+        used = self.tries_per_word.get(word, 0)
+        return max(0, min(MAX_TRIES_PER_WORD - used, max(0, GUARANTEED_TRIES_PER_WORD - used) + self.shared_extra_tries_left))
+
+    def _require_try(self, word: str) -> None:
+        if self.tries_left_for_word(word) <= 0:
+            raise PronunciationBudgetExhausted(
+                f"pronunciation tries used: {self.tries_per_word.get(word, 0)}/{MAX_TRIES_PER_WORD} for {word!r}; every word can be tried "
+                f"{GUARANTEED_TRIES_PER_WORD} times, and tries beyond that come from a shared pool of {SHARED_EXTRA_TRIES} ({self.shared_extra_tries_left} left)")
 
     def source(self, word: str) -> dict[str, Any]:
         """The sounds the speaker used for ``word`` (consensus over its occurrences in the source audio)."""
@@ -832,9 +848,7 @@ class PronunciationLab:
         source = self.source(word)
         if not source["found"]:
             return {"word": word, "error": "the speaker never says this word in the source audio, so there are no sounds to build a Zulu word from"}
-        if self.total_tries >= MAX_TRIES_PER_CLIP or self.tries_per_word.get(word, 0) >= MAX_TRIES_PER_WORD:
-            raise PronunciationBudgetExhausted(
-                f"pronunciation tries used: {self.tries_per_word.get(word, 0)}/{MAX_TRIES_PER_WORD} for {word!r}, {self.total_tries}/{MAX_TRIES_PER_CLIP} in all")
+        self._require_try(word)
         self.tries_per_word[word] = self.tries_per_word.get(word, 0) + 1
         candidates = loan_adapt.adapt(source["phones"], limit=LOAN_POOL)
         rows, seen = [], set()
@@ -857,7 +871,7 @@ class PronunciationLab:
                                        "is the most typical, the others change one choice each (see changes_from_the_most_typical)",
                 "next": "choose one, write it in the Zulu text where the English word stands, with the noun prefix the sentence needs (i-, isi-, ama-, u-), "
                         "then call use_loanword so later clips use the same word",
-                "tries_left_for_word": MAX_TRIES_PER_WORD - self.tries_per_word[word], "tries_left_in_clip": MAX_TRIES_PER_CLIP - self.total_tries}
+                "tries_left_for_word": MAX_TRIES_PER_WORD - self.tries_per_word[word], "shared_extra_tries_left": self.shared_extra_tries_left}
 
     def suggest_spellings(self, word: str) -> dict[str, Any]:
         """Spellings of ``word`` worked out backwards from the speaker's sounds and the letters this voice turns into those sounds, spoken and
@@ -868,9 +882,7 @@ class PronunciationLab:
         source = self.source(word)
         if not source["found"]:
             return {"word": word, "error": "the speaker never says this word in the source audio, so there is nothing to match"}
-        if self.total_tries >= MAX_TRIES_PER_CLIP or self.tries_per_word.get(word, 0) >= MAX_TRIES_PER_WORD:
-            raise PronunciationBudgetExhausted(
-                f"pronunciation tries used: {self.tries_per_word.get(word, 0)}/{MAX_TRIES_PER_WORD} for {word!r}, {self.total_tries}/{MAX_TRIES_PER_CLIP} in all")
+        self._require_try(word)
         self.tries_per_word[word] = self.tries_per_word.get(word, 0) + 1
         prefix = written_prefix(word)
         stem = without_prefix(word.split("-")[-1], prefix)
@@ -922,14 +934,14 @@ class PronunciationLab:
             record.pop("_heard", None)
             self.tried.setdefault(word, {})[full] = record
             results.append(record)
-        left_word, left_clip = MAX_TRIES_PER_WORD - self.tries_per_word[word], MAX_TRIES_PER_CLIP - self.total_tries
+        left_word, left_clip = self.tries_left_for_word(word), self.shared_extra_tries_left
         out: dict[str, Any] = {
             "word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"],
             "how_these_were_found": f"spellings were worked out backwards from the speaker's sounds through the letters this voice turns into them, "
                                     f"then the best were varied by small edits (a letter group swapped, left out or added); {len(pool)} were spoken, "
                                     f"{len(by_sounds)} different sound sequences came out; shown are the closest in sounds and the closest in how open the mouth is "
                                     "at the start of the first vowel",
-            "results": results, "tries_left_for_word": left_word, "tries_left_in_clip": left_clip}
+            "results": results, "tries_left_for_word": left_word, "shared_extra_tries_left": left_clip}
         if results:
             nearest = max(results, key=lambda r: (not r.get("lost_in_its_sentence"), r["closeness"]))
             out["closest_so_far"] = {"spelling": nearest["spelling"], "closeness": nearest["closeness"]}
@@ -950,9 +962,7 @@ class PronunciationLab:
             return {"word": word, "error": "the speaker never says this word in the source audio, so there is nothing to match"}
         results = []
         for spelling in spellings:
-            if self.total_tries >= MAX_TRIES_PER_CLIP or self.tries_per_word.get(word, 0) >= MAX_TRIES_PER_WORD:
-                raise PronunciationBudgetExhausted(
-                    f"pronunciation tries used: {self.tries_per_word.get(word, 0)}/{MAX_TRIES_PER_WORD} for {word!r}, {self.total_tries}/{MAX_TRIES_PER_CLIP} in all")
+            self._require_try(word)
             self.tries_per_word[word] = self.tries_per_word.get(word, 0) + 1
             record = self._measure(word, spelling, source)
             heard = record.pop("_heard")
@@ -964,13 +974,13 @@ class PronunciationLab:
         # "closest" is by sounds only; the spellings the English listener wrote the word for are listed beside it, not ranked above it:
         # closeness skips the speaker's last sounds and the listener guesses from one short clip, so neither check may decide alone
         best = max(self.tried[word].values(), key=lambda r: (not r.get("lost_in_its_sentence"), r["closeness"]))
-        left_word, left_clip = MAX_TRIES_PER_WORD - self.tries_per_word[word], MAX_TRIES_PER_CLIP - self.total_tries
+        left_word, left_clip = self.tries_left_for_word(word), self.shared_extra_tries_left
         out = {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], "results": results,
                "closest_so_far": {"spelling": best["spelling"], "closeness": best["closeness"]},
                "understood_by_the_listener": [r["spelling"] for r in self.tried[word].values()
                                               if r.get("english_listener_understands") and not r.get("lost_in_its_sentence")],
                "advice": _advice(self.tried[word], best, left_word, left_clip, speaker=source["phones"]),
-               "tries_left_for_word": left_word, "tries_left_in_clip": left_clip}
+               "tries_left_for_word": left_word, "shared_extra_tries_left": left_clip}
         shown = self.sentence_shown(word)
         if shown:
             out["also_heard_in_this_sentence"] = shown
