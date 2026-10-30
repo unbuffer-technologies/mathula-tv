@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z']*")
+ORDINARY_MIN = 20                # a prefixed place name written this often in real text is ordinary Zulu
+ORDINARY_COMMON = 100            # a lower-case form this common is an everyday Zulu word
 MIN_PAIRS = 3                    # a Zulu form must share at least this many sentences with the English word to count as its equivalent
 
 
@@ -54,6 +56,12 @@ class Attestation:
             self._starts.append(position)
             position += len(line) + 1
         self.lexicon = {entry.lower() for entry in lexicon if entry}
+        self._zulu_text = "\n".join(self.zulu_lines)
+        self._zulu_line_starts: set[int] = set()
+        position = 0
+        for line in self.zulu_lines:
+            self._zulu_line_starts.add(position)
+            position += len(line) + 1
 
     @classmethod
     def from_directory(cls, directory: Path) -> "Attestation":
@@ -76,6 +84,28 @@ class Attestation:
     def attested(self, token: str) -> bool:
         key = token.lower()
         return self.frequency.get(key, 0) > 0 or key in self.lexicon
+
+    def written_count(self, token: str) -> int:
+        """How many times real text writes exactly this form, with this capitalisation (a capital at the start of a sentence proves nothing and is not
+        counted): "eMpumalanga" 115 times, "Tshela" 12 (the verb), "Imali" 146 in mid-sentence."""
+        pattern = re.compile(r"(?<![A-Za-z'])" + re.escape(token) + r"(?![A-Za-z'])")
+        count = 0
+        for match in pattern.finditer(self._zulu_text):
+            if token[:1].isupper() and match.start() in self._zulu_line_starts:
+                continue
+            count += 1
+        return count
+
+    def ordinary_zulu(self, token: str) -> bool:
+        """Whether this written form is ordinary Zulu that the Zulu voice reads as Zulu, and not a foreign word to be matched to the speaker's sounds:
+        a place written with a Zulu locative prefix that real text writes often (eMpumalanga, eGauteng), or a word whose lower-case form is very common
+        and whose capitalised form is only a sentence start (Imali).  A capitalised name that real text rarely writes that way (Tshela: a Zulu verb
+        in lower case, a Sesotho name here) is not."""
+        if re.match(r"^(?:e|ku|kwa|ase|eku)[A-Z][a-z]", token):
+            return self.written_count(token) >= ORDINARY_MIN
+        lower = token[:1].lower() + token[1:]
+        common = self.written_count(lower)
+        return token[:1].isupper() and common >= ORDINARY_COMMON and self.written_count(token) <= 0.2 * common
 
     # -- an English word ---------------------------------------------------------------
     def _lines_with(self, word: str) -> list[int]:

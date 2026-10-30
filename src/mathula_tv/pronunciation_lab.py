@@ -231,7 +231,8 @@ def _stem(word: str) -> str:
 
 
 def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, Any]], *, looks_isizulu: Callable[[str], bool],
-                    exclude: set[str] = frozenset(), limit: int = 30, named: Sequence[Mapping[str, str]] = ()) -> list[dict[str, Any]]:
+                    exclude: set[str] = frozenset(), limit: int = 30, named: Sequence[Mapping[str, str]] = (),
+                    ordinary_zulu: Callable[[str], bool] | None = None) -> list[dict[str, Any]]:
     """English words that the Zulu text keeps and that the speaker says in the source audio.
 
     A token counts when its stem (after any isiZulu prefix glued on, with a hyphen or straight onto a capital: "weScience") is a word of the
@@ -263,6 +264,8 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
     for text in texts:
         for token in re.findall(r"[A-Za-z][A-Za-z'\-]*", text):
             written = token.split("-")[-1]
+            if ordinary_zulu is not None and ordinary_zulu(written):
+                continue                                     # real Zulu text writes it this way (eMpumalanga, Imali): the Zulu voice reads it as Zulu
             unglued = _GLUED_PREFIX.sub("", written)
             for variant, glued in ((written, None), (unglued, "prefix") if unglued != written else (written, None)):
                 stem = _stem(variant)

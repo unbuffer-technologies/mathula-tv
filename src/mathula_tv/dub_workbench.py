@@ -461,7 +461,8 @@ class Workbench:
             from .created_loanwords import path_for, zulu_for
 
             created = path_for(Path(self.store.root).parent)
-            found = [{"written": w["written"], "english": w["english"], "zulu": zulu_for(created, w["english"]) or w.get("zulu") or ""}
+            found = [{"written": w["written"], "english": w["english"],
+                      "zulu": next((z for z in (zulu_for(created, w["english"]), w.get("zulu")) if z and self._attested(z)), "")}      # a form real text never writes is not offered
                      for w in self.judge.foreign_words(texts)
                      if w.get("kind") != "name" and len(_stem(w["english"])) >= 4 and _stem(w["english"]) in spoken]
             return list({(item["english"].casefold()): item for item in found}.values())          # one entry per English word, whatever prefix it carries
@@ -489,6 +490,20 @@ class Workbench:
         path = Path(directory) / "pronunciation_ledger.json"
         path.write_text(json.dumps(self.ledger.to_dict(), indent=1, ensure_ascii=False), encoding="utf-8")
         return path
+
+    def _resources(self) -> Any:
+        from . import attestation
+
+        return attestation.load(Path(self.store.root).parent)
+
+    def _ordinary_zulu(self, token: str) -> bool:
+        resources = self._resources()
+        return bool(resources and resources.ordinary_zulu(token))
+
+    def _attested(self, form: str) -> bool:
+        """Whether real text writes this Zulu form; True when the resources are not installed (nothing can be judged, so nothing is dropped)."""
+        resources = self._resources()
+        return True if resources is None else resources.attested(form)
 
     def attested_zulu(self, word: str, zulu_forms: list[str] | None = None) -> dict[str, Any]:
         """What real written isiZulu does with an English word, and how often forms the agent is thinking of have been written (see attestation).  No try
@@ -550,7 +565,8 @@ class Workbench:
                 named = self.judge.foreign_words(texts)          # the English words a model reads out of the Zulu, whatever their spelling
             except Exception:                                    # an outage leaves the rule-based sweep, never an empty list
                 named = []
-        found = candidate_words(texts, self._lab().transcript, looks_isizulu=looks_isizulu, exclude=set() if with_known else self._known_readings(), named=named)
+        found = candidate_words(texts, self._lab().transcript, looks_isizulu=looks_isizulu, exclude=set() if with_known else self._known_readings(), named=named,
+                                ordinary_zulu=self._ordinary_zulu)
         return {"words": found, "note": "Loanwords first: an entry with zulu_word has an everyday Zulu word; write that word in the text instead of keeping the "
                                          "English one, unless it would change what the speaker said. Check with the lab only the English words you keep. "
                                          "Never glue a Zulu prefix onto an English word the speaker says as it is.",
@@ -604,6 +620,11 @@ class Workbench:
                 raise ValueError(f"create {zulu_word!r} for {word!r} with create_loanword before using it")
             zulu_word = stem
         entry = self.store.load_corpus()["clips"][episode["clip_id"]]
+        if not self._attested(zulu_word):                      # the default for a word nobody writes is to keep the English as the speaker says it
+            self._ledger("used", word, zulu_word)
+            return {"ok": True, "remembered": False, "word": word, "zulu_word": zulu_word,
+                    "note": f"{zulu_word!r} is not written anywhere in real isiZulu text (corpus_count 0), so it is not remembered for later clips. Keep {word!r} as the "
+                            "speaker says it unless you find an attested form with attested_zulu."}
         remember(path_for(Path(self.store.root).parent), word, zulu_word, job_id=str(entry["job_id"]),
                  note=f"created from the speaker's sounds {' '.join(lab.source(word)['phones'])}")
         self._ledger("used", word, zulu_word)

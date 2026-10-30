@@ -42,3 +42,14 @@ def test_the_two_sides_must_be_aligned():
 
     with pytest.raises(ValueError):
         Attestation(["a"], ["a", "b"])
+
+
+def test_a_prefixed_place_and_an_everyday_word_are_ordinary_zulu_but_a_rare_capitalised_name_is_not():
+    zulu = (["Siya eMpumalanga namuhla ."] * 25 + ["Imali iyanda ."] * 2 + ["Sinemali : Imali yethu ."] * 3 + ["Ngitshela abantu ."] * 120
+            + ["Imali ayibonwa ."] * 60 + ["Wathenga imali futhi ."] * 130 + ["Ngitshela ukuthi iTshela Thupa ifikile ."] * 2)
+    english = ["x ."] * len(zulu)
+    a = Attestation(zulu, english)
+    assert a.written_count("eMpumalanga") == 25 and a.ordinary_zulu("eMpumalanga") and not a.ordinary_zulu("eGauteng")
+    assert a.written_count("Imali") == 3 and a.written_count("imali") >= 130                              # a capital that starts a line proves nothing
+    assert a.ordinary_zulu("Imali")                                                                       # an everyday word capitalised by its place in the sentence
+    assert not a.ordinary_zulu("Tshela") and not a.ordinary_zulu("Fighters")                             # a name real text does not write that way

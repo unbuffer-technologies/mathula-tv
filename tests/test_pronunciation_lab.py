@@ -872,3 +872,45 @@ def test_noun_prefixed_english_words_are_found_in_the_text_but_not_particles_per
     workbench.loanwords = lambda: [{"written": "amaBenefit", "english": "benefit", "zulu": "inzuzo"}]
     found = workbench.glued_class_prefix_words()
     assert [(w["written"], w["speaker_says"]) for w in found] == [("MaFighter", "Fighters"), ("iSkhokho", "Skhokho")]
+
+
+def test_a_word_that_real_zulu_text_writes_as_ordinary_zulu_is_not_offered_to_the_lab():
+    transcript = [{"text": "Mpumalanga", "heard_as": "Mbumalanga"}, {"text": "Tshela", "heard_as": "Tela"}, {"text": "rally"}]
+    shaped = lambda w: True                                                                           # noqa: E731
+    texts = ["Sinabantu eMpumalanga futhi i-Tshela Thupa ifikile"]
+    both = {f["word"] for f in candidate_words(texts, transcript, looks_isizulu=shaped)}
+    assert "Tshela" in both and "eMpumalanga" in both
+    only_tshela = {f["word"] for f in candidate_words(texts, transcript, looks_isizulu=shaped, ordinary_zulu=lambda w: w == "eMpumalanga")}
+    assert "Tshela" in only_tshela and "eMpumalanga" not in only_tshela
+
+
+def test_a_created_loanword_nobody_writes_is_not_remembered_and_not_offered_again(tmp_path):
+    import json
+    from pathlib import Path
+
+    from mathula_tv import attestation
+    from mathula_tv.created_loanwords import path_for, remember, zulu_for
+
+    attestation._cache.clear()
+    workbench, _ = make_workbench(tmp_path, {})
+    directory = attestation.resources_dir(tmp_path)
+    (directory / "lexicon").mkdir(parents=True)
+    (directory / "autshumato.zu.txt").write_text("Ibhasi sekwephuzile .\n", encoding="utf-8")
+    (directory / "autshumato.en.txt").write_text("The bus is late .\n", encoding="utf-8")
+    workbench._pronunciation_lab._created = {"bus": {"ibhasi"}, "provident": {"phurovideni"}}
+    workbench._pronunciation_lab.source = lambda word: {"found": True, "phones": ["b", "ʌ", "s"], "occurrences": 1, "each_occurrence": []}
+    assert workbench.use_loanword("bus", "ibhasi").get("remembered", True) is True and zulu_for(path_for(tmp_path), "bus") == "ibhasi"
+    answer = workbench.use_loanword("provident", "phurovideni")
+    assert answer["remembered"] is False and "not written anywhere" in answer["note"] and zulu_for(path_for(tmp_path), "provident") is None
+    remember(path_for(tmp_path), "pension", "impesheni", job_id="j")                                       # a form saved earlier that real text never writes
+    Path(workbench._episode()["dir"], "submission.json").write_text(json.dumps({"items": [{"item_id": "u1", "zulu_text": "ne-provident fund, ama-pension"}]}), encoding="utf-8")
+    workbench._pronunciation_lab._transcript = [{"text": "provident"}, {"text": "pension"}]
+
+    class Judge:
+        def foreign_words(self, texts):
+            return [{"written": "ne-provident", "english": "provident", "kind": "word", "zulu": "umlwi"},
+                    {"written": "ama-pension", "english": "pension", "kind": "word", "zulu": "impesheni"}]
+
+    workbench.judge = Judge()
+    assert {(w["english"], w["zulu"]) for w in workbench.loanwords()} == {("provident", ""), ("pension", "")}        # neither form is written in the (tiny) corpus
+    attestation._cache.clear()
