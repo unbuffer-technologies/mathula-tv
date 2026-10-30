@@ -22,7 +22,7 @@ def test_the_zulu_forms_that_share_the_most_sentences_with_an_english_word_are_i
     assert bus["sentences"] == 3 and bus["forms"][0]["form"] == "ibhasi" and bus["forms"][0]["shared_sentences"] == 3 and bus["kept_in_english"] == 0
     computer = a.equivalents("computer")                                                              # the plural line counts as a sentence with the word
     assert computer["sentences"] == 3 and computer["forms"] == []                                      # but ikhompyutha is in only two of them: under MIN_PAIRS, not an equivalent
-    assert a.equivalents("unheard") == {"english": "unheard", "sentences": 0, "forms": [], "kept_in_english": 0}
+    assert a.equivalents("unheard") == {"english": "unheard", "sentences": 0, "forms": [], "kept_in_english": 0, "with_particle": []}
 
 
 def test_an_english_word_that_stays_english_in_the_zulu_is_reported_as_code_switched():
@@ -68,3 +68,14 @@ def test_a_phrase_and_a_form_with_a_hyphenated_particle_are_counted_exactly_and_
     assert particle["corpus_count"] == 2 and [w["token"] for w in particle["words"]] == ["se", "provident"] and a.attested("se-provident")
     assert a.status("sempesheni")["corpus_count"] == 6 and "words" not in a.status("sempesheni")          # a single form is as before
     assert a.attested("umhlomulo") and not a.attested("")
+
+
+def test_the_lookup_shows_how_real_writers_attach_a_particle_to_an_english_word_and_cautions_about_a_small_corpus():
+    zulu = ["Behlangene kwi-rally kusizwe .", "Beya kwi-rally ngoLwesihlanu .", "I-rally yeqembu ifikile .", "Babuthane embuthanweni ."]
+    english = ["They met at the rally today .", "They went to the rally on Friday .", "The party rally has arrived .", "They gathered at the meeting ."]
+    a = Attestation(zulu, english)
+    answer = lookup(a, "rally", ["irally", "kwi-rally"])
+    assert answer["sentences"] == 3 and answer["kept_in_english"] == 3
+    assert answer["with_particle"][0] == {"form": "kwi-rally", "count": 2}
+    assert "kwi-rally (2)" in answer["reading"] and "weak evidence" in answer["caution"] and "only 3 sentences" in answer["caution"]
+    assert [c["corpus_count"] for c in answer["checked_forms"]] == [0, 2]                              # irally is not written, kwi-rally is

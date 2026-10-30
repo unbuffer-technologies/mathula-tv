@@ -136,17 +136,21 @@ class Attestation:
         score, so common function words do not win), and how often the English word itself stays in the Zulu sentence (code-switching)."""
         word = english_word.lower().strip()
         lines = self._lines_with(word)
-        result: dict[str, Any] = {"english": english_word, "sentences": len(lines), "forms": [], "kept_in_english": 0}
+        result: dict[str, Any] = {"english": english_word, "sentences": len(lines), "forms": [], "kept_in_english": 0, "with_particle": []}
         if not lines:
             return result
         together: Counter[str] = Counter()
         kept = 0
         word_forms = {word, word + "s", word + "es"}
+        particle = re.compile(r"(?<![A-Za-z'])([A-Za-z]{1,6}-" + re.escape(word) + r"(?:s|es)?)(?![A-Za-z'])", re.IGNORECASE)
+        particles: Counter[str] = Counter()
         for index in lines:
             found = set(tokens(self.zulu_lines[index]))
             if found & word_forms:
                 kept += 1
             together.update(found)
+            particles.update(m.lower() for m in particle.findall(self.zulu_lines[index]))
+        result["with_particle"] = [{"form": form, "count": count} for form, count in particles.most_common(5)]
         scored = []
         for form, pairs in together.items():
             if pairs < MIN_PAIRS or form in word_forms:
@@ -164,6 +168,8 @@ def lookup(attestation: Attestation, english_word: str, zulu_forms: Sequence[str
     of any form the agent is thinking of writing."""
     answer = attestation.equivalents(english_word)
     answer["checked_forms"] = [attestation.status(form) for form in zulu_forms]
+    answer["caution"] = ("the corpus is translated government and news text, 2.9 million words: a form missing from it is weak evidence, not proof that nobody writes it"
+                         + ("; only %d sentences here have the word" % answer["sentences"] if answer["sentences"] < 50 else ""))
     sentences, kept = answer["sentences"], answer["kept_in_english"]
     strong = [f for f in answer["forms"] if f["score"] >= 0.1][:3]
     if not sentences:
@@ -176,6 +182,8 @@ def lookup(attestation: Attestation, english_word: str, zulu_forms: Sequence[str
     else:
         answer["reading"] = (f"no Zulu form clearly pairs with it and it is rarely kept in English ({kept} of {sentences} sentences): nothing is attested; "
                              "keep it as the speaker says it")
+    if sentences and answer["with_particle"]:
+        answer["reading"] += "; written with a hyphenated particle as " + ", ".join(f"{p['form']} ({p['count']})" for p in answer["with_particle"][:3])
     return answer
 
 
