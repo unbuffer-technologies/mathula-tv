@@ -104,13 +104,21 @@ def batch_stats(batch: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def gate(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> tuple[bool, list[str]]:
-    """Adopt a candidate playbook only if it is no worse than the batch it came from."""
+def _met_rate(stats: Mapping[str, Any]) -> float:
+    return stats.get("met_bar", 0) / max(1, stats.get("n", 0))
+
+
+def gate(baseline: Mapping[str, Any], candidate: Mapping[str, Any], expected_runs: int | None = None) -> tuple[bool, list[str]]:
+    """Adopt a candidate playbook only if it is no worse than the batch it came from.
+
+    The trial may have fewer runs than the baseline (a baseline can be gathered from more runs than a trial
+    repeats), so runs are compared as rates, and "finished" means all the runs the trial was asked for."""
     reasons: list[str] = []
-    if candidate.get("n", 0) < baseline.get("n", 0):
-        reasons.append(f"candidate has only {candidate.get('n', 0)} finished runs (baseline {baseline.get('n')})")
-    if candidate.get("met_bar", 0) < baseline.get("met_bar", 0):
-        reasons.append(f"meets the bar less often ({candidate['met_bar']} vs {baseline['met_bar']})")
+    wanted = baseline.get("n", 0) if expected_runs is None else expected_runs
+    if candidate.get("n", 0) < wanted:
+        reasons.append(f"candidate has only {candidate.get('n', 0)} finished runs (expected {wanted})")
+    if _met_rate(candidate) < _met_rate(baseline) - 1e-9:
+        reasons.append(f"meets the bar less often ({candidate.get('met_bar', 0)}/{candidate.get('n', 0)} vs {baseline.get('met_bar', 0)}/{baseline.get('n', 0)})")
     if candidate.get("gate_failures_mean", 0) > baseline.get("gate_failures_mean", 0) + 1e-9:
         reasons.append("more hard-gate failures")
     if candidate.get("meaning_loss_mean", 0) > baseline.get("meaning_loss_mean", 0) + 1e-9:
@@ -121,7 +129,7 @@ def gate(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> tuple[boo
             candidate["fidelity_issues_mean"] > baseline["fidelity_issues_mean"] + FIDELITY_TOLERANCE:
         reasons.append("more additions/distortions/omissions per run "
                        f"({candidate['fidelity_issues_mean']:.1f} vs {baseline['fidelity_issues_mean']:.1f})")
-    if candidate.get("met_bar", 0) <= baseline.get("met_bar", 0) and \
+    if _met_rate(candidate) <= _met_rate(baseline) + 1e-9 and \
             candidate.get("residual_mean", 0) > baseline.get("residual_mean", 0) + DEAD_AIR_TOLERANCE_PTS:
         reasons.append(f"more dead air left ({candidate['residual_mean']:.2f}% vs {baseline['residual_mean']:.2f}%)")
     if candidate.get("tokens_mean", 0) > baseline.get("tokens_mean", 0) * TOKEN_GROWTH_TOLERANCE:
@@ -205,7 +213,7 @@ def improvement_step(
                   "candidate_playbook": candidate_version}
         trial = run_batch(client, store, tts_factory, clip_ids=clips, run_id=trial_run, playbook=candidate, repeats=repeats)
         stats = batch_stats(trial)
-        adopt, reasons = gate(baseline, stats)
+        adopt, reasons = gate(baseline, stats, len(clips) * repeats)
         record.update(candidate_stats=stats, trial_run=trial_run, decision="adopted" if adopt else "rejected", reasons=reasons)
         if adopt:
             set_current(store, candidate["version"], reason=f"passed trial {trial_run}")
@@ -232,7 +240,7 @@ def improvement_step(
         return record
     trial = run_batch(client, store, tts_factory, clip_ids=clips, run_id=trial_run, playbook=candidate, repeats=repeats)
     stats = batch_stats(trial)
-    adopt, reasons = gate(baseline, stats)
+    adopt, reasons = gate(baseline, stats, len(clips) * repeats)
     record.update(candidate_stats=stats, trial_run=trial_run, decision="adopted" if adopt else "rejected", reasons=reasons)
     if adopt:
         set_current(store, candidate["version"], reason=f"passed trial {trial_run}")

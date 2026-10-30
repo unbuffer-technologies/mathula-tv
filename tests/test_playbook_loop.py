@@ -181,6 +181,15 @@ def test_gate_rejects_each_kind_of_regression():
         assert not ok and any(fragment in r for r in reasons), (fragment, reasons)
 
 
+def test_a_trial_with_fewer_runs_than_the_baseline_is_compared_by_rate_not_by_count():
+    base = _stats(met=4, n=4)                                   # a baseline gathered from four runs
+    assert gate(base, _stats(met=3, n=3), expected_runs=3)[0]   # every trial run met the bar
+    ok, reasons = gate(base, _stats(met=2, n=3), expected_runs=3)
+    assert not ok and any("less often" in r for r in reasons)
+    ok, reasons = gate(base, _stats(met=2, n=2), expected_runs=3)
+    assert not ok and any("finished runs" in r for r in reasons)
+
+
 def test_more_dead_air_is_tolerated_only_when_the_candidate_meets_the_bar_more_often():
     assert gate(_stats(met=1, residual=2.0), _stats(met=2, residual=2.6))[0]
     assert not gate(_stats(met=1, residual=2.0), _stats(met=1, residual=2.6))[0]
