@@ -510,6 +510,12 @@ _SLIM_HEADLINE = (
 )
 
 
+CLAIMS_NOTE = (
+    "Taking a claim out shortens the unit, and a unit left short is dead air: a submission that breaks a unit that had fitted is rejected. "
+    "Compare chars_now with fits_about_chars, put back only what the English does say (or a pause) to keep the length, measure the edited "
+    "units, and send all of them in one partial submit.")
+
+
 def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
     """The model-facing view of a submit_dub result (the harness keeps the full one)."""
     if not result.get("accepted"):
@@ -537,6 +543,7 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
         slim["meaning_loss"] = result["meaning"]["loss"]
     if (result.get("meaning") or {}).get("claims"):
         slim["claims_to_check"] = result["meaning"]["claims"]
+        slim["claims_note"] = CLAIMS_NOTE
     if result.get("warnings"):
         slim["warnings"] = result["warnings"]
     return slim

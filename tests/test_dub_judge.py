@@ -190,13 +190,33 @@ def test_an_addition_the_reader_finds_is_shown_to_the_agent_once_per_text_withou
     first = [c["item_id"] for c in meaning["claims"]]
     assert len(first) == CLAIMS_PER_SUBMIT and "lost" not in first and "plain" not in first      # a bounded list; loss units are not repeated
     assert meaning["claims"][0]["kinds"] == ["addition"] and meaning["claims"][0]["reads_back_as"]
+    assert meaning["claims"][0]["chars_now"] == 1 and "fits_about_chars" not in meaning["claims"][0]   # no window known without a voice rate
     second = [c["item_id"] for c in wb._judge_meaning(card(), tmp_path)["claims"]]
     assert len(second) == 3 and not set(first) & set(second)                                      # each unit once per text: the rest, not the same six
     assert wb._judge_meaning(card(), tmp_path)["claims"] == []
     assert len(wb._judge_meaning(card("edited"), tmp_path)["claims"]) == CLAIMS_PER_SUBMIT       # an edit shows the unit again
     result = _result([]) | {"meaning": {"loss": [], "claims": meaning["claims"]}}
-    assert slim_submit(result)["claims_to_check"] == meaning["claims"]
+    assert slim_submit(result)["claims_to_check"] == meaning["claims"] and "dead air" in slim_submit(result)["claims_note"]
     assert unmet_targets(result, max_dead_air_pct=2.0) == []                                      # information only: no new bar
+
+
+def test_a_claim_says_how_long_the_unit_is_and_what_its_window_takes_so_cutting_it_does_not_leave_dead_air(tmp_path):
+    from mathula_tv.dub_workbench import Workbench
+
+    class Judge:
+        usage = {}
+
+        def judge(self, units):
+            return [{**u, "meaning_preserved": 2, "back_translation": "x", "issues": [{"kind": "addition", "detail": "adds clean"}]} for u in units]
+
+    wb = Workbench(store=None, tts_factory=lambda: None, judge=Judge())
+    wb.segments = [{"segment_id": "s1", "speaker_id": "A", "start_ms": 0, "end_ms": 5000}]
+    wb.voices = {"A": {"selected_voice": "zu-ZA-ThembaNeural"}}
+    card = {"headline": {}, "groups": [{"group_id": "u0", "source_text": "c", "spoken_text": "Amanzi ~pause300 acwebile"}]}
+    claim = wb._judge_meaning(card, tmp_path, [{"item_id": "u0", "source_segment_ids": ["s1"]}])["claims"][0]
+    assert claim["chars_now"] == len("Amanzi acwebile") and claim["fits_about_chars"] == 60            # 5 s at 12.4 characters a second; markers are not counted
+    wb.claims_shown.clear()
+    assert "fits_about_chars" not in wb._judge_meaning(card, tmp_path)["claims"][0]  # a unit with no known segments gets no window
 
 
 def test_a_flag_with_quotes_that_are_not_in_the_text_is_downgraded_to_a_doubt():

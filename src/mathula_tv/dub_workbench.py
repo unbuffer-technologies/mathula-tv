@@ -122,7 +122,9 @@ LENGTH_GAP_MIN_PCT = 6           # a unit within this share of its window gets n
 
 def spoken_chars(text: str) -> int:
     """Characters the length guide counts: spaces included, pause and ~ markers not."""
-    return len(re.sub(r"~|\[[^\]]*\]", "", text or ""))
+    from .delivery import PAUSE_MARKER
+
+    return len(re.sub(r"~|\[[^\]]*\]", "", PAUSE_MARKER.sub(" ", text or "")))     # a ~pause800 marker is silence: its letters are not spoken
 
 
 def length_gap(text: str, measured: dict[str, Any]) -> dict[str, int]:
@@ -831,7 +833,7 @@ class Workbench:
         ]
         return {"units": units, "count": len(units)}
 
-    def _judge_meaning(self, card: dict[str, Any], directory: Path) -> dict[str, Any] | None:
+    def _judge_meaning(self, card: dict[str, Any], directory: Path, items: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
         """Ask the independent judge whether each unit keeps the English meaning (only changed units cost tokens).
 
         Units it scores 0-1 are material meaning loss: they are counted in the scorecard headline so the harness can
@@ -853,16 +855,23 @@ class Workbench:
                                                       "usage": dict(self.judge.usage)})
         return {"loss": [{"item_id": v["id"], "issues": [i["detail"] for i in v["issues"]][:3],
                           "reads_back_as": (v.get("back_translation") or "")[:300]} for v in loss],
-                "claims": self._claims_to_check(verdicts, {v["id"] for v in loss}, units),
+                "claims": self._claims_to_check(verdicts, {v["id"] for v in loss}, units, items or []),
                 "unjudged": sum(1 for v in verdicts if v["meaning_preserved"] is None)}
 
-    def _claims_to_check(self, verdicts: list[dict[str, Any]], already_shown_as_loss: set[str], units: list[dict[str, str]]) -> list[dict[str, Any]]:
+    def _claims_to_check(self, verdicts: list[dict[str, Any]], already_shown_as_loss: set[str], units: list[dict[str, str]],
+                         items: list[dict[str, Any]] = ()) -> list[dict[str, Any]]:
         """Units whose Zulu an independent reader thinks says something the English does not (an addition or a distortion), apart from
         the ones that lose meaning outright.  Seven runs of one clip carried 7 to 12 additions each: the agent fills a window with
         claims the speaker never made, and the submit result showed it only the units scoring 0-1.  Information, not a bar: the judge
         is noisy, so the agent weighs each against the English.  Each unit is shown once per text (an edit shows it again), and at
-        most CLAIMS_PER_SUBMIT at a time, the lowest scores first, so this can never become an open-ended repair loop."""
+        most CLAIMS_PER_SUBMIT at a time, the lowest scores first, so this can never become an open-ended repair loop.
+
+        Each claim carries the unit's characters and what its window takes (fits_about_chars): taking an addition out shortens the unit, and a
+        unit left short is dead air, which the timing ratchet rejects when the unit had fitted (4 to 8 of the 10 to 19 submissions of two of
+        three runs were rejected that way, against one per run before the flag)."""
         spoken = {u["id"]: u["dub"] for u in units}
+        guide = length_guide(self.segments, self.voices)
+        by_item = {str(i["item_id"]): i for i in items}
         found = []
         for v in verdicts:
             issues = [i for i in v.get("issues", []) if i.get("kind") in ("addition", "distortion")]
@@ -870,9 +879,12 @@ class Workbench:
             if not issues or v["id"] in already_shown_as_loss or key in self.claims_shown:
                 continue
             score = v["meaning_preserved"] if v["meaning_preserved"] is not None else 3
+            window = sum(guide.get(str(sid), 0) for sid in (by_item.get(str(v["id"])) or {}).get("source_segment_ids", ()))
             found.append((score, key, {"item_id": v["id"], "kinds": sorted({i["kind"] for i in issues}),
                                        "issues": [i["detail"] for i in issues][:2],
-                                       "reads_back_as": (v.get("back_translation") or "")[:300]}))
+                                       "reads_back_as": (v.get("back_translation") or "")[:300],
+                                       "chars_now": spoken_chars(spoken.get(v["id"], "")),
+                                       **({"fits_about_chars": window} if window else {})}))
         found.sort(key=lambda f: f[0])
         shown = found[:CLAIMS_PER_SUBMIT]
         self.claims_shown.update(key for _, key, _ in shown)
@@ -940,7 +952,7 @@ class Workbench:
                     "this_submission": _timing_summary(card["headline"]),
                     "previous_submission": _timing_summary((self.last_submit or {}).get("headline") or {}),
                 }
-        meaning = self._judge_meaning(card, directory)
+        meaning = self._judge_meaning(card, directory, items)
         write_submission(directory / "submission.json", submission)
         episode["submissions"] += 1
         self.locked_segments = {sid for sid, entry in status.items() if entry["ok"]}
