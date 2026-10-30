@@ -130,7 +130,7 @@ TEMPORAL_MASK_TRANSLATION_SCHEMA_VERSION = "mathula-native-natural-translation-v
 TEMPORAL_MASK_PROMPT_VERSION = "native-temporal-mask-window-v10-phase-a-no-self-check"
 CONTEXT_LEDGER_SCHEMA_VERSION = "mathula-native-context-ledger-v1"
 ZULU_GLOSSARY_SCHEMA_VERSION = "mathula-native-zulu-glossary-v1"
-ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v3-widest-understanding"
+ZULU_GLOSSARY_PROMPT_VERSION = "native-zulu-glossary-v4-widest-understanding-number-kept"
 CANDIDATE_POOL_SCHEMA_VERSION = "mathula-native-candidate-pool-v4-turn-id"
 CANDIDATE_TRANSLATE_PROMPT_VERSION = "native-candidate-translate-v13-social-media-vocabulary-all-modes"
 TURN_BLOCK_TRANSLATE_PROMPT_VERSION = "native-turn-block-translate-v42-single-call-reverted"
@@ -1182,6 +1182,13 @@ and work out what it means? If so, use the more familiar word. Confirmed real ca
 grant" listeners say and understand "igranti", not the formal "isibonelelo", so the glossary must say
 "igranti". The same holds for other everyday loanwords (e.g. "i-VAT", "imeya", "iphalamende") over stiffer
 coinages. Familiar to the most people beats elegant.
+
+NUMBER AND ENGLISH TERMS. A rendering keeps the number of the English: a plural stays plural and a singular stays singular. Never
+change a plural source word to its singular and then build a Zulu form from that singular by putting a Zulu noun-class prefix on it
+(English "Fighters" must not become "maFighter": the number was changed, then a plural invented from it, and the speaker said neither).
+When the speaker uses an English term as it is (a party's own word for its members, an organisation's name, a title), the rendering is
+either an everyday isiZulu word of the same number, or the English term exactly as the speaker says it, plural -s included, with no
+Zulu noun prefix glued on; a grammar particle goes before it with a hyphen (ne-, ye-, ku-) so the English word stays whole.
 
 Do not translate anything else. Do not summarize the story. No tools or web search. Return JSON
 only."""
@@ -10865,7 +10872,9 @@ def _normalize_zulu_glossary(value: Any) -> dict[str, Any]:
         "register": dict(value.get("register") or {}),
     }
     jsonschema.validate(glossary, _ZULU_GLOSSARY_CONTRACT)
-    return glossary
+    from .english_prefix import fix_glossary
+
+    return fix_glossary(glossary)[0]            # "Fighters" is never rendered "maFighter": see english_prefix
 
 
 def _write_zulu_glossary(

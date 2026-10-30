@@ -150,6 +150,7 @@ class Workbench:
         self._readings_changed = 0                                # how many times a reading was changed in this run
         self.foreign_words_listed = False                       # whether the agent has looked at the English words its Zulu keeps
         self.pronunciation_choices: list[dict[str, Any]] = []   # spellings the agent chose with the lab, for the report
+        self.glossary_corrections: list[str] = []                # glossary terms put right when the clip was opened (see english_prefix)
         from .pronunciation_ledger import Ledger
 
         self.ledger = Ledger()                                   # what the agent was shown about each word and what it did (see pronunciation_ledger)
@@ -248,6 +249,10 @@ class Workbench:
         # is what is rendered.
         self.pronunciation_root = register_clip_pronunciation(self.store, clip_id)
         glossary_doc = read_json(native / "zulu_terminology_glossary.json")
+        from .english_prefix import fix_glossary
+
+        if isinstance(glossary_doc.get("zulu_terminology_glossary"), dict):          # a form like maFighter never reaches the agent, whatever the file says
+            glossary_doc["zulu_terminology_glossary"], self.glossary_corrections = fix_glossary(glossary_doc["zulu_terminology_glossary"])
         ledger_doc = read_json(native / "context_ledger.json")
         modes_path = native / "speaker_seriousness_modes.json"
         modes = read_json(modes_path).get("modes", {}) if modes_path.is_file() else {}
@@ -723,6 +728,11 @@ class Workbench:
             problems.append({"gate": "restated_reference", "evidence": [f"{h['first']} / {h['second']}" for h in restated]})
         if fabricated:
             problems.append({"gate": "fabricated_entity", "evidence": fabricated})
+        from .english_prefix import find_prefixed_english
+
+        prefixed = find_prefixed_english(zulu_text, source_text)
+        if prefixed:
+            problems.append({"gate": "english_with_class_prefix", "evidence": prefixed})
         doubled = find_unsupported_doubling(zulu_text, source_text)
         if doubled:
             problems.append({"flag": "unsupported_doubling", "evidence": doubled})

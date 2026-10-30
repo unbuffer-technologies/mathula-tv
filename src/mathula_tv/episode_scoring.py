@@ -26,7 +26,7 @@ from .experience_store import text_hash
 SCORECARD_SCHEMA = "mathula-episode-scorecard-v1"
 SHORTFALL_FLAG_PCT = 15.0
 GATE_NAMES = (
-    "required_literals", "restated_reference", "fabricated_entity", "known_bad_text", "untranslated",
+    "required_literals", "restated_reference", "fabricated_entity", "known_bad_text", "untranslated", "english_with_class_prefix",
 )
 # A last-resort compression pass omits protected literals on purpose and flags
 # itself for review; reporting those as unwaived gate failures would punish the
@@ -318,6 +318,10 @@ def _score_group(
     gates["untranslated"] = {
         "failed": not normalized or normalized == re.sub(r"\W+", " ", source_text).strip().casefold(),
     }
+    from .english_prefix import find_prefixed_english
+
+    prefixed = find_prefixed_english(spoken, source_text)          # "MaFighter" for the speaker's English "Fighters": see english_prefix
+    gates["english_with_class_prefix"] = {"failed": bool(prefixed), "evidence": prefixed}
 
     flags: list[str] = []
     if residual_pct >= SHORTFALL_FLAG_PCT:

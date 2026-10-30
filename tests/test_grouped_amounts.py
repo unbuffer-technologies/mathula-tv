@@ -91,3 +91,11 @@ def test_vocabulary_is_chosen_for_the_widest_understanding():
     assert "simplicity and maximum reach" in SYSTEM_PROMPT and "simplicity and maximum reach" in ZULU_GLOSSARY_SYSTEM_PROMPT
     assert "WIDEST UNDERSTANDING" in ZULU_GLOSSARY_SYSTEM_PROMPT and '"igranti"' in ZULU_GLOSSARY_SYSTEM_PROMPT
     assert "widest-understanding" in ZULU_GLOSSARY_PROMPT_VERSION        # so every cached glossary is regenerated under the new rule
+
+
+def test_the_glossary_rule_keeps_the_number_of_an_english_term_and_forbids_a_prefix_built_on_a_changed_number():
+    from mathula_tv.native_dub import ZULU_GLOSSARY_PROMPT_VERSION, ZULU_GLOSSARY_SYSTEM_PROMPT
+    assert "number-kept" in ZULU_GLOSSARY_PROMPT_VERSION and "widest-understanding" in ZULU_GLOSSARY_PROMPT_VERSION
+    assert "keeps the number of the English" in ZULU_GLOSSARY_SYSTEM_PROMPT and "plural -s included" in ZULU_GLOSSARY_SYSTEM_PROMPT
+    assert "Zulu noun prefix glued on" in ZULU_GLOSSARY_SYSTEM_PROMPT and "must not become" in ZULU_GLOSSARY_SYSTEM_PROMPT
+
