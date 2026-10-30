@@ -84,32 +84,43 @@ class WebText:
         return [{"form": form, "count": count} for form, count in found.most_common(top)]
 
 
-def build_web_index(documents: Path, out_dir: Path) -> dict[str, int]:
-    """Make the web resources from ``host<TAB>date<TAB>text`` lines: ``web_counts.tsv`` (token, news count, other count; tokens seen at least twice, a
-    hyphenated token counted whole and by its parts) and ``web_news.txt`` (one news document per line)."""
+def build_web_index(documents: Path | Sequence[Path], out_dir: Path) -> dict[str, int]:
+    """Make the web resources from ``host<TAB>date<TAB>text`` files: ``web_counts.tsv`` (token, news count, other count; tokens seen at least twice, a
+    hyphenated token counted whole and by its parts) and ``web_news.txt`` (one news document per line).  A document whose first 100 letters have been
+    seen already (the same story in two sources) is counted once."""
     news: Counter[str] = Counter()
     other: Counter[str] = Counter()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     documents_in_news = 0
-    with Path(documents).open(encoding="utf-8") as source, (out_dir / "web_news.txt").open("w", encoding="utf-8", newline="\n") as news_file:
-        for line in source:
-            host, _date, text = line.rstrip("\n").split("\t", 2)
-            is_news = host in WEB_NEWS_DOMAINS
-            target = news if is_news else other
-            for token in _WEB_TOKEN.findall(text):
-                low = token.lower()
-                target[low] += 1
-                if "-" in low:
-                    target.update(part for part in low.split("-") if part)
-            if is_news:
-                news_file.write(text + "\n")
-                documents_in_news += 1
+    duplicates = 0
+    seen: set[str] = set()
+    files = [Path(documents)] if isinstance(documents, (str, Path)) else [Path(d) for d in documents]
+    with (out_dir / "web_news.txt").open("w", encoding="utf-8", newline="\n") as news_file:
+        for path in files:
+            for line in path.open(encoding="utf-8"):
+                host, _date, text = line.rstrip("\n").split("\t", 2)
+                is_news = host in WEB_NEWS_DOMAINS
+                if is_news:
+                    key = re.sub(r"[^a-z]", "", text[:160].lower())[:100]
+                    if key in seen:
+                        duplicates += 1
+                        continue
+                    seen.add(key)
+                target = news if is_news else other
+                for token in _WEB_TOKEN.findall(text):
+                    low = token.lower()
+                    target[low] += 1
+                    if "-" in low:
+                        target.update(part for part in low.split("-") if part)
+                if is_news:
+                    news_file.write(text + "\n")
+                    documents_in_news += 1
     kept = [token for token in set(news) | set(other) if news[token] + other[token] >= 2]
     with (out_dir / "web_counts.tsv").open("w", encoding="utf-8", newline="\n") as counts_file:
         for token in sorted(kept):
             counts_file.write(f"{token}\t{news[token]}\t{other[token]}\n")
-    return {"tokens": len(kept), "news_documents": documents_in_news}
+    return {"tokens": len(kept), "news_documents": documents_in_news, "duplicates_skipped": duplicates}
 
 
 class Attestation:
@@ -313,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     english.add_argument("word")
     english.add_argument("--zulu", nargs="*", default=[], help="forms to check as well")
     web = sub.add_parser("build-web", help="make the web resources from host<TAB>date<TAB>text lines")
-    web.add_argument("documents", type=Path)
+    web.add_argument("documents", type=Path, nargs="+")
     args = parser.parse_args(argv)
     if args.command == "build-web":
         print(build_web_index(args.documents, resources_dir(load_settings().work_dir) / "web"))
