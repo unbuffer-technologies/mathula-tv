@@ -1,4 +1,4 @@
-from mathula_tv.attestation import Attestation, lookup, tokens
+from mathula_tv.attestation import Attestation, WebText, build_web_index, lookup, tokens
 
 
 def small():
@@ -79,3 +79,23 @@ def test_the_lookup_shows_how_real_writers_attach_a_particle_to_an_english_word_
     assert answer["with_particle"][0] == {"form": "kwi-rally", "count": 2}
     assert "kwi-rally (2)" in answer["reading"] and "weak evidence" in answer["caution"] and "only 3 sentences" in answer["caution"]
     assert [c["corpus_count"] for c in answer["checked_forms"]] == [0, 2]                              # irally is not written, kwi-rally is
+
+
+def test_zulu_news_sites_attest_a_form_the_small_translated_corpus_never_shows(tmp_path):
+    documents = tmp_path / "docs.tsv"
+    documents.write_text("\n".join([
+        "isolezwe.co.za\t2024-01-01\tUkhulumele ku-irally yeqembu . Kwenziwa ama-rally amaningi , i-rally enkulu .",
+        "bayedenews.com\t2024-01-02\tIrally ibe khona namuhla . Bahambele irally , i-rally .",
+        "zu.airbnb.com\t2024-01-03\tIrally ayikho lapha . Generally bayakwamukela , rally ngeke .",
+        "isolezwe.co.za\t2024-01-04\tUmkhankaso uqalile . Isikhwama sempesheni siyakhula . Isikhwama sempesheni sikhulile ."]) + "\n", encoding="utf-8")
+    built = build_web_index(documents, tmp_path / "web")
+    assert built["news_documents"] == 3
+    web = WebText.from_directory(tmp_path / "web")
+    assert web.written("irally") == (3, 1)                                                              # news and everything else are counted apart
+    assert web.written("i-rally") == (2, 0) and web.written("isikhwama sempesheni") == (2, 0)           # a hyphenated form and a phrase are counted as written
+    forms = {f["form"]: f["count"] for f in web.forms_with("rally")}
+    assert forms["irally"] == 3 and forms["ama-rally"] == 1 and forms["i-rally"] == 2 and "generally" not in forms
+    a = Attestation(["Ibhasi ."], ["The bus ."], web=web)
+    assert a.attested("irally") and not a.attested("irali") and a.attested("isikhwama sempesheni")
+    answer = lookup(a, "rally", ["irally"])
+    assert "irally (3)" in answer["reading"] and answer["checked_forms"][0]["web_news"] == 3 and "Zulu news sites" in answer["caution"]

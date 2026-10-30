@@ -11,6 +11,10 @@ Department of Arts and Culture):
 * the Autshumato English-isiZulu parallel corpus: 233,691 aligned sentence pairs, 2.87 million Zulu tokens;
 * the NCHLT isiZulu lexicon files (nouns, verbs, lemma list): 43,178 entries.
 
+A third source, in ``web/``, is Zulu written on the web (FineWeb-2 zul_Latn, ODC-By 1.0: 127,335 documents, 56.8 million words, Common Crawl
+2013-2024), counted apart for Zulu news sites; ``build-web`` makes it from the downloaded file.  It shows how real writers spell an English word in
+Zulu text (irally 5, i-rally 4 on news sites) that the translated corpus is too small to show.
+
 They are plain text in ``<work_dir>/resources/attestation/``: ``autshumato.zu.txt`` and ``autshumato.en.txt`` (one sentence per line, the two files
 aligned line by line) and ``lexicon/*.txt`` (one entry per line, or token<TAB>lemma).  Nothing here calls a model.
 """
@@ -28,6 +32,14 @@ ORDINARY_COMMON = 100            # a lower-case form this common is an everyday 
 MIN_PAIRS = 3                    # a Zulu form must share at least this many sentences with the English word to count as its equivalent
 
 
+WEB_MIN = 2                      # a form written this often on Zulu news sites is attested (one occurrence may be a typo)
+WEB_NEWS_DOMAINS = frozenset({
+    "isolezwe.co.za", "iol.co.za", "izindaba.scrolla.africa", "bayedenews.com", "news24.com", "isizulu.news24.com", "impempe.com", "ilanganews.co.za",
+    "pressreader.com", "ndabaonline.ukzn.ac.za", "umbele.co.za"})
+_WEB_TOKEN = re.compile(r"[A-Za-z](?:[A-Za-z'\-]*[A-Za-z])?")
+_ZULU_PARTICLES = "i|ama|izi|izin|isi|imi|aba|ne|nge|nga|we|ye|kwi|kwe|yama|ngama|le|se|e|ku|ka|o|u|a|ba"
+
+
 def resources_dir(work_dir: Path) -> Path:
     return Path(work_dir) / "resources" / "attestation"
 
@@ -37,8 +49,72 @@ def tokens(line: str) -> list[str]:
     return [t.lower() for t in _TOKEN.findall(line)]
 
 
+class WebText:
+    """Zulu written on the web (FineWeb-2 zul_Latn: 127,335 documents, 56.8 million words, Common Crawl 2013-2024, ODC-By 1.0), counted apart for Zulu
+    news sites and for everything else, because the rest includes machine-translated product and tech pages that prove less."""
+
+    def __init__(self, counts: dict[str, tuple[int, int]], news_text: str = "") -> None:
+        self.counts = counts
+        self._news = news_text.lower()
+
+    @classmethod
+    def from_directory(cls, directory: Path) -> "WebText":
+        counts: dict[str, tuple[int, int]] = {}
+        for line in (Path(directory) / "web_counts.tsv").read_text(encoding="utf-8").splitlines():
+            token, news, other = line.split("\t")
+            counts[token] = (int(news), int(other))
+        news_file = Path(directory) / "web_news.txt"
+        return cls(counts, news_file.read_text(encoding="utf-8") if news_file.is_file() else "")
+
+    def written(self, form: str) -> tuple[int, int]:
+        """(news, other): how often Zulu web text writes this form; a phrase is counted in the news text only."""
+        key = " ".join(form.lower().split())
+        if " " not in key:
+            return self.counts.get(key, (0, 0))
+        found = len(re.findall(r"(?<![a-z'])" + re.escape(key) + r"(?![a-z'])", self._news)) if self._news else 0
+        return found, 0
+
+    def forms_with(self, english_word: str, top: int = 6) -> list[dict[str, Any]]:
+        """How Zulu news sites write an English word: bare, with a Zulu particle (irally), or with a hyphenated one (i-rally, kwi-rally)."""
+        word = re.escape(english_word.lower().strip())
+        if not self._news or not word:
+            return []
+        pattern = re.compile(r"(?<![a-z'])([a-z]{1,6}-" + word + r"|(?:" + _ZULU_PARTICLES + r")?" + word + r")(?:s|es)?(?![a-z'])")
+        found = Counter(match.group(0) for match in pattern.finditer(self._news))
+        return [{"form": form, "count": count} for form, count in found.most_common(top)]
+
+
+def build_web_index(documents: Path, out_dir: Path) -> dict[str, int]:
+    """Make the web resources from ``host<TAB>date<TAB>text`` lines: ``web_counts.tsv`` (token, news count, other count; tokens seen at least twice, a
+    hyphenated token counted whole and by its parts) and ``web_news.txt`` (one news document per line)."""
+    news: Counter[str] = Counter()
+    other: Counter[str] = Counter()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    documents_in_news = 0
+    with Path(documents).open(encoding="utf-8") as source, (out_dir / "web_news.txt").open("w", encoding="utf-8", newline="\n") as news_file:
+        for line in source:
+            host, _date, text = line.rstrip("\n").split("\t", 2)
+            is_news = host in WEB_NEWS_DOMAINS
+            target = news if is_news else other
+            for token in _WEB_TOKEN.findall(text):
+                low = token.lower()
+                target[low] += 1
+                if "-" in low:
+                    target.update(part for part in low.split("-") if part)
+            if is_news:
+                news_file.write(text + "\n")
+                documents_in_news += 1
+    kept = [token for token in set(news) | set(other) if news[token] + other[token] >= 2]
+    with (out_dir / "web_counts.tsv").open("w", encoding="utf-8", newline="\n") as counts_file:
+        for token in sorted(kept):
+            counts_file.write(f"{token}\t{news[token]}\t{other[token]}\n")
+    return {"tokens": len(kept), "news_documents": documents_in_news}
+
+
 class Attestation:
-    def __init__(self, zulu_lines: Sequence[str], english_lines: Sequence[str], lexicon: Iterable[str] = ()) -> None:
+    def __init__(self, zulu_lines: Sequence[str], english_lines: Sequence[str], lexicon: Iterable[str] = (), web: WebText | None = None) -> None:
+        self.web = web
         if len(zulu_lines) != len(english_lines):
             raise ValueError(f"the two sides must be aligned line by line ({len(zulu_lines)} against {len(english_lines)})")
         self.zulu_lines = list(zulu_lines)
@@ -74,7 +150,8 @@ class Attestation:
         for path in sorted((directory / "lexicon").glob("*.txt")) if (directory / "lexicon").is_dir() else []:
             for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 entries.extend(part.strip() for part in line.split("\t") if part.strip())
-        return cls(zulu[:size], english[:size], entries)
+        web = WebText.from_directory(directory / "web") if (directory / "web" / "web_counts.tsv").is_file() else None
+        return cls(zulu[:size], english[:size], entries, web)
 
     # -- a Zulu form -----------------------------------------------------------------
     def status(self, form: str) -> dict[str, Any]:
@@ -83,19 +160,28 @@ class Attestation:
         key = " ".join(form.lower().split())
         parts = [p for p in re.split(r"[\s\-]+", key) if p]
         if len(parts) <= 1 and "-" not in key:
-            return {"token": form, "corpus_count": self.frequency.get(key, 0), "in_lexicon": key in self.lexicon}
+            answer = {"token": form, "corpus_count": self.frequency.get(key, 0), "in_lexicon": key in self.lexicon}
+            return self._with_web(answer, key)
         written = len(re.findall(r"(?<![a-z'])" + re.escape(key) + r"(?![a-z'])", self._zulu_lower)) if key else 0
-        words = [{"token": p, "corpus_count": self.frequency.get(p, 0), "in_lexicon": p in self.lexicon} for p in parts]
-        return {"token": form, "corpus_count": written, "in_lexicon": False, "words": words,
-                "all_words_attested": bool(words) and all(w["corpus_count"] > 0 or w["in_lexicon"] for w in words)}
+        words = [self._with_web({"token": p, "corpus_count": self.frequency.get(p, 0), "in_lexicon": p in self.lexicon}, p) for p in parts]
+        answer = {"token": form, "corpus_count": written, "in_lexicon": False, "words": words,
+                  "all_words_attested": bool(words) and all(w["corpus_count"] > 0 or w["in_lexicon"] or w.get("web_news", 0) >= WEB_MIN for w in words)}
+        return self._with_web(answer, key)
+
+    def _with_web(self, answer: dict[str, Any], key: str) -> dict[str, Any]:
+        if self.web is not None and key:
+            news, other = self.web.written(key)
+            answer["web_news"], answer["web_other"] = news, other
+        return answer
 
     def attested(self, form: str) -> bool:
         """A single form is attested when real text writes it or the lexicon has it; a phrase when real text writes the phrase or every one of its
         words is attested (the parts of a new combination are real words)."""
         found = self.status(form)
+        web = found.get("web_news", 0) >= WEB_MIN
         if "words" in found:
-            return found["corpus_count"] > 0 or found["all_words_attested"]
-        return found["corpus_count"] > 0 or found["in_lexicon"]
+            return found["corpus_count"] > 0 or web or found["all_words_attested"]
+        return found["corpus_count"] > 0 or found["in_lexicon"] or web
 
     def written_count(self, token: str) -> int:
         """How many times real text writes exactly this form, with this capitalisation (a capital at the start of a sentence proves nothing and is not
@@ -168,12 +254,19 @@ def lookup(attestation: Attestation, english_word: str, zulu_forms: Sequence[str
     of any form the agent is thinking of writing."""
     answer = attestation.equivalents(english_word)
     answer["checked_forms"] = [attestation.status(form) for form in zulu_forms]
-    answer["caution"] = ("the corpus is translated government and news text, 2.9 million words: a form missing from it is weak evidence, not proof that nobody writes it"
-                         + ("; only %d sentences here have the word" % answer["sentences"] if answer["sentences"] < 50 else ""))
+    web = attestation.web
+    answer["web_forms"] = web.forms_with(english_word) if web is not None else []
+    if web is None:
+        answer["caution"] = ("the corpus is translated government and news text, 2.9 million words: a form missing from it is weak evidence, not proof that nobody writes it"
+                             + ("; only %d sentences here have the word" % answer["sentences"] if answer["sentences"] < 50 else ""))
+    else:
+        answer["caution"] = ("evidence is translated government text (2.9 million words) and Zulu news sites 2013-2024 (isolezwe, news24, scrolla, bayede, ilanga, impempe); "
+                             "web_news counts only those sites, web_other is everything else on the Zulu web, some of it machine translated; a form missing from both is weak evidence")
     sentences, kept = answer["sentences"], answer["kept_in_english"]
     strong = [f for f in answer["forms"] if f["score"] >= 0.1][:3]
     if not sentences:
-        answer["reading"] = "the English word does not occur in the corpus: nothing is attested; keep it as the speaker says it"
+        answer["reading"] = ("the English word does not occur in the translated corpus" if answer["web_forms"]
+                             else "the English word does not occur in the corpus: nothing is attested; keep it as the speaker says it")
     elif strong:
         answer["reading"] = ("real text pairs it with " + ", ".join(f"{f['form']!r} ({f['shared_sentences']} of {sentences} sentences)" for f in strong)
                              + (f"; the English word itself stays in {kept} of them" if kept else ""))
@@ -184,6 +277,8 @@ def lookup(attestation: Attestation, english_word: str, zulu_forms: Sequence[str
                              "keep it as the speaker says it")
     if sentences and answer["with_particle"]:
         answer["reading"] += "; written with a hyphenated particle as " + ", ".join(f"{p['form']} ({p['count']})" for p in answer["with_particle"][:3])
+    if answer["web_forms"]:
+        answer["reading"] += "; Zulu news sites write it as " + ", ".join(f"{p['form']} ({p['count']})" for p in answer["web_forms"][:4])
     return answer
 
 
@@ -214,7 +309,12 @@ def main(argv: list[str] | None = None) -> int:
     english = sub.add_parser("english", help="what real text writes where the English side has this word")
     english.add_argument("word")
     english.add_argument("--zulu", nargs="*", default=[], help="forms to check as well")
+    web = sub.add_parser("build-web", help="make the web resources from host<TAB>date<TAB>text lines")
+    web.add_argument("documents", type=Path)
     args = parser.parse_args(argv)
+    if args.command == "build-web":
+        print(build_web_index(args.documents, resources_dir(load_settings().work_dir) / "web"))
+        return 0
     resources = load(load_settings().work_dir)
     if resources is None:
         print("no resources in", resources_dir(load_settings().work_dir))
