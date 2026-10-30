@@ -139,7 +139,9 @@ def length_gap(text: str, measured: dict[str, Any]) -> dict[str, int]:
     return {"chars": chars, "add_about_chars" if gap > 0 else "cut_about_chars": amount}
 
 
-SAVED_READINGS_MEASURED = 24    # saved readings measured for the reminder (the weakest six are shown): the cost is one clip each, once per run
+CLAIMS_PER_SUBMIT = 6           # units a submit result asks the agent to check against the English, at most
+
+SAVED_READINGS_MEASURED = 24   # saved readings measured for the reminder (the weakest six are shown): the cost is one clip each, once per run
 
 
 class BudgetExhausted(RuntimeError):
@@ -185,6 +187,7 @@ class Workbench:
         self.locked_segments: set[str] = set()
         self.episode: dict[str, Any] | None = None
         self.last_submit: dict[str, Any] | None = None   # the latest accepted submit_dub result, for the harness
+        self.claims_shown: set[tuple[str, str]] = set()  # (unit id, spoken text) the agent has already been asked to check
 
     # -- plumbing -----------------------------------------------------------------
     @property
@@ -850,7 +853,30 @@ class Workbench:
                                                       "usage": dict(self.judge.usage)})
         return {"loss": [{"item_id": v["id"], "issues": [i["detail"] for i in v["issues"]][:3],
                           "reads_back_as": (v.get("back_translation") or "")[:300]} for v in loss],
+                "claims": self._claims_to_check(verdicts, {v["id"] for v in loss}, units),
                 "unjudged": sum(1 for v in verdicts if v["meaning_preserved"] is None)}
+
+    def _claims_to_check(self, verdicts: list[dict[str, Any]], already_shown_as_loss: set[str], units: list[dict[str, str]]) -> list[dict[str, Any]]:
+        """Units whose Zulu an independent reader thinks says something the English does not (an addition or a distortion), apart from
+        the ones that lose meaning outright.  Seven runs of one clip carried 7 to 12 additions each: the agent fills a window with
+        claims the speaker never made, and the submit result showed it only the units scoring 0-1.  Information, not a bar: the judge
+        is noisy, so the agent weighs each against the English.  Each unit is shown once per text (an edit shows it again), and at
+        most CLAIMS_PER_SUBMIT at a time, the lowest scores first, so this can never become an open-ended repair loop."""
+        spoken = {u["id"]: u["dub"] for u in units}
+        found = []
+        for v in verdicts:
+            issues = [i for i in v.get("issues", []) if i.get("kind") in ("addition", "distortion")]
+            key = (str(v["id"]), spoken.get(v["id"], ""))
+            if not issues or v["id"] in already_shown_as_loss or key in self.claims_shown:
+                continue
+            score = v["meaning_preserved"] if v["meaning_preserved"] is not None else 3
+            found.append((score, key, {"item_id": v["id"], "kinds": sorted({i["kind"] for i in issues}),
+                                       "issues": [i["detail"] for i in issues][:2],
+                                       "reads_back_as": (v.get("back_translation") or "")[:300]}))
+        found.sort(key=lambda f: f[0])
+        shown = found[:CLAIMS_PER_SUBMIT]
+        self.claims_shown.update(key for _, key, _ in shown)
+        return [claim for _, _, claim in shown]
 
     def submit_dub(
         self, items: list[dict[str, Any]], approach_notes: str = "", partial: bool = False,

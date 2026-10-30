@@ -162,7 +162,12 @@ The bar for "done" (checked by the harness against your last submit_dub result, 
 overruns or runs into another unit's speech (collisions), no hard-gate failures, no unit
 whose meaning an independent reader finds materially changed from the English (submit_dub reports these as
 meaning_loss, with what your Zulu reads back as; a lost qualifier, a changed time or negation, a dropped clause that
-carried a fact), and residual_dead_air_pct at or below {max_dead_air}. If you stop while a submission is still below that bar and you have budget left,
+carried a fact), and residual_dead_air_pct at or below {max_dead_air}. submit_dub also lists claims_to_check:
+units where the same reader found something your Zulu says that the English does not (an addition or a changed
+detail), with what it reads back as. That is not a bar and the reader is sometimes wrong: look at the English of
+each, take out what it does not say (a wider word than the speaker used, an intensifier, a figure or a reason of your
+own), and leave it alone when the English does say it. Window length is never a reason to add a claim: a shorter
+faithful unit and a pause are better than a longer unit that says more than the speaker did. If you stop while a submission is still below that bar and you have budget left,
 you will be sent back to the specific units to fix.
 
 When you are satisfied, call submit_dub (it returns your score and which units are flagged; you may revise
@@ -530,6 +535,8 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
         slim["flagged_units"] = result["flagged_units"]
     if (result.get("meaning") or {}).get("loss"):
         slim["meaning_loss"] = result["meaning"]["loss"]
+    if (result.get("meaning") or {}).get("claims"):
+        slim["claims_to_check"] = result["meaning"]["claims"]
     if result.get("warnings"):
         slim["warnings"] = result["warnings"]
     return slim

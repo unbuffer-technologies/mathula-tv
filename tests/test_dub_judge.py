@@ -168,6 +168,37 @@ def test_the_workbench_counts_loss_in_the_headline_and_survives_a_judge_outage(t
     assert Workbench(store=None, tts_factory=lambda: None)._judge_meaning(card(), tmp_path) is None
 
 
+def test_an_addition_the_reader_finds_is_shown_to_the_agent_once_per_text_without_becoming_a_bar(tmp_path):
+    from mathula_tv.dub_workbench import CLAIMS_PER_SUBMIT, Workbench
+
+    class Judge:
+        usage = {}
+
+        def judge(self, units):
+            def verdict(u):
+                kind = {"lost": "distortion", "plain": None}.get(u["id"], "addition")
+                score = 1 if u["id"] == "lost" else 2
+                return {**u, "meaning_preserved": 3 if kind is None else score, "back_translation": "all grandmothers get clean water",
+                        "issues": [{"kind": kind, "detail": "adds clean"}] if kind else [{"kind": "unclear", "detail": "?"}]}
+            return [verdict(u) for u in units]
+
+    ids = ["plain", "lost", *[f"u{n}" for n in range(CLAIMS_PER_SUBMIT + 3)]]
+    card = lambda text="d": {"headline": {}, "groups": [{"group_id": i, "source_text": "c", "spoken_text": text} for i in ids]}
+    wb = Workbench(store=None, tts_factory=lambda: None, judge=Judge())
+    meaning = wb._judge_meaning(card(), tmp_path)
+    assert [m["item_id"] for m in meaning["loss"]] == ["lost"]
+    first = [c["item_id"] for c in meaning["claims"]]
+    assert len(first) == CLAIMS_PER_SUBMIT and "lost" not in first and "plain" not in first      # a bounded list; loss units are not repeated
+    assert meaning["claims"][0]["kinds"] == ["addition"] and meaning["claims"][0]["reads_back_as"]
+    second = [c["item_id"] for c in wb._judge_meaning(card(), tmp_path)["claims"]]
+    assert len(second) == 3 and not set(first) & set(second)                                      # each unit once per text: the rest, not the same six
+    assert wb._judge_meaning(card(), tmp_path)["claims"] == []
+    assert len(wb._judge_meaning(card("edited"), tmp_path)["claims"]) == CLAIMS_PER_SUBMIT       # an edit shows the unit again
+    result = _result([]) | {"meaning": {"loss": [], "claims": meaning["claims"]}}
+    assert slim_submit(result)["claims_to_check"] == meaning["claims"]
+    assert unmet_targets(result, max_dead_air_pct=2.0) == []                                      # information only: no new bar
+
+
 def test_a_flag_with_quotes_that_are_not_in_the_text_is_downgraded_to_a_doubt():
     client = FakeClient({"b": "She denied the claim."},
                         {"b": {"meaning_preserved": 0, "issues": [{"kind": "addition", "detail": "adds everything"}],
