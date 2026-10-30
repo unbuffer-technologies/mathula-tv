@@ -260,3 +260,52 @@ def test_a_saved_candidate_can_be_trialled_without_a_new_reflection(tmp_path, mo
     record = dub_improve.improvement_step(None, None, lambda: None, baseline_run="b", trial_run="t", clip_ids=["c"],
                                           candidate_version="pb-saved")
     assert record["decision"] == "adopted" and saved["adopted"] == "pb-saved" and record["resumed_candidate"] == "pb-saved"
+
+
+# ---- fidelity: the judge's counts reach the gate and the reflector -------------------------------------------------------
+
+def _write_judge(directory, additions=0, distortions=0, omissions=0, faithful=60.0):
+    issues = ([{"kind": "addition", "detail": f"adds claim {i}"} for i in range(additions)]
+              + [{"kind": "distortion", "detail": "flips a reason"} for _ in range(distortions)]
+              + [{"kind": "omission", "detail": "drops a name"} for _ in range(omissions)])
+    verdicts = [{"id": "u01", "issues": issues}, {"id": "u02", "issues": []}]
+    (directory / "judge.json").write_text(json.dumps({"verdicts": verdicts, "summary": {"pct_units_fully_faithful": faithful}}), encoding="utf-8")
+
+
+def test_fidelity_summary_counts_the_judges_issues_by_kind_and_shows_a_few(tmp_path):
+    from mathula_tv.dub_judge import fidelity_summary
+
+    assert fidelity_summary(tmp_path) == {}                                              # no verdicts: nothing to compare
+    _write_judge(tmp_path, additions=3, distortions=1, omissions=1, faithful=48.0)
+    found = fidelity_summary(tmp_path)
+    assert (found["units"], found["additions"], found["distortions"], found["omissions"], found["faithful_pct"]) == (2, 3, 1, 1, 48.0)
+    assert len(found["examples"]) == 4 and found["examples"][0].startswith("addition: adds claim 0")
+
+
+def test_batch_stats_averages_the_judges_counts_over_the_runs_that_were_judged(tmp_path):
+    store = _store(tmp_path)
+    for repeat, adds in ((1, 6), (2, 10), (3, 8)):
+        _write_run(store.repeat_dir("b", "c", repeat), stop="agent_finished")
+        if repeat != 3:
+            _write_judge(store.repeat_dir("b", "c", repeat), additions=adds, distortions=2)
+    stats = batch_stats(collect_batch(store, "b", "c"))
+    assert stats["judged"] == 2 and stats["fidelity_issues_mean"] == 10 and stats["additions_mean"] == 8
+    assert batch_stats([{"repeat": 1, "met_bar": True, "headline": {}, "processed_tokens": 1, "fidelity": {}}])["judged"] == 0
+
+
+def test_gate_refuses_more_additions_and_distortions_beyond_the_run_to_run_spread():
+    base = {**_stats(), "judged": 3, "fidelity_issues_mean": 13.0}
+    assert gate(base, {**_stats(), "judged": 3, "fidelity_issues_mean": 14.9})[0]       # within the spread seen across runs of one setup
+    ok, reasons = gate(base, {**_stats(), "judged": 3, "fidelity_issues_mean": 15.5})
+    assert not ok and any("additions/distortions/omissions" in r for r in reasons)
+    assert gate(base, {**_stats(), "judged": 3, "fidelity_issues_mean": 5.0})[0]         # fewer is welcome
+    assert gate(base, {**_stats(), "judged": 0})[0] and gate({**_stats(), "judged": 0}, {**_stats(), "judged": 3, "fidelity_issues_mean": 40.0})[0]
+
+
+def test_the_digest_puts_the_fidelity_counts_beside_the_timing_result(tmp_path):
+    _write_run(tmp_path / "r2", records=_failing_trace())
+    _write_judge(tmp_path / "r2", additions=2, distortions=1, faithful=40.0)
+    digest = digest_run(tmp_path / "r2")
+    assert "FIDELITY (judge): fully_faithful=40.0% of 2 units, additions=2 distortions=1 omissions=0" in digest and "e.g. addition:" in digest
+    _write_run(tmp_path / "r3", records=_failing_trace())
+    assert "FIDELITY" not in digest_run(tmp_path / "r3")

@@ -16,6 +16,8 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from .dub_judge import fidelity_summary
+
 DIGEST_MAX_CHARS = 5500
 _ALWAYS_KEEP = ("REJECTED", "PUSHBACK", "NUDGE", "SAYS-NO-TOOLS", "END")
 
@@ -33,6 +35,11 @@ the bar, some did not. Work like this:
 2. Contrast runs that met the bar with runs that did not: what did the good runs do that the bad ones did not?
 3. Propose 0 to 3 edits to the playbook. Prefer revising or removing a note that caused a failure over adding a
    new one. Every edit must cite specific evidence from the digest (which run, what happened).
+
+Besides the bar, an independent judge compares each run's isiZulu with what the speaker said and counts additions
+(content the speaker did not say), distortions (a changed meaning, a flipped negation or reason) and omissions. These
+counts are in each run's FIDELITY line. Runs that meet the bar can still be unfaithful: look for how the agent got
+there (for example how it lengthened a unit that was too short) and prefer a method that keeps the meaning.
 
 Rules for edits:
 - Each note is one imperative sentence of at most 240 characters, about method, general enough to hold for ANY
@@ -59,6 +66,15 @@ def _headline_line(headline: Mapping[str, Any]) -> str:
             f"gates={headline.get('gate_failures')} meaning_loss={headline.get('meaning_loss_units', 'n/a')}")
 
 
+def _fidelity_line(run_dir: Path) -> str:
+    found = fidelity_summary(run_dir)
+    if not found:
+        return ""
+    line = (f"FIDELITY (judge): fully_faithful={found.get('faithful_pct')}% of {found['units']} units, additions={found['additions']} "
+            f"distortions={found['distortions']} omissions={found['omissions']}")
+    return line + (" | e.g. " + "; ".join(found["examples"]) if found["examples"] else "")
+
+
 def digest_run(run_dir: Path, *, max_chars: int = DIGEST_MAX_CHARS) -> str:
     """A compact, deterministic account of one run, built from its trace and summary."""
     run_dir = Path(run_dir)
@@ -73,6 +89,8 @@ def digest_run(run_dir: Path, *, max_chars: int = DIGEST_MAX_CHARS) -> str:
         f"pushbacks={summary.get('pushbacks')} tokens={(tokens.get('in') or 0) + (tokens.get('out') or 0):,} "
         f"| final: {_headline_line(final)} | unmet_at_end={summary.get('unmet_at_end')}"
     )
+    fidelity = _fidelity_line(run_dir)
+    header = header + ("\n" + fidelity if fidelity else "")
     lines: list[tuple[bool, str]] = []
     trace_path = run_dir / "trace.jsonl"
     records = [json.loads(l) for l in trace_path.read_text(encoding="utf-8").splitlines() if l.strip()] if trace_path.is_file() else []

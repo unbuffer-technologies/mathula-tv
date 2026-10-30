@@ -6,7 +6,8 @@
 Nothing is adopted on the strength of the reflector's say-so. A candidate playbook has to be run
 the standard three times on each clip, and is adopted only if it is no worse than the batch it
 was derived from: it must meet the bar at least as often, break no more timing than before, leave no
-more dead air (beyond a small tolerance), and not cost materially more tokens. Every step, adopted
+more dead air (beyond a small tolerance), not carry more additions, distortions and omissions per run (the judge's counts, beyond a
+tolerance the run-to-run spread sets), and not cost materially more tokens. Every step, adopted
 or not, is recorded in ``playbooks/history.jsonl`` with its evidence.
 
 Problems in the harness itself (a tool that rejects reasonable input, a rule that freezes a bad draft)
@@ -31,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Mapping, Sequence
 
 from .dub_agent import ChatClient, build_system_prompt, run_agent
-from .dub_judge import UnitJudge
+from .dub_judge import UnitJudge, fidelity_summary
 from .dub_reflect import digest_run, reflect
 from .dub_smells import find_smells, render as render_smells
 from .dub_workbench import Workbench
@@ -41,6 +42,7 @@ from .playbook import (
 
 TOKEN_GROWTH_TOLERANCE = 1.15      # a candidate may cost up to 15% more tokens than the baseline
 DEAD_AIR_TOLERANCE_PTS = 0.3       # ... and leave up to 0.3 points more dead air when everything else ties
+FIDELITY_TOLERANCE = 2.0           # ... and carry up to 2 more additions+distortions+omissions per run: seven runs of one clip ranged 11 to 18
 REPEATS = 3
 MAX_PARALLEL_RUNS = 9
 
@@ -70,7 +72,7 @@ def collect_batch(store: Any, run_id: str, clip_id: str, *, repeats: int = 5) ->
             "met_bar": summary.get("stop_reason") == "agent_finished", "headline": headline,
             "processed_tokens": int(tokens.get("in") or 0) + int(tokens.get("out") or 0),
             "cached_tokens": int(tokens.get("cached") or 0), "tts_used": summary.get("tts_used"),
-            "playbook": summary.get("playbook"),
+            "playbook": summary.get("playbook"), "fidelity": fidelity_summary(directory),
         })
     return batch
 
@@ -82,7 +84,15 @@ def collect_batches(store: Any, run_id: str, clip_ids: Sequence[str]) -> list[di
 def batch_stats(batch: list[dict[str, Any]]) -> dict[str, Any]:
     if not batch:
         return {"n": 0}
+    judged = [r["fidelity"] for r in batch if r.get("fidelity")]
+    fidelity = {
+        "judged": len(judged),
+        "fidelity_issues_mean": statistics.mean(f["additions"] + f["distortions"] + f["omissions"] for f in judged),
+        "additions_mean": statistics.mean(f["additions"] for f in judged),
+        "faithful_pct_mean": statistics.mean(float(f.get("faithful_pct") or 0) for f in judged),
+    } if judged else {"judged": 0}
     return {
+        **fidelity,
         "n": len(batch),
         "met_bar": sum(1 for r in batch if r["met_bar"]),
         "tokens_mean": statistics.mean(r["processed_tokens"] for r in batch),
@@ -107,6 +117,10 @@ def gate(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> tuple[boo
         reasons.append(f"more units lose meaning ({candidate['meaning_loss_mean']:.2f} vs {baseline['meaning_loss_mean']:.2f})")
     if candidate.get("violations_mean", 0) > baseline.get("violations_mean", 0) + 1e-9:
         reasons.append(f"more overruns/collisions ({candidate['violations_mean']:.2f} vs {baseline['violations_mean']:.2f})")
+    if candidate.get("judged") and baseline.get("judged") and \
+            candidate["fidelity_issues_mean"] > baseline["fidelity_issues_mean"] + FIDELITY_TOLERANCE:
+        reasons.append("more additions/distortions/omissions per run "
+                       f"({candidate['fidelity_issues_mean']:.1f} vs {baseline['fidelity_issues_mean']:.1f})")
     if candidate.get("met_bar", 0) <= baseline.get("met_bar", 0) and \
             candidate.get("residual_mean", 0) > baseline.get("residual_mean", 0) + DEAD_AIR_TOLERANCE_PTS:
         reasons.append(f"more dead air left ({candidate['residual_mean']:.2f}% vs {baseline['residual_mean']:.2f}%)")

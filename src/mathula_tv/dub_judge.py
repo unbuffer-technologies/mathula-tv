@@ -10,7 +10,8 @@ is not anchored on the English:
 
 It is the same model family as the agent, so its errors correlate with the agent's. Treat the output as a
 way to rank units for the human reviewers (and, later, calibrate it against their verdicts), never as a
-reason to skip them. Nothing here feeds the agent or the improvement gate.
+reason to skip them.  The improvement loop reads its counts (``fidelity_summary``): the gate refuses a candidate playbook that adds
+more additions, distortions and omissions than the batch it came from, and the reflector sees them next to the timing result.
 """
 from __future__ import annotations
 
@@ -122,6 +123,32 @@ def _clean_issues(raw: Any) -> list[dict[str, str]]:
             kind = str(issue.get("kind", "")).lower()
             issues.append({"kind": kind if kind in ISSUE_KINDS else "distortion", "detail": str(issue.get("detail", ""))[:200]})
     return issues
+
+
+def fidelity_summary(run_dir: Path, *, examples: int = 4) -> dict[str, Any]:
+    """What a run's ``judge.json`` says in counts: units judged, the share fully faithful, the issues by kind, and a few examples; {} when the run has
+    no verdicts.  Seven runs of one clip carried 7 to 12 additions each whatever the playbook, so a count of the issues is the number to compare."""
+    path = Path(run_dir) / "judge.json"
+    if not path.is_file():
+        return {}
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return {}
+    verdicts = [v for v in document.get("verdicts") or [] if isinstance(v, dict)]
+    if not verdicts:
+        return {}
+    kinds = {kind: 0 for kind in ISSUE_KINDS}
+    shown: list[str] = []
+    for verdict in verdicts:
+        for issue in verdict.get("issues") or []:
+            kind = issue.get("kind") if issue.get("kind") in kinds else "distortion"
+            kinds[kind] += 1
+            if len(shown) < examples and kind in ("addition", "distortion", "omission"):
+                shown.append(f"{kind}: {str(issue.get('detail', ''))[:110]}")
+    summary = document.get("summary") or {}
+    return {"units": len(verdicts), "faithful_pct": summary.get("pct_units_fully_faithful"), "issues": sum(kinds.values()),
+            **{f"{kind}s": count for kind, count in kinds.items()}, "examples": shown}
 
 
 def judge_units(client: Any, units: Sequence[Mapping[str, str]], *, chunk: int = CHUNK) -> dict[str, Any]:
