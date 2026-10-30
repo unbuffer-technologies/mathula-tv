@@ -80,7 +80,8 @@ You work through tools and decide your own method. You are scored on:
    written vowel is spoken in full. Keep an English word only for a name, a title, an acronym, or a word with no everyday Zulu word. The
    pronunciation lab below is for the names, acronyms and titles you keep.
    When you are not sure what to do with an English word, ask what real Zulu does: attested_zulu(word, zulu_forms) shows the Zulu forms that
-   translated text pairs with it, whether the English word stays English there, and how often a form you are thinking of has been written. The ladder:
+   translated text pairs with it, whether the English word stays English there, how Zulu news sites write it, and how often a form you are thinking
+   of has been written. The ladder:
    an attested Zulu word or loan if there is one; otherwise code-switch, which means keeping the English word as the speaker says it (same number, plural
    -s included), with a hyphenated particle if the grammar needs one (ne-, ye-), and checking with the lab how the voice says it. Never invent a form
    that real text does not write. Only when real text itself adapts such a word, create_loanword rebuilds the speaker's sounds in Zulu syllables (a vowel
@@ -275,10 +276,12 @@ TOOL_SPECS = [
           "tried; this is your side of it, so a word that sounds wrong later can be traced to what was seen and why it was left.",
           {"word": {"type": "string"}, "decision": {"type": "string", "enum": ["kept_as_is", "changed", "not_a_problem"]},
            "why": {"type": "string", "description": "your reason, in a few words"}}, ["word", "decision", "why"]),
-    _tool("attested_zulu", "What real written isiZulu does with an English word, from 233,691 aligned sentence pairs of translated text (2.9 million Zulu words) and the "
-          "NCHLT lexicon: the Zulu forms that real text pairs with the word (shared sentences, score), how often the English word itself stays English in the "
-          "Zulu sentence, and, for forms you give, how often each has really been written (corpus_count, in_lexicon; a phrase or a form with a hyphenated particle is counted exactly and word by word). Free: no try, no model. Use it before "
-          "you adapt or create a word: a form that real text never writes (corpus_count 0) is not to be invented.",
+    _tool("attested_zulu", "What real written isiZulu does with an English word, from 233,691 aligned sentence pairs of translated text (2.9 million Zulu words), the "
+          "NCHLT lexicon, and 56.8 million words of Zulu web text (2013-2024) counted apart for Zulu news sites: the Zulu forms that real text pairs with the word "
+          "(shared sentences, score), how often the English word itself stays English in the Zulu sentence, how Zulu news sites write the English word (bare, "
+          "with a particle: web_forms), and, for forms you give, how often each has really been written (corpus_count, in_lexicon, web_news, web_other; a phrase or "
+          "a form with a hyphenated particle is counted exactly and word by word). Free: no try, no model. Use it before you adapt or create a word: a form that "
+          "no source writes (all counts 0) is not to be invented; one that Zulu news sites write at least twice is attested. The caution says how far the evidence reaches.",
           {"word": {"type": "string", "description": "the English word, e.g. pension"},
            "zulu_forms": {"type": "array", "items": {"type": "string"}, "description": "forms you are thinking of writing, e.g. [\"impesheni\"]"}}, ["word"]),
     _tool("get_submission", "The units currently accepted (all, or only unit_ids), with their text and any flags from "

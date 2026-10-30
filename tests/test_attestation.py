@@ -95,7 +95,8 @@ def test_zulu_news_sites_attest_a_form_the_small_translated_corpus_never_shows(t
     assert web.written("i-rally") == (2, 0) and web.written("isikhwama sempesheni") == (2, 0)           # a hyphenated form and a phrase are counted as written
     forms = {f["form"]: f["count"] for f in web.forms_with("rally")}
     assert forms["irally"] == 3 and forms["ama-rally"] == 1 and forms["i-rally"] == 2 and "generally" not in forms
-    a = Attestation(["Ibhasi ."], ["The bus ."], web=web)
+    a = Attestation(["Ibhasi ."], ["The rally ."], web=web)
     assert a.attested("irally") and not a.attested("irali") and a.attested("isikhwama sempesheni")
     answer = lookup(a, "rally", ["irally"])
     assert "irally (3)" in answer["reading"] and answer["checked_forms"][0]["web_news"] == 3 and "Zulu news sites" in answer["caution"]
+    assert "at least twice by Zulu news sites" in answer["reading"] and "nothing is attested" not in answer["reading"]

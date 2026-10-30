@@ -272,6 +272,9 @@ def lookup(attestation: Attestation, english_word: str, zulu_forms: Sequence[str
                              + (f"; the English word itself stays in {kept} of them" if kept else ""))
     elif kept and kept * 5 >= sentences:
         answer["reading"] = f"no Zulu form clearly pairs with it, and it stays English in {kept} of {sentences} sentences: real text code-switches it"
+    elif answer["web_forms"]:
+        answer["reading"] = (f"the translated corpus has no Zulu form that clearly pairs with it ({kept} of {sentences} sentences keep the English); "
+                             "a form written at least twice by Zulu news sites is attested")
     else:
         answer["reading"] = (f"no Zulu form clearly pairs with it and it is rarely kept in English ({kept} of {sentences} sentences): nothing is attested; "
                              "keep it as the speaker says it")
