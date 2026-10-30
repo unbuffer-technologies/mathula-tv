@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
@@ -116,7 +117,29 @@ def length_guide(segments: list[dict[str, Any]], voices: dict[str, Any]) -> dict
     return guide
 
 
-SAVED_READINGS_MEASURED = 24     # saved readings measured for the reminder (the weakest six are shown): the cost is one clip each, once per run
+LENGTH_GAP_MIN_PCT = 6           # a unit within this share of its window gets no length advice
+
+
+def spoken_chars(text: str) -> int:
+    """Characters the length guide counts: spaces included, pause and ~ markers not."""
+    return len(re.sub(r"~|\[[^\]]*\]", "", text or ""))
+
+
+def length_gap(text: str, measured: dict[str, Any]) -> dict[str, int]:
+    """How much to write to fill the window, from this very measurement: the unit's characters, and, when it speaks more than 6% short of its window
+    (or past it), the characters to add (or cut), to the nearest 5, at the rate this text measured.  The agent saw only 'shortfall_pct' before and had
+    to guess the size of the edit, so a first draft 27% short took most of a run to close."""
+    chars, spoken, window = spoken_chars(text), int(measured.get("measured_ms") or 0), int(measured.get("window_ms") or 0)
+    if not (chars and spoken and window):
+        return {}
+    gap = chars * (window / spoken - 1)
+    if abs(gap) < chars * LENGTH_GAP_MIN_PCT / 100:
+        return {"chars": chars}
+    amount = max(5, int(round(abs(gap) / 5)) * 5)
+    return {"chars": chars, "add_about_chars" if gap > 0 else "cut_about_chars": amount}
+
+
+SAVED_READINGS_MEASURED = 24    # saved readings measured for the reminder (the weakest six are shown): the cost is one clip each, once per run
 
 
 class BudgetExhausted(RuntimeError):
@@ -284,7 +307,8 @@ class Workbench:
                 "fits_about_chars is the Zulu length (characters, spaces included, pauses and ~markers not counted) that fills a segment's window at "
                 "this voice's natural speed, about 12 characters per second. Dubs that fitted landed within roughly 20% of it; first drafts that "
                 "retold compactly landed about 30% short, which then took most of the run to close unit by unit. Draft to this length from the start, "
-                "with what the speaker said (padding with additions fails the restatement and fabrication gates).")
+                "with what the speaker said (padding with additions fails the restatement and fabrication gates). Each measurement then gives the unit's "
+                "chars and add_about_chars or cut_about_chars, the edit that closes the gap at the rate that text measured.")
         if mine is not None:
             opened["your_scope"] = (
                 "You dub ONLY the segments marked yours:true (one speaker turn). The rest of the clip is "
@@ -698,6 +722,7 @@ class Workbench:
             pronunciation_root=self.pronunciation_root,
         )
         result = self._present(result)
+        result.update(length_gap(text, result))
         result["tts_budget_remaining"] = remaining
         return result
 
@@ -721,6 +746,8 @@ class Workbench:
 
         with ThreadPoolExecutor(max_workers=min(6, len(requests))) as pool:
             results = [self._present(r) for r in pool.map(_one, requests)]
+        for request, result in zip(requests, results):
+            result.update(length_gap(request["text"], result))
         return {"results": results, "tts_budget_remaining": remaining}
 
     def preview_turn_padding(

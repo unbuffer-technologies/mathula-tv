@@ -914,3 +914,14 @@ def test_a_created_loanword_nobody_writes_is_not_remembered_and_not_offered_agai
     workbench.judge = Judge()
     assert {(w["english"], w["zulu"]) for w in workbench.loanwords()} == {("provident", ""), ("pension", "")}        # neither form is written in the (tiny) corpus
     attestation._cache.clear()
+
+
+def test_a_measurement_says_how_many_characters_to_add_or_cut_to_fill_the_window_at_the_rate_that_text_measured():
+    from mathula_tv.dub_workbench import length_gap, spoken_chars
+
+    assert spoken_chars("Sawubona ~ baba [pause]") == len("Sawubona  baba ")
+    text = "a" * 100
+    assert length_gap(text, {"measured_ms": 7300, "window_ms": 10000}) == {"chars": 100, "add_about_chars": 35}          # 27% short: 100 x (10 / 7.3 - 1) = 37 -> 35
+    assert length_gap(text, {"measured_ms": 12000, "window_ms": 10000}) == {"chars": 100, "cut_about_chars": 15}          # past the window: 100 x (1 - 10 / 12) = 17 -> 15
+    assert length_gap(text, {"measured_ms": 9700, "window_ms": 10000}) == {"chars": 100}                                  # within 6%: no advice
+    assert length_gap("", {"measured_ms": 1, "window_ms": 1}) == {} and length_gap(text, {}) == {}

@@ -65,7 +65,9 @@ You work through tools and decide your own method. You are scored on:
    not a goal: a viewer hears padding as a pause, so prefer wording that fills the time.
    Length guide: open_clip gives each segment fits_about_chars, the Zulu length that fills its window at this voice's natural speed (about 12
    characters per second). Write your first draft to that length, with what the speaker said: a compact first draft has landed 30% short and
-   cost most of the run to close unit by unit.
+   cost most of the run to close unit by unit. Every measurement tells you the unit's chars and, when it is more than 6% off its window,
+   add_about_chars or cut_about_chars: the size of the edit at the rate that very text measured. Edit by that amount (fuller phrasing of what
+   the speaker said, never a restatement) so one more measurement closes the unit, and do the units that are furthest off first.
 
    Figures. Write numbers and amounts as digits ("u-4,500", "abantu abangu-500"). They are spoken in native
    isiZulu (izinkulungwane ezine namakhulu amahlanu zamaRandi), which takes longer than English. Dates and
