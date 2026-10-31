@@ -99,7 +99,8 @@ You work through tools and decide your own method. You are scored on:
    makes for your spelling, with the differences. The list holds names and initialisms too ("is_name": a presenter's first name, "SG", "ANC"): the
    speaker's sounds in the source audio are the right reading of a name as of any word, and the voice reads names and letters by Zulu rules, so they
    are often off. Every entry says how close the voice's reading of it, as you wrote it, is to the speaker's ("as_written", weakest first): start
-   with the weakest, and leave the ones already close alone. Below 0.7 a word is not fine as it is: hear at least one spelling for it before you
+   with the weakest, and leave the ones already close alone. Where a result carries a reference_note, the speaker's audio was too fast or unclear to decode, so the
+   sounds shown are a standard South African English voice saying the same phrase: match those. Below 0.7 a word is not fine as it is: hear at least one spelling for it before you
    decide to keep it. Being part of a title ("Western Cape High Court"), a familiar word ("OK") or a name is not a reason to skip that. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
    limited (3 per word, and a shared pool for a 4th and 5th): spend them where the voice is clearly off, not on words that already sound right.
    Each result also says what an English listener wrote when the voice said your spelling ("english_hears"), and whether that is the word

@@ -638,7 +638,8 @@ class Workbench:
                 entry["as_written"] = {"closeness": None, "reference_unreliable": measured["reference_warning"]}          # a score against the wrong sounds says nothing
                 self._ledger("shown", entry["word"], "measured as written, in the word list: the speaker's sounds do not fit the word")
             elif measured:
-                entry["as_written"] = {"closeness": measured.get("closeness"), "problems": problems_of(measured)}
+                entry["as_written"] = {"closeness": measured.get("closeness"), "problems": problems_of(measured),
+                                       **({"reference": "a standard South African English voice, not the speaker (their audio was too fast to decode)"} if measured.get("reference_note") else {})}
                 self._ledger("shown", entry["word"], "measured as written, in the word list", closeness=measured.get("closeness"), problems=problems_of(measured))
         return sorted(found, key=lambda e: (e.get("as_written", {}).get("closeness") is None, (e.get("as_written") or {}).get("closeness") or 0))
 

@@ -979,3 +979,51 @@ def test_a_capitalised_isizulu_looking_name_the_transcript_spells_the_same_is_of
     ordinary = lambda w: w.casefold() == "imali"                                          # noqa: E731
     assert [f["word"] for f in candidate_words(texts, transcript, looks_isizulu=shaped, named=[], ordinary_zulu=ordinary)] == ["Heidi"]
     assert candidate_words(texts, transcript, looks_isizulu=shaped, named=[]) == []        # without the attestation check there is nothing to tell Heidi from Imali
+
+
+# ---- the English-voice reference -----------------------------------------------------------------------------------
+
+def test_a_word_is_weak_when_the_speaker_says_it_too_fast_or_the_sounds_are_not_the_word():
+    from mathula_tv import reference_tts
+
+    assert reference_tts.weakness([(601.40, 601.64)], None) is not None                                                                                # 0.24 s
+    assert reference_tts.weakness([(1.0, 1.4), (5.0, 5.5)], None) is None                                                                                # 0.4 and 0.5 s
+    assert "letters" in reference_tts.weakness([(1.0, 1.9)], "do not fit its letters")
+    assert reference_tts.weakness([], None) is None
+
+
+def test_the_phrase_around_the_longest_occurrence_is_what_the_english_voice_says():
+    from mathula_tv import reference_tts
+
+    transcript = [{"text": t, "start": float(i), "end": float(i) + (0.5 if t == "High" else 0.2)} for i, t in enumerate(["the", "Western", "Cape", "High", "Court,", "did", "it"])]
+    assert reference_tts.phrase_around(transcript, "High") == (["Western", "Cape", "High", "Court,", "did"], 2)
+    assert reference_tts.phrase_around(transcript, "Mabhida") is None
+
+
+def test_the_target_words_sounds_are_cut_out_of_the_english_voices_phrase_without_its_neighbours(tmp_path):
+    from mathula_tv import reference_tts
+
+    transcript = [{"text": t, "start": float(i), "end": float(i) + 0.2} for i, t in enumerate(["Cape", "High", "SG"])]
+    said = {}
+
+    class Listener:
+        def align(self, wav, words, start, end):
+            said["words"] = list(words)
+            spans = {"Cape": (0.0, 0.3), "High": (0.35, 0.6), "S": (0.7, 0.8), "G": (0.8, 0.95)}
+            return [{"word": w, "start": spans[w][0], "end": spans[w][1], "confidence": -0.1} for w in words]
+
+    class Gop:
+        def decode_timed(self, wav):
+            return [("k", 0.0, 0.1), ("eɪ", 0.1, 0.2), ("p", 0.2, 0.3), ("h", 0.36, 0.42), ("aɪ", 0.44, 0.58), ("e", 0.7, 0.75), ("s", 0.76, 0.8)]
+
+    ref = reference_tts.tts_reference("High", transcript, work=tmp_path, gop=Gop(), listener=Listener(), synthesize=lambda ssml, path: path)
+    assert said["words"] == ["Cape", "High", "S", "G"]                       # an initialism is said letter by letter
+    assert ref["phones"] == ["h", "aɪ"] and ref["voice"] == reference_tts.EN_VOICE        # Cape's p (0.2-0.3) and the SG sounds are not High's
+    assert reference_tts.tts_reference("Mabhida", transcript, work=tmp_path, gop=Gop(), listener=Listener(), synthesize=lambda ssml, path: path) is None
+
+
+def test_a_result_says_which_reference_it_shows():
+    from mathula_tv.pronunciation_lab import _reference_fields
+
+    assert _reference_fields({"reference_warning": "w", "reference_note": "n"}) == {"reference_warning": "w", "reference_note": "n"}
+    assert _reference_fields({"phones": ["a"]}) == {}
