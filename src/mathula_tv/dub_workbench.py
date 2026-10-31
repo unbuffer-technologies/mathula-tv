@@ -704,6 +704,23 @@ class Workbench:
                         "(i-, isi-, ama-, u-), then re-measure and resubmit the units you change. A created word is Zulu text: the captions show it and the "
                         "voice reads it as Zulu, so it needs no respelling."}
 
+    def _refuse_unsound_choice(self, lab: Any, word: str, spelling: str, tried: dict[str, Any]) -> None:
+        """A closeness score can reward a reading that is plainly worse: prod-56 chose "Nyuz" for News (the voice then says only "n"), "E" for AI (the voice
+        says nothing), "Rhamaphosa" for Ramaphosa (the voice says "hamaposa") and "Ey En Si" for ANC at 0.683 against 0.70 as written, and saved them for later clips.
+        A reading is refused when the voice says less than 60% of the reference's sounds, or does not beat the word as it is written."""
+        reference, said = list(lab.source(word).get("phones") or []), str(tried.get("voice_sounds") or "").split()
+        if reference and len(said) < 0.6 * len(reference):
+            raise ValueError(f"with {spelling!r} the voice says only [{' '.join(said)}] of the reference [{' '.join(reference)}]: it loses sounds, so it is not a reading of "
+                             f"{word!r}. Choose a spelling that keeps them, or leave the word as it is written (note_pronunciation kept_as_is).")
+        try:
+            written = lab.as_written(word)
+        except Exception:
+            written = None
+        if (spelling.casefold() != word.casefold() and written and written.get("closeness") is not None
+                and float(tried["closeness"]) <= float(written["closeness"])):
+            raise ValueError(f"{spelling!r} measures {tried['closeness']}, no closer than {word!r} as it is written ({written['closeness']}): leave the word as it is "
+                             "written (note_pronunciation kept_as_is, citing the tries) or find a spelling that is closer.")
+
     def use_pronunciation(self, word: str, spelling: str) -> dict[str, Any]:
         """Make ``spelling`` the way ``word`` is spoken: in your own measurements now, in the render, and in the shared memory for later clips."""
         from . import dub_pronunciation
@@ -713,6 +730,7 @@ class Workbench:
         tried = lab.tried.get(word, {}).get(spelling)
         if tried is None:
             raise ValueError(f"try {spelling!r} for {word!r} with try_pronunciation before using it")
+        self._refuse_unsound_choice(lab, word, spelling, tried)
         if tried.get("lost_in_its_sentence") and (word, spelling) not in self._lost_sound_warned:
             self._lost_sound_warned.add((word, spelling))       # said once: choosing it again after this is the agent's decision
             raise ValueError(

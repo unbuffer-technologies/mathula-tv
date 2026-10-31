@@ -1036,3 +1036,22 @@ def test_an_initialism_with_fewer_sounds_than_letters_and_a_one_sound_word_fall_
     assert reference_tts.weakness([(1.0, 1.6)], None, "SG", ["ɪ", "s", "tʃ", "iː", "ɪ"]) is None
     assert "one sound" in reference_tts.weakness([(1.0, 1.6)], None, "Heidi", ["d"])
     assert reference_tts.weakness([(1.0, 1.6)], None, "Hi", ["h"]) is None                                 # too short a word to say so
+
+
+def test_a_reading_that_loses_sounds_or_is_no_closer_than_the_written_word_is_refused(tmp_path):
+    workbench, _ = make_workbench(tmp_path, {})
+
+    class Lab:
+        def source(self, word):
+            return {"phones": ["n", "uː", "z"]}
+
+        def as_written(self, word):
+            return {"closeness": 0.7}
+
+    lab = Lab()
+    with pytest.raises(ValueError, match="loses sounds"):
+        workbench._refuse_unsound_choice(lab, "News", "Nyuz", {"voice_sounds": "n", "closeness": 0.76})              # prod-56: the voice says only "n"
+    with pytest.raises(ValueError, match="no closer"):
+        workbench._refuse_unsound_choice(lab, "News", "Nyooz", {"voice_sounds": "n uː z", "closeness": 0.683})
+    workbench._refuse_unsound_choice(lab, "News", "Nyooz", {"voice_sounds": "n uː z", "closeness": 0.85})            # closer and whole: allowed
+    workbench._refuse_unsound_choice(lab, "News", "news", {"voice_sounds": "n uː z", "closeness": 0.7})              # the word as written: nothing to compare
