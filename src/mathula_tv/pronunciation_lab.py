@@ -991,6 +991,17 @@ class PronunciationLab:
             self._letters = letter_sounds.load_or_build(path, self.voice_reading, voice=self.voice)
         return self._letters
 
+    def _phonology(self):
+        """What Zulu speakers do with English sounds (``phonology``), learned from the Multipron corpus and kept in the working resources; None when not built."""
+        if getattr(self, "_zulu_speakers", "unset") == "unset":
+            from . import phonology
+
+            try:
+                self._zulu_speakers = phonology.Phonology.load(Path(self.job_root).parents[1] / "resources" / "phonology" / "english_to_zulu_speaker.json")
+            except (IndexError, OSError):
+                self._zulu_speakers = None
+        return self._zulu_speakers
+
     def voice_open_f1(self) -> float | None:
         """How open the mouth is when this voice says a plain "a" (F1 in Hz): the scale the opening of any vowel is read against."""
         if getattr(self, "_open_reference", "unset") == "unset":
@@ -1086,7 +1097,8 @@ class PronunciationLab:
 
         # seeds: spellings worked out backwards from the speaker's sounds, the word as it is, and the best of what has been tried for it
         tried_best = sorted(self.tried.get(word, {}).values(), key=lambda r: -r["closeness"])[:3]
-        speak([spelling for spelling, _ in letter_sounds.candidates(source["phones"], table, limit=SUGGEST_FIRST)] + [stem]
+        speakers = self._phonology()
+        speak([spelling for spelling, _ in letter_sounds.candidates(source["phones"], table, limit=SUGGEST_FIRST, humans=speakers.human_cost if speakers else None)] + [stem]
               + [without_prefix(r["spelling"], prefix) for r in tried_best])
         for _ in range(SUGGEST_ROUNDS):                                # then the best so far are varied by small orthographic edits and spoken
             leaders = sorted(spoken, key=lambda spelling: -spoken[spelling][0])[:4]
@@ -1129,6 +1141,14 @@ class PronunciationLab:
             out["closest_so_far"] = {"spelling": nearest["spelling"], "closeness": nearest["closeness"]}
             out["understood_by_the_listener"] = [r["spelling"] for r in results if r.get("english_listener_understands") and not r.get("lost_in_its_sentence")]
             out["advice"] = _advice(self.tried[word], nearest, left_word, left_clip, speaker=source["phones"])
+        if speakers:
+            what = speakers.what_speakers_do(source["phones"])
+            if what:
+                out["how_zulu_speakers_say_these_sounds"] = {
+                    "measured_on": "isiZulu first-language speakers saying English and Afrikaans names, checked phoneme transcriptions (Multipron corpus), compared with English speakers saying the same names",
+                    "sounds": what,
+                    "use": "where the voice cannot make the speaker's exact sound, these are the nearest sounds people use for it, most usual first; a letter that makes one of them is a fair "
+                           "choice, an exact match is still better; a sound not listed is kept by most of them"}
         shown = self.sentence_shown(word)
         if shown:
             out["also_heard_in_this_sentence"] = shown

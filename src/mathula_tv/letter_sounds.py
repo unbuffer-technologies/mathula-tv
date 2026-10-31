@@ -125,19 +125,27 @@ def load_or_build(path: Path, reading: Callable[[str], Sequence[str]], *, voice:
     return table
 
 
-def _step_cost(target: str, made: str) -> float | None:
-    """What it costs to reach the speaker's sound ``target`` with a letter group that makes ``made``; None when it cannot."""
+def _step_cost(target: str, made: str, humans=None) -> float | None:
+    """What it costs to reach the speaker's sound ``target`` with a letter group that makes ``made``; None when it cannot.  ``humans`` (``Phonology.human_cost``)
+    adds the ways Zulu speakers themselves reach an English sound, always dearer than the sound itself."""
     from .pronunciation_lab import substitution_cost
 
     cost = substitution_cost(target, made)
     if cost == 0.0:
         return 0.0
+    if humans is not None and (human := humans(target, made)) is not None:
+        own = _own_step(target, made, cost)
+        return human if own is None else min(own, human)
+    return _own_step(target, made, cost)
+
+
+def _own_step(target: str, made: str, cost: float) -> float | None:
     if _is_vowel(target) and _is_vowel(made):
         return cost if cost <= NEAR_VOWEL_COST else None
     return cost if cost <= 0.3 else None
 
 
-def candidates(target: Sequence[str], table: Mapping, *, limit: int = 24, beam: int = 400) -> list[tuple[str, float]]:
+def candidates(target: Sequence[str], table: Mapping, *, limit: int = 24, beam: int = 400, humans=None) -> list[tuple[str, float]]:
     """Spellings (lowercase) whose letter groups make the speaker's sounds ``target`` in the voice's table, best first, as (spelling, cost)."""
     graphemes = [(letters, list(option["sounds"]), 0.1 * (1.0 - option["seen"] / max(1, option["of"])))
                  for letters, value in (table.get("graphemes") or {}).items() for option in _options(value)]
@@ -158,7 +166,7 @@ def candidates(target: Sequence[str], table: Mapping, *, limit: int = 24, beam: 
                     continue
                 total = 0.0
                 for wanted, made in zip(target[position:end], phones):
-                    step = _step_cost(wanted, made)
+                    step = _step_cost(wanted, made, humans)
                     if step is None:
                         break
                     total += step

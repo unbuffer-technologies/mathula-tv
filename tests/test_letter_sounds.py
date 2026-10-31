@@ -86,3 +86,17 @@ def test_the_vowels_of_a_spelling_are_varied_before_its_consonants():
     first_consonant_swap = next(i for i, spelling in enumerate(near) if spelling.startswith(("z", "ss", "zai", "ssai")))
     assert first_vowel_swap < first_consonant_swap                                                # "sayn..." before "zain..."
     assert "saainsa" in ls.neighbours("sainsa", table, limit=200)                                  # the open-start way of writing the diphthong is reachable
+
+
+def test_zulu_speakers_ways_rank_the_vowel_choices_instead_of_one_flat_cost():
+    table = {"graphemes": {"a": [{"sounds": ["a"], "seen": 3, "of": 3}], "u": [{"sounds": ["u"], "seen": 3, "of": 3}], "s": [{"sounds": ["s"], "seen": 3, "of": 3}]}}
+    odd = "ø"                                                                  # a vowel the spelling prior does not list
+
+    def humans(target, made):
+        return {(odd, "a"): 0.15, (odd, "u"): 0.25}.get((target, made))
+    plain = dict(ls.candidates(["s", odd, "s"], table, limit=50))
+    ranked = dict(ls.candidates(["s", odd, "s"], table, limit=50, humans=humans))
+    assert ranked["sas"] < plain["sas"] and ranked["sus"] < plain["sus"]           # evidence replaces the flat cost of a vowel that is not the sound itself
+    assert ranked["sas"] < ranked["sus"]                                           # the vowel most speakers use is cheapest, a rarer one next
+    exact = dict(ls.candidates(["s", "a", "s"], table, limit=50, humans=humans))
+    assert exact["sas"] < ranked["sas"]                                            # an exact match is still cheaper than a speakers' way

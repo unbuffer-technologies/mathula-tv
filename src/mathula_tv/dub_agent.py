@@ -112,7 +112,11 @@ You work through tools and decide your own method. You are scored on:
    note_pronunciation(word, decision, why) puts your reason in it, so that a word that later sounds wrong can be traced to what was seen and why.
    Do not stay in one family of letters: if your spellings keep missing the same sound, call suggest_spellings. It works backwards from the
    speaker's sounds through the letters this voice is known to turn into those sounds, speaks many combinations, and returns the closest
-   different ones, measured, so you see spellings you would not have guessed. It counts as one try.
+   different ones, measured, so you see spellings you would not have guessed. It counts as one try. It also returns
+   "how_zulu_speakers_say_these_sounds": for the sounds of the word that Zulu has no exact letter for (the schwa, the vowels of "cat" and "bird",
+   the "ow" of "go"), what isiZulu first-language speakers actually say, measured on the same names said by English speakers (the schwa stays a
+   schwa 40%, becomes a 21%, i 14%; the "ow" of "go" becomes o 64%). Use it to pick a letter for such a sound on evidence; an exact match to the
+   speaker's sound is still the better spelling when the voice can make one.
    Two sounds can share a label: the recogniser says "b" for Zulu's soft plain b and for an English b. So each result may also carry
    "how_the_sounds_are_made_differently", measured from both audios for the stops (p b t d k g): how sharp the release is, how long the
    closure before it lasts, whether the vocal folds vibrate through the closure, how long until voicing starts after the release, and the

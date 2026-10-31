@@ -37,6 +37,16 @@ def _ipa(phone: str) -> str:
     return SAMPA_TO_IPA.get(phone, phone)
 
 
+# The recognisers write some English vowels with symbols the corpus does not use (it writes South African English with i, u, a and the schwa).
+RECOGNISER_TO_CORPUS = {"ɪ": "i", "ʊ": "u", "ʌ": "a", "ɐ": "a", "ɚ": "ə", "ɝ": "ɜː", "ɑ": "ɑː", "ɜ": "ɜː", "iː": "i", "uː": "u",
+                        "oʊ": "əʊ", "ɹ": "ɹ", "ɾ": "ɹ", "ɡ": "ɡ"}
+
+
+def corpus_symbol(phone: str) -> str:
+    phone = phone.replace("͡", "").replace("͜", "")
+    return RECOGNISER_TO_CORPUS.get(phone, phone)
+
+
 def is_vowel(phone: str) -> bool:
     return bool(phone) and phone[0] in VOWELS
 
@@ -167,6 +177,32 @@ class Phonology:
         """What Zulu speakers do with an English phone: [{"zulu": phone or "" for left out, "share": 0-1, "n": count}], most usual first; a phone never seen is kept as it is."""
         found = [o for o in self._map.get(english_phone, []) if o["share"] >= minimum_share]
         return found or [{"zulu": english_phone, "share": 1.0, "n": 0}]
+
+    def human_cost(self, target: str, made: str, *, minimum_share: float = 0.08) -> float | None:
+        """What it costs to reach the English phone ``target`` with a letter group whose sound is ``made``, when Zulu speakers do that: between 0.15 (what most do)
+        and 0.3 (rarely done); None when they do not.  Above what the spelling prior charges for an exact match, so an exact match stays cheaper."""
+        options = [o for o in self._map.get(corpus_symbol(target), []) if o["zulu"] and o["share"] >= minimum_share]
+        wanted = corpus_symbol(made)
+        for option in options:
+            if option["zulu"] == wanted:
+                return round(0.15 + 0.15 * (1.0 - option["share"] / options[0]["share"]), 3)
+        return None
+
+    def what_speakers_do(self, english_phones: Sequence[str], *, limit: int = 6, minimum_seen: int = 15) -> list[dict[str, Any]]:
+        """For the sounds of a word that Zulu speakers change (the top choice is not the sound itself, or no choice is clearly the most usual), what they say instead."""
+        out, seen = [], set()
+        for phone in english_phones:
+            symbol = corpus_symbol(phone)
+            options = self._map.get(symbol, [])
+            if symbol in seen or not options or sum(o["n"] for o in options) < minimum_seen:
+                continue
+            seen.add(symbol)
+            if options[0]["zulu"] == symbol and options[0]["share"] >= 0.8:
+                continue
+            shown = [o for o in options if o["share"] >= 0.05][:4]
+            out.append({"speaker_sound": phone, "zulu_speakers_say": ", ".join(f"{o['zulu'] or '(leave out)'} {round(100 * o['share'])}%" for o in shown),
+                        "seen": sum(o["n"] for o in options)})
+        return out[:limit]
 
     def adapt(self, english_phones: Sequence[str]) -> list[str]:
         """The most usual Zulu-speaker phones for the English phones (no vowels inserted)."""
