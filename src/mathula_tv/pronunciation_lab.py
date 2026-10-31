@@ -234,11 +234,17 @@ def _stem(word: str) -> str:
 def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, Any]], *, looks_isizulu: Callable[[str], bool],
                     exclude: set[str] = frozenset(), limit: int = 30, named: Sequence[Mapping[str, str]] = (),
                     ordinary_zulu: Callable[[str], bool] | None = None) -> list[dict[str, Any]]:
-    """English words that the Zulu text keeps and that the speaker says in the source audio.
+    """English words and names that the Zulu text keeps and that the speaker says in the source audio.
 
     A token counts when its stem (after any isiZulu prefix glued on, with a hyphen or straight onto a capital: "weScience") is a word of the
     English transcript.  A glued prefix proves the writer meant an English word, so it is kept even when the word happens to end in a vowel and
     so looks isiZulu ("Science").  Names already given a reading (``exclude``) are skipped.
+
+    A name is listed like any other word the speaker says: the lab's reference is the speaker's own sounds in the source audio, which are right for
+    a name as they are for a word, so an English listener's difficulty with it does not matter.  The names stage covers only the names the web research
+    accepted, and left out "Heidi" and "SG" (an interviewer's first name and an initialism the speaker spells out), which the voice then read with Zulu
+    letter rules.  A name that already has a reading (``exclude``) is not listed.  An initialism of 2 to 5 capitals that the transcript writes the same
+    way is listed too: the speaker says its letters one by one, which the voice's letter rules do differently.
 
     ``named`` is what a model read out of the Zulu text itself ({"written": "iScience", "english": "science"}): it finds the English words
     by meaning, whatever their spelling or prefix.  Only the speaker's side (the transcript) is still matched here, because the lab needs
@@ -248,6 +254,11 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
                     if str(item.get("kind") or "").lower() != "name" and str(item.get("zulu") or "").strip()}
     name_stems = {_stem(str(item.get("english") or "")) for item in named if str(item.get("kind") or "").lower() == "name"} - {""}
     name_written = {str(item.get("written") or "").casefold() for item in named if str(item.get("kind") or "").lower() == "name"}
+    initialisms: dict[str, dict[str, Any]] = {}              # "SG": how the transcript writes the letters the speaker says one by one
+    for word in source_words:
+        letters = re.sub(r"[^A-Za-z]", "", str(word.get("text") or ""))
+        if 2 <= len(letters) <= 5 and letters.isupper():
+            initialisms.setdefault(letters, {"as_spoken": letters, "count": 0})["count"] += 1
     spoken: dict[str, dict[str, Any]] = {}
     spelt_alike = {re.sub(r"[^a-z']", "", str(w.get("text") or "").casefold()) for w in source_words} - {""}     # words as the transcript spells them
     # the Zulu-shaped words that are names or another language's words, not Zulu: a word the transcript restorer corrected to a name, or one the model
@@ -267,11 +278,18 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
             written = token.split("-")[-1]
             if ordinary_zulu is not None and ordinary_zulu(written):
                 continue                                     # real Zulu text writes it this way (eMpumalanga, Imali): the Zulu voice reads it as Zulu
+            if written in initialisms and written.casefold() not in exclude:
+                entry = found.setdefault(written, {
+                    "word": written, "occurrences_in_dub": 0, "speaker_says": initialisms[written]["as_spoken"],
+                    "times_the_speaker_says_it": initialisms[written]["count"],
+                    "is_name": True,
+                    "note": "an initialism: the speaker says its letters one by one; the voice reads letters by Zulu rules, so compare the speaker's sounds"})
+                entry["occurrences_in_dub"] += 1
+                continue
             unglued = _GLUED_PREFIX.sub("", written)
             for variant, glued in ((written, None), (unglued, "prefix") if unglued != written else (written, None)):
                 stem = _stem(variant)
-                if stem in name_stems or written.casefold() in name_written:
-                    continue                                 # the model says it is a name: not an English word to listen for
+                is_name = stem in name_stems or written.casefold() in name_written
                 carried = looks_isizulu(variant) and not glued and variant[:1].isupper() and re.sub(r"[^a-z']", "", variant.casefold()) in (spelt_alike & name_words)     # capitalised: a name
                 if len(stem) < 4 or stem not in spoken or (looks_isizulu(variant) and not glued and not carried) or written.casefold() in exclude or variant.casefold() in exclude:
                     continue
@@ -280,7 +298,10 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
                     "times_the_speaker_says_it": spoken[stem]["count"],
                     "note": ("a Zulu prefix is glued on: the speaker says the English word as it is" if glued else
                              "written the same in the speaker's transcript although it is shaped like isiZulu: a name or a word of another language "
-                             "(Sesotho, Afrikaans); the voice reads it with Zulu letter rules, so compare the speaker's sounds" if carried else "")})
+                             "(Sesotho, Afrikaans); the voice reads it with Zulu letter rules, so compare the speaker's sounds" if carried else
+                             "a name: the speaker's own sounds in the source audio are the reference" if is_name else "")})
+                if is_name or carried:
+                    entry["is_name"] = True
                 entry["occurrences_in_dub"] += 1
                 if zulu_by_stem.get(stem):
                     entry["zulu_word"] = zulu_by_stem[stem]
@@ -288,7 +309,7 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
     for item in named:
         written, english = str(item.get("written") or "").strip(), str(item.get("english") or "").strip()
         if str(item.get("kind") or "").lower() == "name":
-            continue                                         # names go through the names pipeline; an English listener cannot judge them
+            continue                                         # a name with a glued prefix is found by the sweep above, which strips the prefix
         stem = _stem(english)
         if len(stem) < 4 or stem not in spoken or written in found or written.casefold() in exclude or english.casefold() in exclude:
             continue

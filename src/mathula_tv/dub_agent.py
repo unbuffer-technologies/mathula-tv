@@ -96,8 +96,11 @@ You work through tools and decide your own method. You are scored on:
    English words you keep in the Zulu ("Fighters", names) are spoken by the Zulu voice with Zulu letter rules and can come
    out unrecognisable ("MaFighter" was heard as "mafactor"). Never glue a Zulu prefix onto an English word the speaker says as it is. Once the dub
    fits, call list_foreign_words; for the ones the speaker says in English, try_pronunciation shows the speaker's sounds and the sounds the voice
-   makes for your spelling, with the differences. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
-   limited (5 per word, 15 per clip): spend them where the voice is clearly off, not on words that already sound right.
+   makes for your spelling, with the differences. The list holds names and initialisms too ("is_name": a presenter's first name, "SG", "ANC"): the
+   speaker's sounds in the source audio are the right reading of a name as of any word, and the voice reads names and letters by Zulu rules, so they
+   are often off. Every entry says how close the voice's reading of it, as you wrote it, is to the speaker's ("as_written", weakest first): start
+   with the weakest, and leave the ones already close alone. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
+   limited (3 per word, and a shared pool for a 4th and 5th): spend them where the voice is clearly off, not on words that already sound right.
    Each result also says what an English listener wrote when the voice said your spelling ("english_hears"), and whether that is the word
    ("english_listener_understands"). Neither check is the main one. The sounds (closeness and the listed differences) skip the speaker's last
    sounds, so a missing ending can still score high; the listener hears one short clip and guesses a real word, so it can write "Saints" for a
@@ -251,8 +254,9 @@ TOOL_SPECS = [
            "partial": {"type": "boolean", "description": "true = update only the units you send."},
            "remove": {"type": "array", "items": {"type": "string"},
                       "description": "partial only: ids of current units to delete (e.g. units you re-split)."}}, ["items"]),
-    _tool("list_foreign_words", "After your dub fits: the English words your Zulu keeps that the speaker says in the source audio "
-          "(including ones you glued a Zulu prefix onto), so you know which to check with try_pronunciation.", {}, []),
+    _tool("list_foreign_words", "After your dub fits: the English words, names and initialisms your Zulu keeps that the speaker says in the source audio "
+          "(including ones you glued a Zulu prefix onto), weakest first with how close the voice's reading is to the speaker's, so you know which "
+          "to check with try_pronunciation.", {}, []),
     _tool("try_pronunciation", "Hear what the Zulu voice does with up to 3 spellings of an English word. For each spelling it returns the sounds "
           "the voice made, the speaker's own sounds for the word (decoded from the source audio), how close they are (0-1) and what differs "
           "(\"speaker ɔɪ, voice o\", \"the voice leaves out d\"), what an English listener writes for the voice's audio (english_hears), "

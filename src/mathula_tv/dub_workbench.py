@@ -141,6 +141,7 @@ def length_gap(text: str, measured: dict[str, Any]) -> dict[str, int]:
     return {"chars": chars, "add_about_chars" if gap > 0 else "cut_about_chars": amount}
 
 
+WORDS_MEASURED = 20             # words, names and initialisms the word list measures as written against the speaker (one clip of the voice each)
 CLAIMS_PER_SUBMIT = 6           # units a submit result asks the agent to check against the English, at most
 
 SAVED_READINGS_MEASURED = 24   # saved readings measured for the reminder (the weakest six are shown): the cost is one clip each, once per run
@@ -596,11 +597,32 @@ class Workbench:
                 named = []
         found = candidate_words(texts, self._lab().transcript, looks_isizulu=looks_isizulu, exclude=set() if with_known else self._known_readings(), named=named,
                                 ordinary_zulu=self._ordinary_zulu)
+        found = self._measured_weakest_first(found)
         return {"words": found, "note": "Loanwords first: an entry with zulu_word has an everyday Zulu word; write that word in the text instead of keeping the "
                                          "English one, unless it would change what the speaker said. Check with the lab only the English words you keep. "
-                                         "Never glue a Zulu prefix onto an English word the speaker says as it is.",
+                                         "Never glue a Zulu prefix onto an English word the speaker says as it is. Names and initialisms (is_name) are "
+                                         "here too: the speaker's sounds are the reading to match. as_written is how close the voice is now, weakest first; "
+                                         "a name already close (an isiZulu name, say) needs nothing.",
                 "tries_per_word": f"every word can be tried {GUARANTEED_TRIES_PER_WORD} times; a 4th and 5th come from a shared pool, {self._lab().shared_extra_tries_left} left",
                 "shared_extra_tries_left": self._lab().shared_extra_tries_left}
+
+    def _measured_weakest_first(self, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Every word the lab may be asked about, measured as the Zulu writes it against the speaker's sounds in the source audio, weakest first.
+
+        The speaker's audio is the baseline: ``as_written`` is how far the voice's reading is from it.  Until now only the six words the reminder showed
+        were measured, in list order, so a name that sat late in the list ("Heidi", "Western Cape High Court") was never looked at, and names and
+        initialisms were not listed at all.  One clip of the voice per word (no try is spent), at most WORDS_MEASURED of them; a word that cannot
+        be measured goes last, never missing."""
+        from .pronunciation_ledger import problems_of
+
+        for entry in found[:WORDS_MEASURED]:
+            try:
+                measured = self._lab().as_written(entry["word"])
+            except Exception:
+                measured = None
+            if measured:
+                entry["as_written"] = {"closeness": measured.get("closeness"), "problems": problems_of(measured)}
+        return sorted(found, key=lambda e: (e.get("as_written", {}).get("closeness") is None, (e.get("as_written") or {}).get("closeness") or 0))
 
     def try_pronunciation(self, word: str, spellings: list[str]) -> dict[str, Any]:
         """Hear what the Zulu voice does with up to three spellings of ``word`` and how they differ from the speaker's sounds."""

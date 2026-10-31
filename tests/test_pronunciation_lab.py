@@ -186,10 +186,10 @@ def test_the_models_reading_of_the_zulu_finds_what_the_rules_cannot():
     assert found[0]["speaker_says"] == "science" and "prefix" in found[0]["note"] and found[0]["occurrences_in_dub"] == 1
     # a word already given a reading, or that the rules found, is not listed twice
     assert candidate_words(["iScience"], words, looks_isizulu=looks_isizulu, named=named, exclude={"science"}) == []
-    # a name the model marks as a name is not offered to the lab, even though the speaker says it
+    # a name the model marks as a name is offered too, flagged as one: the speaker's sounds are the reference for a name as for a word
     names = candidate_words(["eNkomazi", "iScience"], [{"text": "Nkomazi"}, {"text": "science"}], looks_isizulu=looks_isizulu,
                             named=[{"written": "eNkomazi", "english": "Nkomazi", "kind": "name"}, {"written": "iScience", "english": "science", "kind": "word"}])
-    assert [f["word"] for f in names] == ["iScience"]
+    assert {f["word"]: bool(f.get("is_name")) for f in names} == {"eNkomazi": True, "iScience": False}
     both = candidate_words(["weScience", "iScience"], words, looks_isizulu=looks_isizulu, named=named)
     assert len(both) == 1 and both[0]["occurrences_in_dub"] == 2 and both[0]["speaker_says"] == "science"
 
@@ -941,3 +941,31 @@ def test_a_measurement_says_how_many_characters_to_add_or_cut_to_fill_the_window
     assert length_gap(text, {"measured_ms": 12000, "window_ms": 10000}) == {"chars": 100, "cut_about_chars": 15}          # past the window: 100 x (1 - 10 / 12) = 17 -> 15
     assert length_gap(text, {"measured_ms": 9700, "window_ms": 10000}) == {"chars": 100}                                  # within 6%: no advice
     assert length_gap("", {"measured_ms": 1, "window_ms": 1}) == {} and length_gap(text, {}) == {}
+
+
+def test_a_name_and_an_initialism_the_speaker_says_are_offered_so_heidi_and_sg_reach_the_lab():
+    # the Nonvalo interview: the names stage covered only what the web research accepted, so "Heidi" (an English first name that looks isiZulu)
+    # and "SG" (letters said one by one) were never examined, and the voice read both by Zulu letter rules
+    transcript = [{"text": "Heidi,"}, {"text": "SG"}, {"text": "Nonvalo"}, {"text": "rally"}]
+    shaped = lambda w: w.casefold() in {"heidi", "nonvalo", "sawubona"}                       # noqa: E731
+    named = [{"written": "Heidi", "english": "Heidi", "kind": "name"}, {"written": "Nonvalo", "english": "Nonvalo", "kind": "name"}]
+    texts = ["Sawubona kusihlwa, Heidi.", "njenge-SG eqenjini", "uNonvalo uthi"]
+    found = {f["word"]: f for f in candidate_words(texts, transcript, looks_isizulu=shaped, named=named)}
+    assert found["Heidi"]["is_name"] and found["SG"]["is_name"] and "letters one by one" in found["SG"]["note"] and found["SG"]["occurrences_in_dub"] == 1
+    assert candidate_words(texts, transcript, looks_isizulu=shaped, named=named, exclude={"heidi", "sg", "nonvalo"}) == []      # a reading already chosen
+    assert "SG" not in {f["word"] for f in candidate_words(["Sawubona SGX"], transcript, looks_isizulu=shaped)}                  # only an initialism the transcript writes the same way
+
+
+def test_every_listed_word_is_measured_against_the_speaker_and_the_weakest_come_first(tmp_path):
+    workbench, _ = make_workbench(tmp_path, {})
+
+    class Lab:
+        def as_written(self, word):
+            return {"Heidi": {"closeness": 0.31}, "SG": {"closeness": 0.5}, "Nonvalo": {"closeness": 0.9}, "Western": {"closeness": 0.42}}.get(word)
+
+    workbench._pronunciation_lab = Lab()
+    found = [{"word": "Nonvalo", "is_name": True}, {"word": "Western"}, {"word": "SG", "is_name": True}, {"word": "Heidi", "is_name": True}, {"word": "Zuma", "is_name": True}]
+    ordered = workbench._measured_weakest_first(found)
+    assert [e["word"] for e in ordered] == ["Heidi", "Western", "SG", "Nonvalo", "Zuma"]       # names and words alike; one that cannot be measured goes last, not missing
+    assert ordered[0]["as_written"]["closeness"] == 0.31 and "as_written" not in ordered[-1]
+
