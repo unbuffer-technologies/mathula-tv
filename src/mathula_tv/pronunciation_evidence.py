@@ -30,6 +30,33 @@ def word_spans(words: Sequence[Mapping[str, Any]], word: str, limit: int = 4) ->
     return [found[round(i * step)] for i in range(limit)]
 
 
+ONSET_SLACK_SECONDS = 0.20      # the transcript's start for a word is often late by this much; its first sounds ("oʊ" of OK, "w ɛ" of Western) fall before it
+OFFSET_SLACK_SECONDS = 0.12
+
+
+def word_windows(words: Sequence[Mapping[str, Any]], word: str, limit: int = 4) -> list[tuple[float, float, float, float]]:
+    """(start, end, earliest, latest) seconds of up to ``limit`` occurrences of ``word``: the transcript's own span, and how far the word's sounds may
+    reach either side of it, which is its slack but never into the neighbouring words (the previous word's end, the next word's start).
+
+    The recogniser's word times are coarse: decoding only inside the span cut the first sounds off OK ("k eː"), SG ("s tʃ iː", the "e" of "es" lost) and
+    Western ("ɪ s ə n"), and the lab then matched spellings to those clipped sounds."""
+    target = _letters(word)
+    found: list[tuple[float, float, float, float]] = []
+    for index, item in enumerate(words):
+        if not target or _letters(item.get("text")) != target:
+            continue
+        start, end = float(item.get("start") or 0.0), float(item.get("end") or 0.0)
+        before = float(words[index - 1].get("end") or 0.0) if index else 0.0
+        after = float(words[index + 1].get("start") or end + OFFSET_SLACK_SECONDS) if index + 1 < len(words) else end + OFFSET_SLACK_SECONDS
+        earliest = min(start, max(before, start - ONSET_SLACK_SECONDS))
+        latest = max(end, min(after, end + OFFSET_SLACK_SECONDS))
+        found.append((start, end, earliest, latest))
+    if len(found) <= limit:
+        return found
+    step = (len(found) - 1) / (limit - 1) if limit > 1 else 0
+    return [found[round(i * step)] for i in range(limit)]
+
+
 def edit_distance(a: Sequence[str], b: Sequence[str]) -> int:
     previous = list(range(len(b) + 1))
     for i, x in enumerate(a, 1):
@@ -41,8 +68,15 @@ def edit_distance(a: Sequence[str], b: Sequence[str]) -> int:
 
 
 def consensus(heard: Sequence[Sequence[str]]) -> list[str]:
-    """The decoding closest to all the others (the medoid): one noisy occurrence cannot decide the word."""
-    return list(min(heard, key=lambda mine: sum(edit_distance(mine, other) for other in heard)))
+    """The decoding closest to all the others (the medoid): one noisy occurrence cannot decide the word.
+
+    Only decodings at least as long as the median one compete.  A truncated decoding ("d iː" for Heidi, the others "aɪ d iː" and "h eː l d i") is
+    close to every longer one by deletion alone, so the plain medoid picked it, and "Dyi" then scored 1.0 against sounds the speaker did not make."""
+    heard = [list(h) for h in heard]
+    lengths = sorted(len(h) for h in heard)
+    median = lengths[len(lengths) // 2]
+    longer = [h for h in heard if len(h) >= median]
+    return list(min(longer, key=lambda mine: sum(edit_distance(mine, other) for other in heard)))
 
 
 def heard_word(source: Path, transcript: Sequence[Mapping[str, Any]], word: str, gop: Any, work: Path, limit: int = 6,
@@ -54,15 +88,17 @@ def heard_word(source: Path, transcript: Sequence[Mapping[str, Any]], word: str,
     """
     from .media import extract_clip
 
-    spans = word_spans(transcript, word, limit)
-    if not spans:
+    windows = word_windows(transcript, word, limit)
+    if not windows:
         return None
+    spans = [(start, end) for start, end, _, _ in windows]
     decoded, timed, clips = [], [], []
-    for k, (start, end) in enumerate(spans):
+    for k, (start, end, earliest, latest) in enumerate(windows):
         lead = min(context_seconds, start)
         clip = extract_clip(source, start, end, work / f"{_letters(word)}_{k}.wav", pad_seconds=context_seconds)
+        low, high = lead - (start - earliest), lead + (latest - start)                # the span widened by the slack, never into a neighbouring word
         inside_timed = [(token, begin, finish) for token, begin, finish in gop.decode_timed(clip)
-                        if lead - slack_seconds <= (begin + finish) / 2 <= lead + (end - start) + slack_seconds]
+                        if min(lead - slack_seconds, low) <= (begin + finish) / 2 <= max(lead + (end - start) + slack_seconds, high)]
         decoded.append([token for token, _, _ in inside_timed])
         timed.append(inside_timed)
         clips.append(clip)

@@ -211,6 +211,10 @@ def main(argv: list[str] | None = None) -> int:
     forget = sub.add_parser("forget", help="remove an entry (there is no way to add one by hand: the agent learns the readings)")
     forget.add_argument("display_text")
     forget.add_argument("--voice", default="zu-ZA-ThembaNeural")
+    off = sub.add_parser("disable", help="switch an entry off and keep it, with the reason (a disabled reading is not applied and does not block a better one)")
+    off.add_argument("display_text")
+    off.add_argument("--voice", default="zu-ZA-ThembaNeural")
+    off.add_argument("--why", required=True)
     args = parser.parse_args(argv)
     path = memory_path(load_settings().work_dir)
     if args.command == "list":
@@ -218,6 +222,14 @@ def main(argv: list[str] | None = None) -> int:
             state = "OFF" if entry.get("disabled") else "on"
             print(f"{state:>3} {entry['source']:<6} {entry['display_text']!r} -> {entry['tts_text']!r} [{entry.get('voice')}] "
                   f"jobs={len(entry['jobs'])} failures={entry.get('failures', 0)}")
+    elif args.command == "disable":
+        data = load(path)
+        entry = data["entries"].get(_key(args.display_text, args.voice))
+        if entry:
+            entry["disabled"] = True
+            entry["note"] = (str(entry.get("note") or "") + f" Disabled: {args.why}").strip()
+            _save(path, data)
+        print("disabled" if entry else "no such entry")
     else:
         data = load(path)
         removed = data["entries"].pop(_key(args.display_text, args.voice), None)

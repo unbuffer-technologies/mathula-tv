@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from mathula_tv import media
-from mathula_tv.pronunciation_evidence import speaker_sounds, word_spans
+from mathula_tv.pronunciation_evidence import consensus, heard_word, speaker_sounds, word_spans, word_windows
 from mathula_tv.pronunciation_search import looks_isizulu
 
 WORDS = [
@@ -53,3 +53,29 @@ def test_a_name_with_an_english_word_the_speaker_never_says_has_no_evidence(tmp_
     monkeypatch.setattr(media, "extract_clip", lambda source, start, end, out, **kw: out)
     heard = speaker_sounds(make_job(tmp_path), "Floyd Shivambu", "floid shivambu", FakeGop(), tmp_path / "w", looks_isizulu=looks_isizulu)
     assert heard["words"] is None and heard["missing"] == ["Floyd"]
+
+
+def test_a_word_may_reach_before_its_start_but_never_into_the_word_before_it():
+    words = [{"text": "Good", "start": 0.0, "end": 0.5}, {"text": "OK", "start": 0.62, "end": 0.9}, {"text": "sir", "start": 0.95, "end": 1.2},
+             {"text": "so", "start": 5.0, "end": 5.2}, {"text": "OK", "start": 5.5, "end": 5.8}, {"text": "now", "start": 7.0, "end": 7.2}]
+    first, second = word_windows(words, "OK")
+    assert first == (0.62, 0.9, 0.5, 0.95)                 # the previous word's end and the next word's start bound it
+    assert second[2] == 5.5 - 0.20 and second[3] == 5.8 + 0.12
+
+
+def test_the_first_sounds_of_a_word_that_the_transcript_starts_late_are_kept(tmp_path, monkeypatch):
+    monkeypatch.setattr(media, "extract_clip", lambda source, start, end, out, **kw: out)
+    words = [{"text": "Good", "start": 0.0, "end": 0.5}, {"text": "OK", "start": 1.0, "end": 1.3}, {"text": "sir", "start": 1.6, "end": 1.9}]
+
+    class Gop:
+        def decode_timed(self, clip):          # the clip starts 0.25 s before the span; times are in the clip
+            return [("g", 0.0, 0.06), ("oʊ", 0.12, 0.2), ("k", 0.33, 0.4), ("eɪ", 0.42, 0.55), ("s", 0.8, 0.9)]
+
+    heard = heard_word(tmp_path / "a.wav", words, "OK", Gop(), tmp_path / "w")
+    assert heard["phones"] == ["oʊ", "k", "eɪ"]            # "oʊ" sits 0.09 s before the transcript's start and is kept; Good and sir are not
+
+
+def test_a_truncated_decoding_does_not_win_the_consensus_over_fuller_ones():
+    heard = [["aɪ", "d", "iː"], ["d", "iː"], ["h", "eː", "l", "d", "i"]]
+    assert consensus(heard) == ["aɪ", "d", "iː"]
+    assert consensus([["p", "ɑː", "t", "iː"]]) == ["p", "ɑː", "t", "iː"]
