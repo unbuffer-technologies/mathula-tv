@@ -290,7 +290,12 @@ def candidate_words(texts: Iterable[str], source_words: Sequence[Mapping[str, An
             for variant, glued in ((written, None), (unglued, "prefix") if unglued != written else (written, None)):
                 stem = _stem(variant)
                 is_name = stem in name_stems or written.casefold() in name_written
-                carried = looks_isizulu(variant) and not glued and variant[:1].isupper() and re.sub(r"[^a-z']", "", variant.casefold()) in (spelt_alike & name_words)     # capitalised: a name
+                # a capitalised word that looks isiZulu and that the transcript spells the same: a name.  The model's reading of the Zulu text (name_words) used to
+                # be the only way in, so a run whose model call left "Heidi" out never offered it (prod-50); with the attestation check (ordinary_zulu, which
+                # lets plain Zulu such as "Imali" through) the transcript's spelling is enough
+                carried = looks_isizulu(variant) and not glued and variant[:1].isupper() and (
+                    re.sub(r"[^a-z']", "", variant.casefold()) in (spelt_alike & name_words)
+                    or (ordinary_zulu is not None and re.sub(r"[^a-z']", "", variant.casefold()) in spelt_alike))
                 if len(stem) < 4 or stem not in spoken or (looks_isizulu(variant) and not glued and not carried) or written.casefold() in exclude or variant.casefold() in exclude:
                     continue
                 entry = found.setdefault(written, {

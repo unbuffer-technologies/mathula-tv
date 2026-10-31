@@ -969,3 +969,13 @@ def test_every_listed_word_is_measured_against_the_speaker_and_the_weakest_come_
     assert [e["word"] for e in ordered] == ["Heidi", "Western", "SG", "Nonvalo", "Zuma"]       # names and words alike; one that cannot be measured goes last, not missing
     assert ordered[0]["as_written"]["closeness"] == 0.31 and "as_written" not in ordered[-1]
 
+
+
+def test_a_capitalised_isizulu_looking_name_the_transcript_spells_the_same_is_offered_even_when_the_model_left_it_out():
+    # prod-50: the model call that reads names out of the Zulu text did not return "Heidi" that time, and she was never offered
+    transcript = [{"text": "Heidi,"}, {"text": "Imali"}]
+    shaped = lambda w: w.casefold() in {"heidi", "imali", "sawubona"}                       # noqa: E731
+    texts = ["Sawubona kusihlwa, Heidi. Imali yethu."]
+    ordinary = lambda w: w.casefold() == "imali"                                          # noqa: E731
+    assert [f["word"] for f in candidate_words(texts, transcript, looks_isizulu=shaped, named=[], ordinary_zulu=ordinary)] == ["Heidi"]
+    assert candidate_words(texts, transcript, looks_isizulu=shaped, named=[]) == []        # without the attestation check there is nothing to tell Heidi from Imali
