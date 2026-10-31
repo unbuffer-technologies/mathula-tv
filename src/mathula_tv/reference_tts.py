@@ -23,10 +23,15 @@ CONTEXT_WORDS = 2               # words either side of the target that the phras
 SLACK_SECONDS = 0.06
 
 
-def weakness(spans: Sequence[tuple[float, float]], warning: str | None) -> str | None:
+def weakness(spans: Sequence[tuple[float, float]], warning: str | None, word: str = "", phones: Sequence[str] = ()) -> str | None:
     """Why the speaker's audio is not enough for this word, or None when it is."""
     if warning:
         return "the speaker's sounds do not fit the word's letters"
+    letters = re.sub(r"[^A-Za-z]", "", word)
+    if letters and phones is not None and (2 <= len(letters) <= 5 and letters.isupper()) and len(phones) < len(letters):
+        return f"an initialism said letter by letter, but only {len(phones)} sound(s) were decoded for its {len(letters)} letters"       # AI came out as one sound
+    if len(letters) >= 3 and phones is not None and 0 < len(phones) < 2:
+        return "only one sound was decoded for it"
     durations = [end - start for start, end in spans if end > start]
     if durations and median(durations) < SHORT_SPAN_SECONDS:
         return f"the speaker says it in {median(durations):.2f} s, too fast to decode on its own"

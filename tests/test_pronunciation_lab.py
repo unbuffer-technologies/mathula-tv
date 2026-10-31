@@ -1027,3 +1027,12 @@ def test_a_result_says_which_reference_it_shows():
 
     assert _reference_fields({"reference_warning": "w", "reference_note": "n"}) == {"reference_warning": "w", "reference_note": "n"}
     assert _reference_fields({"phones": ["a"]}) == {}
+
+
+def test_an_initialism_with_fewer_sounds_than_letters_and_a_one_sound_word_fall_back_to_the_english_voice():
+    from mathula_tv import reference_tts
+
+    assert "letter by letter" in reference_tts.weakness([(1.0, 1.6)], None, "AI", ["ɛ"])                  # prod-54 saved AI -> "E" against this
+    assert reference_tts.weakness([(1.0, 1.6)], None, "SG", ["ɪ", "s", "tʃ", "iː", "ɪ"]) is None
+    assert "one sound" in reference_tts.weakness([(1.0, 1.6)], None, "Heidi", ["d"])
+    assert reference_tts.weakness([(1.0, 1.6)], None, "Hi", ["h"]) is None                                 # too short a word to say so

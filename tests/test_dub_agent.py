@@ -880,7 +880,7 @@ def test_an_agent_that_finishes_with_a_far_word_left_untried_is_asked_once_to_he
     asked = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "measure far from the speaker's own sounds" in str(m.get("content"))]
     assert len(asked) == 1 and "High (closeness 0.47)" in asked[0] and workbench.tried == ["High"]
     assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5
-    assert "0.7" in dub_agent.SYSTEM_PROMPT and "not a reason to skip" in dub_agent.SYSTEM_PROMPT
+    assert "0.75" in dub_agent.SYSTEM_PROMPT and "not a reason to skip" in dub_agent.SYSTEM_PROMPT
 
 
 def test_a_noun_prefix_glued_on_a_word_the_speaker_says_as_it_is_is_named_in_the_early_note_and_the_reminder(tmp_path):

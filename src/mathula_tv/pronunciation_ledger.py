@@ -15,7 +15,8 @@ from typing import Any, Mapping, Sequence
 
 DECISIONS = ("kept_as_is", "changed", "not_a_problem")
 MIN_REASON_CHARS = 8
-FAR_CLOSENESS = 0.7            # a word the voice reads as written this far from the speaker's own sounds is not "fine as it is" until a spelling has been heard
+FAR_CLOSENESS = 0.75           # a word the voice reads as written this far from the reference sounds is not "fine as it is" until a spelling has been heard: at 0.7 "High"
+                               # (the voice says "heh" for the English "hi") sat exactly on the line and was kept for being part of a title
 MAX_FAR_LISTED = 8
 
 

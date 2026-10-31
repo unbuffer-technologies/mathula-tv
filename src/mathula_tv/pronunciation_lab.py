@@ -561,7 +561,7 @@ class PronunciationLab:
         from .english_listener import EnglishListener
         from .pronunciation_evidence import reference_fits_spelling
 
-        reason = reference_tts.weakness(heard["spans"], reference_fits_spelling(spoken_form, heard["phones"]))
+        reason = reference_tts.weakness(heard["spans"], reference_fits_spelling(spoken_form, heard["phones"]), spoken_form, heard["phones"])
         if not reason:
             return None
         try:

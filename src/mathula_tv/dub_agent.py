@@ -100,7 +100,7 @@ You work through tools and decide your own method. You are scored on:
    speaker's sounds in the source audio are the right reading of a name as of any word, and the voice reads names and letters by Zulu rules, so they
    are often off. Every entry says how close the voice's reading of it, as you wrote it, is to the speaker's ("as_written", weakest first): start
    with the weakest, and leave the ones already close alone. Where a result carries a reference_note, the speaker's audio was too fast or unclear to decode, so the
-   sounds shown are a standard South African English voice saying the same phrase: match those. Below 0.7 a word is not fine as it is: hear at least one spelling for it before you
+   sounds shown are a standard South African English voice saying the same phrase: match those. Below 0.75 a word is not fine as it is: hear at least one spelling for it before you
    decide to keep it. Being part of a title ("Western Cape High Court"), a familiar word ("OK") or a name is not a reason to skip that. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
    limited (3 per word, and a shared pool for a 4th and 5th): spend them where the voice is clearly off, not on words that already sound right.
    Each result also says what an English listener wrote when the voice said your spelling ("english_hears"), and whether that is the word
@@ -835,7 +835,7 @@ PRONUNCIATION_REMINDER = (
     "with Zulu letters: {words}. If any of them may sound wrong, call list_foreign_words, check those with try_pronunciation, use "
     "use_pronunciation for a spelling that an English listener writes as the word, re-measure any unit that contains the word (the text keeps the "
     "word itself: the spelling is applied when the voice speaks it, never typed into the text), and finish. "
-    "If you judge they are fine as they are, you do not have to use the lab: finish, except that a word measured below 0.7 closeness is not fine "
+    "If you judge they are fine as they are, you do not have to use the lab: finish, except that a word measured below 0.75 closeness is not fine "
     "as it is until you have heard a spelling for it (a title or a familiar word is no exception).")
 
 
