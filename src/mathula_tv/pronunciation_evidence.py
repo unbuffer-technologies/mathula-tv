@@ -92,17 +92,18 @@ def heard_word(source: Path, transcript: Sequence[Mapping[str, Any]], word: str,
     if not windows:
         return None
     spans = [(start, end) for start, end, _, _ in windows]
-    decoded, timed, clips = [], [], []
+    decoded, timed, clips, bounds = [], [], [], []
     for k, (start, end, earliest, latest) in enumerate(windows):
         lead = min(context_seconds, start)
         clip = extract_clip(source, start, end, work / f"{_letters(word)}_{k}.wav", pad_seconds=context_seconds)
         low, high = lead - (start - earliest), lead + (latest - start)                # the span widened by the slack, never into a neighbouring word
-        inside_timed = [(token, begin, finish) for token, begin, finish in gop.decode_timed(clip)
-                        if min(lead - slack_seconds, low) <= (begin + finish) / 2 <= max(lead + (end - start) + slack_seconds, high)]
+        window = (min(lead - slack_seconds, low), max(lead + (end - start) + slack_seconds, high))
+        inside_timed = [(token, begin, finish) for token, begin, finish in gop.decode_timed(clip) if window[0] <= (begin + finish) / 2 <= window[1]]
+        bounds.append(window)
         decoded.append([token for token, _, _ in inside_timed])
         timed.append(inside_timed)
         clips.append(clip)
-    return {"phones": consensus([d for d in decoded if d] or decoded), "decoded": decoded, "spans": spans, "timed": timed, "clips": clips}
+    return {"phones": consensus([d for d in decoded if d] or decoded), "decoded": decoded, "spans": spans, "timed": timed, "clips": clips, "bounds": bounds}
 
 
 def speaker_sounds(job_root: Path, name: str, base: str, gop: Any, work: Path, *, looks_isizulu: Callable[[str], bool],
