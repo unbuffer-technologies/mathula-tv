@@ -131,7 +131,69 @@ def _entry(head: Sequence[str], synonyms: Sequence[str], zulu: Sequence[Sequence
             "zulu_alternatives": [a for a in alternatives if a not in equivalents], "source": source, "page": page}
 
 
-def build(election_pdf: Path | None, parliament_pdf: Path | None, out_dir: Path) -> dict[str, Any]:
+COMMON_SUPPORT = 3          # a single word that turns up in at least this many sentences of the parallel text is a common word
+MIN_AGREEMENT = 0.5         # ...and then it counts only if the translators used the list's equivalent in at least this share of them
+MAX_SINGLE_WORD_EQUIVALENT = 3
+
+
+def _stem(equivalent: str) -> str:
+    """The part of an equivalent that survives noun-class prefixes and verb endings: its longest word, lower-cased, less the hyphen and the first two letters."""
+    words = [w for w in re.split(r"[\s-]+", equivalent.casefold()) if w]
+    word = max(words, key=len, default="")
+    return word[2:] if len(word) > 6 else word
+
+
+def _holds(isizulu: str, stem: str) -> bool:
+    """Does the sentence hold the stem?  A short stem must be a whole word, or it would match inside unrelated words."""
+    return stem in isizulu if len(stem) >= 5 else re.search(r"(?<!\w)" + re.escape(stem) + r"(?!\w)", isizulu) is not None
+
+
+def assess(entries: Sequence[dict[str, Any]], pairs: Iterable[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Mark each entry ``reliable`` or not, with the evidence, from human English-isiZulu sentence pairs.
+
+    The lists give an official equivalent for every term, general words included: ``state`` gets a department's name, ``development`` a ministry's.  Such a word is
+    not safe to impose on a translation.  So a multi-word term or an abbreviation is kept (it names one thing); a single word is kept when its equivalent is a word
+    or two, and either it is rare in the parallel text (a specialist word like councillor) or, being common, the human translators did use the list's equivalent
+    (``support`` is the number of sentences it occurs in, ``agreement`` the share of them whose isiZulu holds the equivalent's stem).
+    """
+    sentences = [(" " + _key(en) + " ", zu.casefold()) for en, zu in pairs]
+    out = []
+    for entry in entries:
+        entry = dict(entry)
+        words = entry["english"].split()
+        stems = [x for x in (_stem(z) for z in [*entry["zulu"], *entry.get("zulu_alternatives", [])]) if len(x) >= 3]
+        name = _key(entry["english"])
+        if len(words) > 1 or (entry["english"].isupper() and len(entry["english"]) <= 6):
+            entry.update(reliable=True, why="multi-word term or abbreviation")
+        elif not name:
+            entry.update(reliable=False, why="no usable English term")
+        elif all(z.startswith("-") for z in entry["zulu"]):
+            entry.update(reliable=False, why="a verb stem: it needs inflecting, which a glossary cannot do")
+        elif min(len(z.split()) for z in entry["zulu"]) > MAX_SINGLE_WORD_EQUIVALENT:
+            entry.update(reliable=False, why="a one-word term whose equivalent is a long official name")
+        else:
+            containing = [zu for en, zu in sentences if re.search(r"\s" + re.escape(name) + r"s?\s", en)]
+            used = sum(any(_holds(zu, st) for st in stems) for zu in containing)
+            entry.update(support=len(containing), agreement=round(used / len(containing), 2) if containing else None)
+            if len(containing) < COMMON_SUPPORT:
+                entry.update(reliable=True, why="rare in news text: a specialist word")
+            elif used / len(containing) >= MIN_AGREEMENT:
+                entry.update(reliable=True, why="common word, and translators used the list's equivalent")
+            else:
+                entry.update(reliable=False, why="common word that translators render differently")
+        out.append(entry)
+    return out
+
+
+def load_pairs(csv_path: Path) -> list[tuple[str, str]]:
+    """English-isiZulu pairs from a two-column (en, zu) CSV such as Umsuka's training file."""
+    import csv
+
+    with open(csv_path, encoding="utf-8", errors="replace", newline="") as handle:
+        return [(row[0], row[1]) for row in list(csv.reader(handle))[1:] if len(row) >= 2]
+
+
+def build(election_pdf: Path | None, parliament_pdf: Path | None, out_dir: Path, pairs: Iterable[tuple[str, str]] | None = None) -> dict[str, Any]:
     """Read the PDFs (``pypdf``), parse them and write ``political_terms.json`` into ``out_dir``."""
     import logging
 
@@ -145,10 +207,13 @@ def build(election_pdf: Path | None, parliament_pdf: Path | None, out_dir: Path)
         reader = PdfReader(str(path))
         text = "".join(f"\n<<<PAGE {i + 1}>>>\n{page.extract_text() or ''}" for i, page in enumerate(reader.pages))
         entries += parse_text(text, source)
+    if pairs is not None:
+        entries = assess(entries, list(pairs))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "political_terms.json").write_text(json.dumps({"schema": "mathula-political-terms-v1", "entries": entries}, ensure_ascii=False, indent=1), encoding="utf-8")
-    return {"entries": len(entries), "election": sum(e["source"] == "election" for e in entries), "parliament": sum(e["source"] == "parliament" for e in entries)}
+    return {"entries": len(entries), "election": sum(e["source"] == "election" for e in entries), "parliament": sum(e["source"] == "parliament" for e in entries),
+            "reliable": sum(bool(e.get("reliable")) for e in entries)}
 
 
 def _key(text: str) -> str:
@@ -156,8 +221,9 @@ def _key(text: str) -> str:
 
 
 class Terminology:
-    def __init__(self, entries: Iterable[dict[str, Any]]) -> None:
-        self.entries = list(entries)
+    def __init__(self, entries: Iterable[dict[str, Any]], *, reliable_only: bool = True) -> None:
+        """Entries not assessed (no ``reliable`` key) count as reliable; ``reliable_only=False`` indexes the whole list."""
+        self.entries = [e for e in entries if not reliable_only or e.get("reliable", True)]
         self._index: dict[str, list[dict[str, Any]]] = {}
         for entry in self.entries:
             for name in [entry["english"], *entry.get("english_synonyms", [])]:
@@ -165,9 +231,9 @@ class Terminology:
                     self._index.setdefault(_key(name), []).append(entry)
 
     @classmethod
-    def load(cls, directory: Path) -> "Terminology | None":
+    def load(cls, directory: Path, *, reliable_only: bool = True) -> "Terminology | None":
         path = Path(directory) / "political_terms.json"
-        return cls(json.loads(path.read_text(encoding="utf-8"))["entries"]) if path.is_file() else None
+        return cls(json.loads(path.read_text(encoding="utf-8"))["entries"], reliable_only=reliable_only) if path.is_file() else None
 
     def lookup(self, term: str) -> list[dict[str, Any]]:
         """Entries whose English term or synonym is ``term`` (case, punctuation and a plural -s do not matter)."""
