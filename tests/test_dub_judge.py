@@ -298,3 +298,13 @@ def test_the_foreign_word_prompt_treats_titles_numbered_labels_and_dates_as_name
     from mathula_tv.dub_judge import FOREIGN_PROMPT
 
     assert "Fighters" in FOREIGN_PROMPT and "Ward 11" in FOREIGN_PROMPT and "November" in FOREIGN_PROMPT and "dates stay English by design" in FOREIGN_PROMPT
+
+
+def test_a_submit_result_carries_the_text_of_the_units_it_flags_so_the_agent_need_not_fetch_them(tmp_path):
+    from mathula_tv.dub_workbench import UNIT_TEXT_CHARS, UNIT_TEXTS_SHOWN, Workbench
+
+    items = [{"item_id": f"u{n}", "zulu_text": "x" * (UNIT_TEXT_CHARS + 50) if n == 0 else f"Ithi {n}"} for n in range(UNIT_TEXTS_SHOWN + 3)]
+    entries = [{"item_id": f"u{n}", "gates": [], "flags": ["overrun"]} for n in range(UNIT_TEXTS_SHOWN + 3)]
+    shown = Workbench._with_texts(entries, items)
+    assert shown[0]["zulu_text"].endswith("…") and len(shown[0]["zulu_text"]) == UNIT_TEXT_CHARS + 1
+    assert shown[1]["zulu_text"] == "Ithi 1" and "zulu_text" not in shown[UNIT_TEXTS_SHOWN]            # bounded: the rest are read with get_submission

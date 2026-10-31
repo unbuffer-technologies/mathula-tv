@@ -142,6 +142,8 @@ def length_gap(text: str, measured: dict[str, Any]) -> dict[str, int]:
 
 
 WORDS_MEASURED = 20             # words, names and initialisms the word list measures as written against the speaker (one clip of the voice each)
+UNIT_TEXTS_SHOWN = 8            # flagged units and claims whose current Zulu text a submit result carries, so the agent need not call get_submission to read them
+UNIT_TEXT_CHARS = 360
 CLAIMS_PER_SUBMIT = 6           # units a submit result asks the agent to check against the English, at most
 
 SAVED_READINGS_MEASURED = 24   # saved readings measured for the reminder (the weakest six are shown): the cost is one clip each, once per run
@@ -919,6 +921,7 @@ class Workbench:
                                        "issues": [i["detail"] for i in issues][:2],
                                        "reads_back_as": (v.get("back_translation") or "")[:300],
                                        "chars_now": spoken_chars(spoken.get(v["id"], "")),
+                                       "zulu_text": (lambda t: t if len(t) <= UNIT_TEXT_CHARS else t[:UNIT_TEXT_CHARS] + "…")(spoken.get(v["id"], "")),
                                        **({"fits_about_chars": window} if window else {})}))
         found.sort(key=lambda f: f[0])
         shown = found[:CLAIMS_PER_SUBMIT]
@@ -1007,9 +1010,19 @@ class Workbench:
                  "residual_ms": t["padding"]["residual_ms"]}
                 for t in card["turns"] if t["shortfall_ms"]
             ],
-            "flagged_units": [
+            "flagged_units": self._with_texts([
                 {"item_id": g["group_id"], "gates": [n for n, v in g["gates"].items() if v["failed"]], "flags": g["flags"]}
                 for g in card["groups"] if g["flags"] or any(v["failed"] for v in g["gates"].values())
-            ],
+            ], items),
         }
         return self.last_submit
+
+    @staticmethod
+    def _with_texts(entries: list[dict[str, Any]], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The first UNIT_TEXTS_SHOWN entries carry the unit's current Zulu text.  In lenfix-2, 14 of 75 turns were get_submission calls made right after a
+        submit only to read the text of the units it flagged; each such turn re-sends the whole 22,000-token context."""
+        texts = {str(i["item_id"]): str(i.get("zulu_text") or "") for i in items}
+        for entry in entries[:UNIT_TEXTS_SHOWN]:
+            text = texts.get(str(entry["item_id"]), "")
+            entry["zulu_text"] = text if len(text) <= UNIT_TEXT_CHARS else text[:UNIT_TEXT_CHARS] + "…"
+        return entries

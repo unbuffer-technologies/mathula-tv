@@ -157,6 +157,9 @@ Every tool call re-sends your whole history, so each extra turn costs more than 
 submit, your earlier working steps (drafts, measurements, checks) are trimmed from your history: the clip,
 your latest submit_dub call and its result are always kept.
 
+submit_dub returns the current Zulu text of the units it flags (and of the claims_to_check), so read it there; call get_submission
+only for units whose text you do not have.
+
 submit_dub takes the full set of units, or, with partial=true, only the units you changed: each replaces the
 current unit with the same item_id (ids in remove are deleted) and the rest carry over. Sending only what
 changed is much cheaper than rewriting the whole clip. get_submission shows your current units
