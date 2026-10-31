@@ -38,10 +38,16 @@ def weakness(spans: Sequence[tuple[float, float]], warning: str | None, word: st
     return None
 
 
-def _expand(token: str) -> list[str]:
-    """An initialism is said letter by letter ("SG" -> "S G"); other tokens are said as written, without punctuation."""
+def is_initialism(token: str) -> bool:
     clean = re.sub(r"[^\w']", "", token)
-    return list(clean) if 2 <= len(clean) <= 5 and clean.isalpha() and clean.isupper() else [clean]
+    return 2 <= len(clean) <= 5 and clean.isalpha() and clean.isupper()
+
+
+def _spoken(token: str) -> str:
+    """An initialism is said by the names of its letters (SSML say-as); with the letters spaced ("A I") or run together the voice said the AI of
+    "concocted pictures AI pictures" as a single short vowel and the recogniser heard one sound."""
+    clean = re.sub(r"[^\w']", "", token)
+    return f'<say-as interpret-as="characters">{clean}</say-as>' if is_initialism(token) else clean
 
 
 def phrase_around(transcript: Sequence[Mapping[str, Any]], word: str) -> tuple[list[str], int] | None:
@@ -68,8 +74,8 @@ def tts_reference(word: str, transcript: Sequence[Mapping[str, Any]], *, work: P
     if found is None:
         return None
     words, position = found
-    tokens: list[tuple[int, str]] = [(i, t) for i, w in enumerate(words) for t in _expand(w) if t]
-    text = " ".join(t for _, t in tokens)
+    tokens: list[tuple[int, str]] = [(i, re.sub(r"[^\w']", "", w)) for i, w in enumerate(words) if re.sub(r"[^\w']", "", w)]
+    text = " ".join(_spoken(words[i]) for i, _ in tokens)
     ssml = ('<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-ZA">'
             f'<voice name="{voice}">{text}</voice></speak>')
     work.mkdir(parents=True, exist_ok=True)
@@ -87,7 +93,9 @@ def tts_reference(word: str, transcript: Sequence[Mapping[str, Any]], *, work: P
     # (the "ay" of OK comes after the K), and a fixed slack cut it off
     # but the aligner's start for a word is where its first letter's sound begins, and the end of the word before can run past its last letter ("Cape" ends
     # in a p released after the aligner's end), so on the left the target keeps only a little slack and never goes before the neighbour's end
-    low = max([start - SLACK_SECONDS, *before[-1:]])
+    # letter names are not the letters the aligner follows, so an initialism starts after the word before it; that word's last sound ("pictures" ends in a z)
+    # is still sounding a few hundredths of a second after the aligner's end for it, hence the margin
+    low = before[-1] + 0.08 if (before and is_initialism(words[position])) else max([start - SLACK_SECONDS, *before[-1:]])
     high = after[0] if after else end + 4 * SLACK_SECONDS
     timed = [(token, begin, finish) for token, begin, finish in gop.decode_timed(wav) if low <= (begin + finish) / 2 <= high]
     phones = [token for token, _, _ in timed]

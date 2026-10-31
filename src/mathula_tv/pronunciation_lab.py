@@ -546,6 +546,8 @@ class PronunciationLab:
             heard = heard_word(self.job_root / "audio" / "analysis_mono.wav", self.transcript, re.sub(r"[^A-Za-z']", "", spoken_form), self.gop,
                                self.work_dir / "source", limit=4)
             fallback = self._english_reference(spoken_form, heard) if heard else None
+            if heard and not fallback:
+                fallback = self._complete_onset(spoken_form, heard)
             self._source_cache[stem] = ({"found": True, "phones": heard["phones"], "occurrences": len(heard["spans"]), "spoken_form": spoken_form,
                                          "reference_warning": reference_fits_spelling(spoken_form, heard["phones"]),
                                          "each_occurrence": [" ".join(d) for d in heard["decoded"]],
@@ -553,6 +555,41 @@ class PronunciationLab:
             if fallback:
                 self._source_cache[stem].update(fallback)
         return self._source_cache[stem]
+
+    def _complete_onset(self, spoken_form: str, heard: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The speaker's decode of "Heidi" began with a vowel (aɪ d iː): the recogniser drops a weak onset like h, as it dropped the first sounds of OK, SG and
+        Western, and the lab then matched spellings to a word with no h ("Aydie", 0.925).  When the decode starts with a vowel but the word's first letter is a
+        consonant, a standard English voice says the corrected phrase; if it starts the word with the consonant that letter stands for, that onset is added to the
+        speaker's sounds.  Words that really start with a vowel sound (hour) are left as they are."""
+        from . import reference_tts
+        from .english_listener import EnglishListener
+        from .pronunciation_assess import strip_length
+        from .pronunciation_evidence import _LETTERS_FOR
+
+        phones = list(heard.get("phones") or [])
+        first_letter = re.sub(r"[^a-z]", "", spoken_form.casefold())[:1]
+        if not phones or not first_letter or first_letter in "aeiou" or strip_length(phones[0])[:1] not in "aeiouɪɛæɔʊʌəɑɒøɚɜɐ":
+            return None
+        if reference_tts.is_initialism(spoken_form):
+            return None                                  # SG starts with the vowel of "es": the letter S is not an onset here
+        try:
+            from .dub_repair import synthesize_ssml
+
+            if getattr(self, "_listener", None) is None:
+                self._listener = EnglishListener()
+            ref = reference_tts.tts_reference(
+                spoken_form, self.transcript, work=self.work_dir / "english_reference", gop=self.gop, listener=self._listener,
+                synthesize=lambda ssml, path: synthesize_ssml(ssml, self.key, self.region, path))
+        except Exception:
+            return None
+        if not ref or not ref["phones"]:
+            return None
+        onset = strip_length(ref["phones"][0])
+        if onset not in _LETTERS_FOR or first_letter not in _LETTERS_FOR[onset]:
+            return None
+        return {"phones": [onset, *phones], "each_occurrence": [" ".join([onset, *phones])],
+                "reference_note": (f"the speaker's decode began with a vowel [{' '.join(phones)}] but {spoken_form!r} begins with {first_letter.upper()}: the onset {onset!r} was added "
+                                   f"from a standard South African English voice saying {ref['phrase']!r}")}
 
     def _english_reference(self, spoken_form: str, heard: Mapping[str, Any]) -> dict[str, Any] | None:
         """When the speaker's audio cannot be decoded into the word (too fast, or sounds that are not its letters), a standard South African English voice

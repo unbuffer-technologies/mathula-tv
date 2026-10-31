@@ -968,7 +968,7 @@ def test_every_listed_word_is_measured_against_the_speaker_and_the_weakest_come_
     ordered = workbench._measured_weakest_first(found)
     assert [e["word"] for e in ordered] == ["Heidi", "Western", "SG", "Nonvalo", "Zuma"]       # names and words alike; one that cannot be measured goes last, not missing
     assert ordered[0]["as_written"]["closeness"] == 0.31 and "as_written" not in ordered[-1]
-
+
 
 
 def test_a_capitalised_isizulu_looking_name_the_transcript_spells_the_same_is_offered_even_when_the_model_left_it_out():
@@ -1009,7 +1009,7 @@ def test_the_target_words_sounds_are_cut_out_of_the_english_voices_phrase_withou
     class Listener:
         def align(self, wav, words, start, end):
             said["words"] = list(words)
-            spans = {"Cape": (0.0, 0.3), "High": (0.35, 0.6), "S": (0.7, 0.8), "G": (0.8, 0.95)}
+            spans = {"Cape": (0.0, 0.3), "High": (0.35, 0.6), "SG": (0.7, 0.95)}
             return [{"word": w, "start": spans[w][0], "end": spans[w][1], "confidence": -0.1} for w in words]
 
     class Gop:
@@ -1017,7 +1017,7 @@ def test_the_target_words_sounds_are_cut_out_of_the_english_voices_phrase_withou
             return [("k", 0.0, 0.1), ("eɪ", 0.1, 0.2), ("p", 0.2, 0.3), ("h", 0.36, 0.42), ("aɪ", 0.44, 0.58), ("e", 0.7, 0.75), ("s", 0.76, 0.8)]
 
     ref = reference_tts.tts_reference("High", transcript, work=tmp_path, gop=Gop(), listener=Listener(), synthesize=lambda ssml, path: path)
-    assert said["words"] == ["Cape", "High", "S", "G"]                       # an initialism is said letter by letter
+    assert said["words"] == ["Cape", "High", "SG"]                           # the phrase is aligned as written; an initialism is said by say-as, by its letters' names
     assert ref["phones"] == ["h", "aɪ"] and ref["voice"] == reference_tts.EN_VOICE        # Cape's p (0.2-0.3) and the SG sounds are not High's
     assert reference_tts.tts_reference("Mabhida", transcript, work=tmp_path, gop=Gop(), listener=Listener(), synthesize=lambda ssml, path: path) is None
 
@@ -1055,3 +1055,27 @@ def test_a_reading_that_loses_sounds_or_is_no_closer_than_the_written_word_is_re
         workbench._refuse_unsound_choice(lab, "News", "Nyooz", {"voice_sounds": "n uː z", "closeness": 0.683})
     workbench._refuse_unsound_choice(lab, "News", "Nyooz", {"voice_sounds": "n uː z", "closeness": 0.85})            # closer and whole: allowed
     workbench._refuse_unsound_choice(lab, "News", "news", {"voice_sounds": "n uː z", "closeness": 0.7})              # the word as written: nothing to compare
+
+
+def test_an_initialism_is_said_by_the_names_of_its_letters_and_cut_out_between_its_neighbours(tmp_path):
+    from mathula_tv import reference_tts
+
+    transcript = [{"text": t, "start": float(i), "end": float(i) + 0.2} for i, t in enumerate(["pictures,", "AI", "pictures"])]
+    sent = {}
+
+    class Listener:
+        def align(self, wav, words, start, end):
+            spans = [(0.0, 0.5), (0.6, 0.7), (1.2, 1.7)]                                     # the aligner's span for the letters A, I is short and late
+            return [{"word": w, "start": a, "end": b, "confidence": -0.1} for w, (a, b) in zip(words, spans)]
+
+    class Gop:
+        def decode_timed(self, wav):
+            return [("p", 0.3, 0.4), ("eː", 0.62, 0.8), ("aɪ", 0.9, 1.1), ("p", 1.25, 1.3)]
+
+    def synth(ssml, path):
+        sent["ssml"] = ssml
+        return path
+
+    ref = reference_tts.tts_reference("AI", transcript, work=tmp_path, gop=Gop(), listener=Listener(), synthesize=synth)
+    assert 'interpret-as="characters">AI</say-as>' in sent["ssml"]
+    assert ref["phones"] == ["eː", "aɪ"]                                                      # both letter names, from the previous word's end to the next one's start
