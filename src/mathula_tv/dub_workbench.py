@@ -634,7 +634,10 @@ class Workbench:
                 measured = self._lab().as_written(entry["word"])
             except Exception:
                 measured = None
-            if measured:
+            if measured and measured.get("reference_warning"):
+                entry["as_written"] = {"closeness": None, "reference_unreliable": measured["reference_warning"]}          # a score against the wrong sounds says nothing
+                self._ledger("shown", entry["word"], "measured as written, in the word list: the speaker's sounds do not fit the word")
+            elif measured:
                 entry["as_written"] = {"closeness": measured.get("closeness"), "problems": problems_of(measured)}
                 self._ledger("shown", entry["word"], "measured as written, in the word list", closeness=measured.get("closeness"), problems=problems_of(measured))
         return sorted(found, key=lambda e: (e.get("as_written", {}).get("closeness") is None, (e.get("as_written") or {}).get("closeness") or 0))
@@ -722,6 +725,10 @@ class Workbench:
         prefix, tried_spelling = written_prefix(word), spelling
         if prefix and not spelling.casefold().startswith(prefix.casefold()):
             spelling = prefix + spelling
+        if lab.source(word).get("reference_warning"):
+            raise ValueError(
+                f"{lab.source(word)['reference_warning']}. Keep {word!r} as the Zulu writes it (note_pronunciation kept_as_is, citing this); a reading "
+                "matched to those sounds would not make it sound right and would be saved for later clips.")
         from .pronunciation_memory import beaten_by_saved, saved as saved_reading
 
         held = saved_reading(memory_path(Path(self.store.root).parent), word, lab.voice)

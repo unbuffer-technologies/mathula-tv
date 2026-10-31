@@ -530,12 +530,13 @@ class PronunciationLab:
         spoken_stems = {_stem(str(w.get("text"))): str(w["text"]) for w in self.transcript}
         stem = next((c for c in (_stem(word), _stem(without_prefix(word.split("-")[-1], written_prefix(word)))) if c in spoken_stems), _stem(word))
         if stem not in self._source_cache:
-            from .pronunciation_evidence import heard_word
+            from .pronunciation_evidence import heard_word, reference_fits_spelling
 
             spoken_form = spoken_stems.get(stem, word)
             heard = heard_word(self.job_root / "audio" / "analysis_mono.wav", self.transcript, re.sub(r"[^A-Za-z']", "", spoken_form), self.gop,
                                self.work_dir / "source", limit=4)
             self._source_cache[stem] = ({"found": True, "phones": heard["phones"], "occurrences": len(heard["spans"]), "spoken_form": spoken_form,
+                                         "reference_warning": reference_fits_spelling(spoken_form, heard["phones"]),
                                          "each_occurrence": [" ".join(d) for d in heard["decoded"]],
                                          "_timed": heard.get("timed"), "_clips": heard.get("clips")} if heard else {"found": False, "phones": []})
         return self._source_cache[stem]
@@ -818,6 +819,7 @@ class PronunciationLab:
         record = self._measure(word, spelling or word, source)
         record.pop("_heard", None)
         return {"word": word, "spelling": spelling, "speaker_sounds": " ".join(source["phones"]), "voice_sounds": record["voice_sounds"], "closeness": record["closeness"],
+                **({"reference_warning": source["reference_warning"]} if source.get("reference_warning") else {}),
                 "differences": record["differences"][:3], "ending": record.get("ending"), "english_hears": record.get("english_hears"),
                 "english_listener_understands": record.get("english_listener_understands"),
                 "lost_in_its_sentence": record.get("lost_in_its_sentence"), "made_differently": (record.get("how_the_sounds_are_made_in_its_sentence") or record.get("how_the_sounds_are_made_differently") or [])[:2]}
@@ -962,7 +964,7 @@ class PronunciationLab:
             results.append(record)
         left_word, left_clip = self.tries_left_for_word(word), self.shared_extra_tries_left
         out: dict[str, Any] = {
-            "word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"],
+            "word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], **({"reference_warning": source["reference_warning"]} if source.get("reference_warning") else {}), 
             "how_these_were_found": f"spellings were worked out backwards from the speaker's sounds through the letters this voice turns into them, "
                                     f"then the best were varied by small edits (a letter group swapped, left out or added); {len(pool)} were spoken, "
                                     f"{len(by_sounds)} different sound sequences came out; shown are the closest in sounds and the closest in how open the mouth is "
@@ -1001,7 +1003,7 @@ class PronunciationLab:
         # closeness skips the speaker's last sounds and the listener guesses from one short clip, so neither check may decide alone
         best = max(self.tried[word].values(), key=lambda r: (not r.get("lost_in_its_sentence"), r["closeness"]))
         left_word, left_clip = self.tries_left_for_word(word), self.shared_extra_tries_left
-        out = {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], "results": results,
+        out = {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], **({"reference_warning": source["reference_warning"]} if source.get("reference_warning") else {}), "results": results,
                "closest_so_far": {"spelling": best["spelling"], "closeness": best["closeness"]},
                "understood_by_the_listener": [r["spelling"] for r in self.tried[word].values()
                                               if r.get("english_listener_understands") and not r.get("lost_in_its_sentence")],

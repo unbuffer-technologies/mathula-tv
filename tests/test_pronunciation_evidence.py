@@ -79,3 +79,13 @@ def test_a_truncated_decoding_does_not_win_the_consensus_over_fuller_ones():
     heard = [["aɪ", "d", "iː"], ["d", "iː"], ["h", "eː", "l", "d", "i"]]
     assert consensus(heard) == ["aɪ", "d", "iː"]
     assert consensus([["p", "ɑː", "t", "iː"]]) == ["p", "ɑː", "t", "iː"]
+
+
+def test_sounds_that_have_no_letter_in_the_word_are_not_a_reference_for_it():
+    from mathula_tv.pronunciation_evidence import reference_fits_spelling
+
+    assert "do not fit its letters" in reference_fits_spelling("High", ["p", "aː", "k"])           # prod-51: the transcript's time for High was decoded as "park"
+    for word, phones in (("Heidi", ["aɪ", "d", "iː", "x"]), ("Party", ["p", "ɑː", "t", "iː", "æ"]), ("Court", ["k", "oː", "t", "d"]), ("SG", ["ɪ", "s", "tʃ", "iː", "ɪ"]),
+                         ("Western", ["ɪ", "s", "ə", "n"]), ("Cyril", ["s", "ø", "r", "r", "a"]), ("Litchfield", ["ɪ", "tʃ", "f", "iː", "l", "d", "æ"])):
+        assert reference_fits_spelling(word, phones) is None, word
+    assert reference_fits_spelling("Hi", ["h", "aɪ"]) is None and reference_fits_spelling("X", ["p"]) is None      # too few consonants to judge

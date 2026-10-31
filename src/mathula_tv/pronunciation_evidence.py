@@ -143,3 +143,29 @@ def speaker_sounds(job_root: Path, name: str, base: str, gop: Any, work: Path, *
                          "chosen": picked["chosen"], "chosen_excess": round(picked["chosen_excess"], 3),
                          "dictionary_excess": round(picked["base_excess"], 3)})
     return {"words": None if missing else sounds, "missing": missing, "evidence": evidence}
+
+
+# Which letters of an English word can stand behind a consonant sound.  Rough on purpose: it only has to tell "the sounds decoded for this word are not this
+# word" (the transcript's time for "High" pointed at a stretch decoded as "p aː k") from a noisy but real decoding.
+_LETTERS_FOR = {
+    "p": "p", "b": "b", "t": "td", "d": "dt", "k": "kcqx", "g": "gj", "ɡ": "gj", "f": "fpv", "v": "vf", "s": "sczx", "z": "zsx", "ʃ": "sctgh", "ʒ": "szgj",
+    "tʃ": "cthg", "dʒ": "jgd", "θ": "th", "ð": "th", "h": "hw", "m": "m", "n": "n", "ŋ": "ng", "l": "l", "ɫ": "l", "r": "r", "ɹ": "r", "ɾ": "rtd", "ɚ": "r",
+    "w": "wuo", "j": "yie", "ts": "tszc", "x": "chkg", "ʔ": "t",
+}
+FIT_MIN_SHARE = 0.5            # the share of the decoded consonants that some letter of the word can explain
+
+
+def reference_fits_spelling(word: str, phones: Sequence[str]) -> str | None:
+    """None when the speaker's decoded sounds are plausibly this word; otherwise a sentence saying why they are not.
+
+    A spelling matched to sounds that are not the word would only reproduce the wrong sounds: prod-51 gave "High" the spelling "Phakh" (closeness 0.97)
+    because the transcript's time for it was decoded as "p aː k"."""
+    letters = set(re.sub(r"[^a-z]", "", str(word or "").casefold()))
+    consonants = [strip_length(p) for p in phones if strip_length(p) in _LETTERS_FOR]
+    if len(consonants) < 2 or not letters:
+        return None
+    unexplained = [p for p in consonants if not (letters & set(_LETTERS_FOR[p]))]
+    if 1 - len(unexplained) / len(consonants) >= FIT_MIN_SHARE:
+        return None
+    return (f"the speaker's sounds for {word!r} ({' '.join(phones)}) do not fit its letters (nothing in the word makes {' '.join(unexplained)}): the transcript's "
+            "time for it probably points at another stretch of speech, so matching a spelling to them would reproduce the wrong sounds")
