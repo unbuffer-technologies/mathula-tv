@@ -513,6 +513,9 @@ class Workbench:
     def ledger_unexamined(self) -> list[dict[str, Any]]:
         return self.ledger.unexamined()
 
+    def ledger_untried_far(self) -> list[dict[str, Any]]:
+        return self.ledger.untried_far()
+
     def ledger_summary(self) -> dict[str, Any]:
         return self.ledger.summary()
 
@@ -622,6 +625,7 @@ class Workbench:
                 measured = None
             if measured:
                 entry["as_written"] = {"closeness": measured.get("closeness"), "problems": problems_of(measured)}
+                self._ledger("shown", entry["word"], "measured as written, in the word list", closeness=measured.get("closeness"), problems=problems_of(measured))
         return sorted(found, key=lambda e: (e.get("as_written", {}).get("closeness") is None, (e.get("as_written") or {}).get("closeness") or 0))
 
     def try_pronunciation(self, word: str, spellings: list[str]) -> dict[str, Any]:

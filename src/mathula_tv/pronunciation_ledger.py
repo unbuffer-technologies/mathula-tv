@@ -15,6 +15,8 @@ from typing import Any, Mapping, Sequence
 
 DECISIONS = ("kept_as_is", "changed", "not_a_problem")
 MIN_REASON_CHARS = 8
+FAR_CLOSENESS = 0.7            # a word the voice reads as written this far from the speaker's own sounds is not "fine as it is" until a spelling has been heard
+MAX_FAR_LISTED = 8
 
 
 def problems_of(row: Mapping[str, Any]) -> list[str]:
@@ -70,13 +72,34 @@ class Ledger:
                 found.append({"word": entry["word"], "problems": list(dict.fromkeys(problems))[:3]})
         return found
 
+    def untried_far(self) -> list[dict[str, Any]]:
+        """Words that measured under FAR_CLOSENESS as written and that no spelling was tried or used for, whatever reason was written for leaving them.
+        prod-48 left "High" (0.47), "Party" (0.48) and "OK" (0.63) as they were because they were part of a title or a familiar word, while the speaker's
+        sounds, not the kind of word, are what a reading is matched to.  Weakest first."""
+        found = []
+        for entry in self._words.values():
+            levels = [row["closeness"] for row in entry["shown"] if row.get("closeness") is not None]
+            if levels and min(levels) < FAR_CLOSENESS and not entry["tried"] and not entry["used"]:
+                found.append({"word": entry["word"], "closeness": min(levels)})
+        return sorted(found, key=lambda item: item["closeness"])
+
     def to_dict(self) -> dict[str, Any]:
-        return {"words": sorted(self._words.values(), key=lambda e: e["word"].casefold()), "unexamined": self.unexamined()}
+        return {"words": sorted(self._words.values(), key=lambda e: e["word"].casefold()), "unexamined": self.unexamined(), "untried_far": self.untried_far()}
 
     def summary(self) -> dict[str, Any]:
         entries = list(self._words.values())
         return {"words": len(entries), "tried": sum(1 for e in entries if e["tried"]), "used": sum(1 for e in entries if e["used"]),
                 "noted": sum(1 for e in entries if e["note"]), "unexamined": self.unexamined()}
+
+
+def far_request_text(items: Sequence[Mapping[str, Any]]) -> str:
+    """The one request about words that measure far from the speaker and were not tried."""
+    listed = "; ".join(f"{item['word']} (closeness {item['closeness']})" for item in items[:MAX_FAR_LISTED])
+    return ("One more thing before you finish. These words measure far from the speaker's own sounds as you wrote them, and no spelling was heard "
+            f"for them: {listed}. Being part of a title, a familiar word or a name is not a reason to leave one: the speaker's sounds in the source "
+            "audio are what the voice is matched to. For each, call try_pronunciation (or suggest_spellings) once and use what you hear. If no "
+            "spelling is closer, keep the word and say so with note_pronunciation, citing what you tried. A word that is a real isiZulu word is not "
+            "in this list, so there is no Zulu spelling to protect.")
 
 
 def request_text(items: Sequence[Mapping[str, Any]]) -> str:

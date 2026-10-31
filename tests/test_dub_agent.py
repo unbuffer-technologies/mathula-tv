@@ -853,6 +853,36 @@ def test_an_agent_that_finishes_with_a_word_shown_wrong_and_untouched_is_asked_f
     assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5
 
 
+def test_an_agent_that_finishes_with_a_far_word_left_untried_is_asked_once_to_hear_a_spelling(tmp_path):
+    from mathula_tv import dub_agent
+
+    class Far(StubWorkbench):
+        def __init__(self, root):
+            super().__init__(root)
+            self.tried = []
+
+        def ledger_untried_far(self):
+            return [] if self.tried else [{"word": "High", "closeness": 0.47}]
+
+        def try_pronunciation(self, word, spellings):
+            self.tried.append(word)
+            return {"ok": True}
+
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),                                                                   # asked here, not finished
+        _reply(calls=[_call("c", "try_pronunciation", {"word": "High", "spellings": ["Hai"]})]),
+        _reply(content="done"),
+    ])
+    workbench = Far(tmp_path)
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r")
+    asked = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "measure far from the speaker's own sounds" in str(m.get("content"))]
+    assert len(asked) == 1 and "High (closeness 0.47)" in asked[0] and workbench.tried == ["High"]
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5
+    assert "0.7" in dub_agent.SYSTEM_PROMPT and "not a reason to skip" in dub_agent.SYSTEM_PROMPT
+
+
 def test_a_noun_prefix_glued_on_a_word_the_speaker_says_as_it_is_is_named_in_the_early_note_and_the_reminder(tmp_path):
     from mathula_tv import dub_agent
 

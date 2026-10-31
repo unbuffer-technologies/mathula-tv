@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from mathula_tv.pronunciation_ledger import Ledger, problems_of, request_text
+from mathula_tv.pronunciation_ledger import Ledger, far_request_text, problems_of, request_text
 
 
 def test_a_word_shown_with_something_named_wrong_and_never_touched_is_unexamined_until_tried_used_or_explained():
@@ -35,3 +35,19 @@ def test_problems_come_from_differences_the_ending_and_what_the_sentence_loses()
     row = {"differences": ["speaker ts, voice dʒ (consonant)"], "ending": "the voice ends with a vowel", "lost_in_its_sentence": ["t", "s"]}
     assert problems_of(row) == ["speaker ts, voice dʒ (consonant)", "ending: the voice ends with a vowel", "in its sentence the voice loses t s"]
     assert problems_of({"differences": [], "ending": None}) == []
+
+
+def test_a_word_far_from_the_speaker_is_not_cleared_by_a_reason_alone_only_by_hearing_a_spelling():
+    ledger = Ledger()
+    ledger.shown("High", "measured as written, in the word list", closeness=0.47, problems=["speaker aɪ, voice i (vowel)"])
+    ledger.shown("OK", "measured as written, in the word list", closeness=0.63, problems=["speaker eː, voice o (vowel)"])
+    ledger.shown("Zuma", "measured as written, in the word list", closeness=1.0, problems=[])
+    ledger.shown("Raila", "listed by list_foreign_words")                                                 # never measured: nothing to say
+    ledger.note("High", "kept_as_is", "part of the official Western Cape High Court title")                # a reason about the kind of word does not count
+    assert [(i["word"], i["closeness"]) for i in ledger.untried_far()] == [("High", 0.47), ("OK", 0.63)]   # weakest first; the close and the unmeasured are left out
+    ledger.tried("High", ["Hai", "Hay"])
+    ledger.used("OK", "Okey", 0.9)
+    assert ledger.untried_far() == [] and ledger.to_dict()["untried_far"] == []
+    text = far_request_text([{"word": "High", "closeness": 0.47}])
+    assert "High (closeness 0.47)" in text and "not a reason" in text and "try_pronunciation" in text
+

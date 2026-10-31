@@ -99,7 +99,8 @@ You work through tools and decide your own method. You are scored on:
    makes for your spelling, with the differences. The list holds names and initialisms too ("is_name": a presenter's first name, "SG", "ANC"): the
    speaker's sounds in the source audio are the right reading of a name as of any word, and the voice reads names and letters by Zulu rules, so they
    are often off. Every entry says how close the voice's reading of it, as you wrote it, is to the speaker's ("as_written", weakest first): start
-   with the weakest, and leave the ones already close alone. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
+   with the weakest, and leave the ones already close alone. Below 0.7 a word is not fine as it is: hear at least one spelling for it before you
+   decide to keep it. Being part of a title ("Western Cape High Court"), a familiar word ("OK") or a name is not a reason to skip that. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
    limited (3 per word, and a shared pool for a 4th and 5th): spend them where the voice is clearly off, not on words that already sound right.
    Each result also says what an English listener wrote when the voice said your spelling ("english_hears"), and whether that is the word
    ("english_listener_understands"). Neither check is the main one. The sounds (closeness and the listed differences) skip the speaker's last
@@ -830,7 +831,8 @@ PRONUNCIATION_REMINDER = (
     "with Zulu letters: {words}. If any of them may sound wrong, call list_foreign_words, check those with try_pronunciation, use "
     "use_pronunciation for a spelling that an English listener writes as the word, re-measure any unit that contains the word (the text keeps the "
     "word itself: the spelling is applied when the voice speaks it, never typed into the text), and finish. "
-    "If you judge they are fine as they are, you do not have to use the lab: finish.")
+    "If you judge they are fine as they are, you do not have to use the lab: finish, except that a word measured below 0.7 closeness is not fine "
+    "as it is until you have heard a spelling for it (a title or a familiar word is no exception).")
 
 
 # The agent fits timing first and looks at pronunciation last, so a run that spends all its turns on timing never reaches the lab (prod-21
@@ -904,6 +906,7 @@ def _run_agent(
     nudged = False
     pronunciation_reminded = False
     ledger_asked = False
+    far_asked = False
     loanwords_noted = False
     pushbacks = 0
     unmet: list[str] = []
@@ -989,6 +992,18 @@ def _run_agent(
                     text = request_text(items)
                     messages.append({"role": "user", "content": text})
                     trace.log("ledger_request", turn=turn, words=[item["word"] for item in items], text=text)
+                    continue
+            # Words that measure far from the speaker and that no spelling was heard for, whatever reason was written: asked about once.
+            untried = getattr(workbench, "ledger_untried_far", None)
+            if not far_asked and callable(untried) and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens:
+                items = untried()
+                if items:
+                    far_asked = True
+                    from .pronunciation_ledger import far_request_text
+
+                    text = far_request_text(items)
+                    messages.append({"role": "user", "content": text})
+                    trace.log("far_request", turn=turn, words=[item["word"] for item in items], text=text)
                     continue
             # The agent says it is done. The harness checks that against its own score instead of
             # taking its word for it -- bounded, and only while budget remains to act on it.
