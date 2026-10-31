@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 SCHEMA = "mathula-pronunciation-memory-v1"
+AGENT_SOURCE = "agent-pronunciation"       # what the workbench writes into a lexicon when the agent uses a reading
 MEMORY_SOURCE = "memory"
 MAX_FAILURES = 2
 _PRIORITY = {"repair": 1, "agent": 0}
@@ -112,7 +113,9 @@ def apply_to_lexicon(lexicon_path: Path, memory_file: Path, voice: str | None) -
     lexicon = json.loads(lexicon_path.read_text(encoding="utf-8")) if lexicon_path.is_file() else {"schema": "mathula-names-lexicon-v1", "entries": []}
     wanted = entries_for(memory_file, voice)
     taken = {e["display_text"].casefold() for e in wanted}
-    kept = [e for e in lexicon.get("entries", []) if e["display_text"].casefold() not in taken and e.get("source") != MEMORY_SOURCE]
+    # a reading the agent chose in an earlier run (use_pronunciation writes it into the clip's lexicon as well as the memory) goes too: the memory is what
+    # holds it, enabled or not, and a switched-off reading left behind here kept Heidi, Western, Party and ABCD out of prod-50's word list and measured
+    kept = [e for e in lexicon.get("entries", []) if e["display_text"].casefold() not in taken and e.get("source") not in (MEMORY_SOURCE, AGENT_SOURCE)]
     from .pronunciation_lab import written_prefix
 
     def spoken(entry: Mapping[str, Any]) -> str:

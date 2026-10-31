@@ -147,3 +147,24 @@ def test_a_saved_reading_that_measured_closer_is_not_replaced_by_one_that_measur
     remember(path, "Plain", "Plane", source="agent", voice=voice, job_id="a")                                         # no closeness recorded: replaced as before
     remember(path, "Plain", "Plein", source="agent", voice=voice, job_id="b", closeness=0.5)
     assert [e["tts_text"] for e in entries_for(path, voice) if e["display_text"] == "Plain"] == ["Plein"]
+
+
+def test_a_reading_the_agent_chose_earlier_does_not_stay_in_a_lexicon_once_the_memory_switches_it_off(tmp_path):
+    import json
+
+    from mathula_tv import pronunciation_memory as pm
+
+    memory = tmp_path / "memory.json"
+    pm.remember(memory, "Heidi", "Dyi", source="agent", voice="v", job_id="j", kind="english_code_switch")
+    pm.remember(memory, "Party", "Phaathi2", source="agent", voice="v", job_id="j", kind="english_code_switch")
+    lexicon = tmp_path / "pronunciation_names.json"
+    lexicon.write_text(json.dumps({"entries": [
+        {"display_text": "WhatsApp", "tts_text": "Whatsep", "kind": "organisation_name"},
+        {"display_text": "Heidi", "tts_text": "Dyi", "source": "agent-pronunciation"},
+        {"display_text": "Western", "tts_text": "Issen", "source": "agent-pronunciation"}]}), encoding="utf-8")
+    data = pm.load(memory)
+    data["entries"][pm._key("Heidi", "v")]["disabled"] = True
+    pm._save(memory, data)
+    pm.apply_to_lexicon(lexicon, memory, "v")
+    shown = {e["display_text"]: e["tts_text"] for e in json.loads(lexicon.read_text(encoding="utf-8"))["entries"]}
+    assert shown == {"WhatsApp": "Whatsep", "Party": "Phaathi2"}          # the names stage's reading stays, a switched-off or unbacked agent reading goes

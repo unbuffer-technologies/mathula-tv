@@ -276,6 +276,15 @@ class Workbench:
             self.voices = load_clip_voices(self.store, clip_id)
         # The renderer applies the job's pronunciation dictionary; measure with the same one so what is measured
         # is what is rendered.
+        try:        # the clip's lexicon carries what the memory holds now, not what an earlier run left in it (a reading switched off must stop counting as known)
+            from .pronunciation_memory import apply_to_lexicon, memory_path as _memory_path
+
+            first_voice = next((v.get("selected_voice") for v in self.voices.values() if v.get("selected_voice")), None)
+            clip_lexicon = Path(self.store.clip_dir(clip_id)) / "native_dub" / "pronunciation_names.json"
+            if clip_lexicon.is_file():
+                apply_to_lexicon(clip_lexicon, _memory_path(Path(self.store.root).parent), first_voice)
+        except Exception:
+            pass
         self.pronunciation_root = register_clip_pronunciation(self.store, clip_id)
         glossary_doc = read_json(native / "zulu_terminology_glossary.json")
         from .english_prefix import fix_glossary
