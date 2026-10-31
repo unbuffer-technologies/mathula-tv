@@ -443,10 +443,46 @@ def _letters(text: str) -> str:
     return re.sub(r"[^a-z]", "", str(text).casefold())
 
 
+def _pronouncing() -> Mapping[str, Any] | None:
+    """The CMU pronouncing dictionary (word -> pronunciations), or None when the ``cmudict`` package is not installed."""
+    global _CMU
+    if _CMU is None:
+        try:
+            import cmudict
+
+            _CMU = cmudict.dict()
+        except Exception:
+            _CMU = {}
+    return _CMU or None
+
+
+_CMU: Mapping[str, Any] | None = None
+MAX_HOMOPHONE_WORDS = 4
+
+
+def _sounds(text: str) -> set[tuple[str, ...]]:
+    """Every way the words of ``text`` can be said, as phone sequences without stress; empty when a word is not in the dictionary."""
+    dictionary, words = _pronouncing(), re.findall(r"[a-z']+", str(text).casefold())
+    if not dictionary or not words or len(words) > MAX_HOMOPHONE_WORDS:
+        return set()
+    spoken: list[tuple[str, ...]] = [()]
+    for word in words:
+        options = dictionary.get(word)
+        if not options:
+            return set()
+        spoken = [done + tuple(re.sub(r"\d", "", phone) for phone in option) for done in spoken for option in options[:3]][:50]
+    return set(spoken)
+
+
 def understood_as(heard: str, word: str) -> bool:
-    """Whether what an English listener wrote is the word (spacing, case, punctuation and a plural -s do not matter)."""
+    """Whether what an English listener wrote is the word: spacing, case, punctuation and a plural -s do not matter, and a word said the same counts
+    ("Hi" for High, "Okay" for OK).  The check used to compare letters only, so the listener writing exactly the word it heard was marked as not understanding."""
     heard_letters, word_letters = _letters(heard), _letters(word)
-    return bool(word_letters) and (heard_letters == word_letters or heard_letters.rstrip("s") == word_letters.rstrip("s"))
+    if not word_letters:
+        return False
+    if heard_letters == word_letters or heard_letters.rstrip("s") == word_letters.rstrip("s"):
+        return True
+    return bool(_sounds(heard) & _sounds(word))
 
 
 def failing_readings(lab: Any, entries: Iterable[Mapping[str, Any]]) -> set[str]:

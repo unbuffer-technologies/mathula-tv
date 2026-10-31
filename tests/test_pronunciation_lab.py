@@ -1145,3 +1145,16 @@ def test_a_cut_that_is_another_word_than_the_english_voices_is_not_taken():
     assert agreement(["f", "a", "ɪ̃"], english) < reference_tts.CUT_LIKENESS_FLOOR                    # prod-57's probe: OK cut as "fine"
     assert agreement(["h", "a", "ɪ"], ["h", "aɪ"]) >= reference_tts.CUT_LIKENESS_FLOOR
     assert agreement(["w", "ɪ", "s", "ə", "n"], ["w", "ɛ", "s", "t", "ə", "n"]) >= reference_tts.CUT_LIKENESS_FLOOR
+
+
+def test_the_listener_writing_a_word_that_sounds_the_same_is_understanding_the_word(monkeypatch):
+    from mathula_tv import pronunciation_lab as lab
+
+    fake = {"high": [["HH", "AY1"]], "hi": [["HH", "AY1"]], "ok": [["OW2", "K", "EY1"]], "okay": [["OW2", "K", "EY1"]], "hate": [["HH", "EY1", "T"]], "to": [["T", "UW1"]],
+            "keep": [["K", "IY1", "P"]], "cape": [["K", "EY1", "P"]]}
+    monkeypatch.setattr(lab, "_CMU", fake)
+    assert lab.understood_as("Hi.", "High") and lab.understood_as("Okay.", "OK")                # prod-57's test: both were marked as not understood
+    assert not lab.understood_as("Hate to.", "Heidi") and not lab.understood_as("Keep.", "Cape") and not lab.understood_as("", "High")
+    assert lab.understood_as("Fighter", "Fighters")                                            # the letter rules still apply
+    monkeypatch.setattr(lab, "_CMU", {})                                                       # no dictionary installed: letters only, as before
+    assert not lab.understood_as("Hi.", "High") and lab.understood_as("High.", "high")
