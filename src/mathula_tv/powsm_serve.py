@@ -33,8 +33,11 @@ def main() -> None:
             audio, rate = sf.read(request["wav"], start=first, stop=last, dtype="float32")
             if audio.ndim > 1:
                 audio = audio.mean(axis=1)
-            if rate != RATE:
-                raise ValueError(f"the audio must be {RATE} Hz, it is {rate}")
+            if rate != RATE:        # the Zulu voice's clips are 24 kHz
+                import torch
+                import torchaudio
+
+                audio = torchaudio.functional.resample(torch.from_numpy(audio), rate, RATE).numpy()
             padded = np.zeros(WINDOW_SECONDS * RATE, dtype="float32")
             padded[: min(len(audio), len(padded))] = audio[: len(padded)]
             prediction = model(padded, text_prev="<na>")[0][0].split("<notimestamps>")[-1].strip()
