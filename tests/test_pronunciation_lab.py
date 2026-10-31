@@ -1092,3 +1092,60 @@ def test_two_recognisers_that_hear_different_sounds_make_a_reference_unreliable(
 
     assert "different sounds" in reference_tts.weakness([(1.0, 1.9)], None, "Heidi", ["a", "d", "i"], 0.3)
     assert reference_tts.weakness([(1.0, 1.9)], None, "Heidi", ["a", "d", "i"], 0.9) is None
+
+
+def test_the_target_is_cut_out_of_another_recognisers_reading_of_the_same_phrase():
+    from mathula_tv.reference_tts import cut_target
+
+    english = ["k", "eɪ", "p", "h", "aɪ", "k", "ɔ", "t"]                       # the English voice's phrase: Cape High Court; High is [3, 5)
+    powsm = ["kʰ", "e", "ɪ", "p", "h", "a", "ɪ", "kʰ", "w", "ɔ", "ɹ", "t"]       # POWSM's reading of the speaker, with vowels spelled differently
+    assert cut_target(powsm, english, (3, 5)) == ["h", "a", "ɪ"]
+    assert cut_target([], english, (3, 5)) == [] and cut_target(powsm, english, (8, 9)) == []
+
+
+def test_the_powsm_worker_is_asked_once_per_stretch_and_answers_are_kept_on_disk(tmp_path):
+    import sys
+    import textwrap
+
+    from mathula_tv.powsm_listener import PowsmListener
+
+    worker = tmp_path / "worker.py"
+    worker.write_text(textwrap.dedent("""
+        import json, sys
+        print("some log line on stdout", flush=True)
+        print("@@" + json.dumps({"ready": True}), flush=True)
+        for line in sys.stdin:
+            request = json.loads(line)
+            if request["end"] > 100:
+                print("@@" + json.dumps({"error": "too long"}), flush=True)
+            else:
+                print("@@" + json.dumps({"phones": ["h", "a", "ɪ"]}), flush=True)
+    """), encoding="utf-8")
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"RIFF")
+    cache = tmp_path / "cache.json"
+    listener = PowsmListener(cache_path=cache, command=[sys.executable, "-u", str(worker)])
+    assert listener.phones(wav, 1.0, 2.0) == ["h", "a", "ɪ"]
+    assert listener.phones(wav, 1.0, 2.0) == ["h", "a", "ɪ"]                               # from the kept answer
+    assert listener.phones(wav, 150.0, 151.0) is None                                      # the worker's error is None, not an exception
+    listener.close()
+    again = PowsmListener(cache_path=cache, command=[sys.executable, "-c", "raise SystemExit(1)"])
+    assert again.phones(wav, 1.0, 2.0) == ["h", "a", "ɪ"]                                  # a new session needs no worker for a word it already read
+
+
+def test_the_phrase_span_covers_the_words_the_english_voice_says():
+    from mathula_tv import reference_tts
+
+    transcript = [{"text": t, "start": float(i), "end": float(i) + 0.5} for i, t in enumerate(["a", "b", "High", "c", "d", "e"])]
+    assert reference_tts.phrase_span(transcript, "High") == (0.0, 4.5)               # two words either side
+    assert reference_tts.phrase_span(transcript, "Mabhida") is None
+
+
+def test_a_cut_that_is_another_word_than_the_english_voices_is_not_taken():
+    from mathula_tv import reference_tts
+    from mathula_tv.zipa_listener import agreement
+
+    english = ["oː", "k", "eɪ"]
+    assert agreement(["f", "a", "ɪ̃"], english) < reference_tts.CUT_LIKENESS_FLOOR                    # prod-57's probe: OK cut as "fine"
+    assert agreement(["h", "a", "ɪ"], ["h", "aɪ"]) >= reference_tts.CUT_LIKENESS_FLOOR
+    assert agreement(["w", "ɪ", "s", "ə", "n"], ["w", "ɛ", "s", "t", "ə", "n"]) >= reference_tts.CUT_LIKENESS_FLOOR

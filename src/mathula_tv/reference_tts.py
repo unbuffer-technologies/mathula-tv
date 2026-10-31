@@ -21,6 +21,7 @@ EN_VOICE = "en-ZA-LeahNeural"
 SHORT_SPAN_SECONDS = 0.26       # a word the service times shorter than this (median over its occurrences) is too fast to decode on its own
 CONTEXT_WORDS = 2               # words either side of the target that the phrase carries, so the voice says it as it is said in a sentence
 SLACK_SECONDS = 0.06
+CUT_LIKENESS_FLOOR = 0.5         # a word cut out of another recogniser's reading must be this like the English voice's word, or the cut went to another word
 AGREEMENT_FLOOR = 0.5           # see zipa_listener: below it the first recogniser's decoding is not a reference
 
 
@@ -70,6 +71,21 @@ def phrase_around(transcript: Sequence[Mapping[str, Any]], word: str) -> tuple[l
     return words, best[1] - first
 
 
+def phrase_span(transcript: Sequence[Mapping[str, Any]], word: str) -> tuple[float, float] | None:
+    """The start and end seconds of the phrase ``phrase_around`` takes for the word, in the speaker's audio."""
+    target = re.sub(r"[^a-z0-9']", "", str(word).casefold())
+    best: tuple[float, int] | None = None
+    for index, item in enumerate(transcript):
+        if re.sub(r"[^a-z0-9']", "", str(item.get("text") or "").casefold()) == target:
+            length = float(item.get("end") or 0) - float(item.get("start") or 0)
+            if best is None or length > best[0]:
+                best = (length, index)
+    if best is None:
+        return None
+    window = transcript[max(0, best[1] - CONTEXT_WORDS): best[1] + CONTEXT_WORDS + 1]
+    return float(window[0].get("start") or 0.0), float(window[-1].get("end") or 0.0)
+
+
 def tts_reference(word: str, transcript: Sequence[Mapping[str, Any]], *, work: Path, gop: Any, listener: Any,
                   synthesize: Callable[[str, Path], Path], voice: str = EN_VOICE) -> dict[str, Any] | None:
     """The target word's sounds as ``voice`` says the corrected phrase around it, or None when it cannot be made (the caller keeps the speaker's)."""
@@ -104,4 +120,43 @@ def tts_reference(word: str, transcript: Sequence[Mapping[str, Any]], *, work: P
     phones = [token for token, _, _ in timed]
     if not phones:
         return None
-    return {"phones": phones, "timed": timed, "clip": wav, "voice": voice, "phrase": text, "span": (start, end)}
+    everything = [(token, begin, finish) for token, begin, finish in gop.decode_timed(wav)]
+    first = next((i for i, item in enumerate(everything) if item in timed), 0)
+    return {"phones": phones, "timed": timed, "clip": wav, "voice": voice, "phrase": text, "span": (start, end),
+            "all_phones": [t for t, _, _ in everything], "target_slice": (first, first + len(phones)), "phrase_words": words, "target_position": position}
+
+
+def cut_target(other: Sequence[str], reference_all: Sequence[str], target: tuple[int, int]) -> list[str]:
+    """The part of ``other`` (another recogniser's reading of the same phrase) that lines up with ``reference_all[target[0]:target[1]]``.
+
+    The two readings are aligned by edit distance on coarse sounds, so a vowel spelled differently still lines up and a word one of them garbles does not pull the
+    cut off course; phones of ``other`` that fall between two aligned phones of the target belong to it."""
+    from .zipa_listener import coarse
+
+    a, b = [coarse([p]) for p in other], [coarse([p]) for p in reference_all]
+    rows, cols = len(a), len(b)
+    cost = [[0.0] * (cols + 1) for _ in range(rows + 1)]
+    step = [[""] * (cols + 1) for _ in range(rows + 1)]
+    for i in range(1, rows + 1):
+        cost[i][0], step[i][0] = float(i), "a"
+    for j in range(1, cols + 1):
+        cost[0][j], step[0][j] = float(j), "b"
+    for i in range(1, rows + 1):
+        for j in range(1, cols + 1):
+            options = [(cost[i - 1][j - 1] + (0.0 if a[i - 1] == b[j - 1] else 1.0), "m"), (cost[i - 1][j] + 1.0, "a"), (cost[i][j - 1] + 1.0, "b")]
+            cost[i][j], step[i][j] = min(options, key=lambda o: o[0])
+    pairs: dict[int, int] = {}                      # index in reference -> index in other (matched or substituted)
+    i, j = rows, cols
+    while i > 0 or j > 0:
+        move = step[i][j]
+        if move == "m":
+            pairs[j - 1] = i - 1
+            i, j = i - 1, j - 1
+        elif move == "a":
+            i -= 1
+        else:
+            j -= 1
+    inside = [pairs[k] for k in range(target[0], target[1]) if k in pairs]
+    if not inside:
+        return []
+    return [other[k] for k in range(min(inside), max(inside) + 1)]

@@ -576,6 +576,44 @@ class PronunciationLab:
         scores = [s for s in scores if s is not None]
         return round(sum(scores) / len(scores), 3) if scores else None
 
+    def _powsm_reading(self, spoken_form: str, heard: Mapping[str, Any], ref: Mapping[str, Any], reason: str) -> dict[str, Any] | None:
+        """The listener of last resort: POWSM reads the speaker's own audio over the phrase around the word, blind, and the word's part is cut out by lining the
+        reading up with the English voice's decoding of the same phrase (see ``powsm_listener``).  It heard the h of a 0.16 s "High" that two other
+        recognisers read as "pa".  None when it is not installed, fails, or its cut does not look like the word, and the English voice stands."""
+        import os
+
+        from . import reference_tts
+        from .powsm_listener import PowsmListener
+        from .pronunciation_evidence import reference_fits_spelling
+
+        if os.environ.get("MATHULA_POWSM") == "0" or not PowsmListener.available() or "all_phones" not in ref:
+            return None
+        span = reference_tts.phrase_span(self.transcript, spoken_form)
+        if not span:
+            return None
+        try:
+            if getattr(self, "_powsm", None) is None:
+                self._powsm = PowsmListener(cache_path=self.job_root / "native_dub" / "powsm_cache.json")
+            reading = self._powsm.phones(self.job_root / "audio" / "analysis_mono.wav", span[0] - 0.15, span[1] + 0.15)
+        except Exception:
+            return None
+        if not reading:
+            return None
+        target = reference_tts.cut_target(reading, ref["all_phones"], tuple(ref["target_slice"]))
+        if len(target) < 2 and not reference_tts.is_initialism(spoken_form):
+            return None
+        from . import zipa_listener
+
+        like = zipa_listener.agreement(target, ref["phones"])
+        if like is None or like < reference_tts.CUT_LIKENESS_FLOOR:
+            return None                       # the cut is some other word: the corrected text has a word the audio does not (OK came out as "fine")
+        if not reference_tts.is_initialism(spoken_form) and reference_fits_spelling(spoken_form, target):
+            return None
+        return {"phones": target, "reference_warning": None, "each_occurrence": [" ".join(target)], "_timed": None, "_clips": None,
+                "speaker_phones": list(heard["phones"]),
+                "reference_note": (f"the first recogniser could not read this word in the speaker's audio ({reason}; its decode was [{' '.join(heard['phones'])}]), so the sounds "
+                                   f"shown are what POWSM, a larger phone model, hears in the same audio over the phrase {ref['phrase']!r}")}
+
     def _complete_onset(self, spoken_form: str, heard: Mapping[str, Any]) -> dict[str, Any] | None:
         """The speaker's decode of "Heidi" began with a vowel (aɪ d iː): the recogniser drops a weak onset like h, as it dropped the first sounds of OK, SG and
         Western, and the lab then matched spellings to a word with no h ("Aydie", 0.925).  When the decode starts with a vowel but the word's first letter is a
@@ -633,6 +671,9 @@ class PronunciationLab:
             return None
         if not ref:
             return None
+        powsm = self._powsm_reading(spoken_form, heard, ref, reason)
+        if powsm:
+            return powsm
         return {"phones": ref["phones"], "reference_warning": None, "each_occurrence": [" ".join(ref["phones"])], "_timed": [ref["timed"]], "_clips": [ref["clip"]],
                 "speaker_phones": list(heard["phones"]),
                 "reference_note": (f"the speaker's own audio could not give this word ({reason}; their decode was [{' '.join(heard['phones'])}]), so the sounds shown are a "
