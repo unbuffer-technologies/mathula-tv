@@ -141,7 +141,7 @@ def length_gap(text: str, measured: dict[str, Any]) -> dict[str, int]:
     return {"chars": chars, "add_about_chars" if gap > 0 else "cut_about_chars": amount}
 
 
-WORDS_MEASURED = 20             # words, names and initialisms the word list measures as written against the speaker (one clip of the voice each)
+WORDS_MEASURED = 30             # words, names and initialisms the word list measures as written against the speaker (one clip of the voice each): all of the list, which candidate_words caps at 30. At 20 only the first 20 in the order of the text were measured, so Western (0.42) and the others after them sat unmeasured at the end of prod-52's list
 UNIT_TEXTS_SHOWN = 8            # flagged units and claims whose current Zulu text a submit result carries, so the agent need not call get_submission to read them
 UNIT_TEXT_CHARS = 360
 CLAIMS_PER_SUBMIT = 6           # units a submit result asks the agent to check against the English, at most
