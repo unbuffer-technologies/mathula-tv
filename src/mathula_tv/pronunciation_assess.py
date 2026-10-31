@@ -195,6 +195,7 @@ class LocalGop:
 
     def decode_timed(self, wav: Path) -> list[tuple[str, float, float]]:
         """The phones the recogniser hears in ``wav`` with their start and end seconds."""
+        self._load()
         inverse = {index: token for token, index in self._vocab.items()}
         blank = self._vocab["<pad>"]
         indices = self.log_probs(wav).argmax(dim=-1).tolist()
@@ -210,6 +211,7 @@ class LocalGop:
 
     def decode(self, wav: Path) -> list[str]:
         """The phones the recogniser hears in ``wav``, with no expectation: its best path with repeats and blanks removed."""
+        self._load()
         inverse = {index: token for token, index in self._vocab.items()}
         blank = self._vocab["<pad>"]
         heard: list[str] = []
