@@ -545,36 +545,16 @@ class PronunciationLab:
             spoken_form = spoken_stems.get(stem, word)
             heard = heard_word(self.job_root / "audio" / "analysis_mono.wav", self.transcript, re.sub(r"[^A-Za-z']", "", spoken_form), self.gop,
                                self.work_dir / "source", limit=4)
-            agree = self._recogniser_agreement(heard) if heard else None
-            fallback = self._english_reference(spoken_form, heard, agree) if heard else None
+            fallback = self._english_reference(spoken_form, heard) if heard else None
             if heard and not fallback:
                 fallback = self._complete_onset(spoken_form, heard)
             self._source_cache[stem] = ({"found": True, "phones": heard["phones"], "occurrences": len(heard["spans"]), "spoken_form": spoken_form,
                                          "reference_warning": reference_fits_spelling(spoken_form, heard["phones"]),
                                          "each_occurrence": [" ".join(d) for d in heard["decoded"]],
                                          "_timed": heard.get("timed"), "_clips": heard.get("clips")} if heard else {"found": False, "phones": []})
-            if agree is not None:
-                self._source_cache[stem]["recogniser_agreement"] = agree
             if fallback:
                 self._source_cache[stem].update(fallback)
         return self._source_cache[stem]
-
-    def _recogniser_agreement(self, heard: Mapping[str, Any]) -> float | None:
-        """How alike a second phone recogniser (ZIPA) hears the word, over its occurrences: the mean agreement with the first recogniser's decodings, cut to the
-        same window of the same clips.  None when the second recogniser is not installed or fails (the lab then works as it did)."""
-        from . import zipa_listener
-
-        if not zipa_listener.ZipaListener.available() or not heard.get("bounds"):
-            return None
-        try:
-            if getattr(self, "_zipa", None) is None:
-                self._zipa = zipa_listener.ZipaListener()
-            scores = [zipa_listener.agreement(first, self._zipa.phones_between(Path(clip), low, high))
-                      for first, clip, (low, high) in zip(heard["decoded"], heard["clips"], heard["bounds"])]
-        except Exception:
-            return None
-        scores = [s for s in scores if s is not None]
-        return round(sum(scores) / len(scores), 3) if scores else None
 
     def _powsm_reading(self, spoken_form: str, heard: Mapping[str, Any], ref: Mapping[str, Any], reason: str) -> dict[str, Any] | None:
         """The listener of last resort: POWSM reads the speaker's own audio over the phrase around the word, blind, and the word's part is cut out by lining the
@@ -602,9 +582,9 @@ class PronunciationLab:
         target = reference_tts.cut_target(reading, ref["all_phones"], tuple(ref["target_slice"]))
         if len(target) < 2 and not reference_tts.is_initialism(spoken_form):
             return None
-        from . import zipa_listener
+        from .phone_compare import agreement
 
-        like = zipa_listener.agreement(target, ref["phones"])
+        like = agreement(target, ref["phones"])
         if like is None or like < reference_tts.CUT_LIKENESS_FLOOR:
             return None                       # the cut is some other word: the corrected text has a word the audio does not (OK came out as "fine")
         if not reference_tts.is_initialism(spoken_form) and reference_fits_spelling(spoken_form, target):
@@ -649,14 +629,14 @@ class PronunciationLab:
                 "reference_note": (f"the speaker's decode began with a vowel [{' '.join(phones)}] but {spoken_form!r} begins with {first_letter.upper()}: the onset {onset!r} was added "
                                    f"from a standard South African English voice saying {ref['phrase']!r}")}
 
-    def _english_reference(self, spoken_form: str, heard: Mapping[str, Any], agreement: float | None = None) -> dict[str, Any] | None:
+    def _english_reference(self, spoken_form: str, heard: Mapping[str, Any]) -> dict[str, Any] | None:
         """When the speaker's audio cannot be decoded into the word (too fast, or sounds that are not its letters), a standard South African English voice
         saying the corrected phrase is the reference instead, and the output says so (see ``reference_tts``).  None keeps the speaker's."""
         from . import reference_tts
         from .english_listener import EnglishListener
         from .pronunciation_evidence import reference_fits_spelling
 
-        reason = reference_tts.weakness(heard["spans"], reference_fits_spelling(spoken_form, heard["phones"]), spoken_form, heard["phones"], agreement)
+        reason = reference_tts.weakness(heard["spans"], reference_fits_spelling(spoken_form, heard["phones"]), spoken_form, heard["phones"])
         if not reason:
             return None
         try:

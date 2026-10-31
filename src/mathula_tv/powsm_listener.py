@@ -1,7 +1,7 @@
 """POWSM as the listener of last resort for a word the other recognisers cannot read from the speaker's audio.
 
 POWSM (Phonetic Open Whisper-style Speech Model) reads a stretch of audio into phones, blind; given a phrase of a few words, in the Nonvalo interview it
-heard the "h aɪ" of a 0.16 s "High" that the XLSR phone recogniser and ZIPA both read as "pa".  It is large (about 20 s of CPU per call at a fixed 20 s window) and
+heard the "h aɪ" of a 0.16 s "High" that the XLSR phone recogniser read as "pa" (so did ZIPA, a second recogniser tried and dropped).  It is large (about 20 s of CPU per call at a fixed 20 s window) and
 installs only under Python 3.11, so it runs in a separate environment as a long-lived worker (``powsm_serve.py``) that the lab starts on first use and that keeps
 the model loaded; answers are kept on disk beside the job so a word is read once.
 

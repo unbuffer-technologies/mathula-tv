@@ -22,15 +22,12 @@ SHORT_SPAN_SECONDS = 0.26       # a word the service times shorter than this (me
 CONTEXT_WORDS = 2               # words either side of the target that the phrase carries, so the voice says it as it is said in a sentence
 SLACK_SECONDS = 0.06
 CUT_LIKENESS_FLOOR = 0.5         # a word cut out of another recogniser's reading must be this like the English voice's word, or the cut went to another word
-AGREEMENT_FLOOR = 0.5           # see zipa_listener: below it the first recogniser's decoding is not a reference
 
 
-def weakness(spans: Sequence[tuple[float, float]], warning: str | None, word: str = "", phones: Sequence[str] = (), agreement: float | None = None) -> str | None:
+def weakness(spans: Sequence[tuple[float, float]], warning: str | None, word: str = "", phones: Sequence[str] = ()) -> str | None:
     """Why the speaker's audio is not enough for this word, or None when it is."""
     if warning:
         return "the speaker's sounds do not fit the word's letters"
-    if agreement is not None and agreement < AGREEMENT_FLOOR:
-        return f"two phone recognisers hear different sounds in it (agreement {agreement})"
     letters = re.sub(r"[^A-Za-z]", "", word)
     if letters and phones is not None and (2 <= len(letters) <= 5 and letters.isupper()) and len(phones) < len(letters):
         return f"an initialism said letter by letter, but only {len(phones)} sound(s) were decoded for its {len(letters)} letters"       # AI came out as one sound
@@ -131,7 +128,7 @@ def cut_target(other: Sequence[str], reference_all: Sequence[str], target: tuple
 
     The two readings are aligned by edit distance on coarse sounds, so a vowel spelled differently still lines up and a word one of them garbles does not pull the
     cut off course; phones of ``other`` that fall between two aligned phones of the target belong to it."""
-    from .zipa_listener import coarse
+    from .phone_compare import coarse
 
     a, b = [coarse([p]) for p in other], [coarse([p]) for p in reference_all]
     rows, cols = len(a), len(b)

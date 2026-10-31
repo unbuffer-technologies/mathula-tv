@@ -1082,16 +1082,12 @@ def test_an_initialism_is_said_by_the_names_of_its_letters_and_cut_out_between_i
 
 
 def test_two_recognisers_that_hear_different_sounds_make_a_reference_unreliable():
-    from mathula_tv.zipa_listener import agreement, coarse
+    from mathula_tv.phone_compare import agreement, coarse
 
     assert coarse(["▁", "p", "ʰ", "aː", "k"]) == coarse(["p", "a", "k"])                                 # modifiers, length and the word marker do not count
     assert agreement(["h", "aɪ", "d", "iː"], ["h", "a", "ɪ", "d", "i"]) > 0.8                           # the same word, spelled differently by the two recognisers
     assert agreement(["p", "aː", "k"], ["w", "e", "s", "u", "n"]) < 0.5                                 # different sounds altogether
     assert agreement([], ["a"]) is None
-    from mathula_tv import reference_tts
-
-    assert "different sounds" in reference_tts.weakness([(1.0, 1.9)], None, "Heidi", ["a", "d", "i"], 0.3)
-    assert reference_tts.weakness([(1.0, 1.9)], None, "Heidi", ["a", "d", "i"], 0.9) is None
 
 
 def test_the_target_is_cut_out_of_another_recognisers_reading_of_the_same_phrase():
@@ -1143,7 +1139,7 @@ def test_the_phrase_span_covers_the_words_the_english_voice_says():
 
 def test_a_cut_that_is_another_word_than_the_english_voices_is_not_taken():
     from mathula_tv import reference_tts
-    from mathula_tv.zipa_listener import agreement
+    from mathula_tv.phone_compare import agreement
 
     english = ["oː", "k", "eɪ"]
     assert agreement(["f", "a", "ɪ̃"], english) < reference_tts.CUT_LIKENESS_FLOOR                    # prod-57's probe: OK cut as "fine"
