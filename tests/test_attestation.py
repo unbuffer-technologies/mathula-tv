@@ -55,6 +55,15 @@ def test_a_prefixed_place_and_an_everyday_word_are_ordinary_zulu_but_a_rare_capi
     assert not a.ordinary_zulu("Tshela") and not a.ordinary_zulu("Fighters")                             # a name real text does not write that way
 
 
+def test_a_prefixed_place_whose_stem_is_no_english_word_needs_far_fewer_sightings():
+    zulu = ["Ngiya eNkandla namuhla ."] * 11 + ["Ngiya eBay namuhla ."] * 11
+    a = Attestation(zulu, ["x ."] * len(zulu))
+    english = {"bay"}                                                                                      # a stand-in for the English dictionary
+    assert a.written_count("eNkandla") == 11 and not a.ordinary_zulu("eNkandla")                           # 11 sightings are under the usual 20
+    assert a.ordinary_zulu("eNkandla", english_has=lambda word: word.lower() in english)                   # Nkandla is no English word: Zulu
+    assert not a.ordinary_zulu("eBay", english_has=lambda word: word.lower() in english)                   # Bay is: the usual 20 apply
+
+
 def test_a_phrase_and_a_form_with_a_hyphenated_particle_are_counted_exactly_and_word_by_word():
     zulu = (["Wathola isikhwama sempesheni namuhla ."] * 4 + ["Sebenzisa isikhwama futhi ."] * 3 + ["Ibhalwe ngu-pension kanye se-provident ."] * 2
             + ["Sithenga sempesheni ."] * 2)

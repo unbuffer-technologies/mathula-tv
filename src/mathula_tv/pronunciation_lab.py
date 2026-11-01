@@ -21,7 +21,7 @@ from collections import Counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from xml.sax.saxutils import escape
 
-from .phone_features import distance as phone_distance
+from .phone_features import distance as phone_distance, split_diphthongs
 
 MAX_TRIES_PER_WORD = 5
 GUARANTEED_TRIES_PER_WORD = 3        # every word can always be tried this often: one call over many words cannot starve the last of them
@@ -35,6 +35,8 @@ SUGGEST_FIRST = 28            # spellings worked out backwards from the speaker'
 SUGGEST_PER_ROUND = 20        # varied spellings spoken in each round
 SUGGEST_SHOWN = 5             # the distinct best of them that are measured in full and shown
 SUGGEST_BY_OPENING = 2        # of those, how many are chosen for the speaker's vowel opening instead of for sounds
+SUGGEST_LISTENED = 10         # the closest spellings in sounds that an English listener is asked about (besides every one the interpreter derived)
+INTERPRETER_SPELLINGS = 6     # spellings the interpreter derives from the dictionary for a word
 
 _VOWEL_LETTERS = set("aeiouɑɒɔəɛɜɪʊʌæɐøɨ")
 _VOICING = {("p", "b"), ("t", "d"), ("k", "ɡ"), ("k", "g"), ("s", "z"), ("f", "v"), ("ʃ", "ʒ"), ("tʃ", "dʒ"), ("θ", "ð")}
@@ -84,6 +86,7 @@ def align(source: Sequence[str], heard: Sequence[str]) -> dict[str, Any]:
 
     The speaker's window is cut from running speech by word timings, so its first and last sounds are noisy: skipping them costs
     little. The voice's window is cut cleanly with SSML bookmarks, so a sound the voice adds anywhere (the "ma" of "mafector") is real."""
+    source, heard = split_diphthongs(source), split_diphthongs(heard)
     n, m = len(source), len(heard)
     dp = [[0.0] * (m + 1) for _ in range(n + 1)]
     back: list[list[tuple[int, int, str] | None]] = [[None] * (m + 1) for _ in range(n + 1)]
@@ -244,6 +247,8 @@ def _reference_fields(source: Mapping[str, Any]) -> dict[str, Any]:
         out["reference_warning"] = source["reference_warning"]
     if source.get("reference_note"):
         out["reference_note"] = source["reference_note"]
+    if source.get("english_dictionary"):
+        out["english_dictionary"] = source["english_dictionary"]
     return out
 
 
@@ -601,7 +606,56 @@ class PronunciationLab:
                                          "_timed": heard.get("timed"), "_clips": heard.get("clips")} if heard else {"found": False, "phones": []})
             if fallback:
                 self._source_cache[stem].update(fallback)
+            cached = self._source_cache[stem]
+            if cached.get("found"):
+                note = self._dictionary_note(spoken_form, cached["phones"])
+                if note:
+                    cached["english_dictionary"] = note
         return self._source_cache[stem]
+
+    def _interpreter(self):
+        """The English-to-Zulu interpreter (see ``interpreter``): the dictionary's sounds, what Zulu speakers do with them, and this voice's letters; None when the
+        dictionary has not been put in the working resources."""
+        if getattr(self, "_interp", "unset") == "unset":
+            from .english_sounds import EnglishSounds
+            from .interpreter import Interpreter
+
+            try:
+                sounds = EnglishSounds.load(Path(self.job_root).parents[1] / "resources" / "cmudict" / "cmudict.dict")
+                self._interp = Interpreter(sounds, self._letter_table(), self._phonology()) if sounds is not None else None
+            except (IndexError, OSError):
+                self._interp = None
+        return self._interp
+
+    def _interpreter_spellings(self, stem: str) -> list[str]:
+        """Spellings the interpreter derives from the dictionary's sounds for ``stem`` (with the last letter held for a word said letter by letter);
+        empty when there is no dictionary or the dictionary has nothing for the word."""
+        interpreter = self._interpreter()
+        if interpreter is None or len(stem) < 2:
+            return []
+        try:
+            found = interpreter.spellings(stem, limit=INTERPRETER_SPELLINGS)
+        except Exception:
+            return []
+        spellings = [item["spelling"] for item in found["spellings"]]
+        if any(reading["how"] == "letters" for reading in found["readings"]):
+            spellings += [held for spelling in spellings[:3] for held in interpreter.held_variants(spelling)]
+        return list(dict.fromkeys(spellings))
+
+    def _listener_writes(self, spelling: str, word: str) -> bool:
+        """Whether an English listener writes ``word`` when the voice has said ``spelling`` (it must have been spoken); False when it cannot be asked."""
+        try:
+            heard = self.english_hears(spelling)
+        except Exception:
+            return False
+        return heard is not None and understood_as(heard, word)
+
+    def _dictionary_note(self, spoken_form: str, speaker_phones: Sequence[str]) -> dict[str, Any] | None:
+        interpreter = self._interpreter()
+        try:
+            return interpreter.dictionary_note(without_prefix(spoken_form.split("-")[-1], written_prefix(spoken_form)), speaker_phones) if interpreter else None
+        except Exception:                                  # a failure here leaves out the extra information, never the word
+            return None
 
     def _powsm_reading(self, spoken_form: str, heard: Mapping[str, Any], ref: Mapping[str, Any], reason: str) -> dict[str, Any] | None:
         """The listener of last resort: POWSM reads the speaker's own audio over the phrase around the word, blind, and the word's part is cut out by lining the
@@ -1109,18 +1163,26 @@ class PronunciationLab:
         # seeds: spellings worked out backwards from the speaker's sounds, the word as it is, and the best of what has been tried for it
         tried_best = sorted(self.tried.get(word, {}).values(), key=lambda r: -r["closeness"])[:3]
         speakers = self._phonology()
+        guesses = self._interpreter_spellings(stem)
         speak([spelling for spelling, _ in letter_sounds.candidates(source["phones"], table, limit=SUGGEST_FIRST, humans=speakers.human_cost if speakers else None)] + [stem]
-              + [without_prefix(r["spelling"], prefix) for r in tried_best])
+              + guesses + [without_prefix(r["spelling"], prefix) for r in tried_best])
         for _ in range(SUGGEST_ROUNDS):                                # then the best so far are varied by small orthographic edits and spoken
             leaders = sorted(spoken, key=lambda spelling: -spoken[spelling][0])[:4]
             lists = [letter_sounds.neighbours(leader, table) for leader in leaders]
             speak([edit for group in zip_longest(*lists) for edit in group if edit][:SUGGEST_PER_ROUND])         # one edit of each leader in turn
         pool = list(spoken)
+        # an English listener is the judge of "sounds like the word": the phone recogniser cannot tell k from g or b from p, a listener can. The closest in
+        # sounds and every spelling the interpreter derived are put to it, and those it writes back as the word come first.
+        wanted_word = source.get("spoken_form") or word
+        closest = sorted(spoken, key=lambda s: (-spoken[s][0], len(s), s))[:SUGGEST_LISTENED]
+        asked = set(closest) | {styled(g.lower()) for g in guesses if styled(g.lower()) in spoken}
+        heard_right = {spelling for spelling in asked if self._listener_writes(spelling, wanted_word)}
         by_sounds: dict[tuple[str, ...], tuple[float, str]] = {}
         for spelling, (closeness, heard) in spoken.items():
-            if heard not in by_sounds or (closeness, -len(spelling)) > (by_sounds[heard][0], -len(by_sounds[heard][1])):
+            # of spellings that sound the same, the one the listener approved stands for them, then the closest, then the shortest
+            if heard not in by_sounds or (spelling in heard_right, closeness, -len(spelling)) > (by_sounds[heard][1] in heard_right, by_sounds[heard][0], -len(by_sounds[heard][1])):
                 by_sounds[heard] = (closeness, spelling)
-        ranked = sorted(by_sounds.values(), key=lambda item: (-item[0], len(item[1]), item[1]))
+        ranked = sorted(by_sounds.values(), key=lambda item: (item[1] not in heard_right, -item[0], len(item[1]), item[1]))
         best = ranked[:SUGGEST_SHOWN - SUGGEST_BY_OPENING]
         # a portfolio, not one score: the closest in sounds (closeness is nearly blind to the quality of a vowel), and the closest in how open the
         # mouth is at the start of the first vowel, which a person hears at once ("Seinsa" starts nearly shut where the speaker's mouth is wide open)
@@ -1145,7 +1207,8 @@ class PronunciationLab:
             "how_these_were_found": f"spellings were worked out backwards from the speaker's sounds through the letters this voice turns into them, "
                                     f"then the best were varied by small edits (a letter group swapped, left out or added); {len(pool)} were spoken, "
                                     f"{len(by_sounds)} different sound sequences came out; shown are the closest in sounds and the closest in how open the mouth is "
-                                    "at the start of the first vowel",
+                                    "at the start of the first vowel. The dictionary's sounds for the word were also turned into spellings, and an English listener was "
+                                    "asked about the closest and about those: spellings it writes back as the word (english_listener_understands) come first",
             "results": results, "tries_left_for_word": left_word, "shared_extra_tries_left": left_clip}
         if results:
             nearest = max(results, key=lambda r: (not r.get("lost_in_its_sentence"), r["closeness"]))

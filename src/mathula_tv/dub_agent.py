@@ -117,6 +117,13 @@ You work through tools and decide your own method. You are scored on:
    the "ow" of "go"), what isiZulu first-language speakers actually say, measured on the same names said by English speakers (the schwa stays a
    schwa 40%, becomes a 21%, i 14%; the "ow" of "go" becomes o 64%). Use it to pick a letter for such a sound on evidence; an exact match to the
    speaker's sound is still the better spelling when the voice can make one.
+   Each result for an English word or an initialism also carries "english_dictionary": what a dictionary says the word sounds like (its sounds and
+   stress), set beside the speaker's decode. Sounds that only the decode has ("only_in_the_speakers_decode") are usually the next word's, cut in
+   with this one: do not spell them into the word (the decode of "ANC" had a "k o" from the word after it). A word said letter by letter has its
+   weight on the LAST letter in English, and an English listener hears that letter only when the voice holds it: "Ey Aayi" is heard as AI but "Ey Ai"
+   and "Ey Ayi" as A, "Ey En Siyi" as ANC but "Ey En Si" as A. A spelling ending -yi or -aayi holds its last vowel; a bare vowel does not.
+   suggest_spellings also turns the dictionary's sounds into spellings and asks an English listener about them and about the closest: the spellings
+   it writes back as the word (english_listener_understands) come first.
    Two sounds can share a label: the recogniser says "b" for Zulu's soft plain b and for an English b. So each result may also carry
    "how_the_sounds_are_made_differently", measured from both audios for the stops (p b t d k g): how sharp the release is, how long the
    closure before it lasts, whether the vocal folds vibrate through the closure, how long until voicing starts after the release, and the

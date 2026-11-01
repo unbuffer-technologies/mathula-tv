@@ -55,6 +55,32 @@ def test_memory_entries_replace_the_automatic_reading_of_the_same_text_in_a_jobs
     assert "Nomvalo" in entries
 
 
+def test_the_memory_never_respells_an_ordinary_zulu_word_but_keeps_its_entry(tmp_path):
+    memory, lexicon = tmp_path / "memory.json", tmp_path / "pronunciation_names.json"
+    remember(memory, "eNkandla", "eNggangla", source="agent", voice=THEMBA, job_id="job-a", kind="english_code_switch")
+    remember(memory, "Heidi", "Haidi", source="agent", voice=THEMBA, job_id="job-a", kind="english_code_switch")
+    lexicon.write_text(json.dumps({"voice": THEMBA, "entries": []}))
+    assert apply_to_lexicon(lexicon, memory, THEMBA, skip=lambda text: text == "eNkandla") == ["Heidi"]
+    assert {e["display_text"] for e in json.loads(lexicon.read_text())["entries"]} == {"Heidi"}
+    from mathula_tv.pronunciation_memory import entries_for
+
+    assert {e["display_text"] for e in entries_for(memory, THEMBA)} == {"eNkandla", "Heidi"}               # the entry is still there, only not applied
+
+
+def test_a_closeness_measured_with_another_ruler_does_not_keep_a_saved_reading(tmp_path):
+    from mathula_tv.pronunciation_memory import beaten_by_saved, load, remember, saved
+    from mathula_tv.phone_features import RULER_VERSION
+
+    memory = tmp_path / "memory.json"
+    remember(memory, "Heidi", "Haidi", source="agent", voice=THEMBA, job_id="a", closeness=0.95)
+    assert load(memory)["entries"][f"heidi|{THEMBA}"]["ruler"] == RULER_VERSION
+    assert beaten_by_saved(saved(memory, "Heidi", THEMBA), "Haidii", 0.5)                                  # measured with this ruler: it stays
+    data = load(memory)
+    del data["entries"][f"heidi|{THEMBA}"]["ruler"]                                                        # an entry from before rulers were recorded
+    memory.write_text(json.dumps(data))
+    assert not beaten_by_saved(saved(memory, "Heidi", THEMBA), "Haidii", 0.5)
+
+
 def test_a_reading_that_fails_again_in_two_jobs_is_switched_off_whoever_chose_it(tmp_path):
     memory, lexicon = tmp_path / "memory.json", tmp_path / "pronunciation_names.json"
     remember(memory, "hlu", "hluuu", source="repair", voice=THEMBA, job_id="job-a")

@@ -12,7 +12,7 @@ def test_identical_sounds_are_fully_close():
 
 def test_a_wrong_vowel_and_a_dropped_consonant_are_named_in_plain_words():
     out = align(["f", "l", "ɔɪ", "d"], ["f", "l", "o", "i", "d"])
-    assert any("ɔɪ" in d and "vowel" in d for d in out["differences"]) and out["closeness"] < 1.0
+    assert any("ɔ" in d and "vowel" in d for d in out["differences"]) and out["closeness"] < 1.0       # a diphthong is compared as its two vowels
     dropped = align(["m", "ɛ", "d", "ɪ", "k", "l"], ["m", "ɛ", "ɪ", "k", "l"])
     assert any("leaves out d" in d for d in dropped["differences"])
 
@@ -22,7 +22,7 @@ def test_a_closer_reading_scores_closer_than_a_worse_one():
     close = align(source, ["f", "ai", "t", "e", "z"])                 # near vowels
     far = align(source, ["m", "a", "f", "e", "k", "t", "o", "r"])     # the "mafector" reading
     assert close["closeness"] > far["closeness"] + 0.3 and far["closeness"] < 0.5
-    assert any("adds m" in d for d in far["differences"]) and len(far["differences"]) >= 3
+    assert any("adds" in d for d in far["differences"]) and len(far["differences"]) >= 3
 
 
 def test_noisy_edges_of_the_speakers_window_barely_count():
@@ -615,6 +615,48 @@ def test_suggested_spellings_are_spoken_measured_and_ready_to_use_and_cost_one_t
     assert len({r["voice_sounds"] for r in out["results"]}) == len(out["results"])                                        # different sounds, not the same idea twice
     assert lab_.tries_per_word["MaFighter"] == 1 and out["tries_left_for_word"] == MAX_TRIES_PER_WORD - 1
     assert first["spelling"] in lab_.tried["MaFighter"]                                                                   # so use_pronunciation accepts it
+
+
+def test_the_interpreters_spellings_are_spoken_and_one_an_english_listener_writes_back_comes_first(tmp_path):
+    from mathula_tv.english_sounds import EnglishSounds
+    from mathula_tv.interpreter import Interpreter
+
+    (tmp_path / "cmudict.dict").write_text("heidi HH AY1 D IY0\n", encoding="utf-8")
+    table = {"graphemes": {"h": ["h"], "ai": ["aɪ"], "d": ["d"], "i": ["i"], "ii": ["iː"], "y": ["j"], "e": ["e"]}}
+
+    class Interpreted(FakeLab):
+        def source(self, word):
+            return {"found": True, "phones": ["h", "aɪ", "d", "iː"], "occurrences": 1, "spoken_form": "Heidi", "each_occurrence": []}
+
+        def _letter_table(self):
+            return table
+
+        def _interpreter(self):
+            return Interpreter(EnglishSounds.load(tmp_path / "cmudict.dict"), table, None)
+
+        def voice_reading(self, spelling):
+            text, sounds = spelling.lower(), []
+            while text:
+                for letters, sound in (("ai", "aɪ"), ("ii", "iː")):
+                    if text.startswith(letters):
+                        sounds.append(sound)
+                        text = text[2:]
+                        break
+                else:
+                    sounds.append(text[0])
+                    text = text[1:]
+            return sounds
+
+        def english_hears(self, spelling):                     # the listener writes Heidi for "haidi" (a little further from the sounds), not for "haidii"
+            return "Heidi." if spelling.lower() == "haidi" else "Hate to."
+
+    lab_ = Interpreted({})
+    out = lab_.suggest_spellings("Heidi")
+    spelled = [r["spelling"].lower() for r in out["results"]]
+    assert "haidii" in spelled                                                                                        # the interpreter's spelling was spoken and is shown
+    assert spelled[0] == "haidi" and out["results"][0]["english_listener_understands"] is True                      # the one the listener writes back comes first
+    assert next(r for r in out["results"] if r["spelling"].lower() == "haidii")["closeness"] > out["results"][0]["closeness"]     # although another is closer in sounds
+    assert "English listener" in out["how_these_were_found"]
 
 
 def test_suggestions_include_the_spellings_that_open_the_mouth_like_the_speaker_not_only_the_closest_in_sounds():

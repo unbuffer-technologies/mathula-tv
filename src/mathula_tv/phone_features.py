@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+RULER_VERSION = "features-v1"         # stored beside any closeness that is kept (the pronunciation memory): a number measured with another ruler is not comparable
+
 _STRIP = "ːˑ̩̯̥̪̞̃̊ʰʲʷˤᵝ.^[]ˈˌ"
 _ASCII_ALIAS = {"tS": "tʃ", "dZ": "dʒ", "S": "ʃ", "N": "ŋ", "X": "x", "ts.": "ts"}
 
@@ -111,6 +113,19 @@ def _vowel_distance(a: tuple[float, float, bool], b: tuple[float, float, bool]) 
     dh, db = (a[0] - b[0]) / _HEIGHT_FOR_FULL, (a[1] - b[1]) / _BACK_FOR_FULL
     dr = _ROUND_WEIGHT * (a[2] != b[2])
     return min(_MOST_VOWEL, _VOWEL_SCALE * (dh * dh + db * db + dr * dr) ** 0.5)
+
+
+def split_diphthongs(phones: "list[str] | tuple[str, ...]") -> list[str]:
+    """A diphthong as its two vowels (aɪ -> a ɪ), every other sound as it is.  A recogniser writes the PRICE vowel as one sound or as two, and a
+    comparison must not take that for a difference."""
+    out: list[str] = []
+    for phone in phones:
+        described = describe(phone)
+        if described and described[0] == "vowel" and len(described[1]) > 1:
+            out.extend(c for c in _clean(phone) if c in _VOWELS)
+        else:
+            out.append(phone)
+    return out
 
 
 def voicing_partners(a: str, b: str) -> bool:

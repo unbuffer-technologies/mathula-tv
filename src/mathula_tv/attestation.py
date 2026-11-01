@@ -24,10 +24,11 @@ import bisect
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z']*")
 ORDINARY_MIN = 20                # a prefixed place name written this often in real text is ordinary Zulu
+ORDINARY_MIN_NO_ENGLISH_STEM = 5     # the same when the place's stem (Nkandla) is not an English word
 ORDINARY_COMMON = 100            # a lower-case form this common is an everyday Zulu word
 MIN_PAIRS = 3                    # a Zulu form must share at least this many sentences with the English word to count as its equivalent
 
@@ -205,13 +206,19 @@ class Attestation:
             count += 1
         return count
 
-    def ordinary_zulu(self, token: str) -> bool:
+    def ordinary_zulu(self, token: str, english_has: Callable[[str], bool] | None = None) -> bool:
         """Whether this written form is ordinary Zulu that the Zulu voice reads as Zulu, and not a foreign word to be matched to the speaker's sounds:
         a place written with a Zulu locative prefix that real text writes often (eMpumalanga, eGauteng), or a word whose lower-case form is very common
         and whose capitalised form is only a sentence start (Imali).  A capitalised name that real text rarely writes that way (Tshela: a Zulu verb
-        in lower case, a Sesotho name here) is not."""
+        in lower case, a Sesotho name here) is not.
+
+        ``english_has`` says whether a word is in an English dictionary.  A prefixed place whose stem is no English word (Nkandla, the home of a former
+        president, written "eNkandla" 11 times in a small corpus) needs far fewer sightings: nothing English is competing for it."""
         if re.match(r"^(?:e|ku|kwa|ase|eku)[A-Z][a-z]", token):
-            return self.written_count(token) >= ORDINARY_MIN
+            minimum = ORDINARY_MIN
+            if english_has is not None and not english_has(re.sub(r"^(?:eku|ase|kwa|ku|e)(?=[A-Z])", "", token)):
+                minimum = ORDINARY_MIN_NO_ENGLISH_STEM
+            return self.written_count(token) >= minimum
         lower = token[:1].lower() + token[1:]
         common = self.written_count(lower)
         return token[:1].isupper() and common >= ORDINARY_COMMON and self.written_count(token) <= 0.2 * common
@@ -308,6 +315,19 @@ def load(work_dir: Path) -> Attestation | None:
             return None
         _cache[key] = Attestation.from_directory(directory)
     return _cache[key]
+
+
+def zulu_guard(work_dir: Path) -> Callable[[str], bool]:
+    """Whether a written token is ordinary Zulu that must not be respelled to sound like English: the attestation's rule, with the English dictionary
+    (``resources/cmudict``) telling whether the stem of a prefixed place is an English word.  False for everything when the resources are not installed."""
+    resources = load(work_dir)
+    if resources is None:
+        return lambda token: False
+    from .english_sounds import EnglishSounds
+
+    sounds = EnglishSounds.load(Path(work_dir) / "resources" / "cmudict" / "cmudict.dict")
+    english_has = (lambda word: bool(sounds.word(word))) if sounds is not None else None
+    return lambda token: bool(resources.ordinary_zulu(token, english_has=english_has))
 
 
 def main(argv: list[str] | None = None) -> int:

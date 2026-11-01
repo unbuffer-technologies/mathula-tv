@@ -541,8 +541,11 @@ class Workbench:
         return attestation.load(Path(self.store.root).parent)
 
     def _ordinary_zulu(self, token: str) -> bool:
-        resources = self._resources()
-        return bool(resources and resources.ordinary_zulu(token))
+        if getattr(self, "_zulu_guard", None) is None:
+            from . import attestation
+
+            self._zulu_guard = attestation.zulu_guard(Path(self.store.root).parent)
+        return self._zulu_guard(token)
 
     def _attested(self, form: str) -> bool:
         """Whether real text writes this Zulu form; True when the resources are not installed (nothing can be judged, so nothing is dropped)."""

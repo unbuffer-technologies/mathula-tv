@@ -31,5 +31,13 @@ def test_the_lab_ruler_now_tells_a_near_sound_from_a_far_one():
     assert align(["w", "ɛ", "s", "t"], ["w", "ɪ", "s", "t"])["closeness"] > align(["w", "ɛ", "s", "t"], ["w", "u", "s", "t"])["closeness"]
 
 
+def test_a_diphthong_and_its_two_vowels_are_the_same_thing_to_the_alignment():
+    from mathula_tv.phone_features import split_diphthongs
+
+    assert split_diphthongs(["h", "aɪ", "ɛɹ", "iː", "oʊ"]) == ["h", "a", "ɪ", "ɛɹ", "iː", "o", "ʊ"]       # a vowel with r-colour or length is one sound
+    assert align(["eɪ", "aɪ"], ["e", "ɪ", "a", "ɪ"])["closeness"] == 1.0
+    assert align(["eɪ", "aɪ"], ["e", "ɪ", "a"])["closeness"] < 1.0                                         # a lost last glide is still a difference
+
+
 def test_voicing_partners():
     assert voicing_partners("s", "z") and voicing_partners("t", "d") and not voicing_partners("t", "s") and not voicing_partners("a", "e")

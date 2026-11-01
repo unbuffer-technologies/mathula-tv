@@ -147,8 +147,10 @@ def _own_step(target: str, made: str, cost: float) -> float | None:
     return cost if cost <= 0.3 and (cost <= 0.12 or voicing_partners(target, made)) else None
 
 
-def candidates(target: Sequence[str], table: Mapping, *, limit: int = 24, beam: int = 400, humans=None) -> list[tuple[str, float]]:
-    """Spellings (lowercase) whose letter groups make the speaker's sounds ``target`` in the voice's table, best first, as (spelling, cost)."""
+def candidates(target: Sequence[str], table: Mapping, *, limit: int = 24, beam: int = 400, humans=None, noisy_edges: bool = True) -> list[tuple[str, float]]:
+    """Spellings (lowercase) whose letter groups make the speaker's sounds ``target`` in the voice's table, best first, as (spelling, cost).  The speaker's
+    first and last sounds may be left to the voice at a small cost (they are noisy when cut from running speech); ``noisy_edges=False`` for a
+    target that is not (a dictionary's sounds), where leaving out the first letter of AI is a mistake."""
     graphemes = [(letters, list(option["sounds"]), 0.1 * (1.0 - option["seen"] / max(1, option["of"])))
                  for letters, value in (table.get("graphemes") or {}).items() for option in _options(value)]
     graphemes += [(letters, [phone], PRIOR_RANK_COST * rank) for phone, spellings in PRIOR.items() for rank, letters in enumerate(spellings)]
@@ -159,7 +161,7 @@ def candidates(target: Sequence[str], table: Mapping, *, limit: int = 24, beam: 
     states[0][""] = 0.0
     for position in range(count + 1):
         for spelling, cost in sorted(states[position].items(), key=lambda item: item[1])[:beam]:
-            if count > 1 and position in (0, count - 1):          # a noisy edge sound of the speaker may be left to the voice
+            if noisy_edges and count > 1 and position in (0, count - 1):          # a noisy edge sound of the speaker may be left to the voice
                 skipped = states[position + 1]
                 skipped[spelling] = min(skipped.get(spelling, 99.0), cost + EDGE_SKIP_COST)
             for letters, phones, rarity in graphemes:

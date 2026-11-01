@@ -19,7 +19,9 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
+
+from .phone_features import RULER_VERSION
 
 SCHEMA = "mathula-pronunciation-memory-v1"
 AGENT_SOURCE = "agent-pronunciation"       # what the workbench writes into a lexicon when the agent uses a reading
@@ -62,8 +64,11 @@ def saved(path: Path, display_text: str, voice: str | None) -> dict[str, Any] | 
 
 def beaten_by_saved(entry: Mapping[str, Any] | None, tts_text: str, closeness: float | None) -> bool:
     """Whether the saved reading measured closer to the speaker than this one: then the saved one stays (a run that ran out of turns once
-    replaced a closeness 1.0 reading of "Fighters" with a 0.94 one that lost the final s)."""
+    replaced a closeness 1.0 reading of "Fighters" with a 0.94 one that lost the final s).  A closeness measured with another ruler (or before rulers were
+    recorded) says nothing about this one, so the saved reading does not stay on its strength."""
     if not entry or closeness is None or entry.get("closeness") is None or str(entry["tts_text"]).casefold() == tts_text.casefold():
+        return False
+    if entry.get("ruler") != RULER_VERSION:
         return False
     return float(closeness) < float(entry["closeness"]) - CLOSENESS_MARGIN
 
@@ -83,7 +88,7 @@ def remember(path: Path, display_text: str, tts_text: str, *, source: str, voice
         entry["jobs"] = sorted({*entry["jobs"], job_id})
         entry["source"] = max(entry["source"], source, key=lambda name: _PRIORITY.get(name, -1))
         if closeness is not None:
-            entry["closeness"] = float(closeness)
+            entry["closeness"], entry["ruler"] = float(closeness), RULER_VERSION
     elif entry and _PRIORITY[source] < _PRIORITY[entry["source"]] and not entry.get("disabled"):
         return entry                                          # a verified repair is not overwritten by an agent's choice
     elif entry and not entry.get("disabled") and _PRIORITY[source] <= _PRIORITY[entry["source"]] and beaten_by_saved(entry, tts_text, closeness):
@@ -91,7 +96,7 @@ def remember(path: Path, display_text: str, tts_text: str, *, source: str, voice
     else:
         entry = {"display_text": display_text, "tts_text": tts_text, "voice": voice, "kind": kind, "source": source,
                  "jobs": [job_id], "failures": 0, "disabled": False, "first_seen": now, "note": note,
-                 **({"closeness": float(closeness)} if closeness is not None else {})}
+                 **({"closeness": float(closeness), "ruler": RULER_VERSION} if closeness is not None else {})}
     entry["last_confirmed"] = now
     data["entries"][key] = entry
     _save(path, data)
@@ -104,14 +109,15 @@ def entries_for(path: Path, voice: str | None) -> list[dict[str, Any]]:
             if not e.get("disabled") and (e.get("voice") in (None, voice))]
 
 
-def apply_to_lexicon(lexicon_path: Path, memory_file: Path, voice: str | None) -> list[str]:
+def apply_to_lexicon(lexicon_path: Path, memory_file: Path, voice: str | None, skip: Callable[[str], bool] | None = None) -> list[str]:
     """Make a job's names lexicon carry the memory's entries (replacing an automatic reading of the same text). Returns the texts added.
 
     Readings an earlier call copied from the memory are dropped first: an entry that has since left the memory (cleared, or switched off)
-    must not go on being spoken from a job's stale copy."""
+    must not go on being spoken from a job's stale copy.  ``skip`` says which texts the memory must not respell (an ordinary Zulu word such as
+    eNkandla, which the Zulu voice reads natively): their entries stay in the memory, unused."""
     lexicon_path = Path(lexicon_path)
     lexicon = json.loads(lexicon_path.read_text(encoding="utf-8")) if lexicon_path.is_file() else {"schema": "mathula-names-lexicon-v1", "entries": []}
-    wanted = entries_for(memory_file, voice)
+    wanted = [e for e in entries_for(memory_file, voice) if not (skip and skip(str(e["display_text"])))]
     taken = {e["display_text"].casefold() for e in wanted}
     # a reading the agent chose in an earlier run (use_pronunciation writes it into the clip's lexicon as well as the memory) goes too: the memory is what
     # holds it, enabled or not, and a switched-off reading left behind here kept Heidi, Western, Party and ABCD out of prod-50's word list and measured
@@ -190,7 +196,10 @@ def apply_for_job(job_root: Path) -> list[str]:
     """Give a job the memory's readings for its voice (called at the end of the names stage)."""
     lexicon = Path(job_root) / "native_dub" / "pronunciation_names.json"
     voice = json.loads(lexicon.read_text(encoding="utf-8")).get("voice") if lexicon.is_file() else None
-    return apply_to_lexicon(lexicon, memory_path(Path(job_root).parents[1]), voice)
+    from . import attestation
+
+    work_dir = Path(job_root).parents[1]
+    return apply_to_lexicon(lexicon, memory_path(work_dir), voice, skip=attestation.zulu_guard(work_dir))
 
 
 def record_job_outcomes(job_root: Path, check_report: Mapping[str, Any]) -> list[str]:
