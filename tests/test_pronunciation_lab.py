@@ -1213,3 +1213,13 @@ def test_the_listener_writing_a_word_that_sounds_the_same_is_understanding_the_w
     assert lab.understood_as("Fighter", "Fighters")                                            # the letter rules still apply
     monkeypatch.setattr(lab, "_CMU", {})                                                       # no dictionary installed: letters only, as before
     assert not lab.understood_as("Hi.", "High") and lab.understood_as("High.", "high")
+
+
+def test_a_listener_who_writes_i_for_ai_has_missed_the_a(monkeypatch):
+    from mathula_tv import pronunciation_lab as lab
+
+    fake = {"ai": [["AY1"]], "i": [["AY1"]], "eye": [["AY1"]], "a": [["AH0"], ["EY1"]], "a.": [["EY1"]], "ok": [["OW2", "K", "EY1"]], "okay": [["OW2", "K", "EY1"]]}
+    monkeypatch.setattr(lab, "_CMU", fake)
+    assert not lab.understood_as("I.", "AI") and not lab.understood_as("A.", "AI")             # "ai" the word sounds like "eye", but the speaker said A then I
+    assert lab.understood_as("A I", "AI") and lab.understood_as("A.I.", "AI")                  # the letters, however the listener spaces them
+    assert lab.understood_as("I.", "eye") and lab.understood_as("Okay.", "OK")                 # a plain word, and an initialism said as the word "okay", still count

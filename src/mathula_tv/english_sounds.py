@@ -76,6 +76,18 @@ def is_initialism(token: str) -> bool:
     return 2 <= len(clean) <= MAX_INITIALISM and clean.isalpha() and clean.isupper()
 
 
+def letter_name_sounds(written: str) -> set[tuple[str, ...]]:
+    """How a word said letter by letter sounds, as ARPAbet without stress ("AI" is EY AY; Z has two names, so Z gives two); empty for anything else."""
+    if not is_initialism(written):
+        return set()
+    spoken: list[tuple[str, ...]] = [()]
+    for letter in (c for c in written.upper() if c.isalpha()):
+        if letter not in LETTER_NAMES:
+            return set()
+        spoken = [done + tuple(name) for done in spoken for name in (LETTER_NAMES[letter], *LETTER_VARIANTS.get(letter, []))]
+    return set(spoken)
+
+
 _guesser: Callable[[str], list[str]] | None | str = "unset"
 
 

@@ -493,12 +493,15 @@ def _sounds(text: str) -> set[tuple[str, ...]]:
 def understood_as(heard: str, word: str) -> bool:
     """Whether what an English listener wrote is the word: spacing, case, punctuation and a plural -s do not matter, and a word said the same counts
     ("Hi" for High, "Okay" for OK).  The check used to compare letters only, so the listener writing exactly the word it heard was marked as not understanding."""
+    from .english_sounds import letter_name_sounds
+
     heard_letters, word_letters = _letters(heard), _letters(word)
     if not word_letters:
         return False
     if heard_letters == word_letters or heard_letters.rstrip("s") == word_letters.rstrip("s"):
         return True
-    return bool(_sounds(heard) & _sounds(word))
+    # a run of capitals is said letter by letter: "AI" is A then I, so a listener who writes "I." (the word "ai" sounds like "eye") has missed the A
+    return bool(_sounds(heard) & (letter_name_sounds(word) or _sounds(word)))
 
 
 def failing_readings(lab: Any, entries: Iterable[Mapping[str, Any]]) -> set[str]:
