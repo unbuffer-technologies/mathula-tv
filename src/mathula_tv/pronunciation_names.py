@@ -128,6 +128,7 @@ def load_names_entries(path: Path, approved: set[str] | None = None) -> list[Any
         entries.append(PronunciationEntry(
             display_text=item["display_text"], spoken_text=item["display_text"], tts_text=item["tts_text"], source="names_stage",
             reviewed_by="automatic", confidence=float(item.get("confidence", 0.8)), kind=kind,
+            tts_text_by_voice=item.get("tts_text_by_voice") or (),            # a reading verified on one voice is spoken by that voice only
             notes=("Automatic names stage: isiZulu words untouched, English words respelt by rule and confirmed by audio",)))
     return entries
 

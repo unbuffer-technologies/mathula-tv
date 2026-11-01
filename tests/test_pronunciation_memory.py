@@ -67,6 +67,35 @@ def test_the_memory_never_respells_an_ordinary_zulu_word_but_keeps_its_entry(tmp
     assert {e["display_text"] for e in entries_for(memory, THEMBA)} == {"eNkandla", "Heidi"}               # the entry is still there, only not applied
 
 
+def test_per_voice_application_gives_each_voice_its_own_reading_and_the_rest_the_word_as_written(tmp_path):
+    from mathula_tv.pronunciation_names import load_names_entries
+
+    THANDO = "zu-ZA-ThandoNeural"
+    memory, lexicon = tmp_path / "memory.json", tmp_path / "pronunciation_names.json"
+    remember(memory, "AI", "eyi-aayi", source="agent", voice=THANDO, job_id="job-a", kind="english_code_switch")
+    remember(memory, "AI", "Eyi. Aayi.", source="agent", voice=THEMBA, job_id="job-a", kind="english_code_switch")
+    remember(memory, "Heidi", "Haidi", source="agent", voice=THANDO, job_id="job-a", kind="english_code_switch")
+    lexicon.write_text(json.dumps({"voice": THANDO, "entries": []}))
+    assert sorted(apply_to_lexicon(lexicon, memory, THANDO, per_voice=True)) == ["AI", "Heidi"]
+    entries = {e["display_text"]: e for e in json.loads(lexicon.read_text())["entries"]}
+    assert entries["AI"]["tts_text_by_voice"] == {THANDO: "eyi-aayi", THEMBA: "Eyi. Aayi."} and entries["AI"]["tts_text"] == "AI"
+    assert entries["Heidi"]["tts_text_by_voice"] == {THANDO: "Haidi"}                                          # Themba has no verified reading of Heidi
+    by_name = {e.display_text: e for e in load_names_entries(lexicon)}
+    assert by_name["AI"].tts_text_for_voice(THEMBA) == "Eyi. Aayi." and by_name["AI"].tts_text_for_voice(THANDO) == "eyi-aayi"
+    assert by_name["Heidi"].tts_text_for_voice(THANDO) == "Haidi" and by_name["Heidi"].tts_text_for_voice(THEMBA) == "Heidi"       # unverified there: as written
+    assert by_name["Heidi"].tts_text_for_voice(None) == "Heidi"
+
+
+def test_a_lexicon_reading_never_replaces_what_an_agent_chose_from_a_clip(tmp_path):
+    memory = tmp_path / "memory.json"
+    remember(memory, "AI", "Eeiai", source="agent", voice=THEMBA, job_id="clip", kind="english_code_switch")
+    kept = remember(memory, "AI", "eyi-aayi", source="lexicon", voice=THEMBA, job_id="lexicon", kind="english_code_switch")
+    assert kept["tts_text"] == "Eeiai"
+    remember(memory, "SG", "Esjii", source="lexicon", voice=THEMBA, job_id="lexicon", kind="english_code_switch")
+    replaced = remember(memory, "SG", "Es Jii", source="agent", voice=THEMBA, job_id="clip", kind="english_code_switch")     # the agent may replace a lexicon entry
+    assert replaced["tts_text"] == "Es Jii"
+
+
 def test_a_closeness_measured_with_another_ruler_does_not_keep_a_saved_reading(tmp_path):
     from mathula_tv.pronunciation_memory import beaten_by_saved, load, remember, saved
     from mathula_tv.phone_features import RULER_VERSION

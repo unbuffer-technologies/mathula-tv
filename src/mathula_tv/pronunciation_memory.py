@@ -27,7 +27,7 @@ SCHEMA = "mathula-pronunciation-memory-v1"
 AGENT_SOURCE = "agent-pronunciation"       # what the workbench writes into a lexicon when the agent uses a reading
 MEMORY_SOURCE = "memory"
 MAX_FAILURES = 2
-_PRIORITY = {"repair": 1, "agent": 0}
+_PRIORITY = {"repair": 1, "agent": 0, "lexicon": -1}      # a lexicon entry (built in advance for a voice) never replaces what an agent chose from a clip's own audio
 CLOSENESS_MARGIN = 0.02        # a reading that measures this much closer to the speaker is not replaced by one that measures less close
 
 
@@ -109,15 +109,24 @@ def entries_for(path: Path, voice: str | None) -> list[dict[str, Any]]:
             if not e.get("disabled") and (e.get("voice") in (None, voice))]
 
 
-def apply_to_lexicon(lexicon_path: Path, memory_file: Path, voice: str | None, skip: Callable[[str], bool] | None = None) -> list[str]:
+def all_entries(path: Path) -> list[dict[str, Any]]:
+    """The enabled entries of every voice."""
+    return [e for e in load(path)["entries"].values() if not e.get("disabled")]
+
+
+def apply_to_lexicon(lexicon_path: Path, memory_file: Path, voice: str | None, skip: Callable[[str], bool] | None = None, *, per_voice: bool = False) -> list[str]:
     """Make a job's names lexicon carry the memory's entries (replacing an automatic reading of the same text). Returns the texts added.
 
     Readings an earlier call copied from the memory are dropped first: an entry that has since left the memory (cleared, or switched off)
     must not go on being spoken from a job's stale copy.  ``skip`` says which texts the memory must not respell (an ordinary Zulu word such as
-    eNkandla, which the Zulu voice reads natively): their entries stay in the memory, unused."""
+    eNkandla, which the Zulu voice reads natively): their entries stay in the memory, unused.
+
+    With ``per_voice`` the lexicon carries the readings of every voice, each for its own voice only (``tts_text_by_voice``; the shared text stays the word as
+    written): the dub has two speakers with two voices, a reading verified on one is no evidence about the other, and the renderer already speaks the entry
+    that matches each unit's voice.  Without it, the readings of ``voice`` are shared by all voices, as before."""
     lexicon_path = Path(lexicon_path)
     lexicon = json.loads(lexicon_path.read_text(encoding="utf-8")) if lexicon_path.is_file() else {"schema": "mathula-names-lexicon-v1", "entries": []}
-    wanted = [e for e in entries_for(memory_file, voice) if not (skip and skip(str(e["display_text"])))]
+    wanted = [e for e in (all_entries(memory_file) if per_voice else entries_for(memory_file, voice)) if not (skip and skip(str(e["display_text"])))]
     taken = {e["display_text"].casefold() for e in wanted}
     # a reading the agent chose in an earlier run (use_pronunciation writes it into the clip's lexicon as well as the memory) goes too: the memory is what
     # holds it, enabled or not, and a switched-off reading left behind here kept Heidi, Western, Party and ABCD out of prod-50's word list and measured
@@ -130,8 +139,20 @@ def apply_to_lexicon(lexicon_path: Path, memory_file: Path, voice: str | None, s
         prefix, text = written_prefix(str(entry["display_text"])), str(entry["tts_text"])
         return prefix + text if prefix and entry.get("kind") == "english_code_switch" and not text.casefold().startswith(prefix.casefold()) else text
 
-    added = [{"display_text": e["display_text"], "tts_text": spoken(e), "kind": e.get("kind", "other"), "confidence": 0.9,
-              "source": MEMORY_SOURCE, "memory_source": e["source"]} for e in wanted]
+    if per_voice:
+        grouped: dict[str, dict[str, Any]] = {}
+        for e in wanted:
+            group = grouped.setdefault(e["display_text"].casefold(), {"first": e, "shared": None, "by_voice": {}})
+            if e.get("voice"):
+                group["by_voice"][str(e["voice"])] = spoken(e)
+            else:
+                group["shared"] = spoken(e)
+        added = [{"display_text": g["first"]["display_text"], "tts_text": g["shared"] or g["first"]["display_text"], "tts_text_by_voice": g["by_voice"],
+                  "kind": g["first"].get("kind", "other"), "confidence": 0.9, "source": MEMORY_SOURCE, "memory_source": g["first"]["source"]}
+                 for g in grouped.values() if g["shared"] or g["by_voice"]]
+    else:
+        added = [{"display_text": e["display_text"], "tts_text": spoken(e), "kind": e.get("kind", "other"), "confidence": 0.9,
+                  "source": MEMORY_SOURCE, "memory_source": e["source"]} for e in wanted]
     lexicon["entries"] = [*kept, *added]
     lexicon_path.write_text(json.dumps(lexicon, indent=1, ensure_ascii=False), encoding="utf-8")
     return [e["display_text"] for e in added]
@@ -199,7 +220,7 @@ def apply_for_job(job_root: Path) -> list[str]:
     from . import attestation
 
     work_dir = Path(job_root).parents[1]
-    return apply_to_lexicon(lexicon, memory_path(work_dir), voice, skip=attestation.zulu_guard(work_dir))
+    return apply_to_lexicon(lexicon, memory_path(work_dir), voice, skip=attestation.zulu_guard(work_dir), per_voice=True)
 
 
 def record_job_outcomes(job_root: Path, check_report: Mapping[str, Any]) -> list[str]:

@@ -284,7 +284,7 @@ class Workbench:
             first_voice = next((v.get("selected_voice") for v in self.voices.values() if v.get("selected_voice")), None)
             clip_lexicon = Path(self.store.clip_dir(clip_id)) / "native_dub" / "pronunciation_names.json"
             if clip_lexicon.is_file():
-                apply_to_lexicon(clip_lexicon, _memory_path(Path(self.store.root).parent), first_voice, skip=self._ordinary_zulu)
+                apply_to_lexicon(clip_lexicon, _memory_path(Path(self.store.root).parent), first_voice, skip=self._ordinary_zulu, per_voice=True)
         except Exception:
             pass
         self.pronunciation_root = register_clip_pronunciation(self.store, clip_id)
@@ -397,7 +397,8 @@ class Workbench:
         readings: dict[str, str] = {}
         lexicon = Path(self.store.clip_dir(self._episode()["clip_id"])) / "native_dub" / "pronunciation_names.json"
         if lexicon.is_file():
-            readings.update({str(e["display_text"]): str(e["tts_text"]) for e in read_json(lexicon).get("entries", []) if e.get("display_text") and e.get("tts_text")})
+            readings.update({str(e["display_text"]): str((e.get("tts_text_by_voice") or {}).get(lab.voice) or e["tts_text"])         # this voice's reading, else the shared one
+                             for e in read_json(lexicon).get("entries", []) if e.get("display_text") and e.get("tts_text")})
         for entry in self._memory_entries(lab.voice):
             if entry.get("display_text") and entry.get("tts_text") and not entry.get("disabled"):
                 readings.setdefault(str(entry["display_text"]), str(entry["tts_text"]))
