@@ -17,16 +17,21 @@ DECISIONS = ("kept_as_is", "changed", "not_a_problem")
 MIN_REASON_CHARS = 8
 FAR_CLOSENESS = 0.75           # a word the voice reads as written this far from the reference sounds is not "fine as it is" until a spelling has been heard: at 0.7 "High"
                                # (the voice says "heh" for the English "hi") sat exactly on the line and was kept for being part of a title
-MAX_FAR_LISTED = 8
+MAX_FAR_LISTED = 16
+MAX_UNEXAMINED_LISTED = 24     # prod-63 and prod-64 listed the first 8: Heidi, Party, SG, MK, October, SABC, Jacob and Litchfield were cut from the one request and never asked about
 
 
 def problems_of(row: Mapping[str, Any]) -> list[str]:
-    """What a lab measurement names as wrong: differences from the speaker, an ending that differs, sounds lost in the sentence."""
+    """What a lab measurement names as wrong: differences from the speaker, an ending that differs, sounds lost in the sentence, and, for a reading
+    saved by an earlier run, an English listener who does not write the word when the voice says it (prod-64 kept a saved "Eyai" for AI that a listener
+    heard as "Ed.": the failure was a suggestion the agent could ignore, and now it is a named problem the harness asks about)."""
     problems = [str(d) for d in row.get("differences") or []]
     if row.get("ending"):
         problems.append(f"ending: {row['ending']}")
     if row.get("lost_in_its_sentence"):
         problems.append("in its sentence the voice loses " + " ".join(str(s) for s in row["lost_in_its_sentence"]))
+    if row.get("spelling") and row.get("english_listener_understands") is False and row.get("english_hears") is not None:
+        problems.append(f"an English listener writes {row['english_hears']!r} when the voice says the saved {row['spelling']!r}, not the word")
     return problems
 
 
@@ -105,7 +110,7 @@ def far_request_text(items: Sequence[Mapping[str, Any]]) -> str:
 
 def request_text(items: Sequence[Mapping[str, Any]]) -> str:
     """The one request, sent when the agent says it is done and words are still unexamined."""
-    listed = "; ".join(f"{item['word']} ({'; '.join(item['problems'][:2])})" for item in items[:8])
+    listed = "; ".join(f"{item['word']} ({'; '.join(item['problems'][:2])})" for item in items[:MAX_UNEXAMINED_LISTED])
     return ("One more thing before you finish. These words were put in front of you with something named wrong, and nothing was tried, changed or "
             f"recorded for them: {listed}. For each, either check it with try_pronunciation, or call note_pronunciation(word, decision, why) with what "
             "you decided and why. Leaving a word as it is is allowed; it needs a reason, so that the next run and the people reading the ledger can see it.")

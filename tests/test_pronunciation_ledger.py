@@ -35,6 +35,9 @@ def test_problems_come_from_differences_the_ending_and_what_the_sentence_loses()
     row = {"differences": ["speaker ts, voice dʒ (consonant)"], "ending": "the voice ends with a vowel", "lost_in_its_sentence": ["t", "s"]}
     assert problems_of(row) == ["speaker ts, voice dʒ (consonant)", "ending: the voice ends with a vowel", "in its sentence the voice loses t s"]
     assert problems_of({"differences": [], "ending": None}) == []
+    saved = {"differences": [], "spelling": "Eyai", "english_hears": "Ed.", "english_listener_understands": False}
+    assert problems_of(saved) == ["an English listener writes 'Ed.' when the voice says the saved 'Eyai', not the word"]      # a saved reading the listener does not write back
+    assert problems_of({**saved, "spelling": None}) == [] and problems_of({**saved, "english_listener_understands": True}) == []     # a word as written is not judged this way
 
 
 def test_a_word_far_from_the_speaker_is_not_cleared_by_a_reason_alone_only_by_hearing_a_spelling():
@@ -48,6 +51,9 @@ def test_a_word_far_from_the_speaker_is_not_cleared_by_a_reason_alone_only_by_he
     ledger.tried("High", ["Hai", "Hay"])
     ledger.used("OK", "Okey", 0.9)
     assert ledger.untried_far() == [] and ledger.to_dict()["untried_far"] == []
+    many = [{"word": f"Word{i}", "problems": [f"problem {i}"]} for i in range(20)]
+    asked = request_text(many)
+    assert "Word0 (" in asked and "Word19 (" in asked                           # all twenty are asked about, not the first eight
     text = far_request_text([{"word": "High", "closeness": 0.47}])
     assert "High (closeness 0.47)" in text and "not a reason" in text and "try_pronunciation" in text
 
