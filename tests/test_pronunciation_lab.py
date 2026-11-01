@@ -548,6 +548,19 @@ def test_a_saved_reading_is_measured_in_its_sentence_without_spending_a_try(tmp_
     assert rows[0]["voice_sounds"] == "s aɪ j ɪ n" and rows[0]["closeness"] < 0.8 and saved.total_tries == 0
 
 
+def test_an_ordinary_zulu_word_is_neither_respelled_by_the_agent_nor_by_a_saved_reading(tmp_path):
+    from mathula_tv.pronunciation_memory import memory_path, remember
+
+    workbench, _ = make_workbench(tmp_path, {"eNggangla": ["e", "ŋ", "ɡ", "a"]})
+    workbench._zulu_guard = lambda token: token == "eNkandla"            # what real Zulu text and the English dictionary say about it
+    voice = "zu-ZA-ThembaNeural"
+    remember(memory_path(tmp_path), "eNkandla", "eNggangla", source="agent", voice=voice, job_id="j", kind="english_code_switch")
+    remember(memory_path(tmp_path), "Heidi", "Haidi", source="agent", voice=voice, job_id="j", kind="english_code_switch")
+    assert [e["display_text"] for e in workbench._memory_entries(voice)] == ["Heidi"]                 # its entry is not applied or shown
+    with pytest.raises(ValueError, match="ordinary isiZulu"):
+        workbench.use_pronunciation("eNkandla", "eNggangla")
+
+
 def test_when_the_listener_and_the_sounds_point_at_different_spellings_both_are_shown_and_neither_leads():
     class Disagree(ListenerLab):
         def source(self, word):

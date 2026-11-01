@@ -284,7 +284,7 @@ class Workbench:
             first_voice = next((v.get("selected_voice") for v in self.voices.values() if v.get("selected_voice")), None)
             clip_lexicon = Path(self.store.clip_dir(clip_id)) / "native_dub" / "pronunciation_names.json"
             if clip_lexicon.is_file():
-                apply_to_lexicon(clip_lexicon, _memory_path(Path(self.store.root).parent), first_voice)
+                apply_to_lexicon(clip_lexicon, _memory_path(Path(self.store.root).parent), first_voice, skip=self._ordinary_zulu)
         except Exception:
             pass
         self.pronunciation_root = register_clip_pronunciation(self.store, clip_id)
@@ -380,10 +380,15 @@ class Workbench:
                 region=os.environ["AZURE_SPEECH_REGION"].strip().lower(), work_dir=Path(episode["dir"]) / "pronunciation_lab")
         return self._pronunciation_lab
 
-    def _sync_lab_context(self) -> None:
-        """Give the lab the Zulu as written now and the readings already chosen, so a word is also heard in the sentence it is spoken in."""
+    def _memory_entries(self, voice: str | None) -> list[dict[str, Any]]:
+        """The shared memory's enabled readings for ``voice`` that may be applied: not an ordinary Zulu word (eNkandla), which the Zulu voice reads
+        natively and which a reading saved by an earlier run must not respell."""
         from .pronunciation_memory import entries_for, memory_path
 
+        return [e for e in entries_for(memory_path(Path(self.store.root).parent), voice) if not self._ordinary_zulu(str(e.get("display_text") or ""))]
+
+    def _sync_lab_context(self) -> None:
+        """Give the lab the Zulu as written now and the readings already chosen, so a word is also heard in the sentence it is spoken in."""
         lab = self._lab()
         submission = Path(self._episode()["dir"]) / "submission.json"
         items = read_json(submission).get("items", []) if submission.is_file() else []
@@ -393,7 +398,7 @@ class Workbench:
         lexicon = Path(self.store.clip_dir(self._episode()["clip_id"])) / "native_dub" / "pronunciation_names.json"
         if lexicon.is_file():
             readings.update({str(e["display_text"]): str(e["tts_text"]) for e in read_json(lexicon).get("entries", []) if e.get("display_text") and e.get("tts_text")})
-        for entry in entries_for(memory_path(Path(self.store.root).parent), lab.voice):
+        for entry in self._memory_entries(lab.voice):
             if entry.get("display_text") and entry.get("tts_text") and not entry.get("disabled"):
                 readings.setdefault(str(entry["display_text"]), str(entry["tts_text"]))
         lab.readings = readings
@@ -401,14 +406,13 @@ class Workbench:
     def _known_readings(self) -> set[str]:
         """Texts that already have a reading (the clip's lexicon and the shared memory): the lab does not need to look at them."""
         from .pronunciation_lab import failing_readings
-        from .pronunciation_memory import entries_for, memory_path
 
         self._sync_lab_context()
         known: set[str] = set()
         lexicon = Path(self.store.clip_dir(self._episode()["clip_id"])) / "native_dub" / "pronunciation_names.json"
         if lexicon.is_file():
             known |= {str(e["display_text"]).casefold() for e in read_json(lexicon).get("entries", [])}
-        saved = entries_for(memory_path(Path(self.store.root).parent), self._lab().voice)
+        saved = self._memory_entries(self._lab().voice)
         known |= {str(e["display_text"]).casefold() for e in saved}
         known -= failing_readings(self._lab(), saved)          # a saved reading an English listener does not understand is back on the list
         return known
@@ -459,13 +463,11 @@ class Workbench:
     def saved_readings_evidence(self) -> list[dict[str, Any]]:
         """How the readings the shared memory already holds measure now, in the sentences of this text, for the harness's reminder.  Only
         readings of English words that this text has; no tries are spent, nothing is scored or cut off, and one that cannot be measured is left out."""
-        from .pronunciation_memory import entries_for, memory_path
-
         rows: list[dict[str, Any]] = []
         try:
             self._sync_lab_context()
             lab = self._lab()
-            saved = [e for e in entries_for(memory_path(Path(self.store.root).parent), lab.voice) if e.get("kind") == "english_code_switch"]
+            saved = [e for e in self._memory_entries(lab.voice) if e.get("kind") == "english_code_switch"]
         except Exception:
             return rows
         for entry in saved:
@@ -730,6 +732,9 @@ class Workbench:
         from .pronunciation_memory import memory_path, remember
 
         lab, episode = self._lab(), self._episode()
+        if self._ordinary_zulu(word):
+            raise ValueError(f"{word!r} is ordinary isiZulu (real Zulu text writes it this way): the Zulu voice reads it natively, so it is not respelled to sound like "
+                             "English. Leave it as it is written (note_pronunciation kept_as_is).")
         tried = lab.tried.get(word, {}).get(spelling)
         if tried is None:
             raise ValueError(f"try {spelling!r} for {word!r} with try_pronunciation before using it")
