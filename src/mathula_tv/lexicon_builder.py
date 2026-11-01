@@ -193,7 +193,9 @@ def build(lab: Any, words: Sequence[str], out_path: Path, *, shard: int = 0, sha
           forms: Mapping[str, Mapping[str, str]] | None = None) -> int:
     """Evaluate this shard's words and append one JSON line per word to ``out_path``; words already in the file are skipped (a stopped build resumes)."""
     out_path = Path(out_path)
-    done = {json.loads(line)["word"] for line in out_path.read_text(encoding="utf-8").splitlines() if line.strip()} if out_path.is_file() else set()
+    # a word that ended in an error (the service was down, the key failed) is tried again; only a decision is final
+    done = ({r["word"] for r in (json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines() if line.strip()) if r["status"] != "error"}
+            if out_path.is_file() else set())
     count = 0
     with out_path.open("a", encoding="utf-8") as handle:
         for index, word in enumerate(words):
@@ -215,16 +217,17 @@ def merge(results: Iterable[Path], memory_file: Path, *, job_id: str = "lexicon"
     """Put the kept spellings into the pronunciation memory, for the voice each was built on; returns how many words ended in each status."""
     from .pronunciation_memory import remember
 
-    tally: collections.Counter = collections.Counter()
+    latest: dict[tuple[str, str], dict[str, Any]] = {}            # the last line for a word and voice stands: a retry replaces an error
     for path in results:
         for line in Path(path).read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            tally[record["status"]] += 1
-            if record["status"] == "respell":
-                remember(memory_file, record["word"], record["spelling"], source="lexicon", voice=record["voice"], job_id=job_id, kind="english_code_switch",
-                         closeness=record["closeness"], note=f"built in advance for {record['voice']}")
+            if line.strip():
+                record = json.loads(line)
+                latest[(record["word"], record["voice"])] = record
+    tally: collections.Counter = collections.Counter(record["status"] for record in latest.values())
+    for record in latest.values():
+        if record["status"] == "respell":
+            remember(memory_file, record["word"], record["spelling"], source="lexicon", voice=record["voice"], job_id=job_id, kind="english_code_switch",
+                     closeness=record["closeness"], note=f"built in advance for {record['voice']}")
     return dict(tally)
 
 

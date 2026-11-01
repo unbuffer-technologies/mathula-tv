@@ -77,6 +77,24 @@ def test_the_forms_of_the_letters_make_an_initialism_with_the_earlier_letters_br
     assert lb.compose("AQ", forms) == [] and lb.compose("", forms) == []                      # a letter without a known form: nothing to compose
 
 
+def test_a_word_that_ended_in_an_error_is_tried_again_and_the_retry_replaces_it(tmp_path):
+    out = tmp_path / "built_zu-ZA-ThembaNeural_0.jsonl"
+
+    class Down(FakeLab):
+        def voice_reading(self, spelling):
+            raise RuntimeError("synthesis failed: Authentication error (401)")
+
+    assert lb.build(Down(), ["AI"], out, progress=lambda m: None) == 1
+    assert json.loads(out.read_text().splitlines()[0])["status"] == "error"
+    assert lb.build(FakeLab(), ["AI"], out, progress=lambda m: None) == 1                               # the service is back: the word is built, not skipped
+    assert lb.build(FakeLab(), ["AI"], out, progress=lambda m: None) == 0                               # and now it is done
+    from mathula_tv.pronunciation_memory import entries_for
+
+    memory = tmp_path / "memory.json"
+    assert lb.merge([out], memory) == {"respell": 1}                                                    # the error line is superseded by the later result
+    assert [e["tts_text"] for e in entries_for(memory, "zu-ZA-ThembaNeural")] == ["eyi-aayi"]
+
+
 def test_a_build_resumes_and_a_merge_stores_the_spellings_for_their_own_voice(tmp_path):
     out = tmp_path / "built_zu-ZA-ThembaNeural_0.jsonl"
     messages = []
