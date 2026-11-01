@@ -57,6 +57,18 @@ def test_a_speaker_who_does_not_say_r_after_a_vowel_has_their_own_reading(tmp_pa
     assert english.say("Nkandla") == []
 
 
+def test_a_word_the_dictionary_lacks_is_guessed_only_when_asked_and_the_dictionary_lookup_stays_strict(tmp_path):
+    english = sounds(tmp_path)
+    english.guesser = lambda word: ["L", "IH1", "CH", "F", "IY0", "L", "D", " ", "XX"]             # g2p_en's shape: ARPAbet with stress digits and spaces
+    assert english.word("Litchfield") == [] and english.say("Litchfield") == []                      # the lookups never guess: "not in the dictionary" means something
+    guessed = english.say("Litchfield", guess=True)
+    assert guessed[0]["how"] == "guessed" and guessed[0]["phones"] == ["l", "ɪ", "tʃ", "f", "iː", "l", "d"] and guessed[0]["stress"] == [None, 1, None, None, 0, None, None]
+    assert english.say("Heidi", guess=True)[0]["how"] == "word"                                       # a dictionary word is never replaced by a guess
+    assert english.say("ANC", guess=True)[0]["how"] == "letters"
+    english.guesser = None
+    assert english.say("Litchfield", guess=True) == []                                                # no guesser installed: nothing
+
+
 def test_english_stresses_the_last_letter_of_a_word_said_letter_by_letter(tmp_path):
     english = sounds(tmp_path)
     ai = english.say("AI")[0]

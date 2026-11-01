@@ -40,7 +40,10 @@ class Interpreter:
         self._can = makeable(table) or set(letter_sounds.PRIOR)        # what the voice's own audio produced; the hand-written list only when there is none
 
     def readings(self, written: str) -> list[dict[str, Any]]:
-        return self.sounds.say(written)
+        """The dictionary's readings; for a word it lacks that is not Zulu-shaped (Litchfield, not Nkandla), the guesser's, labelled ``guessed``."""
+        from .pronunciation_search import looks_isizulu
+
+        return self.sounds.say(written, guess=self.sounds.guesser is not None and not looks_isizulu(written))
 
     def nearest_makeable(self, phone: str) -> tuple[str, float]:
         """The sound the voice can make that is nearest to ``phone`` on the chart, and how far."""
@@ -122,6 +125,8 @@ class Interpreter:
         if extra:
             note["only_in_the_speakers_decode"] = extra
             note["so"] = "sounds the dictionary does not have are often the next word's, cut in with this one; do not spell them into the word"
+        if best["how"] == "guessed":
+            note["reliability"] = "the dictionary does not have this word: a model guessed these sounds from its spelling. Treat them as a hint; the speaker's own decode comes first"
         if best["how"] == "letters":
             note["how_english_says_it"] = ("a word said letter by letter: English stresses the LAST letter and the letters before it are short. An English listener "
                                            "hears the last letter only when the voice holds it (about 170 ms): a spelling ending -yi or -aayi holds it, a bare vowel does not")

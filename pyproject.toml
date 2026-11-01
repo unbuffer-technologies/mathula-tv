@@ -19,6 +19,8 @@ speaker-recognition = ["speechbrain>=1.0,<2", "torch>=2.1", "torchaudio>=2.1", "
 agent = ["mcp>=2"]
 # The CMU pronouncing dictionary, so that the English listener writing "Hi" for High or "Okay" for OK counts as understanding the word (pronunciation_lab.understood_as).
 homophones = ["cmudict>=1.0"]
+# A model's guess at the sounds of an English word the dictionary lacks (english_sounds.g2p_guesser); optional, the interpreter works without it.
+g2p = ["g2p_en>=2.1"]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.9", "mypy>=1.14"]
 synthesis = ["numpy>=1.26", "soundfile>=0.12"]
 # Optional/experimental fast path (see azure_tts_sdk.py): grouped bookmark synthesis

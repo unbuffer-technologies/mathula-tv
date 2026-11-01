@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 ARPABET_TO_IPA: dict[str, str] = {
     "AA": "ɑː", "AE": "æ", "AH": "ʌ", "AO": "ɔː", "AW": "aʊ", "AY": "aɪ", "B": "b", "CH": "tʃ", "D": "d", "DH": "ð", "EH": "ɛ", "ER": "ɜː",
@@ -76,9 +76,27 @@ def is_initialism(token: str) -> bool:
     return 2 <= len(clean) <= MAX_INITIALISM and clean.isalpha() and clean.isupper()
 
 
+_guesser: Callable[[str], list[str]] | None | str = "unset"
+
+
+def g2p_guesser() -> Callable[[str], list[str]] | None:
+    """A model's guess at the sounds of a word the dictionary lacks (g2p_en, trained on CMUdict: it reads Litchfield as L IH1 CH F IY0 L D); None when
+    g2p_en is not installed.  Loaded once per process."""
+    global _guesser
+    if _guesser == "unset":
+        try:
+            from g2p_en import G2p
+
+            _guesser = G2p()
+        except Exception:                                   # not installed, or its data cannot be fetched: no guesses, never a failure
+            _guesser = None
+    return _guesser                                         # type: ignore[return-value]
+
+
 class EnglishSounds:
-    def __init__(self, words: Mapping[str, list[list[str]]]) -> None:
+    def __init__(self, words: Mapping[str, list[list[str]]], guesser: Callable[[str], list[str]] | None = None) -> None:
         self.words = words                       # lower-case word -> every dictionary reading (CMUdict's own variants), as ARPAbet
+        self.guesser = guesser                   # what to ask about a word the dictionary lacks; the dictionary lookups themselves never use it
 
     @classmethod
     def load(cls, path: Path) -> "EnglishSounds | None":
@@ -122,14 +140,29 @@ class EnglishSounds:
             readings = [done + [name] for done in readings for name in marked]
         return [[token for name in reading for token in name] for reading in readings if reading]
 
-    def say(self, written: str) -> list[dict[str, Any]]:
+    def guess(self, written: str) -> list[list[str]]:
+        """A model's guess at the sounds (ARPAbet) of a word the dictionary does not have; [] when there is no guesser or it fails."""
+        key = re.sub(r"[^a-z]", "", written.lower())
+        if self.guesser is None or len(key) < 2:
+            return []
+        try:
+            tokens = [t for t in self.guesser(key) if t.rstrip("012") in ARPABET_TO_IPA]
+        except Exception:
+            return []
+        return [tokens] if tokens else []
+
+    def say(self, written: str, *, guess: bool = False) -> list[dict[str, Any]]:
         """Every reading worth choosing between for a written word, as ``{"how", "phones", "stress", "accent"}``, the likeliest first; ``stress``
         has one entry per sound (1 primary, 2 secondary, 0 none for a vowel, None for a consonant).
 
-        A run of 2 to 5 capitals is said by its letters; when the dictionary also knows it as a word ("NEWS", "COVID") that reading follows."""
+        A run of 2 to 5 capitals is said by its letters; when the dictionary also knows it as a word ("NEWS", "COVID") that reading follows.  With
+        ``guess`` a word the dictionary lacks gets the guesser's reading, labelled ``"guessed"``: the caller decides which words may be guessed (a Zulu
+        name read by an English model comes out English)."""
         key = re.sub(r"^[^\w']+|[^\w']+$", "", written).lower()
         spelled = [("letters", reading) for reading in self._letters_arpabet(written)] if is_initialism(written) else []
         spoken = [("word", reading) for reading in self.words.get(key, [])]
+        if guess and not spelled and not spoken:
+            spoken = [("guessed", reading) for reading in self.guess(written)]
         readings: list[dict[str, Any]] = []
         for how, arpabet in spelled + spoken:
             phones, stress = to_ipa(arpabet), stress_of(arpabet)

@@ -80,6 +80,17 @@ def test_the_dictionary_note_shows_the_sounds_only_the_decode_has_and_how_englis
     assert interpreter_.dictionary_note("eNkandla", ["ɛ", "n", "k", "a"]) is None                         # a Zulu name has no dictionary reading
 
 
+def test_an_english_shaped_word_the_dictionary_lacks_is_guessed_but_a_zulu_shaped_one_is_left_alone(tmp_path):
+    (tmp_path / "cmudict.dict").write_text(DICTIONARY, encoding="utf-8")
+    english = EnglishSounds.load(tmp_path / "cmudict.dict")
+    english.guesser = lambda word: ["L", "IH1", "CH", "F", "IY0", "L", "D"]
+    interpreter_ = Interpreter(english, TABLE, SPEAKERS)
+    assert interpreter_.readings("Litchfield")[0]["how"] == "guessed"                                 # ends in a consonant: English-shaped
+    assert interpreter_.readings("Nkandla") == [] and interpreter_.readings("Nomvalo") == []          # an English model would read a Zulu name as English
+    note = interpreter_.dictionary_note("Litchfield", ["l", "ɪ", "tʃ", "f", "iː", "l", "d"])
+    assert note["reads_as"] == "guessed" and "hint" in note["reliability"]
+
+
 def test_a_word_the_dictionary_does_not_have_is_left_alone(tmp_path):
     out = interpreter(tmp_path).spellings("eNkandla")
     assert out["readings"] == [] and out["spellings"] == []

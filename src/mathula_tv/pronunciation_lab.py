@@ -617,11 +617,13 @@ class PronunciationLab:
         """The English-to-Zulu interpreter (see ``interpreter``): the dictionary's sounds, what Zulu speakers do with them, and this voice's letters; None when the
         dictionary has not been put in the working resources."""
         if getattr(self, "_interp", "unset") == "unset":
-            from .english_sounds import EnglishSounds
+            from .english_sounds import EnglishSounds, g2p_guesser
             from .interpreter import Interpreter
 
             try:
                 sounds = EnglishSounds.load(Path(self.job_root).parents[1] / "resources" / "cmudict" / "cmudict.dict")
+                if sounds is not None:
+                    sounds.guesser = g2p_guesser()                  # for the words the dictionary lacks; None when g2p_en is not installed
                 self._interp = Interpreter(sounds, self._letter_table(), self._phonology()) if sounds is not None else None
             except (IndexError, OSError):
                 self._interp = None
