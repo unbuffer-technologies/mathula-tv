@@ -21,6 +21,8 @@ from collections import Counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from xml.sax.saxutils import escape
 
+from .phone_features import distance as phone_distance
+
 MAX_TRIES_PER_WORD = 5
 GUARANTEED_TRIES_PER_WORD = 3        # every word can always be tried this often: one call over many words cannot starve the last of them
 SHARED_EXTRA_TRIES = 15              # tries 4 and 5 of a word come from this pool, shared by all words: the ceiling is 3 per word plus 15
@@ -52,12 +54,21 @@ def _base(phone: str) -> str:
     return "".join(c for c in phone if c not in _MARKS)
 
 
+_GLIDES = {("j", "i"), ("j", "ɪ"), ("j", "y"), ("w", "u"), ("w", "ʊ"), ("ɹ", "ɚ"), ("ɹ", "ə")}
+_SOUNDS_ALIKE = 0.12          # two different sounds are never "nearly the same": align() lists every pair above 0.1
+
+
 def substitution_cost(a: str, b: str) -> float:
     if a == b:
         return 0.0
     base_a, base_b = _base(a), _base(b)
     if base_a == base_b:
         return 0.1                                    # length or aspiration only
+    if (base_a, base_b) in _GLIDES or (base_b, base_a) in _GLIDES:
+        return 0.4                                    # a glide and the vowel it is a short form of
+    made = phone_distance(base_a, base_b)
+    if made is not None:
+        return max(_SOUNDS_ALIKE, round(made, 3))     # how far apart the two are on the IPA chart
     if _is_vowel(a) and _is_vowel(b):
         return 0.3 if base_a[:1] == base_b[:1] else 0.6
     if _is_vowel(a) != _is_vowel(b):

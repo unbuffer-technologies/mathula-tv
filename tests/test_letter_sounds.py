@@ -96,7 +96,8 @@ def test_zulu_speakers_ways_rank_the_vowel_choices_instead_of_one_flat_cost():
         return {(odd, "a"): 0.15, (odd, "u"): 0.25}.get((target, made))
     plain = dict(ls.candidates(["s", odd, "s"], table, limit=50))
     ranked = dict(ls.candidates(["s", odd, "s"], table, limit=50, humans=humans))
-    assert ranked["sas"] < plain["sas"] and ranked["sus"] < plain["sus"]           # evidence replaces the flat cost of a vowel that is not the sound itself
+    assert "sas" not in plain and "sus" not in plain                               # a vowel far from every letter's sound cannot be reached from the chart alone
+    assert "sas" in ranked and "sus" in ranked                                     # but the ways Zulu speakers use reach it
     assert ranked["sas"] < ranked["sus"]                                           # the vowel most speakers use is cheapest, a rarer one next
     exact = dict(ls.candidates(["s", "a", "s"], table, limit=50, humans=humans))
     assert exact["sas"] < ranked["sas"]                                            # an exact match is still cheaper than a speakers' way

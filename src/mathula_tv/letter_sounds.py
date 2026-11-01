@@ -142,7 +142,9 @@ def _step_cost(target: str, made: str, humans=None) -> float | None:
 def _own_step(target: str, made: str, cost: float) -> float | None:
     if _is_vowel(target) and _is_vowel(made):
         return cost if cost <= NEAR_VOWEL_COST else None
-    return cost if cost <= 0.3 else None
+    from .phone_features import voicing_partners
+
+    return cost if cost <= 0.3 and (cost <= 0.12 or voicing_partners(target, made)) else None
 
 
 def candidates(target: Sequence[str], table: Mapping, *, limit: int = 24, beam: int = 400, humans=None) -> list[tuple[str, float]]:
