@@ -327,7 +327,14 @@ def zulu_guard(work_dir: Path) -> Callable[[str], bool]:
 
     sounds = EnglishSounds.load(Path(work_dir) / "resources" / "cmudict" / "cmudict.dict")
     english_has = (lambda word: bool(sounds.word(word))) if sounds is not None else None
-    return lambda token: bool(resources.ordinary_zulu(token, english_has=english_has))
+    answers: dict[str, bool] = {}             # counting a form in the whole corpus is slow and the workbench asks about every memory entry on every tool call
+
+    def guard(token: str) -> bool:
+        if token not in answers:
+            answers[token] = bool(resources.ordinary_zulu(token, english_has=english_has))
+        return answers[token]
+
+    return guard
 
 
 def main(argv: list[str] | None = None) -> int:

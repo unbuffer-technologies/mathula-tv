@@ -51,6 +51,15 @@ def test_a_word_far_from_the_speaker_is_not_cleared_by_a_reason_alone_only_by_he
     ledger.tried("High", ["Hai", "Hay"])
     ledger.used("OK", "Okey", 0.9)
     assert ledger.untried_far() == [] and ledger.to_dict()["untried_far"] == []
+    ledger = Ledger()
+    ledger.shown("AI", "saved reading, in the reminder", closeness=0.85, problems=problems_of({"differences": [], "spelling": "Eyai", "english_hears": "Ed.", "english_listener_understands": False}))
+    ledger.shown("Heidi", "saved reading, in the reminder", closeness=0.9, problems=[])
+    ledger.note("AI", "kept_as_is", "understandable from the context")                               # a reason is not enough for this
+    asked_far = ledger.untried_far()
+    assert [(i["word"], i.get("listener_writes")) for i in asked_far] == [("AI", "'Ed.'")]               # a closeness of 0.85 would not have listed it
+    assert "AI (an English listener writes 'Ed.' for the reading saved for it)" in far_request_text(asked_far)
+    ledger.tried("AI", ["Ey Aayi"])
+    assert ledger.untried_far() == []                                                                    # hearing a spelling answers it
     many = [{"word": f"Word{i}", "problems": [f"problem {i}"]} for i in range(20)]
     asked = request_text(many)
     assert "Word0 (" in asked and "Word19 (" in asked                           # all twenty are asked about, not the first eight

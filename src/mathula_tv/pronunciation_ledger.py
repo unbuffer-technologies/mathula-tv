@@ -81,13 +81,20 @@ class Ledger:
     def untried_far(self) -> list[dict[str, Any]]:
         """Words that measured under FAR_CLOSENESS as written and that no spelling was tried or used for, whatever reason was written for leaving them.
         prod-48 left "High" (0.47), "Party" (0.48) and "OK" (0.63) as they were because they were part of a title or a familiar word, while the speaker's
-        sounds, not the kind of word, are what a reading is matched to.  Weakest first."""
+        sounds, not the kind of word, are what a reading is matched to.  Weakest first.
+
+        A saved reading that an English listener does not write back is listed too, whatever its closeness: prod-65 was asked about AI ("Eyai", heard as
+        "Ed.") and kept it for a reason that did not answer that, so for this a spelling has to be heard, not only a reason written."""
         found = []
         for entry in self._words.values():
             levels = [row["closeness"] for row in entry["shown"] if row.get("closeness") is not None]
-            if levels and min(levels) < FAR_CLOSENESS and not entry["tried"] and not entry["used"]:
-                found.append({"word": entry["word"], "closeness": min(levels)})
-        return sorted(found, key=lambda item: item["closeness"])
+            heard = next((m.group(1) for row in entry["shown"] for p in row["problems"] if (m := re.match(r"an English listener writes (.+?) when the voice says", p))), None)
+            if ((levels and min(levels) < FAR_CLOSENESS) or heard) and not entry["tried"] and not entry["used"]:
+                item = {"word": entry["word"], "closeness": min(levels) if levels else None}
+                if heard:
+                    item["listener_writes"] = heard
+                found.append(item)
+        return sorted(found, key=lambda item: (item["closeness"] is None, item["closeness"] or 0.0))
 
     def to_dict(self) -> dict[str, Any]:
         return {"words": sorted(self._words.values(), key=lambda e: e["word"].casefold()), "unexamined": self.unexamined(), "untried_far": self.untried_far()}
@@ -100,9 +107,10 @@ class Ledger:
 
 def far_request_text(items: Sequence[Mapping[str, Any]]) -> str:
     """The one request about words that measure far from the speaker and were not tried."""
-    listed = "; ".join(f"{item['word']} (closeness {item['closeness']})" for item in items[:MAX_FAR_LISTED])
-    return ("One more thing before you finish. These words measure far from the speaker's own sounds as you wrote them, and no spelling was heard "
-            f"for them: {listed}. Being part of a title, a familiar word or a name is not a reason to leave one: the speaker's sounds in the source "
+    listed = "; ".join((f"{item['word']} (an English listener writes {item['listener_writes']} for the reading saved for it)" if item.get("listener_writes")
+                        else f"{item['word']} (closeness {item['closeness']})") for item in items[:MAX_FAR_LISTED])
+    return ("One more thing before you finish. These words measure far from the speaker's own sounds as you wrote them, or an English listener does not write "
+            f"them back, and no spelling was heard for them: {listed}. Being part of a title, a familiar word or a name is not a reason to leave one: the speaker's sounds in the source "
             "audio are what the voice is matched to. For each, call try_pronunciation (or suggest_spellings) once and use what you hear. If no "
             "spelling is closer, keep the word and say so with note_pronunciation, citing what you tried. A word that is a real isiZulu word is not "
             "in this list, so there is no Zulu spelling to protect.")
