@@ -38,6 +38,8 @@ def test_problems_come_from_differences_the_ending_and_what_the_sentence_loses()
     saved = {"differences": [], "spelling": "Eyai", "english_hears": "Ed.", "english_listener_understands": False}
     assert problems_of(saved) == ["an English listener writes 'Ed.' when the voice says the saved 'Eyai', not the word"]      # a saved reading the listener does not write back
     assert problems_of({**saved, "spelling": None}) == [] and problems_of({**saved, "english_listener_understands": True}) == []     # a word as written is not judged this way
+    assert problems_of({**saved, "letters_heard": True}) == []                                    # the phone recogniser decoded the letters: the speech-to-text's miss is no problem
+    assert len(problems_of({**saved, "letters_heard": False})) == 1
 
 
 def test_a_word_far_from_the_speaker_is_not_cleared_by_a_reason_alone_only_by_hearing_a_spelling():

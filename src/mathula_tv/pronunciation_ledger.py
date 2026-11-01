@@ -30,7 +30,7 @@ def problems_of(row: Mapping[str, Any]) -> list[str]:
         problems.append(f"ending: {row['ending']}")
     if row.get("lost_in_its_sentence"):
         problems.append("in its sentence the voice loses " + " ".join(str(s) for s in row["lost_in_its_sentence"]))
-    if row.get("spelling") and row.get("english_listener_understands") is False and row.get("english_hears") is not None:
+    if row.get("spelling") and row.get("english_listener_understands") is False and row.get("english_hears") is not None and not row.get("letters_heard"):
         problems.append(f"an English listener writes {row['english_hears']!r} when the voice says the saved {row['spelling']!r}, not the word")
     return problems
 

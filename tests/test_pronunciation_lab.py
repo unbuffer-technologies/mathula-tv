@@ -1215,6 +1215,36 @@ def test_the_listener_writing_a_word_that_sounds_the_same_is_understanding_the_w
     assert not lab.understood_as("Hi.", "High") and lab.understood_as("High.", "high")
 
 
+def test_a_word_said_letter_by_letter_is_accepted_when_the_phone_recogniser_decodes_its_letters_even_if_the_speech_to_text_misses(tmp_path):
+    from mathula_tv.pronunciation_lab import _accepted
+
+    class Letters(FakeLab):
+        sounds = {"eyi-aayi": ["eɪ", "aɪ"], "Eyai": ["e", "j", "a"], "Eeiai": ["eː", "j", "aɪ"]}
+
+        def source(self, word):
+            return {"found": True, "phones": ["e", "ɪ", "a", "ɪ"], "occurrences": 1, "spoken_form": "AI", "each_occurrence": []}
+
+        def voice_reading(self, spelling):
+            return list(self.sounds.get(spelling, ["a"]))
+
+        def _audio_for(self, spelling):
+            return "no-audio.wav"
+
+        def english_hears(self, spelling):                      # the strict listener: it writes A. for everything except what it is sure of
+            return "A I." if spelling == "Eeiai" else "A."
+
+    lab_ = Letters({})
+    assert lab_._letters_heard("AI", ["eɪ", "aɪ"]) is True and lab_._letters_heard("AI", ["e", "j", "a"]) is False
+    assert lab_._letters_heard("AI", ["aɪ"]) is False and lab_._letters_heard("AI", ["eː"]) is False        # the plain word decodes as one sound: a letter is missing
+    assert lab_._letters_heard("AI", ["eː", "aɪ"]) is True                                                  # a near sound for eɪ still carries the A
+    assert lab_._letters_heard("AI", ["aɪ", "aɪ"]) is False                                                 # an A decoded as "eye" is not an A: a conservative second opinion, the speech-to-text still votes
+    assert lab_._letters_heard("ne-ANC", ["eɪ", "ɛ", "n", "s", "iː"]) is True and lab_._letters_heard("Heidi", ["h", "aɪ", "d", "i"]) is None
+    assert lab_.reading_understood("AI", "eyi-aayi") is True                                   # the speech-to-text wrote "A.", the decoder heard both letters
+    assert lab_.reading_understood("AI", "Eyai") is False                                      # neither heard it
+    assert lab_.reading_understood("AI", "Eeiai") is True                                      # the speech-to-text wrote it
+    assert _accepted({"letters_heard": True}) and _accepted({"english_listener_understands": True}) and not _accepted({"letters_heard": False})
+
+
 def test_a_listener_who_writes_i_for_ai_has_missed_the_a(monkeypatch):
     from mathula_tv import pronunciation_lab as lab
 

@@ -122,6 +122,10 @@ You work through tools and decide your own method. You are scored on:
    with this one: do not spell them into the word (the decode of "ANC" had a "k o" from the word after it). A word said letter by letter has its
    weight on the LAST letter in English, and an English listener hears that letter only when the voice holds it: "Ey Aayi" is heard as AI but "Ey Ai"
    and "Ey Ayi" as A, "Ey En Siyi" as ANC but "Ey En Si" as A. A spelling ending -yi or -aayi holds its last vowel; a bare vowel does not.
+   The speech-to-text is the strictest listener for such a word: it wrote the right letters for 12 of 12 perfect native initialisms, and it still
+   writes "A." for an "AI" in which a person hears both letters. So for a word said letter by letter a result also carries "letters_heard": whether the
+   phone recogniser decoded the names of its letters (AI: eɪ then aɪ). A spelling with letters_heard true is accepted even when english_listener_understands
+   is false; the speech-to-text's miss alone is not a reason to reject it.
    suggest_spellings also turns the dictionary's sounds into spellings and asks an English listener about them and about the closest: the spellings
    it writes back as the word (english_listener_understands) come first.
    Two sounds can share a label: the recogniser says "b" for Zulu's soft plain b and for an English b. So each result may also carry

@@ -36,6 +36,8 @@ SUGGEST_PER_ROUND = 20        # varied spellings spoken in each round
 SUGGEST_SHOWN = 5             # the distinct best of them that are measured in full and shown
 SUGGEST_BY_OPENING = 2        # of those, how many are chosen for the speaker's vowel opening instead of for sounds
 SUGGEST_LISTENED = 10         # the closest spellings in sounds that an English listener is asked about (besides every one the interpreter derived)
+LETTERS_HEARD = 0.85          # how close the decoded sounds must be to a word's letter names for the phone recogniser to have heard the letters
+LETTERS_EXTRA_SOUND = 0.3     # what a decoded sound that is no letter's costs (a glide between two letter names)
 INTERPRETER_SPELLINGS = 6     # spellings the interpreter derives from the dictionary for a word
 
 _VOWEL_LETTERS = set("aeiouɑɒɔəɛɜɪʊʌæɐøɨ")
@@ -123,6 +125,24 @@ def align(source: Sequence[str], heard: Sequence[str]) -> dict[str, Any]:
             differences.append(f"the voice adds {heard[hj]}" + (" at the start" if hj == 0 else ""))
     distance = total / max(n, m, 1)
     return {"distance": round(distance, 3), "closeness": round(max(0.0, 1.0 - distance), 3), "differences": differences[:6]}
+
+
+def _letters_closeness(letters: Sequence[str], heard: Sequence[str]) -> float:
+    """How well decoded sounds carry a word's letter names, 0 to 1.  Every letter name must be there: one that is missing costs in full (the plain word "AI" decodes as the
+    single sound aɪ, so the A is lost), where ``align`` lets the speaker's edge sounds go cheaply because a window cut from running speech is noisy and a dictionary's
+    is not.  A name decoded as a near sound counts by how near (eː for eɪ), and an extra decoded sound (a glide) costs little."""
+    n, m = len(letters), len(heard)
+    if not n:
+        return 0.0
+    dp = [[0.0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        dp[i][0] = float(i)
+    for j in range(1, m + 1):
+        dp[0][j] = j * LETTERS_EXTRA_SOUND
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            dp[i][j] = min(dp[i - 1][j - 1] + substitution_cost(letters[i - 1], heard[j - 1]), dp[i - 1][j] + 1.0, dp[i][j - 1] + LETTERS_EXTRA_SOUND)
+    return max(0.0, 1.0 - dp[n][m] / n)
 
 
 def final_consonant_lost(occurrences: Sequence[str], heard: Sequence[str]) -> str | None:
@@ -401,11 +421,17 @@ def who_keeps_each_sound(tried: Mapping[str, Mapping[str, Any]], speaker: Sequen
             + ". Put the letters that keep each sound together in one spelling.")
 
 
+def _accepted(record: Mapping[str, Any]) -> bool:
+    """Whether a listener took the spelling for the word: the English speech-to-text wrote it, or, for a word said letter by letter, the phone recogniser decoded
+    its letters (the speech-to-text is the stricter of the two and its miss alone is no veto)."""
+    return bool(record.get("english_listener_understands") or record.get("letters_heard"))
+
+
 def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], left_word: int, left_clip: int, speaker: Sequence[str] = ()) -> str:
     """What to do next, from the tries so far.  It reads what an English listener wrote and the differences; it adds no score and does not
     choose for the agent."""
     heard = {record["spelling"]: record["english_hears"] for record in tried.values() if record.get("english_hears") is not None}
-    understood = [record["spelling"] for record in tried.values() if record.get("english_listener_understands") and not record.get("lost_in_its_sentence")]
+    understood = [record["spelling"] for record in tried.values() if _accepted(record) and not record.get("lost_in_its_sentence")]
     parts = []
     lost = {record["spelling"]: record["lost_in_its_sentence"] for record in tried.values() if record.get("lost_in_its_sentence")}
     if lost:
@@ -433,7 +459,7 @@ def _advice(tried: Mapping[str, Mapping[str, Any]], best: Mapping[str, Any], lef
             else:
                 parts.append(f"An English listener writes the word for {', '.join(repr(x) for x in understood)}. What the listener wrote: {shown}. "
                              "Use one of those; between them, the one whose sounds are closest.")
-        elif not any(record.get("english_listener_understands") for record in tried.values()):
+        elif not any(_accepted(record) for record in tried.values()):
             if best["closeness"] >= GOOD_ENOUGH and not best.get("lost_in_its_sentence"):
                 parts.append(f"The sounds of {best['spelling']!r} match the speaker's (closeness {best['closeness']}). What an English listener wrote: {shown}. "
                              "The listener hears one short clip with no sentence around it and guesses a word from it (a plural, a name or a technical term often "
@@ -647,13 +673,16 @@ class PronunciationLab:
             spellings += [held for spelling in spellings[:3] for held in interpreter.held_variants(spelling)]
         return list(dict.fromkeys(spellings))
 
-    def _listener_writes(self, spelling: str, word: str) -> bool:
-        """Whether an English listener writes ``word`` when the voice has said ``spelling`` (it must have been spoken); False when it cannot be asked."""
+    def _listener_writes(self, spelling: str, word: str, sounds: Sequence[str] = ()) -> bool:
+        """Whether a listener takes ``spelling`` for ``word`` once the voice has said it (it must have been spoken): the English speech-to-text writes the word,
+        or, for a word said letter by letter, the phone recogniser's ``sounds`` contain its letters.  False when it cannot be asked."""
         try:
             heard = self.english_hears(spelling)
         except Exception:
             return False
-        return heard is not None and understood_as(heard, word)
+        if heard is not None and understood_as(heard, word):
+            return True
+        return bool(self._letters_heard(word, sounds))
 
     def _dictionary_note(self, spoken_form: str, speaker_phones: Sequence[str]) -> dict[str, Any] | None:
         interpreter = self._interpreter()
@@ -930,15 +959,30 @@ class PronunciationLab:
             phones.append("ə")                      # the recogniser did not list a final vowel that the signal shows: it is in the sounds the voice makes
         return phones
 
+    def _letters_heard(self, word: str, heard: Sequence[str]) -> bool | None:
+        """For a word said letter by letter: whether the sounds the phone recogniser decodes from the voice contain the names of its letters (AI: eɪ then aɪ).
+        None for any other word.  The speech-to-text is a strict listener for these (it wrote "A." for a Themba "AI" that the phone recogniser decodes as both
+        letters and that a person hears as AI; it wrote AI for 12 of 12 native initialisms), so its miss alone does not count against a reading."""
+        from .english_sounds import EnglishSounds, is_initialism
+
+        stem = without_prefix(word.split("-")[-1], written_prefix(word))
+        if not is_initialism(stem):
+            return None
+        readings = [reading["phones"] for reading in EnglishSounds({}).say(stem) if reading["how"] == "letters"]
+        return bool(heard) and any(_letters_closeness(phones, list(heard)) >= LETTERS_HEARD for phones in readings)
+
     def reading_understood(self, word: str, spelling: str) -> bool | None:
-        """Whether an English listener writes ``word`` when the voice says ``spelling``; None when that cannot be asked.  No sounds are decoded
-        and no try is spent: this re-checks a reading that was saved earlier."""
+        """Whether an English listener writes ``word`` when the voice says ``spelling``; None when that cannot be asked.  No try is spent: this re-checks a
+        reading that was saved earlier.  A word said letter by letter that the speech-to-text misses still counts when the phone recogniser decodes its letters."""
         key = (word.casefold(), spelling)
         if key not in self._reading_checks:
             spelling = without_prefix(spelling, written_prefix(word))        # an English listener hears the English word, not the Zulu "ma"
             self._audio_for(spelling)
             heard = self.english_hears(spelling)
-            self._reading_checks[key] = None if heard is None else understood_as(heard, word)
+            understood = None if heard is None else understood_as(heard, word)
+            if understood is False and self._letters_heard(word, self.voice_reading(spelling)):
+                understood = True
+            self._reading_checks[key] = understood
         return self._reading_checks[key]
 
     def sound_differences(self, source: Mapping[str, Any], spelling: str) -> list[str]:
@@ -1011,6 +1055,9 @@ class PronunciationLab:
         if listener is not None:
             record["english_hears"] = listener or "(nothing)"
             record["english_listener_understands"] = understood_as(listener, source.get("spoken_form") or word)
+        letters = self._letters_heard(source.get("spoken_form") or word, heard)
+        if letters is not None:
+            record["letters_heard"] = letters                       # a word said letter by letter: the phone recogniser's side of the listening
         readings = self.readings_in_sentence(word, spelling)
         if readings is not None:
             record["said_in_its_sentence"] = " ".join(_readings(readings)[0])
@@ -1045,7 +1092,7 @@ class PronunciationLab:
         return {"word": word, "spelling": spelling, "speaker_sounds": " ".join(source["phones"]), "voice_sounds": record["voice_sounds"], "closeness": record["closeness"],
                 **_reference_fields(source),
                 "differences": record["differences"][:3], "ending": record.get("ending"), "english_hears": record.get("english_hears"),
-                "english_listener_understands": record.get("english_listener_understands"),
+                "english_listener_understands": record.get("english_listener_understands"), "letters_heard": record.get("letters_heard"),
                 "lost_in_its_sentence": record.get("lost_in_its_sentence"), "made_differently": (record.get("how_the_sounds_are_made_in_its_sentence") or record.get("how_the_sounds_are_made_differently") or [])[:2]}
 
     def _letter_table(self) -> dict[str, Any]:
@@ -1181,7 +1228,7 @@ class PronunciationLab:
         wanted_word = source.get("spoken_form") or word
         closest = sorted(spoken, key=lambda s: (-spoken[s][0], len(s), s))[:SUGGEST_LISTENED]
         asked = set(closest) | {styled(g.lower()) for g in guesses if styled(g.lower()) in spoken}
-        heard_right = {spelling for spelling in asked if self._listener_writes(spelling, wanted_word)}
+        heard_right = {spelling for spelling in asked if self._listener_writes(spelling, wanted_word, spoken[spelling][1])}
         by_sounds: dict[tuple[str, ...], tuple[float, str]] = {}
         for spelling, (closeness, heard) in spoken.items():
             # of spellings that sound the same, the one the listener approved stands for them, then the closest, then the shortest
@@ -1218,7 +1265,7 @@ class PronunciationLab:
         if results:
             nearest = max(results, key=lambda r: (not r.get("lost_in_its_sentence"), r["closeness"]))
             out["closest_so_far"] = {"spelling": nearest["spelling"], "closeness": nearest["closeness"]}
-            out["understood_by_the_listener"] = [r["spelling"] for r in results if r.get("english_listener_understands") and not r.get("lost_in_its_sentence")]
+            out["understood_by_the_listener"] = [r["spelling"] for r in results if _accepted(r) and not r.get("lost_in_its_sentence")]
             out["advice"] = _advice(self.tried[word], nearest, left_word, left_clip, speaker=source["phones"])
         if speakers:
             what = speakers.what_speakers_do(source["phones"])
@@ -1259,7 +1306,7 @@ class PronunciationLab:
         out = {"word": word, "speaker_sounds": " ".join(source["phones"]), "speaker_occurrences": source["occurrences"], **_reference_fields(source), "results": results,
                "closest_so_far": {"spelling": best["spelling"], "closeness": best["closeness"]},
                "understood_by_the_listener": [r["spelling"] for r in self.tried[word].values()
-                                              if r.get("english_listener_understands") and not r.get("lost_in_its_sentence")],
+                                              if _accepted(r) and not r.get("lost_in_its_sentence")],
                "advice": _advice(self.tried[word], best, left_word, left_clip, speaker=source["phones"]),
                "tries_left_for_word": left_word, "shared_extra_tries_left": left_clip}
         shown = self.sentence_shown(word)
