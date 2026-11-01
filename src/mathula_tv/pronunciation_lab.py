@@ -14,6 +14,7 @@ the check on a first use. The comparison below is guidance for the agent, not a 
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -626,21 +627,63 @@ class PronunciationLab:
             spoken_form = spoken_stems.get(stem, word)
             heard = heard_word(self.job_root / "audio" / "analysis_mono.wav", self.transcript, re.sub(r"[^A-Za-z']", "", spoken_form), self.gop,
                                self.work_dir / "source", limit=4)
-            fallback = self._english_reference(spoken_form, heard) if heard else None
-            if heard and not fallback:
-                fallback = self._complete_onset(spoken_form, heard)
+            # the reference is a dictionary reading that the audio fits (see reference_reading), not a free decode of a word cut from running speech
+            dictionary = self._dictionary_reference(spoken_form, heard) if heard else None
+            taken = dictionary if dictionary and dictionary["dictionary_fit"]["accepted"] else None
+            fallback = None
+            if heard and taken is None:
+                fallback = self._english_reference(spoken_form, heard)
+                if not fallback:
+                    fallback = self._complete_onset(spoken_form, heard)
             self._source_cache[stem] = ({"found": True, "phones": heard["phones"], "occurrences": len(heard["spans"]), "spoken_form": spoken_form,
                                          "reference_warning": reference_fits_spelling(spoken_form, heard["phones"]),
                                          "each_occurrence": [" ".join(d) for d in heard["decoded"]],
                                          "_timed": heard.get("timed"), "_clips": heard.get("clips")} if heard else {"found": False, "phones": []})
-            if fallback:
+            if taken:
+                self._source_cache[stem].update(taken["fields"])
+            elif fallback:
                 self._source_cache[stem].update(fallback)
             cached = self._source_cache[stem]
+            if dictionary:
+                cached["dictionary_fit"] = dictionary["dictionary_fit"]
             if cached.get("found"):
-                note = self._dictionary_note(spoken_form, cached["phones"])
+                note = self._dictionary_note(spoken_form, cached.get("speaker_decode") or cached["phones"])
                 if note:
                     cached["english_dictionary"] = note
         return self._source_cache[stem]
+
+    def _dictionary_reference(self, spoken_form: str, heard: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The dictionary reading that the speaker's audio fits best, as the reference for the word (see ``reference_reading``); None when there is no dictionary,
+        no reading for the word (a Zulu name), or it cannot be scored.  ``dictionary_fit.accepted`` says whether it fits nearly as well as the recogniser's own
+        decode: when it does not, the caller keeps the decode and the old fallbacks."""
+        if os.environ.get("MATHULA_DICTIONARY_REFERENCE") == "0":
+            return None
+        interpreter = self._interpreter()
+        if interpreter is None:
+            return None
+        try:
+            from . import reference_reading
+
+            stem = without_prefix(spoken_form.split("-")[-1], written_prefix(spoken_form))
+            readings = interpreter.readings(stem)
+            if not readings or not heard.get("clips"):
+                return None
+            self.gop._load()
+            vocab = self.gop._vocab
+            clips = [self.gop.log_probs(Path(clip)) for clip in heard["clips"]]
+            decoys = reference_reading.decoy_tokens(interpreter.sounds.words, stem, len(readings[0]["phones"]), vocab)
+            picked = reference_reading.choose(clips, readings, heard["phones"], vocab, vocab["<pad>"], decoys)
+        except Exception:                                        # a failure to score leaves the decode, as before
+            return None
+        if not picked:
+            return None
+        reading = picked["reading"]
+        fit = {"reads_as": reading["how"], "accent": reading["accent"], "excess": picked["excess"], "decoy_median": picked["decoy_median"],
+               "decoy_best": picked["decoy_best"], "separation": picked["separation"], "beaten_by_decoys": picked["beaten_by_decoys"], "accepted": picked["accepted"]}
+        fields = {"phones": picked["phones"], "reference_warning": None, "speaker_decode": list(heard["phones"]), "reference_source": "dictionary",
+                  "reference_note": (f"the sounds shown are the dictionary's {reading['how']} reading of {spoken_form!r} ({reading['accent'].replace('_', '-')}), in the variant the speaker's audio "
+                                     f"fits best, not a decode: the recogniser's own decode of the word cut from the audio was [{' '.join(heard['phones'])}]")}
+        return {"fields": fields, "dictionary_fit": fit}
 
     def _interpreter(self):
         """The English-to-Zulu interpreter (see ``interpreter``): the dictionary's sounds, what Zulu speakers do with them, and this voice's letters; None when the
