@@ -19,7 +19,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .phone_features import RULER_VERSION
 
@@ -54,6 +54,21 @@ def _save(path: Path, data: dict[str, Any]) -> None:
     temporary = path.with_suffix(".partial")
     temporary.write_text(json.dumps(data, indent=1, ensure_ascii=False, sort_keys=True), encoding="utf-8")
     temporary.replace(path)
+
+
+def forget_lexicon(path: Path, words: Iterable[tuple[str, str | None]]) -> int:
+    """Drop the entries that the lexicon built (never an agent's or a repair) for these (word, voice) pairs, so that a later build's decision replaces them even when it
+    measures a little less close; returns how many were dropped."""
+    data = load(path)
+    dropped = 0
+    for display_text, voice in words:
+        entry = data["entries"].get(_key(display_text, voice))
+        if entry and entry.get("source") == "lexicon":
+            del data["entries"][_key(display_text, voice)]
+            dropped += 1
+    if dropped:
+        _save(path, data)
+    return dropped
 
 
 def saved(path: Path, display_text: str, voice: str | None) -> dict[str, Any] | None:

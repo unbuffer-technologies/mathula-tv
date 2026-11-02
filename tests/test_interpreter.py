@@ -50,7 +50,10 @@ def test_a_sound_the_voice_cannot_make_is_aimed_at_the_nearest_one_it_can(tmp_pa
 def test_a_word_is_spelled_from_its_dictionary_sounds_and_keeps_its_derivation(tmp_path):
     out = interpreter(tmp_path).spellings("Heidi")
     assert out["readings"][0]["phones"] == ["h", "aɪ", "d", "iː"]
-    best = out["spellings"][0]
+    ruled = [s for s in out["spellings"] if s.get("source") == "rules"]
+    assert ruled and out["spellings"][0].get("source") == "rules" and ruled[0]["spelling"].startswith("h")           # the English-to-Zulu rules come first
+    assert ruled[0]["derivation"]                                                                                    # with the rules each applied
+    best = next(s for s in out["spellings"] if s.get("source") != "rules")                                           # then what the voice's letters can make
     assert best["aim"][0] == "h" and best["spelling"].startswith("h")
     assert best["reading"] == "word" and best["english"] == ["h", "aɪ", "d", "iː"]
 
@@ -100,3 +103,13 @@ def test_the_table_row_for_a_sound_lists_the_letters_that_make_its_aim(tmp_path)
     rows = interpreter(tmp_path).table_rows(["ɑː", "ɹ"])
     assert rows[0]["aim"] == "a" and "a" in rows[0]["letters_the_voice_reads_so"]
     assert rows[1]["aim"] == "r" and rows[1]["letters_the_voice_reads_so"] == ["r"]
+
+
+def test_a_name_the_research_found_sounds_for_is_read_from_them_before_the_dictionary(tmp_path):
+    researched = {"heidi": {"how": "researched", "accent": "researched", "phones": ["h", "aɪ", "d", "i"], "stress": [None, 1, None, 0]}}
+    (tmp_path / "cmudict.dict").write_text(DICTIONARY, encoding="utf-8")
+    interpreter_ = Interpreter(EnglishSounds.load(tmp_path / "cmudict.dict"), TABLE, SPEAKERS, researched)
+    readings = interpreter_.readings("Heidi")
+    assert readings[0]["how"] == "researched" and len(readings) >= 2                           # the research first, the dictionary's readings after it
+    assert interpreter_.spellings("Heidi")["spellings"][0]["spelling"] == "haydi"             # and the rules spell it
+    assert interpreter_.readings("ANC")[0]["how"] == "letters"                                   # an initialism is still said by its letters

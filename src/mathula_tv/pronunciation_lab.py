@@ -40,6 +40,7 @@ SUGGEST_LISTENED = 10         # the closest spellings in sounds that an English 
 LETTERS_HEARD = 0.85          # how close the decoded sounds must be to a word's letter names for the phone recogniser to have heard the letters
 LETTERS_EXTRA_SOUND = 0.3     # what a decoded sound that is no letter's costs (a glide between two letter names)
 INTERPRETER_SPELLINGS = 6     # spellings the interpreter derives from the dictionary for a word
+SPEAKER_ACCENT = "non_rhotic"  # the accent of the dictionary reading used as the reference: South African English does not say r after a vowel
 
 _VOWEL_LETTERS = set("aeiouɑɒɔəɛɜɪʊʌæɐøɨ")
 _VOICING = {("p", "b"), ("t", "d"), ("k", "ɡ"), ("k", "g"), ("s", "z"), ("f", "v"), ("ʃ", "ʒ"), ("tʃ", "dʒ"), ("θ", "ð")}
@@ -83,9 +84,16 @@ def substitution_cost(a: str, b: str) -> float:
     return 0.7
 
 
-def align(source: Sequence[str], heard: Sequence[str]) -> dict[str, Any]:
+EPENTHETIC = frozenset({"i", "u", "ɪ", "ʊ", "ɨ"})      # the vowels that open a syllable a Zulu spelling left shut (see zulu_rules)
+EPENTHETIC_COST = 0.2
+
+
+def align(source: Sequence[str], heard: Sequence[str], *, epenthetic_source: bool = False) -> dict[str, Any]:
     """Weighted alignment of the speaker's sounds with the voice's. Returns ``distance`` (0 = identical), ``closeness`` (1 - distance)
     and ``differences`` in plain words.
+
+    ``epenthetic_source``: for a caller that passes the voice's sounds as ``source`` and a dictionary reading as ``heard``.  A Zulu spelling opens every syllable
+    on purpose (``zulu_rules``), so an i or u in the voice's sounds right after a consonant, which the reading does not have, costs little instead of a whole sound.
 
     The speaker's window is cut from running speech by word timings, so its first and last sounds are noisy: skipping them costs
     little. The voice's window is cut cleanly with SSML bookmarks, so a sound the voice adds anywhere (the "ma" of "mafector") is real."""
@@ -97,14 +105,19 @@ def align(source: Sequence[str], heard: Sequence[str]) -> dict[str, Any]:
         dp[i][0], back[i][0] = i * _EDGE_COST, (i - 1, 0, "skip_source")
     for j in range(1, m + 1):
         dp[0][j], back[0][j] = j * 1.0, (0, j - 1, "skip_heard")
+    def drop(i: int) -> float:                 # what leaving out source[i - 1] costs
+        if epenthetic_source and i >= 2 and source[i - 1] in EPENTHETIC and not _is_vowel(source[i - 2]):
+            return EPENTHETIC_COST
+        return 1.0
+
     for i in range(1, n + 1):
         for j in range(1, m + 1):
             options = [(dp[i - 1][j - 1] + substitution_cost(source[i - 1], heard[j - 1]), (i - 1, j - 1, "pair")),
-                       (dp[i - 1][j] + 1.0, (i - 1, j, "skip_source")),
+                       (dp[i - 1][j] + drop(i), (i - 1, j, "skip_source")),
                        (dp[i][j - 1] + 1.0, (i, j - 1, "skip_heard"))]
             dp[i][j], back[i][j] = min(options, key=lambda option: option[0])
     # the speaker's last sounds may be skipped cheaply (noisy edge); the voice's extra last sounds may not
-    finish = min([(dp[n][j] + (m - j) * 1.0, n, j) for j in range(m + 1)] + [(dp[i][m] + (n - i) * _EDGE_COST, i, m) for i in range(n + 1)])
+    finish = min([(dp[n][j] + (m - j) * 1.0, n, j) for j in range(m + 1)] + [(dp[i][m] + sum(min(_EDGE_COST, drop(k)) for k in range(i + 1, n + 1)), i, m) for i in range(n + 1)])
     total, i, j = finish
     differences: list[str] = []
     if m - j:
@@ -661,6 +674,8 @@ class PronunciationLab:
         interpreter = self._interpreter()
         if interpreter is None:
             return None
+        if os.environ.get("MATHULA_DICTIONARY_BY_AUDIO") != "1":
+            return self._dictionary_by_rule(interpreter, spoken_form, heard)
         try:
             from . import reference_reading
 
@@ -685,6 +700,24 @@ class PronunciationLab:
                                      f"fits best, not a decode: the recogniser's own decode of the word cut from the audio was [{' '.join(heard['phones'])}]")}
         return {"fields": fields, "dictionary_fit": fit}
 
+    @staticmethod
+    def _dictionary_by_rule(interpreter, spoken_form: str, heard: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The dictionary's reading as the reference, chosen by rule and not by listening: the South African English speaker does not say r after a vowel, so the
+        non-rhotic reading when the word has one, else the dictionary's first.  The model's listening (a decode of a word cut from running speech, scores against
+        it) is the weak part of the pronunciation work, so nothing about the audio decides what the word is; the decode is kept beside it for the agent to read.
+        None when the dictionary has no reading (a Zulu name, which is read as written)."""
+        stem = without_prefix(spoken_form.split("-")[-1], written_prefix(spoken_form))
+        readings = interpreter.readings(stem)
+        if not readings:
+            return None
+        reading = readings[0] if readings[0]["how"] == "researched" else next((r for r in readings if r["accent"] == SPEAKER_ACCENT), readings[0])
+        fit = {"reads_as": reading["how"], "accent": reading["accent"], "accepted": True, "chosen_by": "rule"}
+        fields = {"phones": list(reading["phones"]), "reference_warning": None, "speaker_decode": list(heard["phones"]), "reference_source": "dictionary",
+                  "reference_note": (f"the sounds shown are the dictionary's {reading['how']} reading of {spoken_form!r} ({reading['accent'].replace('_', '-')}), chosen by rule "
+                                     f"(South African English does not say r after a vowel) and not by listening: the recogniser's own decode of the word cut from the audio "
+                                     f"was [{' '.join(heard['phones'])}] and does not decide what the word is")}
+        return {"fields": fields, "dictionary_fit": fit}
+
     def _interpreter(self):
         """The English-to-Zulu interpreter (see ``interpreter``): the dictionary's sounds, what Zulu speakers do with them, and this voice's letters; None when the
         dictionary has not been put in the working resources."""
@@ -696,10 +729,20 @@ class PronunciationLab:
                 sounds = EnglishSounds.load(Path(self.job_root).parents[1] / "resources" / "cmudict" / "cmudict.dict")
                 if sounds is not None:
                     sounds.guesser = g2p_guesser()                  # for the words the dictionary lacks; None when g2p_en is not installed
-                self._interp = Interpreter(sounds, self._letter_table(), self._phonology()) if sounds is not None else None
+                self._interp = Interpreter(sounds, self._letter_table(), self._phonology(), self._researched_readings()) if sounds is not None else None
             except (IndexError, OSError):
                 self._interp = None
         return self._interp
+
+    def _researched_readings(self) -> dict[str, dict[str, Any]]:
+        """The sounds the job's web research found for its names (see ``zulu_rules.research_readings``); empty when the job has none."""
+        from .zulu_rules import research_readings
+
+        path = Path(self.job_root) / "native_dub" / "pronunciation_research.json"
+        try:
+            return research_readings(json.loads(path.read_text(encoding="utf-8"))) if path.is_file() else {}
+        except (OSError, ValueError, TypeError):
+            return {}
 
     def _interpreter_spellings(self, stem: str) -> list[str]:
         """Spellings the interpreter derives from the dictionary's sounds for ``stem`` (with the last letter held for a word said letter by letter);
@@ -713,7 +756,8 @@ class PronunciationLab:
             return []
         spellings = [item["spelling"] for item in found["spellings"]]
         if any(reading["how"] == "letters" for reading in found["readings"]):
-            spellings += [held for spelling in spellings[:3] for held in interpreter.held_variants(spelling)]
+            measured = [item["spelling"] for item in found["spellings"] if item.get("source") != "rules"]          # the rules' spellings already hold the last letter
+            spellings += [held for spelling in measured[:3] for held in interpreter.held_variants(spelling)]
         return list(dict.fromkeys(spellings))
 
     def _listener_writes(self, spelling: str, word: str, sounds: Sequence[str] = ()) -> bool:

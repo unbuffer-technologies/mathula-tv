@@ -1253,3 +1253,30 @@ def test_a_listener_who_writes_i_for_ai_has_missed_the_a(monkeypatch):
     assert not lab.understood_as("I.", "AI") and not lab.understood_as("A.", "AI")             # "ai" the word sounds like "eye", but the speaker said A then I
     assert lab.understood_as("A I", "AI") and lab.understood_as("A.I.", "AI")                  # the letters, however the listener spaces them
     assert lab.understood_as("I.", "eye") and lab.understood_as("Okay.", "OK")                 # a plain word, and an initialism said as the word "okay", still count
+
+
+def test_the_dictionary_reading_is_the_reference_chosen_by_rule_and_the_audio_does_not_decide():
+    class Interpreter:
+        def readings(self, word):
+            return ([{"how": "word", "accent": "rhotic", "phones": ["k", "ɔː", "ɹ", "t"], "stress": [None, 1, None, None]},
+                     {"how": "word", "accent": "non_rhotic", "phones": ["k", "ɔː", "t"], "stress": [None, 1, None]}] if word.lower() == "court" else [])
+
+    decode = {"phones": ["k", "o", "t", "m", "ɪ"]}                                 # the decode of "Court" cut from running speech picked up the next word's sounds
+    found = PronunciationLab._dictionary_by_rule(Interpreter(), "Court", decode)
+    assert found["fields"]["phones"] == ["k", "ɔː", "t"] and found["fields"]["speaker_decode"] == decode["phones"]       # South African English: no r; the decode is only shown
+    assert found["fields"]["reference_source"] == "dictionary" and found["dictionary_fit"] == {"reads_as": "word", "accent": "non_rhotic", "accepted": True, "chosen_by": "rule"}
+    assert "not by listening" in found["fields"]["reference_note"]
+    assert PronunciationLab._dictionary_by_rule(Interpreter(), "Nkandla", decode) is None          # a Zulu name has no dictionary reading: read as written
+
+
+def test_a_vowel_the_zulu_spelling_added_after_a_consonant_costs_little_when_the_voice_is_compared_with_a_dictionary_reading():
+    voice = ["k", "oː", "t", "i"]                    # kooti: the final i opens the syllable on purpose
+    reading = ["k", "ɔː", "t"]
+    plain = align(voice, reading)["closeness"]
+    lenient = align(voice, reading, epenthetic_source=True)["closeness"]
+    assert lenient > plain and lenient > 0.85
+    cluster = align(["w", "e", "s", "i", "t", "a", "n", "i"], ["w", "ɛ", "s", "t", "ə", "n"], epenthetic_source=True)["closeness"]
+    assert cluster > align(["w", "e", "s", "i", "t", "a", "n", "i"], ["w", "ɛ", "s", "t", "ə", "n"])["closeness"]
+    # a vowel straight after a vowel, or one that is not an opening vowel, is a real difference
+    assert align(["k", "o", "a", "t"], ["k", "ɔː", "t"], epenthetic_source=True)["closeness"] == align(["k", "o", "a", "t"], ["k", "ɔː", "t"])["closeness"]
+    assert align(["k", "a", "o", "t"], ["k", "a", "t"], epenthetic_source=True)["closeness"] == align(["k", "a", "o", "t"], ["k", "a", "t"])["closeness"]

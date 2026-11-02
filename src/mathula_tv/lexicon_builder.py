@@ -35,18 +35,17 @@ MIN_LOWER_SHARE = 0.5           # a word mostly written with a capital in the co
 CANDIDATES = 10                 # spellings spoken per word and voice
 LISTENED = 4                    # the closest of them the speech-to-text is asked about, besides the word as written
 CLOSE_ENOUGH = 0.7              # a spelling must be at least this close to a reading to be kept
+CONFIDENT = 0.85                # a word's spelling this close to the dictionary reading needs no listener to say so
 
 
 # What the English speech-to-text writes for a letter said alone (it writes "Eh" or "Hey" for A), and spellings worth trying beside the interpreter's.
 LETTER_ACCEPT = {"A": "a eh ay hey", "B": "b be bee", "C": "c see sea", "D": "d dee", "E": "e", "F": "f ef eff", "G": "g gee", "H": "h age aitch ach", "I": "i eye hi", "J": "j jay",
                  "K": "k kay okay", "L": "l el elle", "M": "m em", "N": "n en", "O": "o oh", "P": "p pee", "Q": "q queue cue", "R": "r are", "S": "s es ess", "T": "t tea tee",
                  "U": "u you", "V": "v vee", "W": "w", "X": "x ex", "Y": "y why", "Z": "z zed zee"}
-LETTER_HAND = {"A": ["ey", "eyi", "ei", "eh", "eya", "eey"], "I": ["ai", "ay", "ayi", "aayi", "aaayi", "ae", "aeyi", "ahyi"], "O": ["o", "ow", "owu", "oh", "ooh"],
-               "R": ["a", "aa", "ar", "aar", "ah"], "U": ["yu", "yuu", "yoo", "you"], "W": ["dabhuliyu", "dabliyu", "dabhaliyu", "dabulyu"], "Y": ["way", "wayi", "wai"],
-               "Z": ["zed", "zedi", "zi", "zee"], "H": ["eych", "eitsh", "eyitsh", "eyichi", "ech"]}
 LETTER_ENDINGS = ("i", "a", "yi", "ayi", "ii", "aa", "e", "u", "ee", "ay", "yii", "aayi")
 HELD_MS = 140                   # an English listener hears a last letter only when the voice holds its vowel about this long
 SHORT_MS = 90
+BUILD = "rules-first-1"         # how the candidates were made and chosen; a word said by letters built under another is built again with ``again_letters``
 
 
 def _tail_ms(lab: Any, spelling: str) -> int | None:
@@ -60,7 +59,7 @@ def _tail_ms(lab: Any, spelling: str) -> int | None:
 def build_letters(lab: Any, out_path: Path, *, shard: int = 0, shards: int = 1, progress: Callable[[str], None] = print) -> int:
     """For each letter of the alphabet, spellings of its English name spoken by the lab's voice and judged (the speech-to-text writes the letter, or the phone recogniser
     decodes its name), with how long each holds its last sound; appends one JSON line per letter (a stopped build resumes)."""
-    from . import letter_sounds
+    from . import letter_sounds, zulu_rules
     from .english_sounds import LETTER_NAMES, to_ipa
     from .pronunciation_lab import _letters_closeness
 
@@ -72,9 +71,10 @@ def build_letters(lab: Any, out_path: Path, *, shard: int = 0, shards: int = 1, 
             if index % shards != shard or letter in done:
                 continue
             target = to_ipa(LETTER_NAMES[letter])
-            pool = [s for s, _ in letter_sounds.candidates([a["aim"] for a in interpreter.aims(target)], lab._letter_table(), limit=8, noisy_edges=False)] if interpreter else []
-            pool += LETTER_HAND.get(letter, [])
-            pool += [s + e for s in pool[:3] for e in LETTER_ENDINGS if not s.endswith(e)]
+            measured = [s for s, _ in letter_sounds.candidates([a["aim"] for a in interpreter.aims(target)], lab._letter_table(), limit=8, noisy_edges=False)] if interpreter else []
+            # the English-to-Zulu rules' spellings of the letter's name (brief, held, longer held) first, then the letters that make the voice say it
+            pool = [r["spelling"] for r in zulu_rules.respell_initialism(letter, limit=10)] + measured
+            pool += [s + e for s in measured[:3] for e in LETTER_ENDINGS if not s.endswith(e)]
             tried = []
             for spelling in dict.fromkeys(pool):
                 heard = lab.voice_reading(spelling)
@@ -148,17 +148,33 @@ def collect(work_dir: Path, *, words_limit: int = 150, initialisms_limit: int = 
             "words": list(dict.fromkeys([*SEED_WORDS, *words[:words_limit]]))}
 
 
-def decide(written: str, tried: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def decide(written: str, tried: Sequence[Mapping[str, Any]], *, letters: bool = False) -> dict[str, Any]:
     """From the spellings tried (each ``{"spelling", "closeness", "accepted"}``; ``written`` is the word as the text writes it): leave a word that is already right, keep
-    the closest spelling a listener takes for the word, or report that none was."""
+    the closest spelling a listener takes for the word, or report that none was.  A word said letter by letter (``letters``) keeps one whose last sound the voice holds
+    (``tail_ms`` of at least HELD_MS) when a listener takes any such: English stresses the last letter (the I of AI is held, the I of HIV is not), and the closeness of
+    the sounds cannot tell a held vowel from a brief one."""
     by_spelling = {t["spelling"]: t for t in tried}
-    if written in by_spelling and by_spelling[written]["accepted"]:
-        return {"status": "fine as written"}
-    good = [t for t in tried if t["accepted"] and t["closeness"] >= CLOSE_ENOUGH and t["spelling"] != written]
+    here = by_spelling.get(written)
+    if letters:
+        if here and here["accepted"]:
+            return {"status": "fine as written"}
+        good = [t for t in tried if t["accepted"] and t["closeness"] >= CLOSE_ENOUGH and t["spelling"] != written]
+    else:
+        # a word has a dictionary reading, and the sounds the voice makes are measured against it: sounds that close need no listener, and a listener that merely knows
+        # the word ("News" written for [n eɪ]) does not make a reading right.  A listener's approval counts only for sounds that are fairly close.
+        if here and (here["closeness"] >= CONFIDENT or (here["accepted"] and here["closeness"] >= CLOSE_ENOUGH)):
+            return {"status": "fine as written"}
+        good = [t for t in tried if t["closeness"] >= CLOSE_ENOUGH and (t["accepted"] or t["closeness"] >= CONFIDENT) and t["spelling"] != written]
     if not good:
         return {"status": "unresolved"}
-    best = max(good, key=lambda t: (t["closeness"], -len(t["spelling"])))
-    return {"status": "respell", "spelling": best["spelling"], "closeness": best["closeness"]}
+    if letters:
+        held = [t for t in good if (t.get("tail_ms") or 0) >= HELD_MS]
+        good = held or good
+    # equally close spellings: the one tried first, which is the English-to-Zulu rules' main choice, then its variants, then the letters composed from the voice's
+    # forms; the rules are the prior, so the voice's measurement overrides them only where it finds a spelling that is closer
+    order = {t["spelling"]: index for index, t in enumerate(tried)}
+    best = max(good, key=lambda t: (t["closeness"], -order[t["spelling"]]))
+    return {"status": "respell", "spelling": best["spelling"], "closeness": best["closeness"], "held": bool(letters and (best.get("tail_ms") or 0) >= HELD_MS)}
 
 
 def evaluate(lab: Any, word: str, forms: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, Any]:
@@ -173,28 +189,64 @@ def evaluate(lab: Any, word: str, forms: Mapping[str, Mapping[str, str]] | None 
         return {"word": word, "status": "no reading"}
     written = word if is_initialism(word) else word.lower()
     composed = compose(word, forms) if forms and readings[0]["how"] == "letters" else []
-    spellings = list(dict.fromkeys([written, *composed, *lab._interpreter_spellings(word)]))[:CANDIDATES + 1 + len(composed)]
+    ruled = [r["spelling"] for r in interpreter.rule_spellings(word, readings)]                # the English-to-Zulu rules' spellings come first: they are the prior
+    spellings = list(dict.fromkeys([written, *ruled, *composed, *lab._interpreter_spellings(word)]))[:CANDIDATES + 1 + len(ruled) + len(composed)]
     tried: list[dict[str, Any]] = []
     for spelling in spellings:
         heard = lab.voice_reading(spelling)
-        closeness = max((align(heard, reading["phones"])["closeness"] for reading in readings), default=0.0) if heard else 0.0
+        closeness = max((align(heard, reading["phones"], epenthetic_source=True)["closeness"] for reading in readings), default=0.0) if heard else 0.0
         tried.append({"spelling": spelling, "closeness": round(closeness, 3), "sounds": " ".join(heard), "heard": heard})
-    asked = {written, *composed} | {t["spelling"] for t in sorted(tried, key=lambda t: -t["closeness"])[:LISTENED]}
+    asked = {written, *composed, *ruled} |{t["spelling"] for t in sorted(tried, key=lambda t: -t["closeness"])[:LISTENED]}
     for t in tried:
         heard = t.pop("heard")
         t["accepted"] = False
         if t["spelling"] in asked:
             t["listener"] = lab.english_hears(t["spelling"])                       # asked once: the text is kept and the verdict is made from it
             t["accepted"] = bool(t["listener"] is not None and understood_as(t["listener"], word)) or bool(lab._letters_heard(word, heard))
-    return {"word": word, "reads_as": readings[0]["how"], **decide(written, tried), "tried": tried}
+    letters = readings[0]["how"] == "letters"
+    if letters:
+        for t in tried:
+            if t["accepted"]:
+                t["tail_ms"] = _tail_ms(lab, t["spelling"])
+    return {"word": word, "reads_as": readings[0]["how"], "build": BUILD, **decide(written, tried, letters=letters), "tried": tried}
+
+
+def redecide(lab: Any, records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The records of an earlier build (``build``), decided again under the length rule: for a word said letter by letter, how long the voice holds the last sound of each
+    spelling a listener took is measured from the audio the build kept, and ``decide`` chooses again.  The listeners are not asked again.  Returns the records whose
+    choice changed."""
+    from .pronunciation_lab import align
+
+    interpreter = lab._interpreter()
+    changed = []
+    for record in records:
+        if record.get("status") == "error" or not record.get("tried"):
+            continue
+        letters = record.get("reads_as") == "letters"
+        tried = [dict(t) for t in record.get("tried", [])]
+        readings = interpreter.readings(record["word"]) if interpreter and not letters else []
+        for t in tried:
+            if readings and t.get("sounds"):               # the sounds the voice made are kept: the closeness is measured again, with the comparison as it is now
+                t["closeness"] = round(max(align(t["sounds"].split(), r["phones"], epenthetic_source=True)["closeness"] for r in readings), 3)
+        if letters:
+            for t in tried:
+                if t["accepted"]:
+                    t["tail_ms"] = _tail_ms(lab, t["spelling"])
+        written = tried[0]["spelling"] if tried else record["word"]
+        decision = decide(written, tried, letters=letters)
+        if (decision["status"], decision.get("spelling")) != (record.get("status"), record.get("spelling")):
+            changed.append({**{k: v for k, v in record.items() if k not in ("status", "spelling", "closeness", "held", "tried")}, **decision, "tried": tried})
+    return changed
 
 
 def build(lab: Any, words: Sequence[str], out_path: Path, *, shard: int = 0, shards: int = 1, progress: Callable[[str], None] = print,
-          forms: Mapping[str, Mapping[str, str]] | None = None) -> int:
-    """Evaluate this shard's words and append one JSON line per word to ``out_path``; words already in the file are skipped (a stopped build resumes)."""
+          forms: Mapping[str, Mapping[str, str]] | None = None, again_letters: bool = False) -> int:
+    """Evaluate this shard's words and append one JSON line per word to ``out_path``; words already in the file are skipped (a stopped build resumes).  ``again_letters``
+    evaluates the words said letter by letter once more (the way they are composed changed); the later line replaces the earlier."""
     out_path = Path(out_path)
     # a word that ended in an error (the service was down, the key failed) is tried again; only a decision is final
-    done = ({r["word"] for r in (json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines() if line.strip()) if r["status"] != "error"}
+    done = ({r["word"] for r in (json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines() if line.strip())
+             if r["status"] != "error" and not (again_letters and r.get("reads_as") == "letters" and r.get("build") != BUILD)}
             if out_path.is_file() else set())
     count = 0
     with out_path.open("a", encoding="utf-8") as handle:
@@ -213,9 +265,34 @@ def build(lab: Any, words: Sequence[str], out_path: Path, *, shard: int = 0, sha
     return count
 
 
+RULES_BUILD = "rules-only-1"
+
+
+def build_rules(interpreter: Any, words: Sequence[str], voices: Sequence[str], directory: Path) -> dict[str, int]:
+    """The lexicon by rule alone: each word's spelling from its dictionary (or researched) sounds through ``zulu_rules``, the same for every voice, with the derivation kept.
+    Nothing is spoken, heard or scored; a person listens and the rules are changed.  One file per voice (``built_<voice>_rules.jsonl``, replaced each time) in the
+    shape ``merge`` reads, so the kept spellings reach the shared memory the same way.  Returns how many words got a spelling and how many had no reading."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    tally = {"spelled": 0, "no reading": 0}
+    lines = []
+    for word in words:
+        found = interpreter.rules_spelling(word)
+        if found is None:
+            lines.append({"word": word, "status": "no reading", "build": RULES_BUILD})
+            tally["no reading"] += 1
+        else:
+            lines.append({"word": word, "status": "respell", "spelling": found["spelling"], "closeness": None, "reads_as": found["reading"], "build": RULES_BUILD,
+                          "derivation": found["derivation"], "english": " ".join(found["english"])})
+            tally["spelled"] += 1
+    for voice in voices:
+        (directory / f"built_{voice}_rules.jsonl").write_text("".join(json.dumps({**line, "voice": voice}, ensure_ascii=False) + "\n" for line in lines), encoding="utf-8")
+    return tally
+
+
 def merge(results: Iterable[Path], memory_file: Path, *, job_id: str = "lexicon") -> dict[str, int]:
     """Put the kept spellings into the pronunciation memory, for the voice each was built on; returns how many words ended in each status."""
-    from .pronunciation_memory import remember
+    from .pronunciation_memory import forget_lexicon, remember
 
     latest: dict[tuple[str, str], dict[str, Any]] = {}            # the last line for a word and voice stands: a retry replaces an error
     for path in results:
@@ -224,6 +301,7 @@ def merge(results: Iterable[Path], memory_file: Path, *, job_id: str = "lexicon"
                 record = json.loads(line)
                 latest[(record["word"], record["voice"])] = record
     tally: collections.Counter = collections.Counter(record["status"] for record in latest.values())
+    forget_lexicon(memory_file, [(r["word"], r["voice"]) for r in latest.values() if r["status"] == "respell"])      # the latest build's choice replaces the lexicon's earlier one
     for record in latest.values():
         if record["status"] == "respell":
             remember(memory_file, record["word"], record["spelling"], source="lexicon", voice=record["voice"], job_id=job_id, kind="english_code_switch",
@@ -250,6 +328,19 @@ def main(argv: list[str] | None = None) -> int:
     build_cmd.add_argument("--shard", type=int, default=0)
     build_cmd.add_argument("--shards", type=int, default=1)
     build_cmd.add_argument("--limit", type=int, default=0)
+    build_cmd.add_argument("--again-letters", action="store_true", help="evaluate the words said letter by letter once more")
+    build_cmd.add_argument("--words", default="", help="build these words (comma separated, any case) instead of the corpus list: a clip's names, for example")
+    redecide_cmd = sub.add_parser("redecide", help="choose again among the spellings already judged, with the length rule for letters (no listener is asked)")
+    redecide_cmd.add_argument("--job-root", required=True)
+    redecide_cmd.add_argument("--voice", required=True)
+    redecide_cmd.add_argument("--shard", type=int, default=0)
+    redecide_cmd.add_argument("--dry", action="store_true", help="print the changed choices and write nothing")
+    redecide_cmd.add_argument("--names", action="store_true", help="the file of a chosen list of words (build --words), not the corpus list")
+    rules_cmd = sub.add_parser("rules", help="spell words by rule alone from their dictionary sounds: no voice, no listener, no score (writes the files merge reads)")
+    rules_cmd.add_argument("--work-dir", required=True)
+    rules_cmd.add_argument("--job-root", default="", help="a job whose web research supplies sounds for its names")
+    rules_cmd.add_argument("--words", default="", help="comma separated words, any case, instead of the corpus list")
+    rules_cmd.add_argument("--voices", default="zu-ZA-ThandoNeural,zu-ZA-ThembaNeural")
     merge_cmd = sub.add_parser("merge", help="put the kept spellings into the shared memory")
     merge_cmd.add_argument("--work-dir", required=True)
     args = parser.parse_args(argv)
@@ -260,26 +351,59 @@ def main(argv: list[str] | None = None) -> int:
         (directory / "words.json").write_text(json.dumps(found, ensure_ascii=False, indent=1), encoding="utf-8")
         print(len(found["initialisms"]), "initialisms,", len(found["words"]), "words ->", directory / "words.json")
         return 0
-    if args.command in ("letters", "build"):
+    if args.command == "rules":
+        from .english_sounds import EnglishSounds, g2p_guesser
+        from .interpreter import Interpreter
+        from .zulu_rules import research_readings
+
+        work_dir = Path(args.work_dir)
+        directory = work_dir / "resources" / "lexicon"
+        sounds = EnglishSounds.load(work_dir / "resources" / "cmudict" / "cmudict.dict")
+        sounds.guesser = g2p_guesser()
+        research_file = Path(args.job_root) / "native_dub" / "pronunciation_research.json" if args.job_root else None
+        researched = research_readings(json.loads(research_file.read_text(encoding="utf-8"))) if research_file and research_file.is_file() else {}
+        found = json.loads((directory / "words.json").read_text(encoding="utf-8"))
+        every = [w.strip() for w in args.words.split(",") if w.strip()] or [*found["initialisms"], *found["words"]]
+        print(build_rules(Interpreter(sounds, {}, None, researched), every, [v for v in args.voices.split(",") if v], directory), "->", directory)
+        return 0
+    if args.command in ("letters", "build", "redecide"):
         from .pronunciation_lab import PronunciationLab
 
         job_root = Path(args.job_root)
         work_dir = job_root.parents[1]
         directory = work_dir / "resources" / "lexicon"
+        # redecide reads the audio the build kept, so it uses the build's folder
         lab = PronunciationLab(job_root, voice=args.voice, key=os.environ["AZURE_SPEECH_KEY"], region=os.environ["AZURE_SPEECH_REGION"].strip().lower(),
-                               work_dir=Path("/tmp") / f"lexicon_{args.command}_{args.voice}_{args.shard}")
+                               work_dir=Path("/tmp") / f"lexicon_{'build' if args.command == 'redecide' else args.command}_{args.voice}_{args.shard}")
+        if args.command == "redecide":
+            path = directory / f"built_{args.voice}_{'names' if args.names else ''}{args.shard}.jsonl"
+            latest = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    record = json.loads(line)
+                    latest[record["word"]] = record
+            changed = redecide(lab, latest.values())
+            with path.open("a", encoding="utf-8") as handle:
+                for record in changed:
+                    if not args.dry:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    before = latest[record["word"]]
+                    print(f"{args.voice} {record['word']}: {before['status']} {before.get('spelling') or ''} -> {record['status']} {record.get('spelling') or ''}", flush=True)
+            print(len(changed), "choices changed" + (" (dry run: nothing written)" if args.dry else ""))
+            return 0
         if args.command == "letters":
             out = directory / f"letters_{args.voice}_{args.shard}.jsonl"
             print(build_letters(lab, out, shard=args.shard, shards=args.shards, progress=lambda m: print(m, flush=True)), "letters built")
             return 0
         found = json.loads((directory / "words.json").read_text(encoding="utf-8"))
-        every = [*found["initialisms"], *found["words"]]
+        every = [w.strip() for w in args.words.split(",") if w.strip()] or [*found["initialisms"], *found["words"]]
         if args.limit:
             every = every[:args.limit]
         forms = letter_forms(json.loads(line) for path in sorted(directory.glob(f"letters_{args.voice}_*.jsonl")) for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
         print(len(forms), "letters known for", args.voice)
-        out = directory / f"built_{args.voice}_{args.shard}.jsonl"
-        print(build(lab, every, out, shard=args.shard, shards=args.shards, progress=lambda m: print(m, flush=True), forms=forms), "words built")
+        # a list of chosen words goes to its own file, which a merge reads after the corpus lists and so lets stand
+        out = directory / f"built_{args.voice}_{'names' if args.words else ''}{args.shard}.jsonl"
+        print(build(lab, every, out, shard=args.shard, shards=args.shards, progress=lambda m: print(m, flush=True), forms=forms, again_letters=args.again_letters), "words built")
         return 0
     from .pronunciation_memory import memory_path
 

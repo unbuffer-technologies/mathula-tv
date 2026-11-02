@@ -5,8 +5,9 @@ The agent used to find a spelling by guessing and measuring.  This is the deriva
 1. ``readings``: the word's English sounds from the dictionary (``english_sounds``); a run of capitals is the names of its letters.
 2. ``aim``: for each English sound, what Zulu speakers do with it (``phonology``, learned from people who say the same names in both languages)
    limited to the sounds this voice can make, so the aim is a sound the voice can say.
-3. ``spellings``: the letters of isiZulu spelling that make the voice say the aim, in the order that keeps the sounds closest (``letter_sounds``,
-   built from the voice's own audio); the ruler is ``phone_features``.
+3. ``spellings``: first the spellings the English-to-Zulu rules give (``zulu_rules``: Zulu has no diphthongs and no closed syllables, and shows stress as
+   length), then the letters of isiZulu spelling that make the voice say the aim, in the order that keeps the sounds closest (``letter_sounds``, built from
+   the voice's own audio); the ruler is ``phone_features``.
 4. The caller speaks and measures them (the pronunciation lab); nothing here is judged without the voice saying it.
 
 ``table`` lists, for every English sound, the row a reader can check: what the sound is, what Zulu speakers say, what the voice can make and the letters
@@ -14,15 +15,27 @@ that make it.  A word with no dictionary reading and no capitals (a Zulu name su
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping, Sequence
 
-from . import letter_sounds
+from . import letter_sounds, zulu_rules
 from .english_sounds import EnglishSounds
 from .phone_features import distance
 from .phonology import corpus_symbol
 
 AIM_MINIMUM_SHARE = 0.08          # a Zulu-speaker choice rarer than this is not an aim
 SHARE_BONUS = 0.3                 # a sound all Zulu speakers choose is this much nearer than its distance on the chart says
+RULE_SPELLINGS = 4                # spellings the English-to-Zulu rules give a word, before the ones found by measuring the voice
+SPEAKER_ACCENT = "non_rhotic"     # the accent of the dictionary reading a word is spelled from: South African English does not say r after a vowel
+
+
+_ZULU_SYLLABLES = re.compile(r"(?:[bdfghjklmnprstvwyz]{0,4}[aeiou]{1,2})+(?:ng|m|n)?")
+
+
+def zulu_shaped(word: str) -> bool:
+    """A word spelled with isiZulu's letters in open syllables, which Zulu can say as it is written (Motaung, Mkhwanazi, Madlanga): a word the dictionary lacks
+    is left alone, not guessed by an English model that would read it as English.  No c, q or x, no consonant ending but ng, n or m, so Kaizer and Jacob are not."""
+    return bool(_ZULU_SYLLABLES.fullmatch(re.sub(r"[^a-z]", "", word.lower())))
 
 
 def makeable(table: Mapping) -> set[str]:
@@ -35,15 +48,18 @@ def makeable(table: Mapping) -> set[str]:
 
 
 class Interpreter:
-    def __init__(self, sounds: EnglishSounds, table: Mapping, speakers: Any = None) -> None:
+    def __init__(self, sounds: EnglishSounds, table: Mapping, speakers: Any = None, researched: Mapping[str, Mapping[str, Any]] | None = None) -> None:
         self.sounds, self.table, self.speakers = sounds, table, speakers
+        self.researched = dict(researched or {})          # sounds the job's web research found for names, by lowercase word: the first source for a name
         self._can = makeable(table) or set(letter_sounds.PRIOR)        # what the voice's own audio produced; the hand-written list only when there is none
 
     def readings(self, written: str) -> list[dict[str, Any]]:
         """The dictionary's readings; for a word it lacks that is not Zulu-shaped (Litchfield, not Nkandla), the guesser's, labelled ``guessed``."""
         from .pronunciation_search import looks_isizulu
 
-        return self.sounds.say(written, guess=self.sounds.guesser is not None and not looks_isizulu(written))
+        found = self.sounds.say(written, guess=self.sounds.guesser is not None and not looks_isizulu(written) and not zulu_shaped(written))
+        researched = self.researched.get(written.strip().lower())
+        return [dict(researched), *found] if researched and not (found and found[0]["how"] == "letters") else found
 
     def nearest_makeable(self, phone: str) -> tuple[str, float]:
         """The sound the voice can make that is nearest to ``phone`` on the chart, and how far."""
@@ -80,9 +96,47 @@ class Interpreter:
     def aims(self, phones: Sequence[str]) -> list[dict[str, Any]]:
         return [self.aim_for(phone) for phone in phones]          # a diphthong stays one sound: the corpus and the voice both treat it as one
 
+    def main_reading(self, written: str) -> dict[str, Any] | None:
+        """The one reading a word is spelled from: the job's researched sounds when there are any, else the dictionary's reading in the South African accent (no r after
+        a vowel), else its first; None when nothing has a reading (a Zulu name)."""
+        readings = self.readings(written)
+        if not readings:
+            return None
+        return readings[0] if readings[0]["how"] == "researched" else next((r for r in readings if r["accent"] == SPEAKER_ACCENT), readings[0])
+
+    def rules_spelling(self, written: str) -> dict[str, Any] | None:
+        """The word's spelling by rule alone, with the reading it came from and the rules it applied: no voice, no listener, no score.  None when the word has no reading."""
+        reading = self.main_reading(written)
+        if reading is None:
+            return None
+        ruled = (zulu_rules.respell_initialism(written, limit=1) if reading["how"] == "letters"
+                 else zulu_rules.respell_word(reading["phones"], reading["stress"], limit=1, written=written))
+        if not ruled:
+            return None
+        return {"word": written, "spelling": ruled[0]["spelling"], "derivation": ruled[0]["derivation"], "reading": reading["how"], "accent": reading["accent"],
+                "english": reading["phones"]}
+
+    @staticmethod
+    def rule_spellings(written: str, readings: Sequence[Mapping[str, Any]], *, limit: int = RULE_SPELLINGS) -> list[dict[str, Any]]:
+        """The English-to-Zulu rules' spellings (``zulu_rules``: no diphthongs, open syllables, stress as length) for the word's readings, the main choice of each
+        first, with the rules each applied.  They need no voice; the caller speaks and measures them like the rest."""
+        if not readings:
+            return []
+        if any(r["how"] == "letters" for r in readings):
+            groups = [(readings[0], zulu_rules.respell_initialism(written, limit=limit))]
+        else:
+            groups = [(r, zulu_rules.respell_word(r["phones"], r["stress"], limit=limit, written=written)) for r in readings[:2]]
+        out: list[dict[str, Any]] = []
+        for rank in range(limit):
+            for reading, ruled in groups:
+                if rank < len(ruled) and all(o["spelling"] != ruled[rank]["spelling"] for o in out):
+                    out.append({"spelling": ruled[rank]["spelling"], "cost": 0.0, "reading": reading["how"], "accent": reading["accent"], "english": reading["phones"],
+                                "aim": [], "source": "rules", "derivation": ruled[rank]["derivation"]})
+        return out[:limit]
+
     def spellings(self, written: str, *, limit: int = 8) -> dict[str, Any]:
-        """Spellings for a written word, best first, each with the reading and aim it came from; ``readings`` is empty when the dictionary and
-        the capitals rule say nothing (the word is left to the caller as it is written)."""
+        """Spellings for a written word, rules first and then the letters that make the voice say the aim, each with the reading it came from; ``readings`` is
+        empty when the dictionary and the capitals rule say nothing (the word is left to the caller as it is written)."""
         readings = self.readings(written)
         found: dict[str, dict[str, Any]] = {}
         for reading in readings:
@@ -92,8 +146,9 @@ class Interpreter:
                 if best is None or cost < best["cost"]:
                     found[spelling] = {"spelling": spelling, "cost": round(cost, 3), "reading": reading["how"], "accent": reading["accent"],
                                        "english": reading["phones"], "aim": [a["aim"] for a in aims]}
-        ranked = sorted(found.values(), key=lambda r: (r["cost"], len(r["spelling"]), r["spelling"]))[:limit]
-        return {"word": written, "readings": readings, "spellings": ranked}
+        ruled = self.rule_spellings(written, readings)
+        measured = [r for r in sorted(found.values(), key=lambda r: (r["cost"], len(r["spelling"]), r["spelling"])) if r["spelling"] not in {x["spelling"] for x in ruled}]
+        return {"word": written, "readings": readings, "spellings": ruled + measured[:limit]}
 
     @staticmethod
     def held_variants(spelling: str) -> list[str]:

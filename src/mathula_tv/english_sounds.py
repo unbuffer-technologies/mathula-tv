@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 ARPABET_TO_IPA: dict[str, str] = {
     "AA": "ɑː", "AE": "æ", "AH": "ʌ", "AO": "ɔː", "AW": "aʊ", "AY": "aɪ", "B": "b", "CH": "tʃ", "D": "d", "DH": "ð", "EH": "ɛ", "ER": "ɜː",
@@ -60,10 +60,14 @@ def non_rhotic(phones: list[str], stress: list[int | None] | None = None):
     out: list[str] = []
     kept: list[int | None] = []
     for index, phone in enumerate(phones):
-        if phone == "ɹ" and not (index + 1 < len(phones) and _starts_with_vowel(phones[index + 1])):
+        followed_by_vowel = index + 1 < len(phones) and _starts_with_vowel(phones[index + 1])
+        if phone == "ɹ" and not followed_by_vowel:
             continue
         out.append("ə" if phone == "ɚ" else phone)
         kept.append(stress[index] if stress is not None else None)
+        if phone == "ɚ" and followed_by_vowel:          # general, every, directorate: the r of the r-coloured vowel is said before a vowel
+            out.append("ɹ")
+            kept.append(None)
     return out if stress is None else (out, kept)
 
 
@@ -74,6 +78,17 @@ def _starts_with_vowel(phone: str) -> bool:
 def is_initialism(token: str) -> bool:
     clean = re.sub(r"[^\w']", "", token)
     return 2 <= len(clean) <= MAX_INITIALISM and clean.isalpha() and clean.isupper()
+
+
+def plural_initialism(token: str) -> str | None:
+    """The letters of an initialism written with a plural s (MPs, SUVs), else None."""
+    found = re.fullmatch(r"([A-Z]{2,})s", re.sub(r"[^\w']", "", token))
+    return found.group(1) if found and is_initialism(found.group(1)) else None
+
+
+def plural_sound(name: Sequence[str]) -> str:
+    """The plural ending after the last letter's name: s after p, t, k, f, th, z otherwise (MPs is em-peez, CDs is see-deez)."""
+    return "S" if name and name[-1] in ("P", "T", "K", "F", "TH") else "Z"
 
 
 def letter_name_sounds(written: str) -> set[tuple[str, ...]]:
@@ -143,12 +158,15 @@ class EnglishSounds:
     def _letters_arpabet(self, written: str) -> list[list[str]]:
         """The letter names of a word, as ARPAbet with a stress digit on each vowel: English stresses the LAST letter of a word said letter by letter
         (A-I has its weight on the I, H-I-V on the V) and the letters before it carry secondary stress."""
-        letters = [c for c in written.upper() if c.isalpha() and c in LETTER_NAMES]
+        plural = plural_initialism(written)
+        letters = [c for c in (plural or written).upper() if c.isalpha() and c in LETTER_NAMES]
         readings: list[list[list[str]]] = [[]]
         for position, letter in enumerate(letters):
             digit = "1" if position == len(letters) - 1 else "2"
             names = [LETTER_NAMES[letter], *LETTER_VARIANTS.get(letter, [])]
             marked = [[t + digit if t in VOWELS_ARPABET else t for t in name] for name in names]
+            if plural and position == len(letters) - 1:
+                marked = [[*name, plural_sound(name)] for name in marked]
             readings = [done + [name] for done in readings for name in marked]
         return [[token for name in reading for token in name] for reading in readings if reading]
 
@@ -171,7 +189,7 @@ class EnglishSounds:
         ``guess`` a word the dictionary lacks gets the guesser's reading, labelled ``"guessed"``: the caller decides which words may be guessed (a Zulu
         name read by an English model comes out English)."""
         key = re.sub(r"^[^\w']+|[^\w']+$", "", written).lower()
-        spelled = [("letters", reading) for reading in self._letters_arpabet(written)] if is_initialism(written) else []
+        spelled = [("letters", reading) for reading in self._letters_arpabet(written)] if is_initialism(written) or plural_initialism(written) else []
         spoken = [("word", reading) for reading in self.words.get(key, [])]
         if guess and not spelled and not spoken:
             spoken = [("guessed", reading) for reading in self.guess(written)]
