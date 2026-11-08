@@ -114,7 +114,17 @@ class Interpreter:
         if not ruled:
             return None
         return {"word": written, "spelling": ruled[0]["spelling"], "derivation": ruled[0]["derivation"], "reading": reading["how"], "accent": reading["accent"],
-                "english": reading["phones"]}
+                "english": reading["phones"], "choice": ruled[0].get("choice")}
+
+    def alternatives(self, written: str, *, limit: int = 8) -> list[dict[str, Any]]:
+        """The main spelling and the next ones the rules give for the word's main reading (ordered by how few open choices they change), each with its derivation
+        and the choice that made it: what the listener hears when the main spelling is not right.  Empty when the word has no reading."""
+        reading = self.main_reading(written)
+        if reading is None:
+            return []
+        ruled = (zulu_rules.respell_initialism(written, limit=limit) if reading["how"] == "letters"
+                 else zulu_rules.respell_word(reading["phones"], reading["stress"], limit=limit, written=written))
+        return [{"spelling": r["spelling"], "derivation": r["derivation"], "choice": r.get("choice"), "reading": reading["how"], "english": reading["phones"]} for r in ruled]
 
     @staticmethod
     def rule_spellings(written: str, readings: Sequence[Mapping[str, Any]], *, limit: int = RULE_SPELLINGS) -> list[dict[str, Any]]:

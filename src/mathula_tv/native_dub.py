@@ -787,7 +787,7 @@ def _render_native_master_with_ffmpeg_progress(
     temporary.replace(output_video)
     probe(output_video)
 
-PASS1_PROMPT_VERSION = "mathula-native-pass1-whole-transcript-stt-restorer-v3-cross-segment-duplication-guard"
+PASS1_PROMPT_VERSION = "mathula-native-pass1-whole-transcript-stt-restorer-v5-youtube-language-switch-and-gaps"
 PASS2_PROMPT_VERSION = "mathula-native-pass2-natural-zulu-v4-soft-duration-overflow-target"
 ROLLING_SYLLABLE_PROMPT_VERSION = "mathula-native-pass2-rolling-zulu-v1-causal-syllable-budget"
 TIMING_REPAIR_PROMPT_VERSION = "mathula-native-natural-timing-recast-v5-context-aware-expand"
@@ -897,11 +897,21 @@ _ZULU_GLOSSARY_CONTRACT: dict[str, Any] = {
     },
 }
 
+# A model that returns more terms than the glossary keeps used to fail this schema and cost a whole repair call each time (44 do-not-translate items against a limit
+# of 30, three calls of 15-45 s): the response is accepted a long way over the limit and `_normalize_zulu_glossary` trims it to the real one.
+_ZULU_GLOSSARY_RESPONSE_CONTRACT: dict[str, Any] = {
+    **_ZULU_GLOSSARY_CONTRACT,
+    "properties": {
+        **_ZULU_GLOSSARY_CONTRACT["properties"],
+        "terms": {**_ZULU_GLOSSARY_CONTRACT["properties"]["terms"], "maxItems": 300},
+        "do_not_translate": {**_ZULU_GLOSSARY_CONTRACT["properties"]["do_not_translate"], "maxItems": 300},
+    },
+}
 _ZULU_GLOSSARY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["zulu_terminology_glossary"],
-    "properties": {"zulu_terminology_glossary": _ZULU_GLOSSARY_CONTRACT},
+    "properties": {"zulu_terminology_glossary": _ZULU_GLOSSARY_RESPONSE_CONTRACT},
 }
 
 
@@ -927,12 +937,25 @@ _PASS1_SCHEMA: dict[str, Any] = {
                             "name_or_entity",
                             "punctuation_or_boundary",
                             "cross_block_reconstruction",
+                            "language_switch",
                         ]
                     },
                 },
             },
         },
         "context_ledger": _CONTEXT_LEDGER_CONTRACT,
+        "additions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["after_segment_id", "text"],
+                "properties": {
+                    "after_segment_id": {"type": "string", "minLength": 1},
+                    "text": {"type": "string", "minLength": 1},
+                },
+            },
+        },
     },
 }
 
@@ -1109,6 +1132,39 @@ repetition, hesitation, uncertainty, numbers, attribution, allegations or intent
 move content between segment IDs. Manual overrides are human-reviewed and authoritative.
 No web search or tools.
 
+LANGUAGE SWITCHES. The speaker may move between English, isiZulu, Sepedi, Sesotho or Afrikaans
+in the same breath, and the English recogniser writes the other languages as nonsense English
+("Siyipatala through tax"). Some segments carry "yt": YouTube's own automatic caption text for
+the same moment, and youtube_track names the language YouTube heard ("zu-orig" isiZulu,
+"en-orig" English). It is an independent second reading: often right where the English
+recogniser is nonsense, and wrong where the English recogniser is right (plain English). When
+the English text of a segment is plainly not English speech, and yt or the argument of the
+surrounding segments shows the words the speaker really said, correct the segment to those
+words with reason_code "language_switch": keep isiZulu, Sepedi or Sesotho words as spoken in
+their own language (never translate them and never force them into English) and keep the
+genuine English words. Where the English text is sensible English, keep it even if yt differs;
+never copy yt wholesale when it is only a different spelling of the same words; when neither
+reading is credible, leave the segment alone.
+
+MISSED SPEECH. youtube_gaps lists stretches of the video that the transcript has no segment
+for: after = the segment just before the stretch, gap_s its length in seconds, yt = YouTube's
+caption text there. The English recogniser sometimes skips speech altogether (a short burst of
+isiZulu or English under a crowd). Where yt shows credible speech that the neighbouring
+segments do not already hold, return it in additions as after_segment_id + text, written the
+way a language switch is restored (isiZulu, Sepedi or Sesotho as spoken, English as English).
+yt can repeat words the segment before or after the gap already has, because caption lines
+overlap the stretch: add only the words that are new, never repeat a neighbour's words, and
+add nothing for noise, applause, a repeat or text you cannot trust. When in doubt, add nothing.
+
+LISTENER EXAMPLES. When listener_examples is present, each entry is a stretch of an earlier
+video where the transcript and the caption disagreed and the listener, who hears the real
+audio, decided: transcript = the English recogniser's text, caption_track and caption =
+YouTube's, model_wrote = an earlier restoration, listener_decided = the final text, winner
+= which reading was right. They are the best evidence of how this speaker's languages and
+YouTube's captions behave: where a new segment is confused in the same way, resolve it the
+way the listener did (keep the transcript where the listener kept it, take the caption's
+words only where the listener did), and never copy an example's words into another segment.
+
 The input segments use id/spk/text. Return sparse corrections only; do NOT echo original
 text. Also return one small reusable context_ledger: a neutral <=120-word programme
 summary, canonical entities/roles, inferred speaker roles when clear, and up to 8 factual
@@ -1151,7 +1207,8 @@ actually contain.
 
 do_not_translate lists proper nouns, acronyms, and case/file numbers that must survive into the
 isiZulu output completely unchanged (e.g. "IDAC", a case number, a foreign institution's own
-official name) -- these are NOT translated, ever, by any later call.
+official name) -- these are NOT translated, ever, by any later call. Return at most 40 terms and
+at most 30 do_not_translate items: the most important ones; anything beyond that is discarded.
 
 register describes the isiZulu register the ENTIRE translation should hold: formality level
 (e.g. formal broadcast/legal register vs. conversational), address form (e.g. use of Mnu./
@@ -1961,7 +2018,10 @@ and avoid wording likely to finish materially earlier than src_ms. Never sound t
 never omit information merely to hit time, and never invent filler or new facts. Naturalness
 and semantic fidelity remain mandatory.
 
-Input entries use id/spk/text plus optional timing fields. context_ledger is cached
+Input entries use id/spk/text plus optional timing fields. A segment may hold the speaker's
+own isiZulu, Sepedi or Sesotho words (restored from YouTube's captions where the English
+recogniser had written nonsense): keep isiZulu as isiZulu, say Sepedi or Sesotho in plain
+isiZulu, and never treat those words as errors. context_ledger is cached
 whole-program context. When neighbour_context is supplied it is read-only continuity
 context; translate ONLY segments. Return each requested segment exactly once, in order, as
 segment_id + spoken_text. Do not echo English source text. If output_contract requests
@@ -2622,9 +2682,17 @@ def run_native_pass1(
         f"[native pass 1] Loaded {len(segments)} source segments from {transcript_path.name}",
     )
     overrides = _load_manual_overrides(paths.web_overrides)
+    from .youtube_captions import hints as youtube_hints
+
+    from .youtube_captions import gaps as youtube_gaps
+
+    youtube = youtube_hints(Path(job_root), segments)          # YouTube's captions, for the segments the English recogniser and they disagree on
+    gap_list = youtube_gaps(Path(job_root), segments)          # and for the stretches the transcript has no segment for
     input_hash = _hash_payload({
         "transcript_sha256": checksum(transcript_path),
         "overrides": overrides,
+        "youtube": youtube,
+        "youtube_gaps": gap_list,
         "prompt_version": PASS1_PROMPT_VERSION,
         "provider_version": FOUNDRY_GROK_PROVIDER_VERSION,
     })
@@ -2632,6 +2700,11 @@ def run_native_pass1(
         existing = read_json(paths.pass1)
         if existing.get("input_sha256") == input_hash:
             _emit_progress(progress, "[native pass 1] Reusing matching completed checkpoint")
+            from .language_questions import apply_to_segments
+
+            if apply_to_segments(Path(job_root), existing.get("segments") or []):          # what the listener answered in the console since this checkpoint was made
+                atomic_write_json(paths.pass1, existing)
+                _emit_progress(progress, "[native pass 1] The listener's answers changed the text of some segments")
             return existing
 
     _whole_transcript_preflight(segments, stage="native pass 1")
@@ -2641,6 +2714,21 @@ def run_native_pass1(
         "segments": _compact_wire_segments(segments, text_key="source_text"),
         "manual_overrides": _compact_manual_overrides(overrides),
     }
+    if youtube:
+        payload["youtube_track"] = youtube["track"]
+        for row in payload["segments"]:
+            if row["id"] in youtube["segments"]:
+                row["yt"] = youtube["segments"][row["id"]]
+        _emit_progress(progress, f"[native pass 1] YouTube captions ({youtube['track']}) differ in {len(youtube['segments'])} segment(s): shown to the restoration")
+    if gap_list:
+        payload["youtube_gaps"] = [{"after": g["after"], "gap_s": round((g["end_ms"] - g["start_ms"]) / 1000.0, 1), "yt": g["yt"]} for g in gap_list]
+        _emit_progress(progress, f"[native pass 1] {len(gap_list)} stretch(es) have captions but no transcript segment: shown to the restoration")
+    from .language_questions import apply_to_segments, examples as listener_examples, work_dir_of
+
+    shown = listener_examples(work_dir_of(Path(job_root)))          # not part of the input hash: a lesson from one video must not redo another video's finished pass 1
+    if shown:
+        payload["listener_examples"] = shown
+        _emit_progress(progress, f"[native pass 1] {len(shown)} earlier correction(s) by the listener shown to the restoration")
     response = provider.complete_json(
         operation="native_stt_restoration",
         system_prompt=PASS1_SYSTEM_PROMPT,
@@ -2658,6 +2746,7 @@ def run_native_pass1(
         f"[native pass 1] Grok returned {len(corrections)} accepted STT correction(s); building restored transcript...",
     )
     corrected = {item["segment_id"]: item for item in corrections}
+    additions = _accepted_additions(response.data.get("additions"), gap_list, progress)
     restored_segments: list[dict[str, Any]] = []
     for segment in segments:
         item = dict(segment)
@@ -2681,6 +2770,15 @@ def run_native_pass1(
         item["changed"] = correction is not None
         if correction:
             item["reason_code"] = correction["reason_code"]
+        added = additions.get(segment["segment_id"])
+        if added:                                                 # speech the transcript skipped, found in YouTube's captions, goes at the end of the segment before it
+            from .source_suspects import _extend_window
+
+            item["restored_text"] = f"{item['restored_text']} {added['text']}".strip()
+            item["added_from_youtube"] = added["text"]
+            item["changed"] = True
+            item.setdefault("reason_code", "missed_speech")
+            _extend_window(item, segments, added["end_ms"])
         suspected_year = _find_suspected_truncated_year(candidate_text)
         if suspected_year is not None:
             item["suspected_truncated_year"] = True
@@ -2692,6 +2790,7 @@ def run_native_pass1(
                 "digits can't be recovered from text alone); review before this reaches translation.",
             )
         restored_segments.append(item)
+    apply_to_segments(Path(job_root), restored_segments)          # the listener's answers for this job outrank the model
 
     artifact = {
         "schema_version": STT_RESTORATION_SCHEMA_VERSION,
@@ -10877,13 +10976,20 @@ def _normalize_zulu_glossary(value: Any) -> dict[str, Any]:
     return fix_glossary(glossary)[0]            # "Fighters" is never rendered "maFighter": see english_prefix
 
 
+def _glossary_text_sha(segments: Sequence[Mapping[str, Any]]) -> str:
+    """What the glossary is decided from: the restored English of each segment. A change to anything else in the pass-1 file (a speaker relabelled, a timing)
+    leaves the terminology as it was, and must not cost a new call."""
+    return _hash_payload({"segments": [[str(item.get("segment_id")), str(item.get("restored_text") or item.get("source_text") or "")] for item in segments]})
+
+
 def _write_zulu_glossary(
-    *, paths: NativeDubPaths, pass1_sha256: str, glossary: Mapping[str, Any], usage: Mapping[str, Any],
+    *, paths: NativeDubPaths, pass1_sha256: str, glossary: Mapping[str, Any], usage: Mapping[str, Any], text_sha256: str | None = None,
 ) -> None:
     atomic_write_json(paths.zulu_glossary, {
         "schema_version": ZULU_GLOSSARY_SCHEMA_VERSION,
         "prompt_version": ZULU_GLOSSARY_PROMPT_VERSION,
         "source_pass1_sha256": pass1_sha256,
+        "source_text_sha256": text_sha256,
         "zulu_terminology_glossary": dict(glossary),
         "usage": {
             "input_tokens": int(usage.get("input_tokens") or 0),
@@ -10912,6 +11018,7 @@ def _ensure_zulu_glossary(
     """
     paths = native_dub_paths(job_root)
     pass1_sha256 = checksum(paths.pass1)
+    text_sha256 = _glossary_text_sha(segments)
     if paths.zulu_glossary.is_file() and not force:
         cached = read_json(paths.zulu_glossary)
         # Real gap found 2026-09-08: this only ever compared source_pass1_sha256,
@@ -10919,7 +11026,7 @@ def _ensure_zulu_glossary(
         # gets treated as BINDING by every later translation call) silently never
         # took effect on an unchanged transcript without also passing --force.
         if (
-            cached.get("source_pass1_sha256") == pass1_sha256
+            (cached.get("source_pass1_sha256") == pass1_sha256 or cached.get("source_text_sha256") == text_sha256)
             and cached.get("prompt_version") == ZULU_GLOSSARY_PROMPT_VERSION
         ):
             glossary = _normalize_zulu_glossary(cached.get("zulu_terminology_glossary"))
@@ -10956,7 +11063,7 @@ def _ensure_zulu_glossary(
         "output_tokens": int(response.output_tokens),
         "attempts": int(response.attempts),
     }
-    _write_zulu_glossary(paths=paths, pass1_sha256=pass1_sha256, glossary=glossary, usage=usage)
+    _write_zulu_glossary(paths=paths, pass1_sha256=pass1_sha256, glossary=glossary, usage=usage, text_sha256=text_sha256)
     _emit_progress(
         progress,
         f"[native glossary] Decided {len(glossary['terms'])} term(s), "
@@ -11905,10 +12012,12 @@ def _ensure_native_pronunciation_research(
         "context_ledger": context_ledger, "glossary": glossary,
         "skip_round_trip_verification": bool(skip_round_trip_verification),
     })
+    # research done with the round-trip check is as good as research done without it: switching the check off must not throw a job's research away
+    either_way = {_hash_payload({"context_ledger": context_ledger, "glossary": glossary, "skip_round_trip_verification": flag}) for flag in (False, True)}
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "attempts": 0}
     if paths.pronunciation_research.is_file() and not force:
         cached = read_json(paths.pronunciation_research)
-        if cached.get("source_hash") == source_hash:
+        if cached.get("source_hash") in either_way:
             _emit_progress(progress, "[native pronunciation] Reusing cached pronunciation research")
             _apply_native_pronunciation_research_to_job_cache(job_root, cached)
             usage = cached.get("usage") if isinstance(cached.get("usage"), Mapping) else {}
@@ -16318,6 +16427,39 @@ def _batch_neighbour_context(
     return _compact_wire_segments([all_segments[pos] for pos in positions], text_key="source_text")
 
 
+def _resolve_segment_id(given: Any, known: Mapping[str, Any]) -> str | None:
+    """The transcript's own id for the one a model wrote: exactly as given, else by its number when that names one segment ("seg-23" for "seg-00023"); None when it
+    names none or more than one."""
+    given = str(given or "").strip()
+    if given in known:
+        return given
+    digits = re.search(r"(\d+)\s*$", given)
+    if not digits:
+        return None
+    number = int(digits.group(1))
+    matches = [key for key in known if (m := re.search(r"(\d+)\s*$", str(key))) and int(m.group(1)) == number]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _accepted_additions(raw: Any, gaps: Sequence[Mapping[str, Any]], progress: Callable[[str], None] | None = None) -> dict[str, dict[str, Any]]:
+    """The restoration's additions for the gaps it was shown: one per segment, each tied to a real gap (the window it may extend into is ours, not the model's)."""
+    by_after = {str(g["after"]): g for g in gaps}
+    accepted: dict[str, dict[str, Any]] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        after, text = _resolve_segment_id(item.get("after_segment_id"), by_after) or str(item.get("after_segment_id") or ""), " ".join(str(item.get("text") or "").split())
+        gap = by_after.get(after)
+        if gap is None or not text:
+            _emit_progress(progress, f"[native pass 1] WARNING ignoring an addition after {after!r}: it is not one of the gaps shown")
+            continue
+        if after in accepted:
+            accepted[after]["text"] += " " + text
+        else:
+            accepted[after] = {"text": text, "end_ms": int(gap["end_ms"])}
+    return accepted
+
+
 def _normalize_pass1(
     data: Mapping[str, Any],
     segments: Sequence[Mapping[str, Any]],
@@ -16334,9 +16476,12 @@ def _normalize_pass1(
     seen: set[str] = set()
     normalized: list[dict[str, Any]] = []
     for correction in data["corrections"]:
-        segment_id = correction["segment_id"]
-        if segment_id not in source:
-            raise ValueError(f"Pass 1 returned unknown segment_id: {segment_id}")
+        segment_id = _resolve_segment_id(correction["segment_id"], source)
+        if segment_id is None:
+            # one mistyped id is a lost correction, not a lost pass: the whole-transcript call is the expensive part of the pipeline
+            _emit_progress(progress, f"[native pass 1] WARNING dropping a correction for unknown segment_id {correction['segment_id']!r}")
+            continue
+        correction = {**correction, "segment_id": segment_id}
         if segment_id in seen:
             raise ValueError(f"Pass 1 returned duplicate correction: {segment_id}")
         seen.add(segment_id)

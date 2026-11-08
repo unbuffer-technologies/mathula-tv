@@ -58,6 +58,12 @@ def source_corrections_sha(native_dir: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
 
 
+def pass1_sha(native_dir: Path) -> str | None:
+    """Checksum of a job's Pass 1 (the restored transcript), recorded when a clip is frozen so a later change to it can be seen."""
+    path = Path(native_dir) / "pass1_restored_transcript.json"
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
 CORPUS_SCHEMA = "mathula-experience-corpus-v1"
 RUN_SCHEMA = "mathula-experience-run-v1"
 
@@ -208,6 +214,7 @@ class ExperienceStore:
         segments = read_json(frozen / "pass1_restored_transcript.json").get("segments") or []
         entry = {
             "source_corrections_sha": source_corrections_sha(native),
+            "pass1_sha": pass1_sha(native),
             "glossary_sha": glossary_sha(native),
             "job_id": job_root.name,
             "frozen_at": _now(),

@@ -19,9 +19,13 @@ many departures from the main choice they make; the caller speaks them in a voic
 from __future__ import annotations
 
 import itertools
+import json
+import os
 import re
 from dataclasses import dataclass
-from typing import Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Sequence
 
 CONSONANTS: dict[str, list[str]] = {
     "p": ["p"], "b": ["b"], "t": ["t"], "d": ["d"], "k": ["k"], "ɡ": ["g"], "g": ["g"], "tʃ": ["tsh", "ch"], "dʒ": ["j"], "f": ["f"], "v": ["v"], "θ": ["th", "s"],
@@ -164,11 +168,97 @@ def _write(units: list[Syl], choice: Choice, *, held: bool, final_only: bool, no
     return text
 
 
+# What each open choice of the rules means, in words a listener can read in the console: its label, and what each of its options does to a spelling.
+RULE_LABELS: dict[str, tuple[str, dict[Any, str]]] = {
+    "epen": ("Vowel added after a consonant that has none", {"i": "i", "u": "u after a rounded sound"}),
+    "diph": ("A diphthong at the end of a letter or word", {"full": "vowel + glide + vowel to rest on (eyi)", "glide": "vowel + glide only (ey)"}),
+    "hold": ("How long the stressed last letter of an initialism is held", {1: "as the rule says (aayi)", 0: "not held (ayi)", 2: "one letter longer"}),
+    "hold_form": ("How a held long i or u is held", {"repeat": "the vowel repeated (siii)", "glide": "a glide added (siyi)"}),
+    "cons": ("A consonant with two spellings", {0: "the usual one (tsh, kh)", 1: "the other one (ch, k)"}),
+    "aspirate": ("p, t, k that open a stressed syllable", {1: "written ph, th, kh", 0: "written plain p, t, k"}),
+    "final_vowel": ("The last consonant of a word", {0: "stays bare (jeykob)", 1: "gets a vowel after it (jeykobi)"}),
+    "cluster_vowel": ("Consonants that come together", {0: "stay together (westen)", 1: "a vowel breaks them (wesiten)"}),
+    "letter_vowel": ("A reduced vowel and the vowels of lot and palm", {1: "follow the letter of the English spelling (jeykob)", 0: "are the English sound (jeykab)"}),
+    "yod": ("The y of news, Tuesday, student", {1: "kept, as South African English says it (nyuuz)", 0: "dropped (nuuz)"}),
+    "short_stress": ("A short vowel with the main stress", {1: "written twice (waatsap)", 0: "written once (watsap)"}),
+    "length": ("A stressed long vowel inside a word", {1: "written twice (khoot)", 0: "written once (khot)"}),
+    "join": ("Between the letters of an initialism", {"-": "a hyphen (eyi-aayi)", " ": "a space, each letter capitalised (Eyi Aayi)"}),
+}
+RULES_CONFIG_ENV = "MATHULA_TV_RULES_CONFIG"
+_config_seen: dict[str, Any] = {"path": None, "mtime": None, "defaults": {}}
+
+
+def rules_config_path() -> Path:
+    """Where the listener's choices of default are kept: the console writes it, the rules read it (``working/rules_config.json`` next to the code unless the
+    environment says otherwise)."""
+    return Path(os.environ.get(RULES_CONFIG_ENV) or Path(__file__).resolve().parents[2] / "working" / "rules_config.json")
+
+
+def rule_defaults() -> dict[str, Any]:
+    """The default picked for each open choice by the listener ({} = the rules as written); re-read when the file changes."""
+    path = rules_config_path()
+    try:
+        stat = path.stat()
+        mtime = (stat.st_mtime_ns, stat.st_size)           # a timestamp alone can repeat between two quick writes on a coarse clock (Windows): the size helps, and a write here forgets the cache
+    except OSError:
+        mtime = None
+    if _config_seen["path"] != str(path) or _config_seen["mtime"] != mtime:
+        defaults: dict[str, Any] = {}
+        if mtime is not None:
+            try:
+                value = json.loads(path.read_text(encoding="utf-8")).get("defaults") or {}
+                defaults = {name: pick for name, pick in value.items() if name in RULE_LABELS and pick in RULE_LABELS[name][1]}
+            except (OSError, ValueError, AttributeError):
+                defaults = {}
+        _config_seen.update(path=str(path), mtime=mtime, defaults=defaults)
+    return dict(_config_seen["defaults"])
+
+
+def write_rule_default(name: str, pick: Any, *, path: Path | None = None, note: str = "") -> dict[str, Any]:
+    """Make ``pick`` the default of one open choice (``pick=None`` puts it back to the rule as written).  Keeps the history of changes with the reason."""
+    if name not in RULE_LABELS:
+        raise ValueError(f"unknown rule: {name}")
+    if pick is not None and pick not in RULE_LABELS[name][1]:
+        raise ValueError(f"{name} has no option {pick!r}")
+    path = Path(path) if path else rules_config_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    defaults = dict(data.get("defaults") or {})
+    before = defaults.get(name)
+    if pick is None:
+        defaults.pop(name, None)
+    else:
+        defaults[name] = pick
+    history = list(data.get("history") or [])
+    history.append({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "rule": name, "from": before, "to": pick, "note": note})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"defaults": defaults, "history": history[-200:]}, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    _config_seen.update(path=None, mtime=None)             # this process re-reads the file on its next question, whatever the file's timestamp says
+    return defaults
+
+
+def choice_differences(main: Choice, other: Choice) -> list[dict[str, Any]]:
+    """The open choices on which ``other`` departs from ``main``, with words for each."""
+    found = []
+    for name, (label, options) in RULE_LABELS.items():
+        a, b = getattr(main, name), getattr(other, name)
+        if a != b:
+            found.append({"rule": name, "label": label, "main": a, "other": b, "main_means": options.get(a, str(a)), "other_means": options.get(b, str(b))})
+    return found
+
+
 def _choices(letters: bool, held: bool) -> list[Choice]:
-    """Every combination of the open choices, the main choice first and then those that depart from it least."""
+    """Every combination of the open choices, the main choice first and then those that depart from it least.  The main choice is the rules as written,
+    except where the listener has picked another default for a choice (``rule_defaults``)."""
     dims = [("epen", ["i", "u"]), ("diph", ["full", "glide"]), ("hold", [1, 0, 2] if held else [1]), ("hold_form", ["repeat", "glide"] if held else ["repeat"]),
             ("cons", [0, 1]), ("length", [1] if letters else [1, 0]), ("aspirate", [1] if letters else [1, 0]), ("final_vowel", [0, 1]), ("cluster_vowel", [0] if letters else [0, 1]), ("letter_vowel", [0] if letters else [1, 0]), ("short_stress", [0] if letters else [1, 0]), ("yod", [0] if letters else [1, 0]),
             ("join", ["-", " "] if letters else ["-"])]
+    chosen = rule_defaults()
+    dims = [(name, [chosen[name], *[o for o in options if o != chosen[name]]] if chosen.get(name) in options else options) for name, options in dims]
     combos = itertools.product(*[range(len(options)) for _, options in dims])
     ordered = sorted(combos, key=lambda picks: (sum(1 for p in picks if p), picks))
     return [Choice(**{name: options[pick] for (name, options), pick in zip(dims, picks)}) for picks in ordered]
@@ -337,8 +427,8 @@ def research_readings(research: dict) -> dict[str, dict]:
         if (item.get("pronunciation_mode") != "word_name" or not ipa or float(item.get("pronunciation_confidence") or 0) < MIN_RESEARCH_CONFIDENCE
                 or not item.get("pronunciation_evidence_urls") or ("zulu" in language.lower() and "english" not in language.lower())):
             continue
-        words = [w for w in str(item.get("canonical_text") or "").replace(".", " ").split() if w]
-        parsed = parse_ipa(ipa)
+        words = [w for w in re.sub(r"[().,;:]", " ", str(item.get("canonical_text") or "")).split() if w]          # "Democratic Alliance (DA)": the brackets are not a word
+        parsed = parse_ipa(re.sub(r"[,;:!?()\[\]]", " ", ipa))          # research writes "əˈlaɪəns, ˌdiːˈeɪ": the comma between the name and its initialism is not a sound
         if len(words) != len(parsed):
             continue
         for word, (phones, stress) in zip(words, parsed):

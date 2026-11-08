@@ -23,7 +23,7 @@ def test_initialisms_researched_words_and_dictionary_words_that_are_not_zulu_are
     found = find([TEXT])
     assert found == ["Heidi", "MK", "Party", "SABC", "MPs", "WhatsApp", "Jacob"]          # in order of appearance; ngithe is Zulu, the compound is Zulu
     assert "Zuma" not in found and "Sawubona" not in found
-    assert find(["uZuma"], researched={"zuma": {}}) == ["Zuma"]                              # a word the research has sounds for is taken
+    assert find(["uLitchfield"], researched={"litchfield": {}}) == ["Litchfield"]            # a word the research has sounds for is taken (a Zulu name is not: see below)
     assert find(["Ngithe uma. Uma kuhle."]) == []                                              # Zulu words are not English because the dictionary has a namesake
 
 
@@ -53,3 +53,18 @@ def test_spellings_chosen_by_ear_for_a_job_stand_beside_the_rule_spellings(tmp_p
 def test_a_written_ordinal_is_said_as_the_english_number():
     assert [jp.ordinal_words(n) for n in (1, 2, 3, 5, 12, 20, 22, 31)] == [["one"], ["two"], ["three"], ["five"], ["twelve"], ["twenty"], ["twenty", "two"], ["thirty", "one"]]          # ngo-22nd is "ngo twenty two": ka- takes the cardinal
     assert jp.ordinals(["zango-22nd kule nyanga", "ngo-22nd October", "ku-3rd na-4th", "R22 nd", "2020"]) == ["22nd", "3rd", "4th"]
+
+
+def test_a_zulu_name_is_left_alone_even_when_web_research_gave_it_english_sounds_but_an_english_name_is_not():
+    found = jp.candidates(["uJacob Zuma noCyril Ramaphosa Nomvalo Heidi"], researched={"zuma": {}, "ramaphosa": {}, "nomvalo": {}, "heidi": {}, "jacob": {}},
+                          dictionary=lambda w: w in {"jacob", "heidi"}, zulu_count=lambda w: 0)
+    assert found == ["Jacob", "Heidi"]
+    assert jp.candidates(["i-AI ne-MK"], researched={}, dictionary=lambda w: False, zulu_count=lambda w: 0) == ["AI", "MK"]          # initialisms are not names
+
+
+def test_the_letters_after_a_digit_are_not_a_word(tmp_path):
+    from mathula_tv.job_pronunciations import candidates
+
+    found = candidates(["Ngomhla we-4th kuNovemba, ngo-22nd, ne-3rd, nango-1st. Sawubona Hello."], researched={}, dictionary=lambda w: w in {"th", "nd", "rd", "st", "hello"},
+                       zulu_count=lambda w: 0)
+    assert "th" not in found and "nd" not in found and "rd" not in found and "st" not in found and "Hello" in found

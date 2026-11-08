@@ -1,0 +1,530 @@
+import json
+
+import pytest
+
+from mathula_tv import zulu_rules
+from mathula_tv.console import Console
+
+JOB = "abcd1234" + "0" * 24
+CLIP = JOB[:8]
+THANDO, THEMBA = "zu-ZA-ThandoNeural", "zu-ZA-ThembaNeural"
+PASSWORD = "correct horse battery"
+
+
+@pytest.fixture()
+def world(tmp_path, monkeypatch):
+    monkeypatch.setenv(zulu_rules.RULES_CONFIG_ENV, str(tmp_path / "rules_config.json"))
+    work = tmp_path / "work"
+    (work / "resources" / "cmudict").mkdir(parents=True)
+    (work / "resources" / "cmudict" / "cmudict.dict").write_text("jacob JH EY1 K AH0 B\nheidi HH AY1 D IY0\ncourt K AO1 R T\n", encoding="utf-8")
+    (work / "experience" / "runs" / "prod-1" / CLIP / "r1").mkdir(parents=True)
+    (work / "experience" / "corpus.json").write_text(json.dumps({"schema_version": "mathula-experience-corpus-v1", "clips": {CLIP: {"job_id": JOB}}}), encoding="utf-8")
+    items = [{"item_id": "u1", "speaker_id": "S0", "zulu_text": "Sawubona Heidi. UJacob Zuma ukhulumile ne-SABC namuhla."},
+             {"item_id": "u2", "speaker_id": "S1", "zulu_text": "Jacob uthe akazukuphendula."}]
+    (work / "experience" / "runs" / "prod-1" / CLIP / "r1" / "submission.json").write_text(json.dumps({"items": items}), encoding="utf-8")
+    (work / "jobs" / JOB / "direct_dub").mkdir(parents=True)
+    (work / "jobs" / JOB / "manifest.json").write_text(json.dumps({"source_filename": "madlanga.mp4", "created_at": "2026-11-02T10:00:00+00:00"}), encoding="utf-8")
+    (work / "jobs" / JOB / "direct_dub" / "voice_resolution.json").write_text(json.dumps({"assignments": {"S0": {"selected_voice": THANDO}, "S1": {"selected_voice": THEMBA}}}), encoding="utf-8")
+    spoken = []
+
+    def fake_synth(*, job_root, speaker, voice, text, target):
+        spoken.append((voice, text))
+        target.write_bytes(b"RIFFfake")
+
+    console = Console(work, synthesize=fake_synth)
+    console.set_password(PASSWORD)
+    console.spoken = spoken
+    return console
+
+
+def call(console, method, path, body=None, cookie=None, csrf=True):
+    headers = {}
+    if cookie:
+        headers["Cookie"] = f"session={cookie}"
+    if csrf and method != "GET":
+        headers["X-Requested-With"] = "console"
+    status, response_headers, payload = console.handle(method, path, headers, json.dumps(body).encode() if body is not None else b"")
+    return status, response_headers, (json.loads(payload) if response_headers.get("Content-Type", "").startswith("application/json") else payload)
+
+
+def signed_in(console):
+    status, headers, _ = call(console, "POST", "/api/login", {"password": PASSWORD})
+    assert status == 200 and "HttpOnly" in headers["Set-Cookie"] and "SameSite=Strict" in headers["Set-Cookie"] and "Secure" in headers["Set-Cookie"]
+    return headers["Set-Cookie"].split(";")[0].split("=", 1)[1]
+
+
+def test_nothing_but_the_page_answers_before_sign_in_and_the_page_carries_a_strict_policy(world):
+    status, headers, body = call(world, "GET", "/")
+    assert status == 200 and b"Pronunciation Console" in body
+    nonce = headers["Content-Security-Policy"].split("nonce-")[1].split("'")[0]
+    assert f'nonce="{nonce}"'.encode() in body and "default-src 'none'" in headers["Content-Security-Policy"] and "frame-ancestors 'none'" in headers["Content-Security-Policy"]
+    for path in ("/api/jobs", "/api/book", "/api/rules", "/api/session", "/audio/" + "a" * 32 + ".wav"):
+        assert call(world, "GET", path)[0] == 401
+    assert call(world, "POST", "/api/correct", {"word": "x"}, csrf=False)[0] == 403          # no X-Requested-With: not from the page
+
+
+def test_a_wrong_password_is_refused_and_five_wrong_ones_lock_the_door_for_ten_minutes(world, monkeypatch):
+    monkeypatch.setattr("mathula_tv.console.time.sleep", lambda _s: None)
+    for _ in range(5):
+        assert call(world, "POST", "/api/login", {"password": "nope-nope-nope"})[0] == 401
+    status, _, body = call(world, "POST", "/api/login", {"password": PASSWORD})
+    assert status == 429 and "ten minutes" in body["error"]
+
+
+def test_a_session_cookie_expires_and_cannot_be_forged(world):
+    cookie = signed_in(world)
+    assert call(world, "GET", "/api/session", cookie=cookie)[0] == 200
+    assert call(world, "GET", "/api/session", cookie=cookie[:-4] + "0000")[0] == 401
+    assert call(world, "GET", "/api/session", cookie="9999999999.abc.def")[0] == 401
+    world.clock = lambda: 4_000_000_000                                                  # long after it was issued
+    assert call(world, "GET", "/api/session", cookie=cookie)[0] == 401
+
+
+def test_the_password_is_stored_only_as_a_hash_and_must_be_long_enough(world):
+    stored = (world.dir / "auth.json").read_text(encoding="utf-8")
+    assert PASSWORD not in stored and "hash" in stored
+    with pytest.raises(ValueError):
+        world.set_password("short")
+
+
+def test_the_review_lists_the_dubs_and_the_words_the_rules_found_with_what_they_say(world):
+    cookie = signed_in(world)
+    jobs = call(world, "GET", "/api/jobs", cookie=cookie)[2]
+    assert jobs[0]["job"] == JOB and jobs[0]["name"] == "madlanga.mp4" and jobs[0]["runs"][0]["run"] == "prod-1"
+    words = {w["word"]: w for w in call(world, "GET", f"/api/words?job={JOB}&run=prod-1", cookie=cookie)[2]}
+    assert {"Jacob", "Heidi", "SABC"} <= set(words) and words["Jacob"]["status"] == "unreviewed" and words["Jacob"]["spelling"] == "jeykob" and words["Jacob"]["times"] == 2
+    detail = call(world, "GET", f"/api/word?job={JOB}&run=prod-1&word=Jacob", cookie=cookie)[2]
+    assert detail["rules"] == "jeykob" and detail["derivation"] and detail["alternatives"][0]["spelling"] == "jeykob" and detail["alternatives"][0]["differences"] == []
+    assert any(a["spelling"] == "jeykab" and a["differences"][0]["rule"] == "letter_vowel" for a in detail["alternatives"])
+    assert {s["voice"] for s in detail["samples"]} == {THANDO, THEMBA}
+    assert call(world, "GET", f"/api/word?job={JOB}&run=prod-1&word=Nobody", cookie=cookie)[0] == 404
+    assert call(world, "GET", "/api/words?job=../../etc&run=prod-1", cookie=cookie)[0] == 400
+
+
+def test_hearing_a_spelling_says_the_real_sentence_with_it_in_the_right_voice_and_a_clip_already_made_is_free(world):
+    cookie = signed_in(world)
+    body = {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jeykab", "voice": THEMBA, "sample": 0}
+    status, _, first = call(world, "POST", "/api/audio", body, cookie)
+    assert status == 200 and first["url"].startswith("/audio/") and "jeykab" in first["text"] and "Jacob" not in first["text"] and world.spoken[0][0] == THEMBA
+    again = call(world, "POST", "/api/audio", body, cookie)[2]
+    assert again["url"] == first["url"] and len(world.spoken) == 1
+    clip = call(world, "GET", first["url"], cookie=cookie)
+    assert clip[0] == 200 and clip[2] == b"RIFFfake" and clip[1]["Content-Type"] == "audio/wav"
+    assert call(world, "GET", "/audio/../../auth.json", cookie=cookie)[0] == 404
+    assert call(world, "POST", "/api/audio", {**body, "voice": "en-US-Someone"}, cookie)[0] == 400
+    assert call(world, "POST", "/api/audio", {**body, "spelling": "<script>"}, cookie)[0] == 400
+
+
+def test_there_is_a_ceiling_on_new_clips_a_day(world):
+    world.max_audio_per_day = 2
+    cookie = signed_in(world)
+    for spelling in ("jeykob", "jeykab"):
+        assert call(world, "POST", "/api/audio", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": spelling, "voice": THANDO}, cookie)[0] == 200
+    status, _, body = call(world, "POST", "/api/audio", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jakobe", "voice": THANDO}, cookie)
+    assert status == 429 and "limit" in body["error"]
+    assert call(world, "POST", "/api/audio", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jeykob", "voice": THANDO}, cookie)[0] == 200          # again: free
+
+
+def test_correct_commits_the_spelling_and_the_next_job_uses_it(world):
+    cookie = signed_in(world)
+    call(world, "POST", "/api/correct", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jeykob"}, cookie)
+    entry = call(world, "GET", "/api/book", cookie=cookie)[2]["entries"][0]
+    assert entry["word"] == "Jacob" and entry["kind"] == "approved" and entry["spelling"] == {"*": "jeykob"}
+    words = {w["word"]: w for w in call(world, "GET", f"/api/words?job={JOB}&run=prod-1", cookie=cookie)[2]}
+    assert words["Jacob"]["status"] == "approved"
+    from mathula_tv import job_pronunciations as jp
+    from mathula_tv import pronunciation_book as book
+
+    done = jp.with_committed_words([], book.load(world.book_path)["entries"], ["UJacob uthe"])
+    assert done[0]["by_voice"] == {THANDO: "jeykob", THEMBA: "jeykob"}
+    assert call(world, "POST", "/api/book/revoke", {"word": "Jacob"}, cookie)[2] == {"revoked": True}
+
+
+def test_a_spelling_of_the_listeners_own_is_committed_and_kept_as_a_lesson_for_the_rules(world):
+    cookie = signed_in(world)
+    status, _, entry = call(world, "POST", "/api/correct", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jakobe", "note": "Zulu say it with e"}, cookie)
+    assert status == 200 and entry["kind"] == "custom" and entry["spelling"] == {"*": "jakobe"} and entry["rule_spelling"] == "jeykob"
+    book_view = call(world, "GET", "/api/book", cookie=cookie)[2]
+    lesson = book_view["feedback"][0]
+    assert lesson["word"] == "Jacob" and lesson["chosen"] == "jakobe" and lesson["rule_spelling"] == "jeykob" and lesson["note"] == "Zulu say it with e"
+    assert lesson["english"] and lesson["derivation"] and lesson["reading"] and lesson["differences"] == []          # the sounds, how the rules built it; not one of the rules' alternatives
+    assert lesson["diff"] == [{"from": "jeykob", "to": "jakobe", "shape": "jV1ykV1b → jV1kV1bV1", "where": "only syllable", "pattern": "ey→a, ∅→e (inside)"}]
+    assert book_view["tally"]["custom"] == 1 and "exceptions" not in book_view["tally"]
+    assert call(world, "POST", "/api/not-correct", {}, cookie)[0] == 404          # no separate exception path any more
+    assert call(world, "GET", "/api/rules", cookie=cookie)[2]["rules"][0]["default"] is None          # committing does not change a rule by itself
+    again = call(world, "POST", "/api/correct", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jakobe", "note": "still"}, cookie)[2]
+    assert len(call(world, "GET", "/api/book", cookie=cookie)[2]["feedback"]) == 1 and again["kind"] == "custom"          # the same lesson is updated, not repeated
+
+
+def test_an_alternative_of_the_rules_records_which_open_choice_it_took_and_the_rules_page_can_make_it_the_default(world):
+    cookie = signed_in(world)
+    status, _, entry = call(world, "POST", "/api/correct", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jeykab", "note": "o is wrong"}, cookie)
+    assert status == 200 and entry["kind"] == "custom"
+    row = call(world, "GET", "/api/book", cookie=cookie)[2]["feedback"][0]
+    assert [d["rule"] for d in row["differences"]] == ["letter_vowel"]
+    rules_view = call(world, "GET", "/api/rules", cookie=cookie)[2]
+    letter = next(r for r in rules_view["rules"] if r["rule"] == "letter_vowel")
+    assert letter["wanted"] == {"0": 1} and letter["words"] == {"0": ["Jacob"]} and letter["as_written"] == 1 and letter["default"] is None
+    assert rules_view["lessons"] == 1 and rules_view["analysis"] is None and rules_view["patterns"][0]["words"] == ["Jacob"]
+    changed = call(world, "POST", "/api/rules", {"rule": "letter_vowel", "pick": 0, "note": "Jacob and Cyril both"}, cookie)[2]
+    assert next(r for r in changed["rules"] if r["rule"] == "letter_vowel")["default"] == 0 and changed["history"][0]["note"] == "Jacob and Cyril both"
+    assert zulu_rules.rule_defaults() == {"letter_vowel": 0}
+    assert call(world, "POST", "/api/rules", {"rule": "letter_vowel", "pick": 9}, cookie)[0] == 400
+    assert call(world, "POST", "/api/rules", {"rule": "letter_vowel", "pick": None}, cookie)[2]["rules"][0] is not None and zulu_rules.rule_defaults() == {}
+
+
+def test_the_same_change_in_different_words_shows_as_one_pattern_and_the_model_is_asked_once_with_the_lessons(world):
+    cookie = signed_in(world)
+    assert call(world, "POST", "/api/learn", {}, cookie)[0] == 400          # nothing to learn from yet
+    asked = []
+
+    def analyst(payload):
+        asked.append(payload)
+        return {"summary": "the last letter is written longer", "findings": [{"pattern": "V3r -> V2rr", "why": "x", "words": ["Jacob"], "proposed_change": "y", "open_choice": None, "confidence": "low"}]}
+
+    world._analyse = analyst
+    call(world, "POST", "/api/correct", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jeykobb", "note": "final b is soft"}, cookie)
+    call(world, "POST", "/api/correct", {"job": JOB, "run": "prod-1", "word": "Heidi", "spelling": "haydii"}, cookie)
+    rules_view = call(world, "GET", "/api/rules", cookie=cookie)[2]
+    assert rules_view["lessons"] == 2 and rules_view["patterns"] and rules_view["patterns"][0]["words"]
+    record = call(world, "POST", "/api/learn", {}, cookie)[2]
+    assert record["lessons"] == 2 and record["result"]["summary"] and len(asked) == 1
+    payload = asked[0]
+    assert {l["word"] for l in payload["lessons"]} == {"Jacob", "Heidi"} and payload["lessons"][0]["english_sounds"] and payload["the_rules"] and "letter_vowel" in payload["open_choices"]
+    assert next(l for l in payload["lessons"] if l["word"] == "Jacob")["listener_note"] == "final b is soft"
+    assert call(world, "GET", "/api/rules", cookie=cookie)[2]["analysis"]["result"]["findings"][0]["confidence"] == "low"          # kept for the page
+    world.MAX_ANALYSES_PER_DAY = 1
+    assert call(world, "POST", "/api/learn", {}, cookie)[0] == 429 and len(asked) == 1
+
+
+def test_a_server_error_is_never_shown_to_the_browser(world, monkeypatch):
+    cookie = signed_in(world)
+    monkeypatch.setattr(world, "jobs", lambda: 1 / 0)
+    status, _, body = call(world, "GET", "/api/jobs", cookie=cookie)
+    assert status == 500 and body == {"error": "something went wrong on the server"}
+
+
+def test_the_clips_of_the_next_words_are_made_ahead_in_both_voices_and_a_clip_made_ahead_is_free_to_play(world):
+    cookie = signed_in(world)
+    status, _, body = call(world, "POST", "/api/prefetch", {"job": JOB, "run": "prod-1", "words": ["Jacob", "Heidi"]}, cookie)
+    assert status == 200 and body == {"queued": 4}                                    # two words, two voices each
+    assert world.wait_idle()
+    made = sorted((voice, text) for voice, text in world.spoken)
+    assert {v for v, _ in made} == {THANDO, THEMBA} and sum("jeykob" in t for _, t in made) == 2 and sum("haydi" in t for _, t in made) == 2
+    before = len(world.spoken)
+    assert call(world, "POST", "/api/prefetch", {"job": JOB, "run": "prod-1", "words": ["Jacob", "Heidi"]}, cookie)[2] == {"queued": 0}          # nothing to do again
+    play = call(world, "POST", "/api/audio", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jeykob", "voice": THEMBA}, cookie)
+    assert play[0] == 200 and len(world.spoken) == before                              # the clip was there: no new synthesis
+
+
+def test_the_ready_check_says_which_clips_are_made_and_pressing_not_correct_makes_every_alternative(world):
+    cookie = signed_in(world)
+    items = [{"spelling": "jeykob", "voice": THANDO}, {"spelling": "jeykab", "voice": THANDO}]
+    assert call(world, "POST", "/api/ready", {"job": JOB, "run": "prod-1", "word": "Jacob", "items": items}, cookie)[2] == {"ready": [False, False]}
+    queued = call(world, "POST", "/api/prefetch", {"job": JOB, "run": "prod-1", "words": ["Jacob"], "alternatives": True}, cookie)[2]["queued"]
+    assert queued == 16                                                                # the rules' choice and seven alternatives, in two voices
+    assert world.wait_idle(10)
+    assert call(world, "POST", "/api/ready", {"job": JOB, "run": "prod-1", "word": "Jacob", "items": items}, cookie)[2] == {"ready": [True, True]}
+    assert call(world, "POST", "/api/prefetch", {"job": JOB, "run": "prod-1", "words": ["Nobody"]}, cookie)[2] == {"queued": 0}
+
+
+def test_making_clips_ahead_stops_quietly_at_the_days_ceiling_and_never_needs_the_listener_to_wait(world):
+    world.max_audio_per_day = 3
+    cookie = signed_in(world)
+    call(world, "POST", "/api/prefetch", {"job": JOB, "run": "prod-1", "words": ["Jacob", "Heidi", "SABC"]}, cookie)
+    assert world.wait_idle(10) and len(world.spoken) == 3
+    status, _, body = call(world, "POST", "/api/audio", {"job": JOB, "run": "prod-1", "word": "SABC", "spelling": "es-eyi-bi-siii", "voice": THANDO}, cookie)
+    assert status == 429 and "limit" in body["error"]
+    assert call(world, "POST", "/api/prefetch", {"job": JOB, "run": "prod-1", "words": ["Jacob"]})[0] == 401          # not signed in
+
+
+def test_a_clip_that_cannot_be_made_does_not_stop_the_ones_after_it(world):
+    original = world._synthesize
+    calls = []
+
+    def flaky(*, job_root, speaker, voice, text, target):
+        calls.append(text)
+        if len(calls) == 1:
+            raise RuntimeError("the voice service said no")
+        original(job_root=job_root, speaker=speaker, voice=voice, text=text, target=target)
+
+    world._synthesize = flaky
+    cookie = signed_in(world)
+    call(world, "POST", "/api/prefetch", {"job": JOB, "run": "prod-1", "words": ["Jacob", "Heidi"]}, cookie)
+    assert world.wait_idle(10) and len(calls) == 4 and len(world.spoken) == 3
+
+
+def test_wordsmith_gives_a_typed_word_in_both_voices_spelled_by_the_rules_with_the_alternatives(world):
+    cookie = signed_in(world)
+    result = call(world, "POST", "/api/smith", {"text": "Jacob"}, cookie)[2]
+    assert result["source"] == "rules" and result["spelling"] == {THANDO: "jeykob", THEMBA: "jeykob"} and result["voices"] == [THANDO, THEMBA]
+    assert result["pieces"][0]["derivation"] and result["alternatives"][0]["spelling"] == "jeykob" and any(a["spelling"] == "jeykab" for a in result["alternatives"])
+    heard = [call(world, "POST", "/api/smith-audio", {"spelling": result["spelling"][v], "voice": v}, cookie) for v in (THANDO, THEMBA)]
+    assert all(status == 200 for status, _, _ in heard) and heard[0][2]["url"] != heard[1][2]["url"]
+    assert world.spoken == [(THANDO, "jeykob"), (THEMBA, "jeykob")]
+    assert call(world, "POST", "/api/smith-audio", {"spelling": "jeykob", "voice": THANDO}, cookie)[2]["url"] == heard[0][2]["url"] and len(world.spoken) == 2          # again: free
+    assert call(world, "GET", heard[0][2]["url"], cookie=cookie)[2] == b"RIFFfake"
+
+
+def test_wordsmith_uses_the_book_leaves_unknown_words_and_typed_words_alone_and_spells_a_phrase_word_by_word(world):
+    cookie = signed_in(world)
+    call(world, "POST", "/api/correct", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jakobe"}, cookie)
+    booked = call(world, "POST", "/api/smith", {"text": "jacob"}, cookie)[2]
+    assert booked["source"] == "book" and booked["spelling"][THANDO] == "jakobe"
+    assert call(world, "POST", "/api/smith", {"text": "Jacob", "as_typed": True}, cookie)[2]["spelling"][THANDO] == "Jacob"
+    zulu = call(world, "POST", "/api/smith", {"text": "umengameli"}, cookie)[2]
+    assert zulu["source"] == "as typed" and zulu["spelling"][THEMBA] == "umengameli" and zulu["alternatives"] == []
+    phrase = call(world, "POST", "/api/smith", {"text": "Heidi, i-SABC umengameli."}, cookie)[2]
+    assert phrase["source"] == "mixed" and len(phrase["pieces"]) == 3 and phrase["alternatives"] == []
+    assert phrase["spelling"][THANDO].startswith("haydi,") and phrase["spelling"][THANDO].endswith("umengameli.") and "i-" in phrase["spelling"][THANDO]
+
+
+def test_wordsmith_needs_a_session_refuses_bad_input_and_counts_against_the_daily_ceiling(world):
+    assert call(world, "POST", "/api/smith", {"text": "Jacob"})[0] == 401
+    assert call(world, "POST", "/api/smith-audio", {"spelling": "jeykob", "voice": THANDO})[0] == 401
+    cookie = signed_in(world)
+    assert call(world, "POST", "/api/smith", {"text": "  "}, cookie)[0] == 400
+    assert call(world, "POST", "/api/smith", {"text": "x" * 81}, cookie)[0] == 400
+    assert call(world, "POST", "/api/smith-audio", {"spelling": "<script>", "voice": THANDO}, cookie)[0] == 400
+    assert call(world, "POST", "/api/smith-audio", {"spelling": "jeykob", "voice": "en-US-Someone"}, cookie)[0] == 400
+    world.max_audio_per_day = 1
+    assert call(world, "POST", "/api/smith-audio", {"spelling": "jeykob", "voice": THANDO}, cookie)[0] == 200
+    assert call(world, "POST", "/api/smith-audio", {"spelling": "jeykab", "voice": THANDO}, cookie)[0] == 429
+
+
+def test_wordsmith_commits_what_was_heard_as_approved_or_an_exception_for_one_voice_or_both_and_takes_it_back(world):
+    cookie = signed_in(world)
+    smith = call(world, "POST", "/api/smith", {"text": "Jacob"}, cookie)[2]
+    assert smith["committable"] is True
+    entry = call(world, "POST", "/api/smith-commit", {"word": "Jacob", "spelling": {THANDO: "jeykob", THEMBA: "jeykob"}}, cookie)[2]
+    assert entry["kind"] == "approved" and entry["spelling"] == {"*": "jeykob"}
+    after = call(world, "POST", "/api/smith", {"text": "jacob"}, cookie)[2]
+    assert after["source"] == "book" and after["spelling"][THEMBA] == "jeykob"
+    entry = call(world, "POST", "/api/smith-commit", {"word": "Jacob", "spelling": {THANDO: "jeykob", THEMBA: "jakobe"}}, cookie)[2]          # the voices differ: each its own
+    assert entry["spelling"] == {THANDO: "jeykob", THEMBA: "jakobe"} and entry["rule_spelling"] == "jeykob"
+    assert call(world, "POST", "/api/smith", {"text": "Jacob"}, cookie)[2]["spelling"] == {THANDO: "jeykob", THEMBA: "jakobe"}
+    entry = call(world, "POST", "/api/smith-commit", {"word": "Jacob", "spelling": {THANDO: "jakobe", THEMBA: "jakobe"}}, cookie)[2]          # one spelling again: the per-voice ones go
+    assert entry["kind"] == "custom" and entry["spelling"] == {"*": "jakobe"}
+    assert "Jacob" in {e["word"] for e in call(world, "GET", "/api/book", cookie=cookie)[2]["entries"]}
+    assert call(world, "POST", "/api/book/revoke", {"word": "Jacob"}, cookie)[2]["revoked"] is True
+    assert call(world, "POST", "/api/smith", {"text": "Jacob"}, cookie)[2]["source"] == "rules"
+
+
+def test_wordsmith_commits_only_a_single_bare_word_and_only_with_a_session(world):
+    assert call(world, "POST", "/api/smith-commit", {"word": "Jacob", "spelling": {THANDO: "jeykob", THEMBA: "jeykob"}})[0] == 401
+    cookie = signed_in(world)
+    for text in ("i-SABC", "Heidi, Jacob", "Jacob,"):
+        assert call(world, "POST", "/api/smith", {"text": text}, cookie)[2]["committable"] is False
+    spellings = {THANDO: "jeykob", THEMBA: "jeykob"}
+    assert call(world, "POST", "/api/smith-commit", {"word": "Heidi Jacob", "spelling": spellings}, cookie)[0] == 400
+    assert call(world, "POST", "/api/smith-commit", {"word": "Jacob", "spelling": {THANDO: "jeykob"}}, cookie)[0] == 400          # a spelling for each voice
+    assert call(world, "POST", "/api/smith-commit", {"word": "Jacob", "spelling": {THANDO: "<b>", THEMBA: "jeykob"}}, cookie)[0] == 400
+    assert call(world, "GET", "/api/book", cookie=cookie)[2]["entries"] == []
+
+
+def test_the_models_answer_contract_is_one_the_shared_client_can_send():
+    from mathula_tv.foundry_grok import _compact_schema_contract
+
+    contract = _compact_schema_contract(Console.ANALYSIS_SCHEMA)
+    assert "findings" in contract and "summary" in contract
+
+
+def _source_job(world, words, audio=True):
+    analysis = world.work_dir / "jobs" / JOB / "analysis"
+    analysis.mkdir(parents=True, exist_ok=True)
+    (analysis / "corrected_transcript.json").write_text(json.dumps({"words": [
+        {"text": t, "start": s, "end": e, "confidence": c, "speaker": "AZURE_1"} for t, s, e, c in words]}), encoding="utf-8")
+    if audio:
+        (world.work_dir / "jobs" / JOB / "audio").mkdir(parents=True, exist_ok=True)
+        (world.work_dir / "jobs" / JOB / "audio" / "analysis_mono.wav").write_bytes(b"RIFFsource")
+    cuts = []
+    world._cut = lambda audio_path, start, duration, target: (cuts.append((round(start, 2), round(duration, 2))), target.write_bytes(b"RIFFcut"))
+    return cuts
+
+
+SAID = [("Good", 1.0, 1.3, .9), ("evening,", 1.3, 1.9, .9), ("Jacob", 2.0, 2.5, .6), ("Zuma", 2.5, 3.0, .9), ("said", 3.0, 3.3, .9), ("that", 3.3, 3.5, .9),
+        ("Jacob's", 20.0, 20.5, .95), ("friends", 20.5, 21.0, .9), ("and", 21.0, 21.2, .9), ("then", 21.2, 21.5, .9),
+        ("Jacob.", 22.0, 22.4, .99), ("Later", 40.0, 40.4, .9), ("JACOB", 60.0, 60.5, .8)]
+
+
+def test_the_source_audio_finds_where_a_word_is_said_best_recognised_first_and_not_twice_in_one_breath(world):
+    _source_job(world, SAID)
+    cookie = signed_in(world)
+    found = call(world, "GET", f"/api/source?job={JOB}&word=jacob", cookie=cookie)[2]["occurrences"]
+    assert [o["index"] for o in found] == [2, 6, 12] and [o["at"] for o in found] == ["0:02", "0:20", "1:00"]          # in the order said; the 22.0 "Jacob." is within 8 s of the 20.0 one, so it is left out
+    assert all("confidence" not in o for o in found)          # nothing is scored
+    first = found[0]
+    assert first["word"] == "Jacob" and first["pre"].endswith("evening,") and first["post"].startswith("Zuma") and first["job"] == JOB and first["job_name"] == "madlanga.mp4"
+    assert call(world, "GET", f"/api/source?job={JOB}&word=Nobody", cookie=cookie)[2]["occurrences"] == []
+    across = call(world, "GET", "/api/source?word=Zuma", cookie=cookie)[2]["occurrences"]          # no job: every job's transcript
+    assert [o["index"] for o in across] == [3] and across[0]["job_name"] == "madlanga.mp4"
+    assert call(world, "GET", "/api/source?job=../../x&word=Jacob", cookie=cookie)[0] == 400
+
+
+def test_the_source_audio_is_cut_around_the_word_or_the_phrase_once_and_is_free(world):
+    cuts = _source_job(world, SAID)
+    cookie = signed_in(world)
+    word = call(world, "POST", "/api/source-audio", {"job": JOB, "index": 2, "mode": "word"}, cookie)[2]
+    assert word["url"].startswith("/audio/") and (word["start"], word["end"]) == (1.88, 2.62) and cuts == [(1.88, 0.74)]
+    assert call(world, "GET", word["url"], cookie=cookie)[2] == b"RIFFcut"
+    assert call(world, "POST", "/api/source-audio", {"job": JOB, "index": 2, "mode": "word"}, cookie)[2]["url"] == word["url"] and len(cuts) == 1
+    phrase = call(world, "POST", "/api/source-audio", {"job": JOB, "index": 6, "mode": "phrase"}, cookie)[2]
+    assert (phrase["start"], phrase["end"]) == (19.9, 22.5) and phrase["url"] != word["url"]          # Jacob's friends and then Jacob., which follow without a pause; not back across the silence to 3.5, nor on to "Later" after one
+    spent = world._budget()[1]["count"]
+    assert spent == 0                                                  # cutting is local: it never counts against the voice budget
+    for body in ({"job": JOB, "index": 99, "mode": "word"}, {"job": JOB, "index": -1, "mode": "word"}, {"job": JOB, "index": 2, "mode": "all"}, {"job": JOB, "index": "x", "mode": "word"}):
+        assert call(world, "POST", "/api/source-audio", body, cookie)[0] == 400
+
+
+def test_the_source_audio_needs_a_session_and_a_job_with_audio(world):
+    _source_job(world, SAID, audio=False)
+    assert call(world, "GET", f"/api/source?job={JOB}&word=Jacob")[0] == 401
+    assert call(world, "POST", "/api/source-audio", {"job": JOB, "index": 2, "mode": "word"})[0] == 401
+    cookie = signed_in(world)
+    assert call(world, "GET", f"/api/source?job={JOB}&word=Jacob", cookie=cookie)[2]["occurrences"] == []          # no audio: nothing to offer
+    assert call(world, "POST", "/api/source-audio", {"job": JOB, "index": 2, "mode": "word"}, cookie)[0] == 404
+
+
+def test_ffmpeg_cuts_the_real_window(tmp_path):
+    import shutil
+    import struct
+    import wave
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
+    source = tmp_path / "s.wav"
+    with wave.open(str(source), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(b"".join(struct.pack("<h", 3000) for _ in range(16000 * 3)))
+    target = tmp_path / "t.wav"
+    Console._ffmpeg_cut(source, 1.0, 0.5, target)
+    with wave.open(str(target), "rb") as w:
+        assert w.getframerate() == 24000 and abs(w.getnframes() / w.getframerate() - 0.5) < 0.05
+
+
+def test_a_word_timed_very_short_still_gets_a_clip_long_enough_to_hear(world):
+    cuts = _source_job(world, [("Ralphs,", 1117.97, 1118.13, .16), ("Ralphs,", 1118.13, 1118.33, .16)])
+    cookie = signed_in(world)
+    clip = call(world, "POST", "/api/source-audio", {"job": JOB, "index": 0, "mode": "word"}, cookie)[2]
+    assert round(clip["end"] - clip["start"], 2) == world.SOURCE_MIN_WORD and cuts[0][1] == world.SOURCE_MIN_WORD and clip["start"] < 1117.97 and clip["end"] > 1118.13
+
+
+def test_a_recogniser_only_shows_what_it_hears_in_a_source_clip_once_and_nothing_else_uses_it(world):
+    _source_job(world, SAID)
+    heard = []
+
+    def recognise(wav):
+        heard.append(wav.name)
+        return {"phones": "dʒ eɪ k ə b", "reads_as": "jacob"}
+
+    world._recognise = recognise
+    assert call(world, "POST", "/api/source-hear", {"job": JOB, "index": 2, "mode": "word"})[0] == 401
+    cookie = signed_in(world)
+    first = call(world, "POST", "/api/source-hear", {"job": JOB, "index": 2, "mode": "word"}, cookie)[2]
+    assert first["phones"] == "dʒ eɪ k ə b" and first["reads_as"] == "jacob" and first["mode"] == "word" and first["url"].startswith("/audio/") and "confidence" not in first and "score" not in first
+    assert call(world, "POST", "/api/source-hear", {"job": JOB, "index": 2, "mode": "word"}, cookie)[2] == first and len(heard) == 1          # once per clip
+    call(world, "POST", "/api/source-hear", {"job": JOB, "index": 2, "mode": "phrase"}, cookie)
+    assert len(heard) == 2
+    assert call(world, "POST", "/api/source-hear", {"job": JOB, "index": 99, "mode": "word"}, cookie)[0] == 400
+    assert call(world, "POST", "/api/source-hear", {"job": JOB, "index": 2, "mode": "x"}, cookie)[0] == 400
+    assert world._budget()[1]["count"] == 0          # local: no voice is asked
+
+
+def test_no_recogniser_is_reachable_from_the_agent_or_the_dub_pipeline_through_the_console():
+    import inspect
+
+    from mathula_tv import dub_agent
+
+    source = inspect.getsource(dub_agent)
+    for name in ("english_listener", "LocalGop", "phoneme_recognizer", "allosaurus", "pronunciation_assess"):
+        assert name not in source
+
+
+def test_the_recogniser_models_are_let_go_when_idle_and_load_again_when_asked(world, monkeypatch):
+    loaded = []
+
+    class Models:
+        def __init__(self):
+            loaded.append(1)
+
+        def decode(self, wav):
+            return ["a"]
+
+        def transcribe(self, wav):
+            return "a"
+
+    import mathula_tv.english_listener as el
+    import mathula_tv.pronunciation_assess as pa
+
+    monkeypatch.setattr(pa, "LocalGop", Models)
+    monkeypatch.setattr(el, "EnglishListener", Models)
+    world.RECOGNISER_IDLE_SECONDS = 3600
+    wav = world.work_dir / "x.wav"
+    wav.write_bytes(b"x")
+    assert world._recognise_local(wav) == {"phones": "a", "reads_as": "a"} and len(loaded) == 2 and world._recognisers is not None
+    world._recognise_local(wav)
+    assert len(loaded) == 2                                         # still loaded: not read twice
+    assert world.unload_recognisers() is True and world._recognisers is None and world.unload_recognisers() is False
+    world._recognise_local(wav)
+    assert len(loaded) == 4                                         # asked again: loaded again
+    world._unload_timer.cancel()
+
+
+def _asked_job(world):
+    """A dub whose Zulu holds a word the dictionary has but nobody said (Wehle), and a restored transcript with a stretch the captions do not support."""
+    (world.work_dir / "resources" / "cmudict" / "cmudict.dict").write_text("jacob JH EY1 K AH0 B\nheidi HH AY1 D IY0\nwehle W EH1 L IY0\n", encoding="utf-8")
+    path = world.work_dir / "experience" / "runs" / "prod-1" / CLIP / "r1" / "submission.json"
+    items = json.loads(path.read_text())["items"]
+    items.append({"item_id": "u3", "speaker_id": "S0", "zulu_text": "Wehle ngesenti elilodwa kuleli sonto.", "source_text": "It only went down by one cent this week.", "start_ms": 6000, "end_ms": 9000})
+    path.write_text(json.dumps({"items": items}), encoding="utf-8")
+    root = world.work_dir / "jobs" / JOB
+    (root / "native_dub").mkdir(parents=True, exist_ok=True)
+    segments = [{"segment_id": "seg-1", "start_ms": 1000, "end_ms": 5000, "speaker_id": "AZURE_1", "source_text": "Good evening Heidi and Jacob Zuma said that thing",
+                 "restored_text": "Good evening Heidi and Jacob Zuma said that thing", "changed": False},
+                {"segment_id": "seg-3", "start_ms": 6000, "end_ms": 9000, "speaker_id": "AZURE_1", "source_text": "It only went down by one cent this week",
+                 "restored_text": "It only went down by one cent this week", "changed": False}]
+    (root / "native_dub" / "pass1_restored_transcript.json").write_text(json.dumps({"segments": segments}), encoding="utf-8")
+    folder = root / "input" / "youtube_captions"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "v.en-orig.json3").write_text(json.dumps({"events": [{"tStartMs": 900, "dDurationMs": 4300, "segs": [{"utf8": "sawubona bantu bakithi sengiyaphuma ngiyabonga kakhulu"}]},
+                                                                  {"tStartMs": 6000, "dDurationMs": 3000, "segs": [{"utf8": "It only went down by one cent this week"}]}]}), encoding="utf-8")
+
+
+def test_a_word_of_the_dub_nobody_said_is_asked_about_not_respelled_and_the_answer_decides(world):
+    _asked_job(world)
+    cookie = signed_in(world)
+    asked = call(world, "GET", f"/api/questions?job={JOB}&run=prod-1", cookie=cookie)[2]
+    assert [w["word"] for w in asked["words"]] == ["Wehle"] and asked["words"][0]["source"].startswith("It only went down") and "Wehle ngesenti" in asked["words"][0]["dub"]
+    assert [s["id"] for s in asked["stretches"]] == ["seg-1"] and asked["open"] == 2 and "zulu" in asked["languages"]
+    assert "Wehle" not in [w["word"] for w in call(world, "GET", f"/api/words?job={JOB}&run=prod-1", cookie=cookie)[2]]               # left as written until the listener says
+    status, _, after = call(world, "POST", "/api/answer", {"job": JOB, "run": "prod-1", "kind": "word", "word": "Wehle", "language": "zulu"}, cookie=cookie)
+    assert status == 200 and after["words"] == [] and [a["word"] for a in after["answered"]] == ["Wehle"] and after["answered"][0]["answer"]["language"] == "zulu" and after["open"] == 1
+    assert "Wehle" not in [w["word"] for w in call(world, "GET", f"/api/words?job={JOB}&run=prod-1", cookie=cookie)[2]]               # Zulu: still left as written
+    call(world, "POST", "/api/answer", {"job": JOB, "run": "prod-1", "kind": "word", "word": "Wehle", "language": "english"}, cookie=cookie)
+    assert "Wehle" in [w["word"] for w in call(world, "GET", f"/api/words?job={JOB}&run=prod-1", cookie=cookie)[2]]                      # English: the rules spell it
+    back = call(world, "POST", "/api/answer-revoke", {"job": JOB, "run": "prod-1", "word": "Wehle"}, cookie=cookie)[2]
+    assert [w["word"] for w in back["words"]] == ["Wehle"]
+
+
+def test_a_stretch_answer_is_kept_for_the_job_and_as_a_lesson_and_bad_answers_are_refused(world):
+    _asked_job(world)
+    cookie = signed_in(world)
+    body = {"job": JOB, "run": "prod-1", "kind": "stretch", "id": "seg-1", "choice": "typed", "text": "Sawubona bantu bakithi"}
+    assert call(world, "POST", "/api/answer", body, cookie=cookie)[0] == 200
+    kept = json.loads((world.work_dir / "jobs" / JOB / "native_dub" / "language_answers.json").read_text())
+    assert kept["stretches"]["seg-1"]["text"] == "Sawubona bantu bakithi"
+    assert json.loads((world.work_dir / "language_lessons.json").read_text())["stretches"][0]["final"] == "Sawubona bantu bakithi"
+    for bad in ({**body, "choice": "guess"}, {**body, "id": "seg-404"}, {**body, "id": "../x"}, {**body, "kind": "other"}, {**body, "text": ""}):
+        assert call(world, "POST", "/api/answer", bad, cookie=cookie)[0] == 400
+    assert call(world, "POST", "/api/answer", body, csrf=False, cookie=cookie)[0] == 403
+    assert call(world, "GET", f"/api/questions?job={JOB}&run=prod-1")[0] == 401
+
+
+def test_a_stretch_can_be_heard_from_the_job_source_audio_once_and_free(world):
+    _asked_job(world)
+    cuts = _source_job(world, SAID)
+    cookie = signed_in(world)
+    clip = call(world, "POST", "/api/segment-audio", {"job": JOB, "id": "seg-1"}, cookie=cookie)[2]
+    assert clip["url"].startswith("/audio/") and clip["start"] == 0.85 and clip["end"] == 5.15 and cuts == [(0.85, 4.3)]
+    assert call(world, "POST", "/api/segment-audio", {"job": JOB, "id": "seg-1"}, cookie=cookie)[2] == clip and len(cuts) == 1
+    assert call(world, "POST", "/api/segment-audio", {"job": JOB, "id": "seg-404"}, cookie=cookie)[0] == 404

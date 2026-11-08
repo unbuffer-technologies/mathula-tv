@@ -1,3 +1,5 @@
+import json
+
 from mathula_tv import zulu_rules as rules
 
 
@@ -164,3 +166,63 @@ def test_the_r_before_a_vowel_stays_o_follows_the_written_o_and_a_zulu_shaped_na
     assert orlando[0]["spelling"] == "oolaando" and "oolaandowu" in {r["spelling"] for r in orlando}          # the o of the spelling, not o + w + u
     assert rules.respell_word(["k", "oʊ", "t"], [None, 1, None], written="Coat")[0]["spelling"].endswith("owut") or "w" in rules.respell_word(["k", "oʊ", "t"], [None, 1, None], written="Coat")[0]["spelling"]          # oa is not a single o: the diphthong stays
     assert zulu_shaped("Motaung") and zulu_shaped("Mkhwanazi") and not zulu_shaped("Kaizer") and not zulu_shaped("Jacob") and not zulu_shaped("Litchfield")
+
+
+def test_a_default_the_listener_picks_changes_the_main_spelling_and_the_old_one_becomes_a_variant(tmp_path, monkeypatch):
+    monkeypatch.setenv(rules.RULES_CONFIG_ENV, str(tmp_path / "rules_config.json"))
+    ipa = rules.parse_ipa("/ˈwɒts.æp/")[0]
+    assert rules.respell_word(*ipa, written="WhatsApp")[0]["spelling"] == "waatsap"
+    rules.write_rule_default("short_stress", 0, note="WhatsApp: the user did not hear the stretch")
+    found = rules.respell_word(*ipa, written="WhatsApp", limit=6)
+    assert found[0]["spelling"] == "watsap" and "waatsap" in {r["spelling"] for r in found}
+    assert rules.rule_defaults() == {"short_stress": 0}
+    history = json.loads((tmp_path / "rules_config.json").read_text(encoding="utf-8"))["history"]
+    assert history[-1]["rule"] == "short_stress" and history[-1]["from"] is None and history[-1]["to"] == 0 and "stretch" in history[-1]["note"]
+    rules.write_rule_default("short_stress", None)                                             # back to the rule as written
+    assert rules.respell_word(*ipa, written="WhatsApp")[0]["spelling"] == "waatsap"
+
+
+def test_a_default_that_names_no_rule_or_no_option_is_refused_and_a_damaged_file_means_the_rules_as_written(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setenv(rules.RULES_CONFIG_ENV, str(tmp_path / "rules_config.json"))
+    with pytest.raises(ValueError):
+        rules.write_rule_default("nonsense", 1)
+    with pytest.raises(ValueError):
+        rules.write_rule_default("short_stress", 7)
+    (tmp_path / "rules_config.json").write_text("{not json", encoding="utf-8")
+    assert rules.rule_defaults() == {}
+
+
+def test_the_difference_between_two_spellings_is_named_by_the_rules_that_separate_them():
+    found = rules.respell_word(["dʒ", "eɪ", "k", "ə", "b"], [None, 1, None, 0, None], limit=4, written="Jacob")
+    main, other = found[0], next(r for r in found if r["spelling"] == "jeykab")
+    differences = rules.choice_differences(main["choice"], other["choice"])
+    assert [d["rule"] for d in differences] == ["letter_vowel"] and "jeykob" in differences[0]["main_means"] and "jeykab" in differences[0]["other_means"]
+
+
+def test_a_rule_default_written_twice_in_one_clock_tick_is_never_served_stale(tmp_path, monkeypatch):
+    import os
+
+    path = tmp_path / "rules_config.json"
+    monkeypatch.setenv(rules.RULES_CONFIG_ENV, str(path))
+    rules.write_rule_default("letter_vowel", 0)
+    assert rules.rule_defaults() == {"letter_vowel": 0}
+    stamp = path.stat().st_mtime_ns
+    rules.write_rule_default("letter_vowel", None)
+    os.utime(path, ns=(stamp, stamp))                         # the second write carries the first one's timestamp
+    assert rules.rule_defaults() == {}
+    rules.write_rule_default("letter_vowel", 1)
+    os.utime(path, ns=(stamp, stamp))
+    assert rules.rule_defaults() == {"letter_vowel": 1}
+
+
+def test_punctuation_in_a_researched_transcription_is_not_a_sound(tmp_path):
+    research = {"accepted_corrections": [{"canonical_text": "Democratic Alliance (DA)", "pronunciation_mode": "word_name", "pronunciation_confidence": 0.9,
+                                          "pronunciation_language": "English", "pronunciation_evidence_urls": ["https://x"],
+                                          "pronunciation_ipa": "/ˌdɛməˈkrætɪk əˈlaɪəns, ˌdiːˈeɪ/"}]}
+    found = rules.research_readings(research)
+    assert set(found) == {"democratic", "alliance", "da"}
+    assert all(p not in (",", ".", "(", ")", ";", ":") for reading in found.values() for p in reading["phones"])
+    spelled = rules.respell_word(found["alliance"]["phones"], found["alliance"]["stress"], limit=1, written="Alliance")[0]["spelling"]
+    assert "," not in spelled and spelled.startswith("alay")
