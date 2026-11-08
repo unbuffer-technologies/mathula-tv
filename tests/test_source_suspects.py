@@ -30,7 +30,7 @@ def test_only_a_clear_misrecognised_verdict_with_a_replacement_becomes_a_correct
     assert [c["token"] for c in corrections_from(suspects, verdicts)] == ["Masia"]
 
 
-def test_the_judge_sends_the_audio_sounds_and_context_in_one_call():
+def test_the_judge_sends_the_youtube_caption_and_context_in_one_call():
     seen = {}
 
     class Provider:
@@ -39,9 +39,10 @@ def test_the_judge_sends_the_audio_sounds_and_context_in_one_call():
             return SimpleNamespace(data={"verdicts": [{"id": 0, "verdict": "misrecognised", "replacement": "the municipality", "reason": "r"}]})
 
     suspects = [{"id": 0, "segment_id": "seg-1", "token": "Masia", "sentence": "when we come in, Masia must know",
-                 "previous_sentence": "", "audio_phones": "m a s i a m a"}]
+                 "previous_sentence": "", "youtube": "when we come in masipala must know"}]
     verdicts = judge(Provider(), suspects, KNOWN)
-    assert verdicts[0]["verdict"] == "misrecognised" and seen["payload"]["tokens"][0]["audio_phones"] == "m a s i a m a"
+    assert verdicts[0]["verdict"] == "misrecognised" and seen["payload"]["tokens"][0]["youtube"] == "when we come in masipala must know"
+    assert "audio_phones" not in seen["payload"]["tokens"][0] and "phone recogniser" not in seen["system_prompt"]
 
 
 def test_the_correction_is_applied_to_the_frozen_copy_only_and_recorded(tmp_path):
@@ -126,3 +127,31 @@ def test_a_clip_is_refrozen_when_its_glossary_changes_and_the_old_glossary_is_ke
     kept = json.loads((store.clip_dir("abc12345") / "native_dub" / "previous_glossary.json").read_text())
     assert kept["zulu_terminology_glossary"]["terms"][0]["zulu"] == "isibonelelo"
     assert ensure_frozen(store, job, "abc12345").get("already_frozen")
+
+
+def test_the_source_check_reads_the_captions_and_runs_no_recogniser(tmp_path):
+    from mathula_tv import source_suspects
+
+    job = tmp_path / "job"
+    (job / "native_dub").mkdir(parents=True)
+    (job / "native_dub" / "pass1_restored_transcript.json").write_text(json.dumps({"context_ledger": {"entities": []}, "segments": [
+        {"segment_id": "seg-1", "start_ms": 10000, "end_ms": 16000,
+         "restored_text": "They must hire security tenders before we come in. Because when we come in, Masia must know, no more tender."}]}), encoding="utf-8")
+    captions = job / "input" / "youtube_captions"
+    captions.mkdir(parents=True)
+    (captions / "abc.zu-orig.json3").write_text(json.dumps({"events": [{"tStartMs": 11000, "dDurationMs": 4000, "segs": [{"utf8": "when we come in masipala must know"}]}]}), encoding="utf-8")
+    seen = {}
+
+    class Provider:
+        def complete_json(self, **kwargs):
+            seen.update(kwargs)
+            return SimpleNamespace(data={"verdicts": [{"id": 0, "verdict": "misrecognised", "replacement": "the municipality", "reason": "masipala"}]})
+
+    path = source_suspects.run(job, Provider(), progress=lambda _m: None)
+    assert seen["payload"]["tokens"][0]["youtube"] == "when we come in masipala must know"
+    done = json.loads(path.read_text(encoding="utf-8"))
+    assert done["corrections"][0]["token"] == "Masia" and done["corrections"][0]["replacement"] == "the municipality" and "unresolved" not in done
+    import inspect
+
+    source = inspect.getsource(source_suspects)
+    assert "LocalGop" not in source and "speech_backend" not in source and "heard_word" not in source

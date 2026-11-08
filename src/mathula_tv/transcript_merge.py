@@ -317,15 +317,128 @@ def repair_contextual_speaker_turns(words: list[dict]) -> list[dict[str, Any]]:
     return repairs
 
 
+# A speech recogniser that loses the thread over silence, music or a crowd can write one word again and again ("Ralphs, Ralphs, and Ralphs. Ralphs, Ralphs, ...": eleven
+# times over fifteen seconds after a list of names, job 1abf3388).  Nobody said it, and the dub would read it out.  The test is the shape of the text alone, no score:
+# one word, six times or more, with nothing but "and" between the repeats.
+LOOP_MIN_REPEATS = 6
+_LOOP_FILLER = frozenset({"and"})
+
+
+def _loop_token(text: Any) -> str:
+    return re.sub(r"[^\w']", "", str(text or "")).casefold()
+
+
+def recogniser_loops(words: list[dict]) -> list[tuple[int, int]]:
+    """The index ranges (first and last, inclusive) of the words that are one word repeated ``LOOP_MIN_REPEATS`` times or more, with only "and" between."""
+    tokens = [_loop_token(w.get("text")) for w in words]
+    loops: list[tuple[int, int]] = []
+    i = 0
+    while i < len(words):
+        token = tokens[i]
+        if not token or token in _LOOP_FILLER:
+            i += 1
+            continue
+        j, count, last = i, 0, i
+        while j < len(words) and (tokens[j] == token or tokens[j] in _LOOP_FILLER):
+            if tokens[j] == token:
+                count, last = count + 1, j
+            j += 1
+        if count >= LOOP_MIN_REPEATS:
+            loops.append((i, last))
+            i = last + 1
+        else:
+            i += 1
+    return loops
+
+
+def _describe_loop(run: list[dict]) -> dict[str, Any]:
+    return {"text": " ".join(str(w.get("text", "")).strip() for w in run), "start": float(run[0]["start"]), "end": float(run[-1]["end"]),
+            "words": len(run), "word_ids": [w["word_id"] for w in run if w.get("word_id")]}
+
+
+def drop_recogniser_loops(words: list[dict]) -> tuple[list[dict], list[dict[str, Any]]]:
+    """The words without the recogniser's loops, and a description of each loop that was dropped."""
+    loops = recogniser_loops(words)
+    if not loops:
+        return list(words), []
+    gone = {i for first, last in loops for i in range(first, last + 1)}
+    return [w for i, w in enumerate(words) if i not in gone], [_describe_loop(words[first:last + 1]) for first, last in loops]
+
+
+def loop_warning(loop: dict[str, Any]) -> str:
+    return f"dropped a recogniser loop ({loop['words']} words, {loop['start']:.1f}s-{loop['end']:.1f}s): {loop['text'][:80]}"
+
+
+def drop_loops_from_transcript(transcript: dict[str, Any]) -> list[dict[str, Any]]:
+    """The same drop for a transcript that is already built (words and segments): the loop's words go, each segment that held some is rewritten from the words it has
+    left (text, word and phrase ids, times) and a segment with none left goes.  Returns what was dropped; the transcript is changed in place."""
+    words = transcript.get("words") or []
+    kept, loops = drop_recogniser_loops(words)
+    if not loops:
+        return []
+    gone = {i for w in loops for i in w["word_ids"]}
+    by_id = {w["word_id"]: w for w in words if w.get("word_id")}
+    segments = []
+    for segment in transcript.get("segments") or []:
+        ids = list(segment.get("source_word_ids") or [])
+        if not any(i in gone for i in ids):
+            segments.append(segment)
+            continue
+        left = [by_id[i] for i in ids if i not in gone and i in by_id]
+        if not left:
+            continue
+        confidences = [float(w["confidence"]) for w in left if w.get("confidence") is not None]
+        segments.append({**segment, "source_text": " ".join(str(w.get("text", "")).strip() for w in left).strip(), "source_word_ids": [w["word_id"] for w in left],
+                         "source_phrase_ids": list(dict.fromkeys(w["source_phrase_id"] for w in left if w.get("source_phrase_id"))),
+                         "start": float(left[0]["start"]), "end": float(left[-1]["end"]),
+                         "recognition_confidence": sum(confidences) / len(confidences) if confidences else segment.get("recognition_confidence")})
+    transcript["words"], transcript["segments"] = kept, segments
+    transcript.setdefault("warnings", []).extend(loop_warning(loop) for loop in loops)
+    transcript["recogniser_loops_dropped"] = [*transcript.get("recogniser_loops_dropped", []), *loops]
+    if isinstance(transcript.get("complete_text"), str):
+        for loop in loops:
+            transcript["complete_text"] = transcript["complete_text"].replace(loop["text"], "").replace("  ", " ").strip()
+    return loops
+
+
+TRANSCRIPT_FILES = ("transcript_en_raw.json", "transcript_en.json", "corrected_transcript.json", "transcript_en.autocorrect_source.json")
+
+
+def drop_loops_in_job(job_root: Any) -> dict[str, list[dict[str, Any]]]:
+    """``drop_loops_from_transcript`` on a job's English transcript files (each kept once beside itself as ``.before_loop_drop.json``).  What was dropped, per file."""
+    import json
+    import shutil
+    from pathlib import Path
+
+    done: dict[str, list[dict[str, Any]]] = {}
+    for name in TRANSCRIPT_FILES:
+        path = Path(job_root) / "analysis" / name
+        if not path.is_file():
+            continue
+        transcript = json.loads(path.read_text(encoding="utf-8"))
+        loops = drop_loops_from_transcript(transcript)
+        if not loops:
+            continue
+        keep = path.with_name(path.stem + ".before_loop_drop.json")
+        if not keep.is_file():
+            shutil.copyfile(path, keep)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(transcript, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+        done[name] = loops
+    return done
+
+
 def reconcile(words: list[dict], diarization: list[dict], *, source: str = "azure", tolerance: float = 0.35, max_pause: float = 1.2) -> dict[str, Any]:
     # Canonical IDs are scoped to one transcript.  Retaining the function cache
     # across jobs can otherwise shift SPEAKER_XX IDs after a rebuild.
     if hasattr(_map_to_canonical_speaker_id, "_mapping"):
         del _map_to_canonical_speaker_id._mapping
+    words, loops = drop_recogniser_loops(words)
     enriched = assign_words(words, diarization, tolerance)
     speaker_turn_repairs = repair_contextual_speaker_turns(enriched)
     segments: list[dict] = []
-    warnings: list[str] = []
+    warnings: list[str] = [loop_warning(loop) for loop in loops]
     current: list[dict] = []
     for word in enriched:
         same_source_phrase = bool(
@@ -344,7 +457,8 @@ def reconcile(words: list[dict], diarization: list[dict], *, source: str = "azur
             warnings.append(f"{word.get('text', '')}: {word['assignment_warning']}")
     if current:
         segments.append(_segment(current, len(segments), source))
-    return {"schema_version": "transcript-v1", "language": "en-ZA", "diarization_source": source, "segments": segments, "words": enriched, "speaker_turn_repairs": speaker_turn_repairs, "warnings": warnings}
+    return {"schema_version": "transcript-v1", "language": "en-ZA", "diarization_source": source, "segments": segments, "words": enriched, "speaker_turn_repairs": speaker_turn_repairs, "warnings": warnings,
+            **({"recogniser_loops_dropped": loops} if loops else {})}
 
 
 def _segment(words: list[dict], index: int, source: str) -> dict:
@@ -424,3 +538,12 @@ def _map_to_canonical_speaker_id(raw_speaker: str, segment_index: int) -> str:
         mapping[raw_speaker] = canonical_id
     
     return mapping[raw_speaker]
+
+
+if __name__ == "__main__":
+    import sys
+
+    for job in sys.argv[1:]:
+        for name, loops in drop_loops_in_job(job).items():
+            for loop in loops:
+                print(f"{name}: {loop_warning(loop)}")

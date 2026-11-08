@@ -33,6 +33,34 @@ def test_a_new_clip_with_only_pass_one_can_be_frozen_for_the_agent(tmp_path):
     assert again["already_frozen"] is True                               # a second production run reuses the freeze
 
 
+def test_a_new_pass_one_refreezes_the_clip_even_when_the_glossary_comes_out_the_same(tmp_path):
+    import json
+    import os
+    import time
+
+    store = ExperienceStore(tmp_path)
+    job = _job(tmp_path)
+    first = ensure_frozen(store, job, "abcd1234")
+    assert first["pass1_sha"]
+    pass1 = job / "native_dub" / "pass1_restored_transcript.json"
+    pass1.write_text(json.dumps({"segments": [{"segment_id": "s1", "start_ms": 0, "end_ms": 4000, "restored_text": "Hello. Nale yabantwana."}]}), encoding="utf-8")
+    again = ensure_frozen(store, job, "abcd1234")                        # the glossary file is byte-identical, the transcript is not
+    assert "already_frozen" not in again and again["pass1_sha"] != first["pass1_sha"]
+    assert "Nale yabantwana" in (store.clip_dir("abcd1234") / "native_dub" / "pass1_restored_transcript.json").read_text(encoding="utf-8")
+    assert ensure_frozen(store, job, "abcd1234")["already_frozen"] is True
+    entry = store.load_corpus()["clips"]["abcd1234"]                     # a clip frozen before checksums were kept: stale when Pass 1 was written after it
+    legacy = {k: v for k, v in entry.items() if k != "pass1_sha"}
+    corpus = store.load_corpus()
+    corpus["clips"]["abcd1234"] = legacy
+    from mathula_tv.atomic_io import atomic_write_json
+
+    atomic_write_json(store.corpus_path, corpus)
+    assert ensure_frozen(store, job, "abcd1234")["already_frozen"] is True            # Pass 1 is older than the freeze
+    later = time.time() + 60
+    os.utime(pass1, (later, later))
+    assert "already_frozen" not in ensure_frozen(store, job, "abcd1234")
+
+
 def test_lessons_are_queued_after_linting_and_the_live_playbook_is_untouched(tmp_path):
     store = ExperienceStore(tmp_path)
     live = seed_playbook()
@@ -115,3 +143,13 @@ def test_speakers_who_share_a_voice_are_separated_by_their_measured_pitch_the_lo
     solo = tmp_path / "solo.json"
     solo.write_text(json.dumps({"assignments": {"SPEAKER_00": person("SPEAKER_00", 0)}}), encoding="utf-8")
     assert refresh(solo, sheet) is None
+
+
+def test_the_preparation_releases_its_models_and_reports_the_memory(tmp_path):
+    from mathula_tv import dub_production, voice_family_classifier
+
+    voice_family_classifier._model_cache = object()
+    said = []
+    dub_production.free_memory(said.append)
+    assert voice_family_classifier._model_cache is None
+    assert said and said[0].startswith("[mem] preparation done, models released:") and isinstance(dub_production.rss_mb(), int)

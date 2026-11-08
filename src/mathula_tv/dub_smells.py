@@ -87,7 +87,7 @@ def rejection_trap(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         rejected = [r for r in _rejections(run) if "timing regression" in r["result"]]
         accepted = _summary(run).get("submissions") or 0
         stuck = len(rejected) >= 2 or (len(rejected) == 1 and accepted <= 1)
-        if stuck and run["stop_reason"] != "agent_finished":
+        if stuck and run["stop_reason"] not in ("agent_finished", "bar_met"):
             findings.append(_finding(
                 "rejection_trap", "high",
                 f"{_label(run)} had {len(rejected)} timing-regression rejection(s), only {accepted} accepted "

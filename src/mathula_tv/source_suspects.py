@@ -1,13 +1,14 @@
-"""Catch words the English transcript got wrong, using the speaker's audio.
+"""Catch words the English transcript got wrong, using YouTube's own captions of the same moment.
 
 Every check the dubbing agent has compares its Zulu with the English transcript. When the transcript itself is wrong, all of
 them pass: in job 13eacc6f the speaker said "masipala" (municipality) fast, the transcript wrote the name "Masia", and the dub
 told its audience that a person called uMasia must know about the tenders.
 
-Pass 1 already repairs transcript errors from the text alone. This is a second look that also has the audio: a capitalised
-word in the middle of a sentence, that is not one of the clip's known names, and that is rare in the clip, is decoded straight
-from the speaker's audio, and one batched model call decides, from the sentence and the sounds, whether it is a real name or
-a misheard word. Only a clear "misheard" verdict with a replacement is acted on.
+Pass 1 already repairs transcript errors from the text (and YouTube's captions where they disagree with a whole segment). This is a
+second look at single words: a capitalised word in the middle of a sentence, that is not one of the clip's known names, and that is
+rare in the clip, is shown with the caption text YouTube has for the same moment, and one batched model call decides, from the
+sentence and that second reading, whether it is a real name or a misheard word. Only a clear "misheard" verdict with a replacement
+is acted on.  No recogniser is run here: the audio is not decoded and nothing is transcribed again.
 
 The corrections are written to ``native_dub/source_corrections.json`` and applied to the FROZEN copy of the transcript that
 the agent, the gates, the meaning check and the renderer read. The job's own Pass 1 file is never edited, so its caches stay valid.
@@ -15,9 +16,7 @@ the agent, the gates, the meaning check and the renderer read. The job's own Pas
 from __future__ import annotations
 
 import json
-import os
 import re
-import wave
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -35,11 +34,12 @@ _NOT_NAMES = {
 
 SYSTEM_PROMPT = (
     "You check an English speech-recognition transcript of a South African political speech, using the sentence around each "
-    "word and the sounds a phone recogniser heard from the speaker's audio (rough and noisy). Each token is a capitalised word "
+    "word and 'youtube', the caption text YouTube has for the same moment (an independent reading: often right where this "
+    "transcript is wrong, and wrong where it is right; it may be empty). Each token is a capitalised word "
     "in the middle of a sentence that is not a known name of this clip. Decide for each: 'proper_name' (a real person, place or "
     "organisation, spelt plausibly), 'misrecognised' (the recogniser wrote a name for what is really a common word or a "
     "South African loanword, such as 'masipala' for municipality), or 'unsure'. Be conservative: answer 'misrecognised' only "
-    "when the sentence clearly needs a different word AND the sounds are compatible with it. For 'misrecognised' give the "
+    "when the sentence clearly needs a different word AND, where there is a caption, it does not contradict it. For 'misrecognised' give the "
     "English words that should stand in the transcript as 'replacement' (for example 'the municipality'); otherwise leave "
     "replacement empty."
 )
@@ -87,54 +87,10 @@ def judge(provider: Any, suspects: list[dict[str, Any]], known_names: Sequence[s
     if not suspects:
         return []
     payload = {"known_names_of_this_clip": list(known_names)[:60],
-               "tokens": [{k: s[k] for k in ("id", "token", "sentence", "previous_sentence", "audio_phones") if k in s} for s in suspects]}
+               "tokens": [{k: s[k] for k in ("id", "token", "sentence", "previous_sentence", "youtube") if s.get(k)} for s in suspects]}
     response = provider.complete_json(operation="native_source_suspect_check", system_prompt=SYSTEM_PROMPT, payload=payload,
                                       schema=schema([s["id"] for s in suspects]), max_output_tokens=min(4000, 300 + 120 * len(suspects)))
     return list(response.data.get("verdicts") or [])
-
-
-RECOVERED_PROMPT = (
-    "An English speech recogniser skipped some stretches of a South African political speech on its first pass; a second listen "
-    "wrote down the words in 'heard'. The speaker mixes English with isiZulu, Sesotho, Setswana and Afrikaans, and the recogniser "
-    "often turns those into nonsense English. For each item decide: 'english_speech' (real English words that fit the argument "
-    "around them -- they continue or add to the sentence in 'context') or 'not_english' (garbled letters from another language, "
-    "crowd noise written as words, or words that do not fit). Be conservative: an invented sentence in the dub is worse than a "
-    "missing one, so answer 'not_english' whenever you are not clearly sure."
-)
-
-
-def vet_recovered(provider: Any, recovered: Sequence[Mapping[str, Any]], segments: Sequence[Mapping[str, Any]],
-                  progress: Callable[[str], None] = print, rejected: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    """Keep only recovered speech that reads as real English; one batched model call. A failed call keeps everything (as before).
-
-    What is left out is appended to ``rejected``: it is speech in another language, and ``code_switch`` takes it from there."""
-    items = [dict(item) for item in recovered]
-    if not items:
-        return items
-    by_id = {str(s.get("segment_id")): str(s.get("restored_text") or s.get("source_text") or "") for s in segments}
-    payload = {"items": [{"id": index, "heard": item.get("heard") or item.get("replacement"), "context": by_id.get(str(item["segment_id"]), "")[-400:]}
-                         for index, item in enumerate(items)]}
-    ids = list(range(len(items)))
-    response_schema = {"type": "object", "additionalProperties": False, "required": ["verdicts"], "properties": {"verdicts": {
-        "type": "array", "minItems": len(ids), "maxItems": len(ids), "items": {"type": "object", "additionalProperties": False,
-            "required": ["id", "verdict"], "properties": {"id": {"type": "integer", "enum": ids},
-                                                          "verdict": {"type": "string", "enum": ["english_speech", "not_english"]}}}}}}
-    try:
-        response = provider.complete_json(operation="native_recovered_speech_check", system_prompt=RECOVERED_PROMPT, payload=payload,
-                                          schema=response_schema, max_output_tokens=400 + 40 * len(items))
-        verdicts = {int(v["id"]): v["verdict"] for v in response.data.get("verdicts") or []}
-    except Exception as exc:
-        progress(f"[source] could not vet the recovered speech ({type(exc).__name__}); keeping it all")
-        return items
-    kept = []
-    for index, item in enumerate(items):
-        if verdicts.get(index, "english_speech") == "english_speech":
-            kept.append(item)
-        else:
-            progress(f"[source] left out as not English: {item.get('heard')!r}")
-            if rejected is not None:
-                rejected.append(item)
-    return kept
 
 
 def corrections_from(suspects: Sequence[Mapping[str, Any]], verdicts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -201,48 +157,9 @@ def apply_to_frozen(pass1_path: Path, corrections_path: Path) -> list[dict[str, 
     return changed
 
 
-def missed_speech(job_root: Path, pass1: Mapping[str, Any], speech_backend: Any, progress: Callable[[str], None]) -> list[dict[str, Any]]:
-    """Speech in the source audio that the transcript has no words for, transcribed again and added to its segment."""
-    import subprocess
-    import tempfile
-
-    from .azure_stt import normalize
-    from .source_gaps import find_missing_speech
-
-    transcript_path = Path(job_root) / "analysis" / "azure_diarization.json"
-    audio = Path(job_root) / "audio" / "analysis_mono.wav"
-    if not transcript_path.is_file() or not audio.is_file():
-        return []
-    words = json.loads(transcript_path.read_text(encoding="utf-8")).get("words") or []
-    scratch = Path(tempfile.mkdtemp(prefix="gaps_"))
-
-    def transcribe(source: Path, start: float, end: float) -> list[dict[str, Any]]:
-        clip = scratch / f"w_{start:.1f}.wav"
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(source),
-                        "-ac", "1", "-ar", "16000", str(clip)], check=True, capture_output=True)
-        return normalize(speech_backend.transcribe(clip, locale="en-US")).get("words") or []
-
-    second_pass = None
-    if os.environ.get("MATHULA_SECOND_PASS", "1").strip().lower() not in {"0", "false", "no", "off"}:
-        from .source_gaps import second_pass_words
-
-        try:        # an independent pass over the whole recording in chunks: the first pass can skip short bursts of speech over a crowd
-            with wave.open(str(audio), "rb") as reader:
-                duration = reader.getnframes() / reader.getframerate()
-            second_pass = second_pass_words(duration, transcribe, audio)
-            progress(f"[source] second pass heard {len(second_pass)} words against the first pass's {len(words)}")
-        except Exception as exc:
-            progress(f"[source] the second pass could not run ({type(exc).__name__}: {str(exc)[:120]})")
-    return find_missing_speech(pass1.get("segments") or [], words, audio, transcribe, progress=progress, second_pass=second_pass)
-
-
-def run(job_root: Path, provider: Any, *, gop: Any = None, speech_backend: Any = None,
-        progress: Callable[[str], None] = print) -> Path | None:
-    """Examine a job's transcript and write ``native_dub/source_corrections.json``. Never raises for one bad word.
-
-    With ``speech_backend`` it also looks for speech the transcript missed (see ``source_gaps``)."""
-    from .pronunciation_assess import LocalGop
-    from .pronunciation_evidence import heard_word
+def run(job_root: Path, provider: Any, *, progress: Callable[[str], None] = print) -> Path | None:
+    """Examine a job's transcript and write ``native_dub/source_corrections.json``. Never raises for one bad word."""
+    from . import youtube_captions
 
     job_root = Path(job_root)
     native = job_root / "native_dub"
@@ -253,20 +170,15 @@ def run(job_root: Path, provider: Any, *, gop: Any = None, speech_backend: Any =
     if research.is_file():
         names += [str(c.get("canonical_text") or "") for c in json.loads(research.read_text(encoding="utf-8")).get("accepted_corrections") or []]
     names = [n for n in names if n]
-    suspects = find_suspects(pass1.get("segments") or [], names)
-    if suspects:
-        transcript_path = job_root / "analysis" / "azure_diarization.json"
-        words = json.loads(transcript_path.read_text(encoding="utf-8")).get("words") or [] if transcript_path.is_file() else []
-        gop = gop or LocalGop()
-        gop._load()
+    segments = pass1.get("segments") or []
+    suspects = find_suspects(segments, names)
+    caption = youtube_captions.reading(job_root)            # the captions' text for a window of the video: a second reading, not a recogniser run here
+    if suspects and caption is not None:
+        windows = {str(s.get("segment_id")): (float(s.get("start_ms") or 0) / 1000.0, float(s.get("end_ms") or 0) / 1000.0) for s in segments}
         for suspect in suspects:
-            try:
-                heard = heard_word(job_root / "audio" / "analysis_mono.wav", words, suspect["token"], gop,
-                                   native / "audio_work" / "suspects", limit=2)
-                if heard:
-                    suspect["audio_phones"] = " ".join(heard["phones"])
-            except Exception as exc:
-                progress(f"[source] could not decode {suspect['token']!r}: {type(exc).__name__}")
+            start, end = windows.get(str(suspect["segment_id"]), (0.0, 0.0))
+            if end > start:
+                suspect["youtube"] = caption(start - 0.5, end + 0.5)[:400]
     try:
         verdicts = judge(provider, suspects, names)
     except Exception as exc:
@@ -275,15 +187,9 @@ def run(job_root: Path, provider: Any, *, gop: Any = None, speech_backend: Any =
     corrections = corrections_from(suspects, verdicts)
     for item in corrections:
         progress(f"[source] {item['token']!r} is probably a misheard word -> {item['replacement']!r}  ({item['reason'][:100]})")
-    unresolved: list[dict[str, Any]] = []
-    if speech_backend is not None:        # speech the transcript never wrote down (see source_gaps)
-        try:
-            corrections += vet_recovered(provider, missed_speech(job_root, pass1, speech_backend, progress), pass1.get("segments") or [], progress, unresolved)
-        except Exception as exc:
-            progress(f"[source] the missing-speech check could not run ({type(exc).__name__}: {str(exc)[:120]})")
     path = native / FILE
-    path.write_text(json.dumps({"schema": SCHEMA, "corrections": corrections, "unresolved": unresolved, "examined": [
-        {"token": s["token"], "segment_id": s["segment_id"], "audio_phones": s.get("audio_phones"),
+    path.write_text(json.dumps({"schema": SCHEMA, "corrections": corrections, "examined": [
+        {"token": s["token"], "segment_id": s["segment_id"], "youtube": s.get("youtube"),
          "verdict": next((v.get("verdict") for v in verdicts if int(v["id"]) == s["id"]), None)} for s in suspects]},
         indent=1, ensure_ascii=False), encoding="utf-8")
     progress(f"[source] checked {len(suspects)} unfamiliar capitalised word(s); {len(corrections)} correction(s)")

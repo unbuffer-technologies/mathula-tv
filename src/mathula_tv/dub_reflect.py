@@ -84,7 +84,7 @@ def digest_run(run_dir: Path, *, max_chars: int = DIGEST_MAX_CHARS) -> str:
     final = json.loads(card_path.read_text(encoding="utf-8"))["headline"] if card_path.is_file() else {}
     tokens = summary.get("tokens") or {}
     header = (
-        f"OUTCOME: stop={summary.get('stop_reason')} met_bar={summary.get('stop_reason') == 'agent_finished'} "
+        f"OUTCOME: stop={summary.get('stop_reason')} met_bar={summary.get('stop_reason') in ('agent_finished', 'bar_met')} "
         f"turns={summary.get('turns')} tts={summary.get('tts_used')} accepted_submissions={summary.get('submissions')} "
         f"pushbacks={summary.get('pushbacks')} tokens={(tokens.get('in') or 0) + (tokens.get('out') or 0):,} "
         f"| final: {_headline_line(final)} | unmet_at_end={summary.get('unmet_at_end')}"

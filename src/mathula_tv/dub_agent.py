@@ -34,6 +34,9 @@ from .dub_workbench import BudgetExhausted, Workbench
 
 DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT = 2.0
 DEFAULT_MAX_PUSHBACKS = 2
+DEAD_AIR_SLACK_PCT = 0.5          # the run counts as having met the bar this far above the stated residual dead air: the last half point is not audible and costs dozens of turns
+WRAPUP_TURNS = 6                  # once the bar is met the agent may use this many more turns for a plainly wrong unit, then the run ends (prod-69: bar met at turn 21, run ended at turn 80)
+MET_STOP_REASONS = frozenset({"agent_finished", "bar_met"})
 MAX_TOOL_RESULT_CHARS = 60000   # a 28-segment clip with ledger + glossary is ~19k; this is a runaway ceiling
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -79,66 +82,23 @@ You work through tools and decide your own method. You are scored on:
    Loanwords first. When Zulu has an everyday word for an English word, a native word or an established loanword (isayensi for science,
    ubuchwepheshe for technology, ibhiliyoni for billion), write that Zulu word, with the prefix the sentence needs, instead of keeping the
    English: a Zulu voice says a Zulu word naturally, a Zulu listener hears ordinary Zulu, and the dub stops fighting the voice's rule that every
-   written vowel is spoken in full. Keep an English word only for a name, a title, an acronym, or a word with no everyday Zulu word. The
-   pronunciation lab below is for the names, acronyms and titles you keep.
+   written vowel is spoken in full. Keep an English word only for a name, a title, an acronym, or a word with no everyday Zulu word.
    When you are not sure what to do with an English word, ask what real Zulu does: attested_zulu(word, zulu_forms) shows the Zulu forms that
    translated text pairs with it, whether the English word stays English there, how Zulu news sites write it, and how often a form you are thinking
    of has been written. The ladder:
    an attested Zulu word or loan if there is one; otherwise code-switch, which means keeping the English word as the speaker says it (same number, plural
-   -s included), with a hyphenated particle if the grammar needs one (ne-, ye-), and checking with the lab how the voice says it. Never invent a form
-   that real text does not write. Only when real text itself adapts such a word, create_loanword rebuilds the speaker's sounds in Zulu syllables (a vowel
-   inserted where Zulu has no cluster and at the end, p t k b written ph th kh bh), speaks the forms, and shows what each changes; write the one you
-   choose in the text with the prefix the sentence needs, and call use_loanword to remember it.
+   -s included), with a hyphenated particle if the grammar needs one (ne-, ye-). Never invent a form
+   that real text does not write. Only when real text itself adapts such a word, create_loanword builds Zulu forms of it by the loan rules from the
+   dictionary's sounds (a vowel inserted where Zulu has no cluster and at the end, p t k b written ph th kh bh) and shows what each changes; nothing is
+   listened to or spoken. Write the one you choose in the text with the prefix the sentence needs, and call use_loanword to remember it.
 
    A kind of thing is not a name: "medical aid", "pension fund", "provident fund" are common nouns, so each noun takes its everyday Zulu
    word (or one you create), even though the speaker says them in English.
 
-   English words you keep in the Zulu ("Fighters", names) are spoken by the Zulu voice with Zulu letter rules and can come
-   out unrecognisable ("MaFighter" was heard as "mafactor"). Never glue a Zulu prefix onto an English word the speaker says as it is. Once the dub
-   fits, call list_foreign_words; for the ones the speaker says in English, try_pronunciation shows the speaker's sounds and the sounds the voice
-   makes for your spelling, with the differences. The list holds names and initialisms too ("is_name": a presenter's first name, "SG", "ANC"): the
-   speaker's sounds in the source audio are the right reading of a name as of any word, and the voice reads names and letters by Zulu rules, so they
-   are often off. Every entry says how close the voice's reading of it, as you wrote it, is to the speaker's ("as_written", weakest first): start
-   with the weakest, and leave the ones already close alone. Where a result carries a reference_note, the speaker's audio was too fast or unclear to decode, so the
-   sounds shown are a standard South African English voice saying the same phrase: match those. Below 0.75 a word is not fine as it is: hear at least one spelling for it before you
-   decide to keep it. Being part of a title ("Western Cape High Court"), a familiar word ("OK") or a name is not a reason to skip that. Adjust the spelling from the differences, then use_pronunciation for the closest; the Zulu text keeps the word itself (the spelling is applied when the voice speaks it, never typed into the text). Tries are
-   limited (3 per word, and a shared pool for a 4th and 5th): spend them where the voice is clearly off, not on words that already sound right.
-   Each result also says what an English listener wrote when the voice said your spelling ("english_hears"), and whether that is the word
-   ("english_listener_understands"). Neither check is the main one. The sounds (closeness and the listed differences) skip the speaker's last
-   sounds, so a missing ending can still score high; the listener hears one short clip and guesses a real word, so it can write "Saints" for a
-   spelling whose sounds are the speaker's own. When they disagree, read the differences and the measured acoustics of both and decide. A
-   spelling they write as something else ("Scenes" for "science") is a warning about a sound; learn from what they wrote.
-   The harness keeps a ledger of what you are shown about each word and what you do with it. For a word you check and leave as it is, or change,
-   note_pronunciation(word, decision, why) puts your reason in it, so that a word that later sounds wrong can be traced to what was seen and why.
-   Do not stay in one family of letters: if your spellings keep missing the same sound, call suggest_spellings. It works backwards from the
-   speaker's sounds through the letters this voice is known to turn into those sounds, speaks many combinations, and returns the closest
-   different ones, measured, so you see spellings you would not have guessed. It counts as one try. It also returns
-   "how_zulu_speakers_say_these_sounds": for the sounds of the word that Zulu has no exact letter for (the schwa, the vowels of "cat" and "bird",
-   the "ow" of "go"), what isiZulu first-language speakers actually say, measured on the same names said by English speakers (the schwa stays a
-   schwa 40%, becomes a 21%, i 14%; the "ow" of "go" becomes o 64%). Use it to pick a letter for such a sound on evidence; an exact match to the
-   speaker's sound is still the better spelling when the voice can make one.
-   Each result for an English word or an initialism also carries "english_dictionary": what a dictionary says the word sounds like (its sounds and
-   stress), set beside the speaker's decode. Sounds that only the decode has ("only_in_the_speakers_decode") are usually the next word's, cut in
-   with this one: do not spell them into the word (the decode of "ANC" had a "k o" from the word after it). A word said letter by letter has its
-   weight on the LAST letter in English, and an English listener hears that letter only when the voice holds it: "Ey Aayi" is heard as AI but "Ey Ai"
-   and "Ey Ayi" as A, "Ey En Siyi" as ANC but "Ey En Si" as A. A spelling ending -yi or -aayi holds its last vowel; a bare vowel does not.
-   The speech-to-text is the strictest listener for such a word: it wrote the right letters for 12 of 12 perfect native initialisms, and it still
-   writes "A." for an "AI" in which a person hears both letters. So for a word said letter by letter a result also carries "letters_heard": whether the
-   phone recogniser decoded the names of its letters (AI: eɪ then aɪ). A spelling with letters_heard true is accepted even when english_listener_understands
-   is false; the speech-to-text's miss alone is not a reason to reject it.
-   suggest_spellings also turns the dictionary's sounds into spellings and asks an English listener about them and about the closest: the spellings
-   it writes back as the word (english_listener_understands) come first.
-   Two sounds can share a label: the recogniser says "b" for Zulu's soft plain b and for an English b. So each result may also carry
-   "how_the_sounds_are_made_differently", measured from both audios for the stops (p b t d k g): how sharp the release is, how long the
-   closure before it lasts, whether the vocal folds vibrate through the closure, how long until voicing starts after the release, and the
-   hiss after it. Zulu writes sounds that look alike in English with different letters (a plain letter and its h-form can differ in exactly
-   these ways), so read the measured difference, decide which letters would change that property, and confirm it with the English
-   listener. The listener is for ordinary English words only: South African names (Nkomazi, Malema, places, parties) are not listed for
-   you and it cannot judge them, so never respell a name by what it writes.
-   Read each difference as the letters to change, and leave the parts that already match alone. Two spellings that make the same sounds
-   are one idea (the result says so). A word whose closest spelling is still under about 0.85 deserves the rest of its tries on spellings that
-   change the named sounds ("speaker k s, voice tʃ": write the k and the s so the voice keeps both) before you settle; stopping after one call
-   with tries left leaves a word badly said.
+   English words you keep in the Zulu (names, acronyms, titles, a word with no everyday Zulu word) are spoken by the Zulu voice from a spelling the
+   harness writes for them by rules, from a dictionary's English sounds. You do not choose or check how they sound: keep the word itself in the text, as
+   the speaker says it. Never glue a Zulu prefix onto an English word the speaker says as it is (a hyphenated particle such as ne- or ye- before it is
+   ordinary Zulu).
 
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word transfer.
    Use the whole clip's context.
@@ -149,12 +109,11 @@ You work through tools and decide your own method. You are scored on:
    a loanword or an informal form, and even if a more formal or purist word exists ("igranti", not "isibonelelo";
    "i-VAT"; "imeya"). The glossary fixes names and terms for consistency; where one of its terms is a stiffer
    or less familiar word than a common loanword for the same thing, use the familiar word.
-   Language switches: the speaker moves between English, isiZulu and sometimes Sepedi or another language. Where the English transcript of a
-   stretch is wrong, the clip's `code_switch` section says what he really said (rebuilt from the sounds, the recognisers, the captions and
-   the argument), in which language, how sure it is and why. Politicians speak like this on purpose, so you read it as a bilingual
-   listener would: use it for the meaning, keep his isiZulu as isiZulu, say other languages' meaning in plain isiZulu. When it is 'uncertain'
-   decide between its reading and the 'or_perhaps' one from the argument and dub your choice; do not skip the stretch or keep only the clear
-   English (a lost 'unga-' turns "do not confuse" into "confuse").
+   Language switches: the speaker moves between English, isiZulu and sometimes Sepedi, Sesotho or another language. Where the English
+   recogniser wrote nonsense for such a stretch, the transcript has already been restored from YouTube's own captions (the restoration pass),
+   so a segment's English may hold his own isiZulu, Sepedi or Sesotho words. Politicians speak like this on purpose, so you read it as a
+   bilingual listener would: keep his isiZulu as isiZulu, say other languages' meaning in plain isiZulu, and do not skip the stretch or keep
+   only the clear English (a lost 'unga-' turns "do not confuse" into "confuse").
    Delivery: the clip carries a `delivery` sheet measured from the audio. A speaker people know (a politician above all) should be
    recognisable in the dub, so write the isiZulu with their shape: keep their pace (a quick run stays short and quick, a slow weighted
    line stays weighted), keep the pauses they take for effect by ending the sentence there, keep the phrases they repeat repeated, and
@@ -274,39 +233,13 @@ TOOL_SPECS = [
            "partial": {"type": "boolean", "description": "true = update only the units you send."},
            "remove": {"type": "array", "items": {"type": "string"},
                       "description": "partial only: ids of current units to delete (e.g. units you re-split)."}}, ["items"]),
-    _tool("list_foreign_words", "After your dub fits: the English words, names and initialisms your Zulu keeps that the speaker says in the source audio "
-          "(including ones you glued a Zulu prefix onto), weakest first with how close the voice's reading is to the speaker's, so you know which "
-          "to check with try_pronunciation.", {}, []),
-    _tool("try_pronunciation", "Hear what the Zulu voice does with up to 3 spellings of an English word. For each spelling it returns the sounds "
-          "the voice made, the speaker's own sounds for the word (decoded from the source audio), how close they are (0-1) and what differs "
-          "(\"speaker ɔɪ, voice o\", \"the voice leaves out d\"), what an English listener writes for the voice's audio (english_hears), "
-          "how its stops are made differently from the speaker's (release, closure, voicing), plus advice on what to change next. Use the differences to choose "
-          "your next spelling. A try is budgeted "
-          "(5 per word, 15 per clip).",
-          {"word": {"type": "string", "description": "the word as written in your Zulu, e.g. MaFighter or medical"},
-           "spellings": {"type": "array", "items": {"type": "string"}, "maxItems": 3,
-                         "description": "spellings to try, e.g. [\"Fighters\", \"Fayitas\"]; respell with Zulu letters to steer the sounds"}},
-          ["word", "spellings"]),
-    _tool("suggest_spellings", "Spellings of an English word worked out backwards from the speaker's own sounds: the sounds are cut into letter "
-          "groups that this Zulu voice is known to turn into those sounds, many combinations are spoken, and the closest different ones come back "
-          "measured like tried spellings (sounds, differences, english_hears, what happens in the sentence), ready for use_pronunciation. Use it "
-          "when your own spellings keep missing a sound or stay in one family of letters. Counts as one try.",
-          {"word": {"type": "string", "description": "the word as written in your Zulu, e.g. MaFighter or science"}}, ["word"]),
     _tool("create_loanword", "For an English noun the speaker says that has NO everyday Zulu word: make a Zulu word for it the way Zulu adapts loans "
-          "(science -> isayensi, bus -> ibhasi, spoon -> isipunu). The speaker's sounds are rebuilt in Zulu syllables (p t k b written ph th kh bh, vowels "
-          "reduced to a e i o u, a vowel inserted where Zulu has no cluster and at the end of the word); the forms come back spoken by the Zulu voice, with "
-          "what each changes from the most typical. Not for names, acronyms or titles. Counts as one try.",
+          "(science -> isayensi, bus -> ibhasi, spoon -> isipunu), by rule, from the dictionary's sounds for the word (p t k b written ph th kh bh, vowels "
+          "reduced to a e i o u, a vowel inserted where Zulu has no cluster and at the end of the word). The forms come back with what each changes from the "
+          "most typical. Nothing is listened to, spoken or scored. Not for names, acronyms or titles.",
           {"word": {"type": "string", "description": "the English word as written in your Zulu, e.g. provident"}}, ["word"]),
     _tool("use_loanword", "Remember the Zulu word you chose from create_loanword so every later clip uses the same one. You still write it in the Zulu text yourself, "
           "with the noun prefix the sentence needs.", {"word": {"type": "string"}, "zulu_word": {"type": "string"}}, ["word", "zulu_word"]),
-    _tool("use_pronunciation", "Make a spelling you tried the way this word is spoken: for your own measurements from now on, in the render, "
-          "and remembered for later clips. Only a spelling you have tried can be used. The Zulu text keeps the word itself; do not type the spelling into it.",
-          {"word": {"type": "string"}, "spelling": {"type": "string"}}, ["word", "spelling"]),
-    _tool("note_pronunciation", "Write down your reason for an English word or name you checked with the lab (or were shown) and decided to leave "
-          "as it is, or changed: decision is kept_as_is, changed or not_a_problem, why is a few words. The harness records what you were shown and what you "
-          "tried; this is your side of it, so a word that sounds wrong later can be traced to what was seen and why it was left.",
-          {"word": {"type": "string"}, "decision": {"type": "string", "enum": ["kept_as_is", "changed", "not_a_problem"]},
-           "why": {"type": "string", "description": "your reason, in a few words"}}, ["word", "decision", "why"]),
     _tool("attested_zulu", "What real written isiZulu does with an English word, from 233,691 aligned sentence pairs of translated text (2.9 million Zulu words), the "
           "NCHLT lexicon, and 56.8 million words of Zulu web text (2013-2024) counted apart for Zulu news sites: the Zulu forms that real text pairs with the word "
           "(shared sentences, score), how often the English word itself stays English in the Zulu sentence, how Zulu news sites write the English word (bare, "
@@ -598,7 +531,7 @@ def build_dispatch(
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
         "get_submission": workbench.get_submission,
     }
-    for name in ("list_foreign_words", "try_pronunciation", "suggest_spellings", "create_loanword", "use_loanword", "use_pronunciation", "note_pronunciation", "attested_zulu"):       # the pronunciation lab, where the workbench has one
+    for name in ("create_loanword", "use_loanword", "attested_zulu"):       # vocabulary tools (the loan rules on the dictionary's sounds, a corpus lookup), where the workbench has them; the agent has no recogniser and no pronunciation tool
         if hasattr(workbench, name):
             tools[name] = getattr(workbench, name)
     return tools
@@ -722,72 +655,6 @@ def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) ->
     return note
 
 
-def pronunciation_evidence_note(workbench: Any, words: list[str]) -> str:
-    """The lab's measurement of each pending word as written, to put in the reminder: with it, "they are fine as they are" is a judgement from
-    evidence, not a guess.  Empty when nothing could be measured."""
-    measure = getattr(workbench, "pronunciation_evidence", None)
-    try:
-        rows = measure(words) if callable(measure) else []
-    except Exception:
-        rows = []
-    lines = []
-    for row in rows:
-        listener = row.get("english_hears")
-        line = (f"{row['word']}{_units_text(row)}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] as written (closeness {row['closeness']})"
-                + (f"; differences: {'; '.join(row['differences'])}" if row.get("differences") else "; no sound differs")
-                + (f"; an English listener writes {listener!r}" if listener else ""))
-        if row.get("lost_in_its_sentence"):
-            line += f"; in its sentence the voice loses {' '.join(row['lost_in_its_sentence'])}"
-        lines.append(line)
-    if not lines:
-        return ""
-    return (" Measured now, with each word as you wrote it (no tries used): " + " | ".join(lines)
-            + ". Closeness is a guide, not a verdict; a short clip often makes the listener write another real word.")
-
-
-def _units_text(row: dict[str, Any]) -> str:
-    units = [str(u) for u in row.get("units") or []]
-    return f" (said in {', '.join(units[:6])}{', ...' if len(units) > 6 else ''})" if units else ""
-
-
-def saved_readings_note(workbench: Any) -> str:
-    """How each reading already saved for an English word of this text measures now, in its sentence: shown as it is (weakest first), with no
-    cut-off, so the agent can decide whether another spelling would be closer."""
-    measure = getattr(workbench, "saved_readings_evidence", None)
-    try:
-        rows = measure() if callable(measure) else []
-    except Exception:
-        rows = []
-    lines, quiet = [], []
-    for row in rows[:10]:
-        listener = row.get("english_hears")
-        line = (f"{row['word']} -> {row.get('spelling')!r}{_units_text(row)}: the speaker says [{row['speaker_sounds']}]; the voice says [{row['voice_sounds']}] "
-                f"(closeness {row['closeness']})"
-                + (f"; differences: {'; '.join(row['differences'])}" if row.get("differences") else "; no sound differs")
-                + (f"; an English listener writes {listener!r}" if listener else ""))
-        if row.get("lost_in_its_sentence"):
-            line += f"; in its sentence the voice loses {' '.join(row['lost_in_its_sentence'])}"
-        if row.get("ending"):
-            line += f"; ending: {row['ending']}"
-        if row.get("made_differently"):
-            line += "; measured on the audio: " + " / ".join(note[:170] for note in row["made_differently"][:2])
-        if row.get("differences") or row.get("ending") or row.get("lost_in_its_sentence"):
-            lines.append(line)
-        else:
-            quiet.append(f"{row['word']} -> {row.get('spelling')!r} (closeness {row['closeness']})")
-    if not lines and not quiet:
-        return ""
-    text = ""
-    if lines:
-        text += (" Saved readings with something named wrong, measured now in their sentences (no tries used). A reading is spoken everywhere its word is said "
-                 "in the video, not only in the units you changed. Decide for each whether another spelling would be closer, judging by the differences "
-                 "listed, not only by whether the listener wrote the word: if one differs from the speaker in a way other letters could fix, "
-                 "try_pronunciation and use_pronunciation replace it: " + " | ".join(lines) + ".")
-    if quiet:
-        text += " Saved readings with nothing named wrong: " + "; ".join(quiet) + "."
-    return text
-
-
 def loanwords_note(workbench: Any) -> str:
     """English common nouns the Zulu keeps although Zulu has an everyday word for them: the loanword comes first."""
     ask = getattr(workbench, "loanwords", None)
@@ -808,14 +675,14 @@ def loanwords_note(workbench: Any) -> str:
     if without:
         note += (" No everyday Zulu word is known for: " + ", ".join(item["written"] for item in without[:10])
                  + ". Look each up with attested_zulu: use an attested form if real text has one; if none is attested, code-switch (keep the English word as the "
-                   "speaker says it, and check how the voice says it with the lab). Create a word with create_loanword (and remember it with use_loanword) only "
+                   "speaker says it; the harness sets how the voice says it). Create a word with create_loanword (and remember it with use_loanword) only "
                    "when real text itself adapts that word.")
     return note
 
 
 def glued_prefix_note(workbench: Any) -> str:
     """English words the Zulu text carries with a noun-class prefix glued on although the speaker says them as they are: the text should carry the
-    word as spoken (the prompt already says so), and a prefix makes it a different word that the lab cannot judge against the speaker's."""
+    word as spoken (the prompt already says so), and a prefix makes it a different word from the one the speaker says."""
     ask = getattr(workbench, "glued_class_prefix_words", None)
     try:
         found = ask() if callable(ask) else []
@@ -827,42 +694,6 @@ def glued_prefix_note(workbench: Any) -> str:
             + "; ".join(f"{item['written']} (the speaker says {item['speaker_says']!r})" for item in found[:8])
             + ". Write the word as the speaker says it, without the prefix (a hyphenated particle such as ne- or ye- before it is ordinary Zulu), change it "
               "where it stands, then re-measure and resubmit the units you changed.")
-
-
-def pronunciation_reminder_text(workbench: Any, words: list[str], *, left: int | None = None) -> str:
-    """The one pronunciation reminder: the words with no checked reading (with the lab's measurement of each as written) and the readings
-    already saved for words of this text (as they measure now).  Empty when there is nothing of either."""
-    saved = saved_readings_note(workbench)
-    loan = loanwords_note(workbench) + glued_prefix_note(workbench)
-    if not words and not saved and not loan:
-        return ""
-    if words:
-        body = PRONUNCIATION_REMINDER.format(words=", ".join(words[:12])) + pronunciation_evidence_note(workbench, words)
-    elif saved:
-        body = PRONUNCIATION_SAVED_REMINDER
-    else:
-        body = "One reminder, once:"
-    return (PRONUNCIATION_LATE_NOTE.format(left=left) if left is not None else "") + body + loan + saved
-
-
-PRONUNCIATION_REMINDER = (
-    "One reminder, once: your Zulu keeps English words that the speaker says and that have no checked reading yet, so the voice may read them "
-    "with Zulu letters: {words}. If any of them may sound wrong, call list_foreign_words, check those with try_pronunciation, use "
-    "use_pronunciation for a spelling that an English listener writes as the word, re-measure any unit that contains the word (the text keeps the "
-    "word itself: the spelling is applied when the voice speaks it, never typed into the text), and finish. "
-    "If you judge they are fine as they are, you do not have to use the lab: finish, except that a word measured below 0.75 closeness is not fine "
-    "as it is until you have heard a spelling for it (a title or a familiar word is no exception).")
-
-
-# The agent fits timing first and looks at pronunciation last, so a run that spends all its turns on timing never reaches the lab (prod-21
-# stopped at max_turns with the lab untouched).  Once an accepted draft exists and this few turns remain, the same one reminder is sent
-# early, with the turns left, so there is room to check the words and re-measure.
-PRONUNCIATION_SAVED_REMINDER = (
-    "One reminder, once: earlier jobs saved readings for English words that your Zulu keeps, and the lab measures how each is spoken here "
-    "(below). If any of them may sound wrong, check it with try_pronunciation, use use_pronunciation for a better spelling, re-measure any unit "
-    "that contains the word (the text keeps the word itself: the spelling is applied when the voice speaks it, never typed into the text), and finish. If you judge they are fine as they are, you do not have to use the lab: finish.")
-PRONUNCIATION_RESERVE_TURNS = 20
-PRONUNCIATION_LATE_NOTE = "You have {left} turns left; spend at most 8 of them on this and keep the rest to re-measure and re-submit. "
 
 
 def run_agent(client: ChatClient, workbench: Workbench, **kwargs: Any) -> dict[str, Any]:
@@ -889,9 +720,10 @@ def _run_agent(
     max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, max_pushbacks: int = DEFAULT_MAX_PUSHBACKS,
     task_message: str | None = None, trace_dir: Path | None = None,
     compact_after_tokens: int = COMPACT_AFTER_TOKENS, playbook_version: str | None = None,
-    seed_items: list[dict[str, Any]] | None = None,
+    seed_items: list[dict[str, Any]] | None = None, wrapup_turns: int = WRAPUP_TURNS, dead_air_slack_pct: float = DEAD_AIR_SLACK_PCT,
 ) -> dict[str, Any]:
-    """``seed_items`` starts a REPAIR run: the units of an earlier accepted submission are re-scored under today's rules
+    """``wrapup_turns``: once a submission meets the bar (within ``dead_air_slack_pct`` on residual dead air) the agent is told to finish and has this many turns left;
+    0 turns the rule off.  ``seed_items`` starts a REPAIR run: the units of an earlier accepted submission are re-scored under today's rules
     and the agent is told to change only what misses the bar, leaving every other unit exactly as it was."""
     directory = Path(trace_dir) if trace_dir else workbench.store.repeat_dir(run_id, clip_id, repeat)
     trace = Trace(directory / "trace.jsonl")
@@ -908,7 +740,7 @@ def _run_agent(
             tts_now = int((workbench.episode or {}).get("tts_budget", tts_budget)) - int((workbench.episode or {}).get("tts_used", 0))
             task_message = task_message or (
                 f"Repair, do not redo. Clip {clip_id!r} already has an accepted submission (get_submission shows its units). "
-                f"Re-scored under the current pronunciation and timing rules it "
+                f"Re-scored under the current timing rules it "
                 + ("misses the bar. " + pushback_message(seeded, seed_unmet, tts_left=tts_now) if seed_unmet else "meets the bar. ")
                 + _source_correction_note(workbench, seed_items)
                 + "Change only the units that need it, send just those with submit_dub partial=true, leave every other unit "
@@ -923,13 +755,13 @@ def _run_agent(
     tool_counts: dict[str, int] = {}
     stop_reason = "max_turns"
     nudged = False
-    pronunciation_reminded = False
-    ledger_asked = False
-    far_asked = False
     loanwords_noted = False
     pushbacks = 0
     unmet: list[str] = []
     turn = 0
+    good_enough_pct = max_dead_air_pct + dead_air_slack_pct
+    seen_submit: Any = None
+    wrapup_at: int | None = None
 
     def accepted() -> bool:
         return bool(workbench.episode and workbench.episode.get("submissions"))
@@ -956,14 +788,6 @@ def _run_agent(
                 early_text = "Your first accepted submission keeps English words that may have a Zulu word." + early
                 messages.append({"role": "user", "content": early_text})
                 trace.log("loanwords_early", turn=turn, text=early_text)
-        if not pronunciation_reminded and accepted() and turn >= max_turns - PRONUNCIATION_RESERVE_TURNS:
-            pending = getattr(workbench, "pronunciation_check_pending", None)
-            words = pending() if callable(pending) else []
-            pronunciation_reminded = True                      # asked once whether or not there is anything to check
-            text = pronunciation_reminder_text(workbench, words, left=max_turns - turn + 1)
-            if text:
-                messages.append({"role": "user", "content": text})
-                trace.log("pronunciation_reminder", turn=turn, words=words[:12], text=text, early=True)
         response = client.complete(messages, tools=TOOL_SPECS)
         usage = response.get("usage") or {}
         last_prompt_tokens = int(usage.get("prompt_tokens") or 0)
@@ -988,45 +812,9 @@ def _run_agent(
             if not accepted():
                 stop_reason = "finished_without_submission"
                 break
-            # The pronunciation lab is optional in the prompt, so an agent can finish without ever looking at the English words it kept
-            # (prod-19 did).  If the sweep finds words with no checked reading, one reminder, once, naming them; with none, no reminder.
-            pending = getattr(workbench, "pronunciation_check_pending", None)
-            may_remind = not pronunciation_reminded and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens
-            words = pending() if callable(pending) and may_remind else []
-            text = pronunciation_reminder_text(workbench, words) if may_remind else ""
-            if text:                                 # only when there is something to check: no need, no reminder
-                pronunciation_reminded = True
-                messages.append({"role": "user", "content": text})
-                trace.log("pronunciation_reminder", turn=turn, words=words[:12], text=text)
-                continue
-            # Words shown with something named wrong that the agent neither tried, used nor wrote a reason for: asked about once, so the ledger has
-            # the agent's side of them (leaving a word as it is is allowed; it needs a reason).
-            unexamined = getattr(workbench, "ledger_unexamined", None)
-            if not ledger_asked and callable(unexamined) and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens:
-                items = unexamined()
-                if items:
-                    ledger_asked = True
-                    from .pronunciation_ledger import request_text
-
-                    text = request_text(items)
-                    messages.append({"role": "user", "content": text})
-                    trace.log("ledger_request", turn=turn, words=[item["word"] for item in items], text=text)
-                    continue
-            # Words that measure far from the speaker and that no spelling was heard for, whatever reason was written: asked about once.
-            untried = getattr(workbench, "ledger_untried_far", None)
-            if not far_asked and callable(untried) and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens:
-                items = untried()
-                if items:
-                    far_asked = True
-                    from .pronunciation_ledger import far_request_text
-
-                    text = far_request_text(items)
-                    messages.append({"role": "user", "content": text})
-                    trace.log("far_request", turn=turn, words=[item["word"] for item in items], text=text)
-                    continue
             # The agent says it is done. The harness checks that against its own score instead of
             # taking its word for it -- bounded, and only while budget remains to act on it.
-            unmet = unmet_targets(getattr(workbench, "last_submit", None), max_dead_air_pct=max_dead_air_pct)
+            unmet = unmet_targets(getattr(workbench, "last_submit", None), max_dead_air_pct=good_enough_pct)
             tts_left = int((workbench.episode or {}).get("tts_budget", tts_budget)) - int((workbench.episode or {}).get("tts_used", 0))
             if (unmet and pushbacks < max_pushbacks and tts_left > 0
                     and tokens["in"] + tokens["out"] < 0.8 * max_total_tokens):
@@ -1047,6 +835,21 @@ def _run_agent(
                       result=observation[:3000])
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": observation})
 
+        latest = getattr(workbench, "last_submit", None)
+        if wrapup_turns and latest is not None and latest is not seen_submit:       # a new accepted submission: has it met the bar?
+            seen_submit = latest
+            if wrapup_at is None and not unmet_targets(latest, max_dead_air_pct=good_enough_pct):
+                wrapup_at = turn + wrapup_turns
+                residual = (latest.get("headline") or {}).get("residual_dead_air_pct")
+                text = ("Your last submission meets the bar by the harness's own score: no hard-gate failures, no collisions, nothing overruns, no meaning lost"
+                        + (f", residual dead air {residual}%" if residual is not None else "")
+                        + ". Finish now: reply with one short sentence and no tool call. Only if one unit is plainly wrong (a name, a number, a date or its meaning) fix that "
+                          "one thing first; timing is locked for the units that fit, and every further turn costs tokens.")
+                messages.append({"role": "user", "content": text})
+                trace.log("wrapup", turn=turn, turns_left=wrapup_turns, residual=residual, text=text)
+        if wrapup_at is not None and turn >= wrapup_at:
+            stop_reason = "bar_met"
+            break
         if tokens["in"] + tokens["out"] > max_total_tokens:
             stop_reason = "token_budget"
             break
@@ -1060,13 +863,6 @@ def _run_agent(
         "tts_used": (workbench.episode or {}).get("tts_used"), "submissions": (workbench.episode or {}).get("submissions"),
         "model": client.config.deployment,
     }
-    ledger_summary = getattr(workbench, "ledger_summary", None)
-    if callable(ledger_summary):
-        try:
-            summary["pronunciation_ledger"] = ledger_summary()
-            workbench.write_pronunciation_ledger(directory)
-        except Exception:                                     # the ledger is a record; it never changes a run's outcome
-            pass
     trace.log("end", **summary)
     (directory / "agent_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary

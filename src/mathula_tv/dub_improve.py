@@ -69,7 +69,7 @@ def collect_batch(store: Any, run_id: str, clip_id: str, *, repeats: int = 5) ->
         tokens = summary.get("tokens") or {}
         batch.append({
             "clip": clip_id, "repeat": repeat, "dir": directory, "stop_reason": summary.get("stop_reason"),
-            "met_bar": summary.get("stop_reason") == "agent_finished", "headline": headline,
+            "met_bar": summary.get("stop_reason") in ("agent_finished", "bar_met"), "headline": headline,
             "processed_tokens": int(tokens.get("in") or 0) + int(tokens.get("out") or 0),
             "cached_tokens": int(tokens.get("cached") or 0), "tts_used": summary.get("tts_used"),
             "playbook": summary.get("playbook"), "fidelity": fidelity_summary(directory),

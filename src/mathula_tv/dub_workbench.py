@@ -337,9 +337,6 @@ class Workbench:
             from .delivery import for_agent
 
             opened["delivery"] = for_agent(sheet, sorted(mine) if mine is not None else None)
-        switched = self._code_switch(clip_id, sorted(mine) if mine is not None else None)
-        if switched:
-            opened["code_switch"] = switched
         if self.source_corrections:
             opened["source_corrections"] = {
                 "note": ("The English below was corrected against the speaker's audio: the transcript had misheard these "
@@ -350,14 +347,6 @@ class Workbench:
                                  "why": c.get("reason", "")} for c in self.source_corrections],
             }
         return opened
-
-    def _code_switch(self, clip_id: str, segment_ids: list[str] | None) -> dict[str, Any] | None:
-        """What the speaker really said where they switch language (see code_switch): read from the job, where prepare_agent_inputs writes it."""
-        from .code_switch import FILE, for_agent, load
-
-        entry = self.store.load_corpus()["clips"][clip_id]
-        doc = load(Path(self.store.root).parent / "jobs" / str(entry["job_id"]) / "native_dub" / FILE)
-        return for_agent(doc, segment_ids) if doc else None
 
     def _delivery_sheet(self, clip_id: str) -> dict[str, Any] | None:
         """How the clip's speakers deliver (see delivery): read from the job, where prepare_agent_inputs writes it."""
@@ -673,23 +662,50 @@ class Workbench:
         except PronunciationBudgetExhausted as exc:
             raise BudgetExhausted(str(exc)) from exc
 
-    def create_loanword(self, word: str) -> dict[str, Any]:
-        """Zulu words made for an English word that has none (counts as one try); see ``PronunciationLab.create_loanword``."""
-        from .pronunciation_lab import PronunciationBudgetExhausted
+    def _loan_phones(self, word: str) -> list[str]:
+        """The dictionary's sounds for the English part of ``word`` (CMUdict, then the guesser for a word it lacks): the same sounds the pronunciation rules start from.
+        Empty when there are none.  No recogniser and no voice is asked."""
+        from .english_sounds import EnglishSounds, g2p_guesser
+        from .interpreter import Interpreter
+        from .pronunciation_lab import without_prefix, written_prefix
 
-        try:
-            result = self._lab().create_loanword(word)
-            self._ledger("tried", word, ["create_loanword"])
-            return result
-        except PronunciationBudgetExhausted as exc:
-            raise BudgetExhausted(str(exc)) from exc
+        if getattr(self, "_loan_interpreter", None) is None:
+            sounds = EnglishSounds.load(Path(self.store.root).parent / "resources" / "cmudict" / "cmudict.dict")
+            if sounds is None:                                        # no dictionary on this machine: no sounds
+                return []
+            sounds.guesser = g2p_guesser()
+            self._loan_interpreter = Interpreter(sounds, {}, None, {})
+        stem = without_prefix(word.split("-")[-1], written_prefix(word))
+        reading = self._loan_interpreter.main_reading(stem)
+        return list(reading["phones"]) if reading else []
+
+    def create_loanword(self, word: str) -> dict[str, Any]:
+        """Zulu words made for an English word that has none, by the loan rules (``loan_adapt``: each English sound to the letters Zulu writes it with, open syllables,
+        a vowel inserted where Zulu has no cluster and at the end) from the dictionary's sounds, the way the pronunciation rules work.  Nothing is listened to, spoken
+        or scored: the forms come back with what each changes from the most typical, and the agent chooses."""
+        from . import loan_adapt
+
+        phones = self._loan_phones(word)
+        if not phones:
+            return {"word": word, "error": "the dictionary has no sounds for this word, so there is nothing to build a Zulu word from: keep the English word as the speaker says it"}
+        rows = [{"zulu_word": c["stem"], "with_i": c["with_i"], "syllables": c["syllables"], "changes_from_the_most_typical": c["choices"]}
+                for c in loan_adapt.adapt(phones, limit=5)]
+        made = self.__dict__.setdefault("_loans", {})
+        for row in rows:
+            made.setdefault(word, set()).add(row["zulu_word"])
+        return {"word": word, "dictionary_sounds": " ".join(phones), "zulu_words": rows,
+                "how_these_were_made": "the dictionary's sounds rebuilt in Zulu syllables: English p/t/k/b written ph/th/kh/bh, vowels reduced to a e i o u, a vowel "
+                                       "inserted where Zulu has no cluster (u after a labial or velar, i after the others) and at the end of the word; the first "
+                                       "is the most typical, the others change one choice each (see changes_from_the_most_typical)",
+                "next": "choose one, write it in the Zulu text where the English word stands, with the noun prefix the sentence needs (i-, isi-, ama-, u-), "
+                        "then call use_loanword so later clips use the same word"}
 
     def use_loanword(self, word: str, zulu_word: str) -> dict[str, Any]:
         """Remember the Zulu word chosen for an English word, for every later clip.  The agent writes it in the Zulu text itself."""
         from .created_loanwords import path_for, remember
 
-        lab, episode = self._lab(), self._episode()
-        made = lab._created.get(word, set())
+        episode = self._episode()
+        made = self.__dict__.setdefault("_loans", {}).get(word, set())
         if zulu_word not in made:
             # the form with its noun prefix (iphurovideni, isayensi) is the word made (phurovideni, sayensi): the prefix is the sentence's
             stem = next((m for m in made if zulu_word.casefold().endswith(m.casefold()) and 0 < len(zulu_word) - len(m) <= 4), None)
@@ -703,7 +719,7 @@ class Workbench:
                     "note": f"{zulu_word!r} is not written anywhere in real isiZulu text (corpus_count 0), so it is not remembered for later clips. Keep {word!r} as the "
                             "speaker says it unless you find an attested form with attested_zulu."}
         remember(path_for(Path(self.store.root).parent), word, zulu_word, job_id=str(entry["job_id"]),
-                 note=f"created from the speaker's sounds {' '.join(lab.source(word)['phones'])}")
+                 note=f"made by the loan rules from the dictionary's sounds {' '.join(self._loan_phones(word))}")
         self._ledger("used", word, zulu_word)
         return {"ok": True, "word": word, "zulu_word": zulu_word,
                 "note": f"remembered for later clips. Write {zulu_word!r} in the Zulu text where {word!r} stands, with the noun prefix the sentence needs "

@@ -18,7 +18,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .atomic_io import atomic_write_json
 from .dub_reflect import digest_run, reflect
@@ -75,7 +75,7 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
     candidate-pool translation stage is not run. Each step is cached; calling this twice costs nothing.
     """
     from .atomic_io import read_json
-    from .cli import create_native_gpt_backend, create_speech_backend, create_tts_backend
+    from .cli import create_native_gpt_backend
     from .native_dub import (
         _ensure_native_pronunciation_research, _ensure_speaker_seriousness_modes, _ensure_zulu_glossary,
         _load_existing_context_ledger, ensure_native_voice_assignments, native_dub_paths,
@@ -95,38 +95,22 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
         raise FileNotFoundError("the context ledger is missing; Pass 1 should have written it")
     glossary, _ = _ensure_zulu_glossary(job_root=job_root, provider=provider, pass1=pass1, segments=segments,
                                         context_ledger=ledger, progress=progress)
-    try:
-        stt = create_speech_backend(settings)
-    except Exception as exc:             # the round-trip check is optional, as in the pipeline
-        progress(f"[prepare] speech credentials unavailable ({exc}); pronunciation round-trip check skipped")
-        stt = None
+    # Pronunciation is the dictionary's sounds through the rules (job_pronunciations): the web research here only finds the sounds of names. It is not
+    # checked by speaking and listening, and no respelling is guessed from the voice (no tts, no speech-to-text, no model for self-supervised guesses).
     _ensure_native_pronunciation_research(
-        job_root=job_root, context_ledger=ledger, glossary=glossary, progress=progress, tts=create_tts_backend(settings),
-        stt_backend=stt, skip_round_trip_verification=stt is None, grok_provider=provider,
+        job_root=job_root, context_ledger=ledger, glossary=glossary, progress=progress, tts=None,
+        stt_backend=None, skip_round_trip_verification=True, grok_provider=None,
         pass1_corrections=pass1.get("corrections") or ())
     _ensure_speaker_seriousness_modes(job_root=job_root, provider=provider, segments=segments, progress=progress)
     job = Orchestrator(settings).jobs.load(job_id)
     voices = ensure_native_voice_assignments(job=job, job_root=job_root, segments=segments, context_ledger=ledger,
                                              provider=provider, progress=progress)
-    names = None
-    try:
-        from .pronunciation_audio import audio_names
-
-        names = audio_names(job_root, voice=primary_voice(Path(voices)), progress=progress)
-    except Exception as exc:        # a names-stage problem must never block the dub; the pipeline's own readings still apply
-        progress(f"[prepare] names stage skipped: {type(exc).__name__}: {str(exc)[:200]}")
-    try:        # words the English transcript got wrong, checked against the speaker's audio (see source_suspects)
+    try:        # words the English transcript got wrong, checked against YouTube's captions of the same moment (see source_suspects): no recogniser runs here
         from .source_suspects import run as check_source
 
-        check_source(job_root, provider, speech_backend=stt, progress=progress)
+        check_source(job_root, provider, progress=progress)
     except Exception as exc:
         progress(f"[prepare] source check skipped: {type(exc).__name__}: {str(exc)[:200]}")
-    try:        # what the speaker really said where they switch language and the English transcript is nonsense (see code_switch)
-        from .code_switch import run as reconstruct_code_switch
-
-        reconstruct_code_switch(job_root, provider, speech_backend=stt, progress=progress)
-    except Exception as exc:
-        progress(f"[prepare] code-switch evidence skipped: {type(exc).__name__}: {str(exc)[:200]}")
     try:        # how each speaker delivers, measured from the audio (see delivery): the agent writes toward it, the renderer nudges the voice
         from .delivery import ensure_sheet
 
@@ -150,7 +134,8 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
                 shutil.copyfile(Path(voices), frozen)
     except Exception as exc:
         progress(f"[prepare] voice personas not refreshed: {type(exc).__name__}: {str(exc)[:200]}")
-    return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices), "names_lexicon": str(names) if names else None,
+    free_memory(progress)
+    return {"job_id": job_id, "segments": len(segments), "voice_resolution": str(voices),
             "glossary": paths.zulu_glossary.is_file(), "pronunciation_research": paths.pronunciation_research.is_file()}
 
 
@@ -170,16 +155,67 @@ def primary_voice(voice_resolution: Path, default: str = "zu-ZA-ThembaNeural") -
     return default
 
 
+def _pass1_changed(existing: dict[str, Any], native: Path) -> bool:
+    """Whether the job's Pass 1 is no longer the one the clip was frozen from.  A clip frozen with its checksum is compared by it; one frozen before checksums were
+    kept is stale when the file was written after the clip was frozen.  (A new Pass 1 can give a byte-identical glossary, so the glossary alone cannot tell.)"""
+    from datetime import datetime
+
+    from .experience_store import pass1_sha
+
+    path = Path(native) / "pass1_restored_transcript.json"
+    if not path.is_file():
+        return False
+    if existing.get("pass1_sha"):
+        return existing["pass1_sha"] != pass1_sha(native)
+    try:
+        return path.stat().st_mtime > datetime.fromisoformat(str(existing.get("frozen_at"))).timestamp()
+    except (TypeError, ValueError):
+        return False
+
+
+def rss_mb() -> int:
+    """This process's resident memory in MB (0 where /proc is not there)."""
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def free_memory(progress: Callable[[str], None] = print) -> None:
+    """Let go of what the preparation loaded (the speaker voice-family model, speechbrain's embeddings, torch's scratch) before the agent's long run: the agent needs none
+    of it, and this machine has 6 GB.  The models are loaded again if a later step asks."""
+    import gc
+
+    before = rss_mb()
+    try:
+        from . import voice_family_classifier
+
+        voice_family_classifier._model_cache = None
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)              # hand the freed pages back to the system
+    except Exception:
+        pass
+    progress(f"[mem] preparation done, models released: {before} MB -> {rss_mb()} MB resident")
+
+
 def ensure_frozen(store: Any, job_root: Path, clip_id: str) -> dict[str, Any]:
     """Freeze the job's Pass-1 inputs as a clip, once. A new clip has no baseline translation to compare with."""
-    from .experience_store import glossary_sha, source_corrections_sha
+    from .experience_store import glossary_sha, pass1_sha, source_corrections_sha
 
     native = Path(job_root) / "native_dub"
     frozen_native = store.clip_dir(clip_id) / "native_dub"
     existing = store.load_corpus()["clips"].get(clip_id)
     frozen_glossary = glossary_sha(frozen_native)          # of the file itself, so clips frozen before checksums were stored still compare
     if (existing and existing.get("source_corrections_sha") == source_corrections_sha(native)
-            and frozen_glossary == glossary_sha(native)):
+            and frozen_glossary == glossary_sha(native) and not _pass1_changed(existing, native)):
         return {"clip_id": clip_id, **existing, "already_frozen": True}
     # a new clip, or one frozen before its transcript corrections or glossary existed or changed: (re)freeze it. The glossary
     # the clip was dubbed under is kept as previous_glossary.json so a repair run can find the units that use a term that changed.
@@ -235,7 +271,8 @@ def run_production(
         max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=build_system_prompt(playbook),
         playbook_version=playbook["version"], seed_items=seed_items)
     run_dir = store.repeat_dir(run_id, clip_id, 1)
-    met_bar = summary.get("stop_reason") == "agent_finished"
+    print(f"[mem] agent finished: {rss_mb()} MB resident")
+    met_bar = summary.get("stop_reason") in ("agent_finished", "bar_met")
     report: dict[str, Any] = {
         "run_id": run_id, "clip_id": clip_id, "job_id": job_id, "playbook": playbook["version"],
         "stop_reason": summary.get("stop_reason"), "met_bar": met_bar, "unmet_at_end": summary.get("unmet_at_end"),
@@ -244,20 +281,15 @@ def run_production(
         "headline": _headline(run_dir),
     }
 
-    report["pronunciation_choices"] = workbench.pronunciation_choices          # for a person's ear: what the agent chose with the lab
-    report["pronunciation_ledger"] = summary.get("pronunciation_ledger")        # what it was shown and did, and the words nobody looked at
-    try:        # stretches where the language switch could not be settled: a short list for a person to listen to
-        from .code_switch import FILE as CODE_SWITCH_FILE, load as load_code_switch, review_items
-
-        report["code_switch_review"] = review_items(load_code_switch(job_root / "native_dub" / CODE_SWITCH_FILE))
-    except Exception:
-        report["code_switch_review"] = []
     if render and (run_dir / "submission.json").is_file():
         try:
             from .dub_render import render_submission
-            from .pronunciation_memory import apply_for_job
+            from .job_pronunciations import build as build_job_pronunciations
 
-            apply_for_job(job_root)        # the render reads the job's lexicon: give it what the shared memory holds, the agent's choices included
+            # How the English words are said is the dictionary's sounds through the rules, written for this run's text: nothing the agent or an earlier job chose
+            submission = json.loads((run_dir / "submission.json").read_text(encoding="utf-8"))
+            report["pronunciations"] = [{"word": s["word"], "spelling": s["spelling"], "reading": s["reading"]}
+                                        for s in build_job_pronunciations(job_root, [str(i.get("zulu_text") or "") for i in submission.get("items", [])], progress=lambda _m: None)]
 
             report["render"] = render_submission(settings, run_id=run_id, clip_id=clip_id, repeat=1, hook=hook, audio_only=audio_only)
             if hook and not audio_only:
@@ -266,18 +298,6 @@ def run_production(
                 report["handoff"] = publish_handoff(Path(settings.work_dir), job_id=job_id, run_id=run_id, clip_id=clip_id)
         except Exception as exc:        # a render problem must not lose the dub, the report or the lessons
             report["render_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
-        if "render" in report:
-            try:        # did the voice say every word? A report only: it never changes or blocks the dub
-                from .azure_stt import normalize as normalize_stt
-                from .cli import create_speech_backend
-                from .dub_intelligibility import check_run
-
-                report["intelligibility"] = check_run(run_dir, create_speech_backend(settings), normalize_stt)
-                from .pronunciation_memory import record_job_outcomes
-
-                report["intelligibility"]["memory_switched_off"] = record_job_outcomes(job_root, report["intelligibility"])
-            except Exception as exc:
-                report["intelligibility_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
 
     if reflect_after and (run_dir / "trace.jsonl").is_file():
         try:

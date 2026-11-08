@@ -565,87 +565,6 @@ class PendingWorkbench(StubWorkbench):
         return {"words": []}
 
 
-def test_an_agent_that_never_looked_at_pronunciation_is_reminded_once_before_it_may_finish(tmp_path):
-    client = ScriptedClient([
-        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
-        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
-        _reply(content="done"),                                                        # reminded here, not finished
-        _reply(calls=[_call("c", "list_foreign_words", {})]),
-        _reply(content="done"),
-    ])
-    summary = run_agent(client, PendingWorkbench(tmp_path), clip_id="c1", run_id="r")
-    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5
-    assert summary["tool_calls"].get("list_foreign_words") == 1
-    reminder = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "One reminder" in str(m.get("content"))]
-    assert reminder and "science, correctional" in reminder[0] and "you do not have to use the lab" in reminder[0]
-
-
-def test_the_pronunciation_reminder_is_bounded_to_one(tmp_path):
-    client = ScriptedClient([
-        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
-        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
-        _reply(content="done"),
-        _reply(content="still done"),                                                   # ignores the reminder: finishes anyway
-    ])
-    summary = run_agent(client, PendingWorkbench(tmp_path), clip_id="c1", run_id="r")
-    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 4
-    assert "list_foreign_words" not in summary["tool_calls"]
-
-
-def test_no_words_to_check_means_no_reminder(tmp_path):
-    class NothingToCheck(PendingWorkbench):
-        def pronunciation_check_pending(self):
-            return []
-
-    client = ScriptedClient([
-        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
-        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
-        _reply(content="done"),
-    ])
-    summary = run_agent(client, NothingToCheck(tmp_path), clip_id="c1", run_id="r")
-    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 3
-
-
-def test_a_run_that_is_running_out_of_turns_is_reminded_early_with_the_turns_left(tmp_path, monkeypatch):
-    from mathula_tv import dub_agent
-
-    monkeypatch.setattr(dub_agent, "PRONUNCIATION_RESERVE_TURNS", 3)
-    client = ScriptedClient([
-        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),                    # turn 1
-        _reply(calls=[_call("b", "submit_dub", {"items": []})]),                       # turn 2: accepted
-        _reply(calls=[_call("c", "get_submission", {})]),                              # turn 3
-        _reply(calls=[_call("d", "get_submission", {})]),                              # turn 4: 6 - 3 = 3 <= 4 -> reminded before this reply? no: before turn 3
-        _reply(calls=[_call("e", "list_foreign_words", {})]),
-        _reply(content="done"),
-    ])
-    summary = run_agent(client, PendingWorkbench(tmp_path), clip_id="c1", run_id="r", max_turns=6)
-    reminders = [(i, str(m.get("content"))) for i, seen in enumerate(client.seen) for m in seen if m["role"] == "user" and "One reminder" in str(m.get("content"))]
-    assert reminders and "turns left" in reminders[0][1] and "science, correctional" in reminders[0][1]
-    assert reminders[0][0] <= 3                                                         # sent while there was still room to act on it
-    assert summary["stop_reason"] == "agent_finished"
-    assert sum(1 for seen in client.seen[-1:] for m in seen if "One reminder" in str(m.get("content"))) == 1      # once, not repeated at the end
-
-
-def test_the_early_reminder_is_not_sent_when_there_is_nothing_to_check(tmp_path, monkeypatch):
-    from mathula_tv import dub_agent
-
-    class Nothing(PendingWorkbench):
-        def pronunciation_check_pending(self):
-            return []
-
-    monkeypatch.setattr(dub_agent, "PRONUNCIATION_RESERVE_TURNS", 3)
-    client = ScriptedClient([
-        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
-        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
-        _reply(calls=[_call("c", "get_submission", {})]),
-        _reply(calls=[_call("d", "get_submission", {})]),
-        _reply(content="done"),
-    ])
-    summary = run_agent(client, Nothing(tmp_path), clip_id="c1", run_id="r", max_turns=6)
-    assert summary["stop_reason"] == "agent_finished"
-    assert not any("One reminder" in str(m.get("content")) for seen in client.seen for m in seen)
-
-
 def test_a_repair_run_is_told_which_units_the_english_changed_under():
     from mathula_tv.dub_agent import _source_correction_note
 
@@ -668,108 +587,26 @@ def test_a_repair_run_is_told_which_units_the_english_changed_under():
     assert "Abu Kogo" in _source_correction_note(Bench(), seed_items)
 
 
-def test_the_pronunciation_reminder_carries_the_labs_measurement_of_each_word_as_written():
-    from mathula_tv.dub_agent import pronunciation_evidence_note
-
-    class Bench:
-        def pronunciation_evidence(self, words):
-            return [{"word": "MaFighter", "speaker_sounds": "f aɪ t a s", "voice_sounds": "f eɪ t ə", "closeness": 0.7,
-                     "differences": ["speaker aɪ, voice eɪ (vowel)"], "english_hears": "Theta.", "lost_in_its_sentence": ["s"]}]
-
-    note = pronunciation_evidence_note(Bench(), ["MaFighter"])
-    assert "MaFighter: the speaker says [f aɪ t a s]; the voice says [f eɪ t ə] as written (closeness 0.7)" in note
-    assert "speaker aɪ, voice eɪ (vowel)" in note and "an English listener writes 'Theta.'" in note and "the voice loses s" in note and "no tries used" in note
-    assert pronunciation_evidence_note(object(), ["x"]) == ""
-
-    class Broken:
-        def pronunciation_evidence(self, words):
-            raise RuntimeError("synthesis down")
-
-    assert pronunciation_evidence_note(Broken(), ["x"]) == ""                         # a measuring failure never blocks the reminder
-
-
-def test_readings_saved_for_words_of_this_text_are_put_to_the_agent_even_when_no_word_is_new(tmp_path):
-    class SavedOnly(PendingWorkbench):
-        def pronunciation_check_pending(self):
-            return []
-
-        def saved_readings_evidence(self):
-            return [{"word": "science", "spelling": "sayensi", "speaker_sounds": "s aɪ n ts ə", "voice_sounds": "s aɪ j ɪ n", "closeness": 0.48,
-                     "differences": ["the voice adds j"], "english_hears": "Science.", "made_differently": ["the closure is shorter"]}]
-
-    client = ScriptedClient([
-        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
-        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
-        _reply(content="done"),                                                        # reminded here
-        _reply(content="done again"),
-    ])
-    summary = run_agent(client, SavedOnly(tmp_path), clip_id="c1", run_id="r")
-    reminder = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "One reminder" in str(m.get("content"))]
-    assert summary["turns"] == 4 and reminder
-    assert "science -> 'sayensi'" in reminder[0] and "the voice adds j" in reminder[0] and "measured on the audio: the closure is shorter" in reminder[0]
-    assert "you do not have to use the lab" in reminder[0] and "no tries used" in reminder[0]
-    from mathula_tv.dub_agent import saved_readings_note
-
-    assert saved_readings_note(object()) == ""
-
-
-def test_the_measured_words_say_which_units_speak_them_and_that_a_reading_is_not_only_for_changed_units():
-    from mathula_tv.dub_agent import pronunciation_evidence_note, saved_readings_note
-
-    row = {"word": "science", "spelling": "sayensi", "speaker_sounds": "s aɪ n ts ə", "voice_sounds": "s aɪ j ɪ n", "closeness": 0.48,
-           "differences": ["the voice adds j"], "english_hears": "Science.", "units": ["u20", "u21"]}
-
-    class Bench:
-        def saved_readings_evidence(self):
-            return [row]
-
-        def pronunciation_evidence(self, words):
-            return [row]
-
-    saved = saved_readings_note(Bench())
-    assert "science -> 'sayensi' (said in u20, u21)" in saved and "not only in the units you changed" in saved and "not only by whether the listener wrote the word" in saved
-    assert "science (said in u20, u21): the speaker says" in pronunciation_evidence_note(Bench(), ["science"])
-
-
-def test_the_agent_can_ask_for_spellings_worked_out_from_the_speakers_sounds(tmp_path):
-    from mathula_tv import dub_agent
-
-    assert "suggest_spellings" in [spec["function"]["name"] for spec in dub_agent.TOOL_SPECS]
-    tools = dub_agent.build_dispatch(StubWorkbench(tmp_path), clip_id="c1", run_id="r", tts_budget=5)
-    assert "suggest_spellings" in tools and tools["suggest_spellings"]("science") == {"word": "science", "results": []}
-    assert "Neither check is the main one" in dub_agent.SYSTEM_PROMPT and "main check" not in dub_agent.SYSTEM_PROMPT
-
-
-def test_loanwords_come_first_in_the_prompt_and_in_the_one_reminder_even_when_no_word_is_new(tmp_path):
+def test_loanwords_come_first_in_the_prompt_and_are_named_in_the_note(tmp_path):
     from mathula_tv import dub_agent
 
     assert "Loanwords first" in dub_agent.SYSTEM_PROMPT and "isayensi" in dub_agent.SYSTEM_PROMPT
 
-    class Loan(PendingWorkbench):
-        def pronunciation_check_pending(self):
-            return []
-
+    class Loan(StubWorkbench):
         def loanwords(self):
             return [{"written": "weScience", "english": "science", "zulu": "isayensi"}, {"written": "Technology", "english": "technology", "zulu": "ubuchwepheshe"}]
 
-    client = ScriptedClient([
-        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
-        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
-        _reply(content="done"),                                                        # reminded here
-        _reply(content="done again"),
-    ])
-    summary = run_agent(client, Loan(tmp_path), clip_id="c1", run_id="r")
-    reminder = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "One reminder" in str(m.get("content"))]
-    assert summary["turns"] == 4 and reminder
-    assert "Loanwords first" in reminder[0] and "weScience -> isayensi" in reminder[0] and "Technology -> ubuchwepheshe" in reminder[0]
+    note = dub_agent.loanwords_note(Loan(tmp_path))
+    assert "Loanwords first" in note and "weScience -> isayensi" in note and "Technology -> ubuchwepheshe" in note
     assert dub_agent.loanwords_note(object()) == ""
 
 
-def test_the_agent_can_create_and_remember_a_loanword_and_the_reminder_names_words_with_no_zulu_word(tmp_path):
+def test_the_agent_can_create_and_remember_a_loanword_by_rule_and_the_note_names_words_with_no_zulu_word(tmp_path):
     from mathula_tv import dub_agent
 
     names = [spec["function"]["name"] for spec in dub_agent.TOOL_SPECS]
     assert "create_loanword" in names and "use_loanword" in names and "create_loanword" in dub_agent.SYSTEM_PROMPT
+    assert "listened to or spoken" in dub_agent.SYSTEM_PROMPT          # the loan rules work on the dictionary's sounds: no recogniser, no voice
 
     class Loan(StubWorkbench):
         def create_loanword(self, word):
@@ -807,83 +644,7 @@ def test_the_loanwords_are_named_once_right_after_the_first_accepted_submission_
     assert "common nouns" in dub_agent.SYSTEM_PROMPT and '("Fighters", "medical aid", names)' not in dub_agent.SYSTEM_PROMPT
 
 
-def test_saved_readings_with_something_named_wrong_come_first_and_are_marked_as_needing_a_decision():
-    from mathula_tv import dub_agent
-
-    class Saved(StubWorkbench):
-        def saved_readings_evidence(self):
-            return [{"word": "MaFighter", "spelling": "MaFighter", "speaker_sounds": "f aɪ t a s", "voice_sounds": "f aɪ t a", "closeness": 0.94,
-                     "differences": ["the voice's word ends without the final s that all 2 of the speaker's occurrences end with"], "ending": None, "units": ["u02"]},
-                    {"word": "Creek", "spelling": "Kreet", "speaker_sounds": "k r iː t", "voice_sounds": "k r iː t", "closeness": 1.0, "differences": [], "units": ["u10"]}]
-
-    note = dub_agent.saved_readings_note(Saved(Path(".")))
-    assert note.index("something named wrong") < note.index("MaFighter") and "final s" in note
-    assert note.index("MaFighter") < note.index("nothing named wrong") < note.index("Creek -> 'Kreet' (closeness 1.0)")
-    assert dub_agent.saved_readings_note(StubWorkbench(Path("."))) == ""
-
-
-def test_an_agent_that_finishes_with_a_word_shown_wrong_and_untouched_is_asked_for_its_reason_once(tmp_path):
-    from mathula_tv import dub_agent
-
-    class Led(StubWorkbench):
-        def __init__(self, root):
-            super().__init__(root)
-            self.noted = []
-
-        def ledger_unexamined(self):
-            return [] if self.noted else [{"word": "MaFighter", "problems": ["the voice's word ends without the final s"]}]
-
-        def note_pronunciation(self, word, decision, why):
-            self.noted.append((word, decision, why))
-            return {"ok": True}
-
-    names = [spec["function"]["name"] for spec in dub_agent.TOOL_SPECS]
-    assert "note_pronunciation" in names and "note_pronunciation" in dub_agent.SYSTEM_PROMPT
-    client = ScriptedClient([
-        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
-        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
-        _reply(content="done"),                                                                   # asked here, not finished
-        _reply(calls=[_call("c", "note_pronunciation", {"word": "MaFighter", "decision": "kept_as_is", "why": "the final s is soft in the speaker"})]),
-        _reply(content="done"),
-    ])
-    workbench = Led(tmp_path)
-    summary = run_agent(client, workbench, clip_id="c1", run_id="r")
-    asked = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "put in front of you with something named wrong" in str(m.get("content"))]
-    assert len(asked) == 1 and "MaFighter" in asked[0] and workbench.noted == [("MaFighter", "kept_as_is", "the final s is soft in the speaker")]
-    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5
-
-
-def test_an_agent_that_finishes_with_a_far_word_left_untried_is_asked_once_to_hear_a_spelling(tmp_path):
-    from mathula_tv import dub_agent
-
-    class Far(StubWorkbench):
-        def __init__(self, root):
-            super().__init__(root)
-            self.tried = []
-
-        def ledger_untried_far(self):
-            return [] if self.tried else [{"word": "High", "closeness": 0.47}]
-
-        def try_pronunciation(self, word, spellings):
-            self.tried.append(word)
-            return {"ok": True}
-
-    client = ScriptedClient([
-        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
-        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
-        _reply(content="done"),                                                                   # asked here, not finished
-        _reply(calls=[_call("c", "try_pronunciation", {"word": "High", "spellings": ["Hai"]})]),
-        _reply(content="done"),
-    ])
-    workbench = Far(tmp_path)
-    summary = run_agent(client, workbench, clip_id="c1", run_id="r")
-    asked = [str(m.get("content")) for m in client.seen[3] if m["role"] == "user" and "measure far from the speaker's own sounds" in str(m.get("content"))]
-    assert len(asked) == 1 and "High (closeness 0.47)" in asked[0] and workbench.tried == ["High"]
-    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5
-    assert "0.75" in dub_agent.SYSTEM_PROMPT and "not a reason to skip" in dub_agent.SYSTEM_PROMPT
-
-
-def test_a_noun_prefix_glued_on_a_word_the_speaker_says_as_it_is_is_named_in_the_early_note_and_the_reminder(tmp_path):
+def test_a_noun_prefix_glued_on_a_word_the_speaker_says_as_it_is_is_named_in_the_early_note(tmp_path):
     from mathula_tv import dub_agent
 
     class Glued(StubWorkbench):
@@ -893,7 +654,6 @@ def test_a_noun_prefix_glued_on_a_word_the_speaker_says_as_it_is_is_named_in_the
     note = dub_agent.glued_prefix_note(Glued(tmp_path))
     assert "MaFighter (the speaker says 'Fighters')" in note and "without the prefix" in note and "ne- or ye-" in note
     assert dub_agent.glued_prefix_note(StubWorkbench(tmp_path)) == ""
-    assert "MaFighter" in dub_agent.pronunciation_reminder_text(Glued(tmp_path), [])
     client = ScriptedClient([
         _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
         _reply(calls=[_call("b", "submit_dub", {"items": []})]),
@@ -962,3 +722,54 @@ def test_the_agent_can_ask_what_real_zulu_does_and_is_told_when_the_resources_ar
     empty = Path(tmp_path) / "elsewhere"
     Bench.store.root = empty / "experience"
     assert "not installed" in Bench().attested_zulu("bus")["error"]
+
+
+def test_the_agent_has_no_pronunciation_tools_and_its_prompt_leaves_pronunciation_to_the_harness():
+    from mathula_tv import dub_agent
+
+    names = {spec["function"]["name"] for spec in dub_agent.TOOL_SPECS}
+    assert not names & {"list_foreign_words", "try_pronunciation", "suggest_spellings", "use_pronunciation", "note_pronunciation"}
+    assert {"open_clip", "submit_dub", "measure_tts", "create_loanword", "attested_zulu"} <= names
+    for word in ("try_pronunciation", "list_foreign_words", "use_pronunciation", "closeness", "english_hears"):
+        assert word not in dub_agent.SYSTEM_PROMPT
+    assert "by rules" in dub_agent.SYSTEM_PROMPT and "Never glue a Zulu prefix" in dub_agent.SYSTEM_PROMPT
+
+
+def test_an_agent_that_finishes_is_not_reminded_about_pronunciation(tmp_path):
+    client = ScriptedClient([
+        _reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]),
+        _reply(calls=[_call("b", "submit_dub", {"items": []})]),
+        _reply(content="done"),
+    ])
+    summary = run_agent(client, StubWorkbench(tmp_path), clip_id="c1", run_id="r")
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 3
+    assert not [m for m in client.seen[-1] if m["role"] == "user" and "reminder" in str(m.get("content")).lower()]
+
+
+def test_a_run_that_has_met_the_bar_is_told_to_finish_and_ends_after_a_few_more_turns_not_eighty(tmp_path):
+    from mathula_tv import dub_agent
+
+    scores = [_score(1.9)] + [_score(1.8)] * 30                       # the bar (2.0%) is met by the first submission
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})])]
+    for i in range(30):                                               # an agent that would go on submitting for ever
+        script.append(_reply(calls=[_call(f"s{i}", "submit_dub", {"items": []})]))
+    client = ScriptedClient(script)
+    workbench = ScoringWorkbench(tmp_path, scores)
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", tts_budget=50, max_turns=80)
+    assert summary["stop_reason"] == "bar_met" and summary["turns"] == 2 + dub_agent.WRAPUP_TURNS          # told at turn 2, six more turns, then it ends
+    told = [m["content"] for m in client.seen[2] if m["role"] == "user" and "Finish now" in str(m.get("content"))]
+    assert told and "meets the bar" in told[0] and "1.9%" in told[0]
+    assert dub_agent.MET_STOP_REASONS >= {"bar_met", "agent_finished"}
+
+
+def test_the_stated_bar_has_half_a_point_of_slack_and_the_wrapup_can_be_turned_off(tmp_path):
+    from mathula_tv.dub_agent import unmet_targets
+
+    near = _score(2.4)
+    assert unmet_targets(near, max_dead_air_pct=2.0)                       # strictly 2.4% misses 2.0%
+    assert not unmet_targets(near, max_dead_air_pct=2.0 + 0.5)              # but is good enough to stop on
+    missed = run_agent(ScriptedClient(_agent_script(0)), ScoringWorkbench(tmp_path / "a", [_score(3.1)]), clip_id="c1", run_id="r", tts_budget=50, max_pushbacks=0)
+    assert missed["stop_reason"] == "finished_below_target"                  # 3.1% is beyond the slack
+    off = run_agent(ScriptedClient([_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})])] + [_reply(calls=[_call("s0", "submit_dub", {"items": []})])] * 8),
+                    ScoringWorkbench(tmp_path / "b", [_score(1.0)] * 8), clip_id="c1", run_id="r", tts_budget=50, max_turns=6, wrapup_turns=0)
+    assert off["stop_reason"] == "max_turns"
