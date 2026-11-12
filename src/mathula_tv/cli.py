@@ -168,6 +168,9 @@ def create_tts_backend(settings) -> AzureTTSBackend:
         timeout_seconds=settings.azure_tts_timeout_seconds,
         max_retries=settings.azure_tts_max_retries,
         ssml_bounds=bounds,
+        # a phrase the voice has already said (same SSML, same voice) is taken from here in the next run: re-rendering a clip after a change to a few words costs
+        # only those words. MATHULA_TV_TTS_CACHE=0 switches it off.
+        cache_dir=None if os.getenv("MATHULA_TV_TTS_CACHE", "1") == "0" else Path(settings.work_dir) / "tts_cache",
     )
 
 

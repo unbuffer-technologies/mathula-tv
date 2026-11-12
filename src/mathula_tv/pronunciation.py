@@ -6,12 +6,13 @@ cannot inject SSML; an SSML builder must escape the resulting text later.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .tts_ssml import CharacterPart, SSMLPart, TextPart
 
@@ -525,11 +526,13 @@ _ZU_HONORIFIC_EXPANSIONS = {
     "nksz": "Nkosazana",
     "dkt": "Dokotela",
 }
+# The agent often writes the title with no full stop ("sinoDkt Arthur Shopola"): the voice then read the raw abbreviation (human-reported 2026-11-11, "section what").
+# Without the full stop the title is taken only when a name with a capital follows, so an ordinary word is never touched.
 _ZU_FUSED_HONORIFIC = re.compile(
     r"(?<!\w)"
-    r"(?P<prefix>kwa|ngo|lika|ku|no|ne|na|ka|u)?"
-    r"(?P<title>Mnu|Nkk|Nksz|Dkt)\."
-    r"(?=\s|$)",
+    r"(?P<prefix>kwa|ngo|lika|ku|no|ne|na|ka|u|sino|nino)?"
+    r"(?P<title>Mnu|Nkk|Nksz|Dkt)"
+    r"(?:\.(?=\s|$)|(?=\s+(?-i:[A-Z])))",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -747,12 +750,31 @@ _ZU_DATE_COMPOUND_UNITS = {
 # 20--99, including the monetary and head-count constructions that exposed the
 # defect in job d724a4c9.  Values outside the reviewed range remain untouched
 # instead of guessing at noun-class morphology.
+_ZU_MONTH_AFTER_FIGURE = (
+    r"(?:[a-z]{0,3})?(?-i:Januwari|Februwari|Febhuwari|Mashi|Apreli|Meyi|Juni|Julayi|Agasti|Septhemba|Septemba|Okthoba|Oktoba|Novemba|Disemba|Ndasa|Mbasa|Ncwaba|Mpandula|Mfumfu|Lwezi|Zibandlela|Ntulikazi|"
+    r"January|February|March|April|May|June|July|August|September|October|November|December)"
+)
+# A figure of one or two digits after an isiZulu prefix.  The prefix is any vowel-final piece of grammar written before the digits (u-60, ngo-7, no-9%, wama-40, eziyi-8, kwengama-73,
+# ezingama-21, eyi-14): the corpus audit (69,875 sentences, 2026-11-10) showed a list of prefixes always lags real usage.  Left to other rules: ordinals ("owesi-10", "lesi-6": ending
+# in -si), a day before a month name ("ka-22 Novemba"), a grouped amount (4,500; 10 000) and names that end in a consonant (COVID-19).
 _ZU_PREFIXED_TWO_DIGIT_CARDINAL = re.compile(
-    r"(?<!\w)"
-    r"(?P<prefix>ezingu|abangu|zingu|engu)\s*-\s*"
-    r"(?P<number>[2-9][0-9])"
-    r"(?![0-9])",
+    r"(?<![\w-])"
+    r"(?P<prefix>(?:(?-i:[a-z]{1,10})|(?-i:[A-Z][a-z]{1,3}))(?<=[aeiou])(?<!si)(?<!SI))\s*-\s*"
+    r"(?P<number>[1-9][0-9]?)"
+    r"(?:\.(?P<decimals>[0-9]{1,3}))?"
+    r"(?P<percent>\s?%)?"
+    r"(?![0-9A-Za-z])(?!,[0-9])(?![:/][0-9])(?![  ][0-9]{3})(?!\s*" + _ZU_MONTH_AFTER_FIGURE + r")",          # nothing stuck to the figure; not a time or a fraction: not an ordinal suffix (4th, 22nd)
     re.IGNORECASE | re.UNICODE,
+)
+# A bare figure of one or two digits with no Zulu prefix glued before it: "eSection 79", "Act 12", "5 abantu".  Reported 2026-11-11 ("section seventhy nine"): it went to the
+# voice as digits.  Left to the other rules: a figure with letters or digits stuck to it (4th, 2026, R50), a decimal or thousands separator inside a bigger number (79.5, 4,500,
+# 10 000), a time or a ratio (14:30, 2/3), a range (79-80), and a day before a month name ("22 Novemba": the date rule is longer and wins).
+_ZU_BARE_FIGURE = re.compile(
+    r"(?<![\w.,:/%$#-])(?<!R\s)(?P<number>[1-9][0-9]?)"
+    r"(?:\.(?P<decimals>[0-9]{1,3}))?"
+    r"(?P<percent>\s?%)?"
+    r"(?![0-9A-Za-z])(?![.,][0-9])(?![:/-][0-9])(?![  ][0-9]{3})(?!\s*" + _ZU_MONTH_AFTER_FIGURE + r")",
+    re.UNICODE,
 )
 _ZU_CARDINAL_TENS = {
     2: "amabili",
@@ -764,22 +786,71 @@ _ZU_CARDINAL_TENS = {
     8: "ayisishiyagalombili",
     9: "ayisishiyagalolunye",
 }
-_ZU_CARDINAL_CONCORD = {
-    "ezingu": "ezinga",
-    "abangu": "abanga",
-    "zingu": "zinga",
-    "engu": "enga",
-}
 
 
-def _zulu_prefixed_two_digit_cardinal(match: re.Match[str]) -> str:
-    number = int(match.group("number"))
-    tens, unit = divmod(number, 10)
-    prefix = _ZU_CARDINAL_CONCORD[match.group("prefix").casefold()]
-    value = f"{prefix}mashumi {_ZU_CARDINAL_TENS[tens]}"
-    if unit:
-        value += " " + _ZU_DATE_COMPOUND_UNITS[unit]
-    return value
+_PAUSE_MARKER = re.compile(r"~pause\d+")
+_ZU_PERCENT_UNIT = " wamaphesenti"
+
+
+def figure_spelling(number: str, decimals: str = "", percent: bool = False) -> str:
+    """The English words, hyphenated, a figure after an isiZulu prefix is said with: "75", "8", % -> "seventy-fayiv-phoynt-eyt wamaphesenti".  What the rules write
+    for the listener's list of decimal figures, and what a committed spelling replaces."""
+    words = _code_switch_figure_words(int(number))
+    if decimals:
+        # "point" as the rules spell it from its dictionary sounds: plain "point" was mispronounced by the voice (human-reported)
+        words += "-phoynt-" + "-".join(_ZU_ENGLISH_DIGIT_WORDS[d] for d in decimals)
+    return words + (_ZU_PERCENT_UNIT if percent else "")
+
+
+def prefixed_figures(texts: Iterable[str]) -> list[tuple[str, str, bool]]:
+    """The figures written after an isiZulu prefix in the texts ("ku-75.8%", "abangu-11"), once each, as (number, decimals, percent): the ones a person may want to say differently."""
+    found: dict[str, tuple[str, str, bool]] = {}
+    for text in texts:
+        for match in [*_ZU_PREFIXED_TWO_DIGIT_CARDINAL.finditer(text), *_ZU_BARE_FIGURE.finditer(_PAUSE_MARKER.sub(" ", text))]:
+            key = match.group("number") + ("." + match.group("decimals") if match.group("decimals") else "") + ("%" if match.group("percent") else "")
+            found.setdefault(key, (match.group("number"), match.group("decimals") or "", bool(match.group("percent"))))
+    return list(found.values())
+
+
+def tens_words_used(texts: Iterable[str]) -> list[str]:
+    """The tens words (seventy, eighty ...) that the figures in these texts are said with, once each, lowest first: each is one choice for a whole ten."""
+    found = {int(number) // 10 for number, _decimals, _percent in prefixed_figures(texts) if int(number) > 31}
+    return [_EN_TENS[t] for t in sorted(found)]
+
+
+def decimal_figures(texts: Iterable[str]) -> list[tuple[str, str, bool]]:
+    return [figure for figure in prefixed_figures(texts) if figure[1]]
+
+
+# a figure or year entry ("11", "31%", "75.8%", "2006") in the dictionary is for the figure and year rules alone: a bare number must not match every "11" or "2006" of a text (a day before a month, an amount, a case number)
+_WHOLE_FIGURE_ENTRY = re.compile(r"\d{1,2}%?|(?:19|20)\d{2}")
+
+
+def _unit_just_said(before: str) -> bool:
+    """Did the text just say the isiZulu word for percent before this figure?  "amaphesenti angu-31%" and "ngamaphesenti angaphezu kuka-31%": "...phesenti" within the last
+    three words, with no other figure in between (a second figure after "amaphesenti angu-75 kanye" is its own)."""
+    found = list(re.finditer(r"phesenti", before, re.IGNORECASE))
+    if not found:
+        return False
+    between = before[found[-1].end():].split()
+    return len(between) <= 3 and not any(any(c.isdigit() for c in word) for word in between)
+
+
+def _zulu_prefixed_two_digit_cardinal(match: re.Match[str], text: str = "", override: Mapping[str, str] | None = None) -> str:
+    """A figure (1-99, with decimals and a percent sign) after an isiZulu prefix is code-switched to English number words, the prefix kept ("kuka-31%" ->
+    "kuka-thethi-waan wamaphesenti"): the isiZulu numerals take too much room in the window (human decision, 2026-11-10), and the raw digits are read by the voice with
+    English sounds of its own ("titty one").  A decimal figure the listener spelled by ear (``override``, keyed "75.8%") is said as spelled.  The unit word is not said twice
+    after the isiZulu word for percent ("amaphesenti angu-31%")."""
+    return f"{match.group('prefix')}-{_figure_words(match, text, override)}"
+
+
+def _figure_words(match: re.Match[str], text: str, override: Mapping[str, str] | None = None) -> str:
+    """The English words of a figure match (number, decimals, percent groups): a person's spelling when the dictionary has one, else the rules'; the unit not said twice."""
+    figure = match.group("number") + ("." + match.group("decimals") if match.group("decimals") else "") + ("%" if match.group("percent") else "")
+    words = (override or {}).get(figure) or figure_spelling(match.group("number"), match.group("decimals") or "", bool(match.group("percent")))
+    if match.group("percent") and _unit_just_said(text[max(0, match.start() - 80):match.start()]):
+        words = re.sub(r"\s+w?amaphesenti$", "", words, flags=re.IGNORECASE)          # the sentence just said the unit, whoever spelled the figure
+    return words
 
 
 _ZU_CODE_SWITCH_RAND_MILLION = re.compile(
@@ -1033,13 +1104,16 @@ def _zulu_dynamic_number_candidates(
     text: str,
     *,
     language: str,
+    override: Mapping[str, str] | None = None,
 ) -> list[tuple[int, int, PronunciationEntry]]:
     if language.casefold() != "zu-za":
         return []
     candidates: list[tuple[int, int, PronunciationEntry]] = []
     for match in _ZU_PREFIXED_TWO_DIGIT_CARDINAL.finditer(text):
         before = match.group(0)
-        after = _zulu_prefixed_two_digit_cardinal(match)
+        after = _zulu_prefixed_two_digit_cardinal(match, text, override)
+        if match.group("percent") and re.match(r"\s+\w", text[match.end():]):
+            after += ","          # a percentage is what the viewer must take in: a breath (a comma leaves ~0.15 s) before the next words; no comma where punctuation already follows
         candidates.append(
             (
                 match.start(),
@@ -1054,6 +1128,34 @@ def _zulu_dynamic_number_candidates(
                     kind="number",
                     notes=(
                         "Application-controlled isiZulu concorded cardinal reading",
+                        ZU_PREFIXED_CARDINAL_VERSION,
+                        "Approved/display digits remain immutable",
+                    ),
+                ),
+            )
+        )
+    taken = [(c[0], c[1]) for c in candidates]
+    for match in _ZU_BARE_FIGURE.finditer(text):
+        if any(start <= match.start() < end for start, end in taken):
+            continue
+        before = match.group(0)
+        after = _figure_words(match, text, override)
+        if match.group("percent") and re.match(r"\s+\w", text[match.end():]):
+            after += ","          # the breath after a percentage, as for a prefixed one
+        candidates.append(
+            (
+                match.start(),
+                match.end(),
+                PronunciationEntry(
+                    display_text=before,
+                    spoken_text=before,
+                    tts_text=after,
+                    language=language,
+                    source="application_default",
+                    confidence=1.0,
+                    kind="number",
+                    notes=(
+                        "Application-controlled English code-switch reading of a bare figure",
                         ZU_PREFIXED_CARDINAL_VERSION,
                         "Approved/display digits remain immutable",
                     ),
@@ -1151,6 +1253,73 @@ def _zulu_dynamic_reference_number_candidates(
     return candidates
 
 
+ZU_LEGAL_NUMBER_VERSION = "mathula-zu-legal-number-digits-v1"
+_ZU_LEGAL_ZERO = "ow"             # how a zero is said inside a legal number (the digit table's word; changed here if a listener prefers another)
+# A legal number is said one digit at a time, "section two oh four" (human, 2026-11-12: "legal numbers are usually pronounced 1 digit at a time"); the voice said the raw
+# digits of "sika-204" as a cardinal, "two hundred and four".  Three or four digits right after a section word ("isigaba 204", "Section 204", "Act 108") or glued to a possessive
+# "-ka" after a statement or section word ("ngesitatimende sika-204"), or after a word that NAMES a thing by its number (Bill 204, Room 101, Flight 123, Resolution 1325).  Two-digit
+# sections ("Section 79", "seventy-nine") keep the figure rule; a quantity ("abantu 204") has no such word before it and stays a cardinal.
+_ZU_LEGAL_CONTEXT = re.compile(r"(?:sigaba|sigabeni|siqephu|sahluko|sitatimende|mthetho|sivumelwano|section|act|clause|regulation|schedule)", re.IGNORECASE)
+_ZU_LEGAL_GLUED = re.compile(r"(?<![\w-])(?P<head>[A-Za-z]{0,6}ka)-(?P<number>[1-9][0-9]{2})(?![\w])", re.UNICODE)
+_ZU_LEGAL_SPACED = re.compile(
+    r"(?<!\w)(?P<head>(?:[A-Za-z]{0,8}(?:sigaba|sigabeni|siqephu|sahluko)|(?i:Section|Act|Clause|Regulation|Schedule|Bill|Resolution|Article|Chapter|Paragraph|Rule|Annexure|Case|Room|Flight|Route|Form|Item|Ward|Block|Gate|Platform|Terminal|Bay|Unit))\s+)(?P<number>[1-9][0-9]{2,3})(?![\w])(?<!(?:19|20)[0-9]{2})",
+    re.UNICODE,
+)
+
+
+def _legal_digit_words(number: str) -> str:
+    return "-".join(_ZU_LEGAL_ZERO if digit == "0" else _ZU_ENGLISH_DIGIT_WORDS[digit] for digit in number)
+
+
+def _zulu_dynamic_legal_number_candidates(text: str, *, language: str) -> list[tuple[int, int, PronunciationEntry]]:
+    if language.casefold() != "zu-za":
+        return []
+    found: list[tuple[int, int, str, str]] = []
+    for match in _ZU_LEGAL_GLUED.finditer(text):
+        if _ZU_LEGAL_CONTEXT.search(text[max(0, match.start() - 45):match.start()]) and not _money_context(text, match.start()):
+            found.append((match.start(), match.end(), match.group("head") + "-", match.group("number")))
+    for match in _ZU_LEGAL_SPACED.finditer(text):
+        found.append((match.start(), match.end(), match.group("head"), match.group("number")))
+    candidates = []
+    for start, end, head, number in found:
+        candidates.append((start, end, PronunciationEntry(
+            display_text=text[start:end], spoken_text=text[start:end], tts_text=head + _legal_digit_words(number), language=language,
+            source="application_default", confidence=1.0, kind="english_code_switch",
+            notes=("Application-controlled digit-by-digit reading of a legal number (section two oh four)", ZU_LEGAL_NUMBER_VERSION, "Approved/display digits remain immutable"),
+        )))
+    return candidates
+
+
+ZU_PHONE_NUMBER_VERSION = "mathula-zu-phone-number-digits-v1"
+# A telephone number written in groups ("082 123 4567", "+27 82 123 4567", "0800 123 456", "011-123-4567") is one number said digit by digit, a short breath between the groups.  The
+# middle group of three digits used to be read as a quantity ("one hundred and twenty-three"), and "+27 82" was left to the voice.  It must open with 0 or + and hold 9 to 13 digits
+# in all, so a date (02-03-2026), an amount (4 500) and a plain count never match.
+_ZU_PHONE_NUMBER = re.compile(
+    r"(?<![\w+/.-])(?P<head>\+\d{1,3}|0\d{1,3})(?P<rest>(?:[  -]\d{2,4}){1,3})(?![\w]|[  -]\d)",
+    re.UNICODE,
+)
+
+
+def _zulu_dynamic_phone_number_candidates(text: str, *, language: str) -> list[tuple[int, int, PronunciationEntry]]:
+    if language.casefold() != "zu-za":
+        return []
+    candidates = []
+    for match in _ZU_PHONE_NUMBER.finditer(text):
+        groups = [match.group("head")] + re.findall(r"\d+", match.group("rest"))
+        if not 9 <= sum(len(re.sub(r"\D", "", g)) for g in groups) <= 13:
+            continue
+        said = []
+        for number, group in enumerate(groups):
+            digits = " ".join(_ZU_ENGLISH_DIGIT_WORDS[d] for d in re.sub(r"\D", "", group))
+            said.append(("plus " if number == 0 and group.startswith("+") else "") + digits)
+        candidates.append((match.start(), match.end(), PronunciationEntry(
+            display_text=match.group(0), spoken_text=match.group(0), tts_text=", ".join(said), language=language,
+            source="application_default", confidence=1.0, kind="english_code_switch",
+            notes=("Application-controlled digit-by-digit reading of a telephone number, a breath between the groups", ZU_PHONE_NUMBER_VERSION, "Approved/display digits remain immutable"),
+        )))
+    return candidates
+
+
 # An ordinal written as an isiZulu concord glued to digits ("owesi-10", "ngowesi-7") is spoken the way people
 # code-switch from English into isiZulu: the isiZulu prefix followed by the ENGLISH number word ("owesi-ten").
 # Human-approved by ear (job a537c3077a094523b7c15056ccc556a5, 2026-10-22: "that's how people code switch"):
@@ -1159,9 +1328,10 @@ def _zulu_dynamic_reference_number_candidates(
 # this voice applies its own English handling to Latin-script words, and <lang>/<phoneme> tags are ignored (see the
 # digit-by-digit notes above). Display text and the numeric-literal guard keep the digits.
 _ZU_ORDINAL_DIGITS = re.compile(
-    r"(?<![\w-])(?P<prefix>(?:ng|ka|na|ne)?o?wesi)\s*-\s*(?P<number>[0-9]{1,3})(?!\w)",
+    r"(?<![\w-])(?P<prefix>(?:ng|ka|na|ne|no|k)?o?(?:w|l|s|y|kw|lw)esi)\s*-\s*(?P<number>[0-9]{1,3})(?!\w)",
     re.IGNORECASE | re.UNICODE,
 )
+_ZU_ORDINAL_SUFFIXED = re.compile(r"(?<![A-Za-z0-9])(?P<number>[1-9][0-9]?)(?:st|nd|rd|th)(?![A-Za-z0-9])", re.UNICODE)          # the number and its suffix only: the prefix stays outside, as in a job lexicon entry
 _EN_UNITS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
              "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen")
 _EN_TENS = {2: "twenty", 3: "thirty", 4: "forty", 5: "fifty", 6: "sixty", 7: "seventy", 8: "eighty", 9: "ninety"}
@@ -1184,13 +1354,48 @@ def _english_cardinal_word(value: int) -> str:
 # listed (3, 4, 7, 10-12, 14-17, 20, 22-25, 27 and everything above 31) keep the plain English word.
 _ZU_CODE_SWITCH_NUMBER_RESPELLINGS = {
     1: "wan", 2: "tuu", 5: "fayiv", 6: "seeks", 8: "eyt", 9: "nayn", 13: "thurteen", 18: "eyteen", 19: "naynteen",
-    21: "twenty-wan", 26: "twenty-seeks", 28: "twenty-eyt", 29: "twenty-nayn", 30: "thurty", 31: "thirty-wan",
+    21: "twenty-wan", 26: "twenty-seeks", 28: "twenty-eyt", 29: "twenty-nayn", 30: "thethi", 31: "thethi-waan",
 }
 
 
 def _code_switch_number_word(value: int) -> str:
     """The text that makes the isiZulu voice say the English number ``value``, for an ordinal or a day of the month."""
     return _ZU_CODE_SWITCH_NUMBER_RESPELLINGS.get(value) or _english_cardinal_word(value)
+
+
+# The tens words (thirty ... ninety) of a figure above 31 are English words the Zulu voice reads with an accent ("seventhy"); only 30 had a spelling chosen by ear.  A person can spell each
+# once ("seventy" -> what the voice should be given) and it applies to every figure in that ten (71, 72 ... 79).  The key is the plain English word; the default is the word itself
+# ("thirty" -> "thethi", the 30/31 spelling the ear chose).
+TENS_WORDS = tuple(_EN_TENS[t] for t in range(3, 10))
+_TENS_OVERRIDE: contextvars.ContextVar[Mapping[str, str]] = contextvars.ContextVar("zu_tens_override", default={})
+
+
+def tens_word(tens: int) -> str:
+    """The word said for the tens digit of a figure 32-99: a person's spelling when the dictionary has one, else the rules' (thirty -> thethi, the others as written)."""
+    plain = _EN_TENS[tens]
+    return _TENS_OVERRIDE.get().get(plain) or ("thethi" if tens == 3 else plain)
+
+
+def _code_switch_figure_words(value: int) -> str:
+    """The English number words for a figure 1-99 in the respellings the ear chose, hyphenated so they are one word: 31 -> "thethi-waan", 75 -> "seventy-fayiv", 44 -> "forty-four"."""
+    if value <= 31:
+        return _code_switch_number_word(value)
+    tens, unit = divmod(value, 10)
+    head = tens_word(tens)
+    return head + ("-" + (_ZU_CODE_SWITCH_NUMBER_RESPELLINGS.get(unit) or _EN_UNITS[unit]) if unit else "")          # one number is one word to the voice: no pause inside it
+
+
+_NAME_JOIN_KINDS = frozenset({"english_code_switch", "personal_name", "organisation_name", "place_name", "initials", "acronym"})
+
+
+def _one_name(previous: tuple[int, int, "PronunciationEntry"], current: tuple[int, int, "PronunciationEntry"], text: str) -> bool:
+    """Are these two substitutions neighbouring words of one English name or term ("North" "West", "Crime" "Intelligence", "panic" "attack")?  Both are English words or names
+    the dictionary respells, with exactly one space between them: two English words side by side in a Zulu sentence are one English compound, capital or not.  Spacing inside
+    such a term made the voice treat each word as its own phrase (human-reported 2026-11-11: "eNorth West University is not hyphenated so it's not flowing"; 2026-11-12:
+    "crime intelligence is 2 english words so compounds like that should automatically be hyphened")."""
+    (p_start, p_end, p_entry), (c_start, c_end, c_entry) = previous, current
+    return (p_entry.kind in _NAME_JOIN_KINDS and c_entry.kind in _NAME_JOIN_KINDS and text[p_end:c_start] == " "
+            and not re.search(r"\d", text[p_start:p_end] + text[c_start:c_end]))          # words, not figures: "lesi-6 nowesi-10" are two ordinals, not one term
 
 
 # A respelled name that ends in a vowel, followed directly by an isiZulu word that begins with the same vowel
@@ -1219,6 +1424,15 @@ def _zulu_dynamic_ordinal_candidates(
     if language.casefold() != "zu-za":
         return []
     candidates: list[tuple[int, int, PronunciationEntry]] = []
+    for match in _ZU_ORDINAL_SUFFIXED.finditer(text):
+        # "ngo-4th", "22nd", "1st" on their own: a job's lexicon lists these ordinals and a person's spelling of one wins (an entry at the same start sorts first); without it the
+        # day is said as the English number word after its prefix, like a day before a month, never as digits.
+        number = int(match.group("number"))
+        before = match.group(0)
+        candidates.append((match.start(), match.end(), PronunciationEntry(
+            display_text=before, spoken_text=before, tts_text=_code_switch_number_word(number), language=language, source="application_default",
+            confidence=1.0, kind="number",
+            notes=("Application-controlled English code switch of an ordinal written with its suffix", ZU_ENGLISH_ORDINAL_CODE_SWITCH_VERSION, "Approved/display digits remain immutable"))))
     for match in _ZU_ORDINAL_DIGITS.finditer(text):
         before = match.group(0)
         after = f"{match.group('prefix')}-{_code_switch_number_word(int(match.group('number')))}"
@@ -1346,7 +1560,7 @@ def _zulu_date_ordinal_day(day: int) -> str:
 # year ending in 1 too (2001/2011/2021/2031), not just this one bare-day
 # case. "wani" round-tripped cleanly as "1" on the same real voice.
 _ZU_YEAR_ONES = {
-    1: "wani", 2: "two", 3: "three", 4: "four", 5: "faif",
+    1: "wan", 2: "two", 3: "three", 4: "four", 5: "faif",
     6: "six", 7: "seven", 8: "eight", 9: "nine",
 }
 _ZU_YEAR_TEENS = {
@@ -1365,7 +1579,7 @@ def _zulu_two_digit_year_words(value: int) -> str:
     if value == 0:
         return "hundred"
     if value < 10:
-        return f"oh {_ZU_YEAR_ONES[value]}"
+        return f"oh-{_ZU_YEAR_ONES[value]}"
     if value < 20:
         return _ZU_YEAR_TEENS[value]
     tens, ones = divmod(value, 10)
@@ -1375,13 +1589,34 @@ def _zulu_two_digit_year_words(value: int) -> str:
     return word
 
 
-def _zulu_year_tts(year: int) -> str:
+_YEAR_OVERRIDE: contextvars.ContextVar[Mapping[str, str]] = contextvars.ContextVar("zu_year_override", default={})
+
+
+def year_spelling(year: int) -> str:
     """Render a 1900-2099 year as two spoken two-digit groups, e.g. 2024 ->
     "twenty twenty-four", matching how South African English broadcast speech
-    actually reads a year -- never digit-by-digit, never a bare cardinal."""
+    actually reads a year -- never digit-by-digit, never a bare cardinal.  What the rules write; a person's spelling replaces it (``_zulu_year_tts``)."""
     head, tail = divmod(year, 100)
     head_word = {19: "nineteen", 20: "twenty"}[head]
-    return f"{head_word} {_zulu_two_digit_year_words(tail)}"
+    return f"{head_word}-{_zulu_two_digit_year_words(tail)}"          # one year is one word to the voice
+
+
+def _zulu_year_tts(year: int) -> str:
+    """The year as it is said: the spelling a person chose by ear for this year ("2006") when the dictionary has one, else the rules'."""
+    return _YEAR_OVERRIDE.get().get(str(year)) or year_spelling(year)
+
+
+def written_years(texts: Iterable[str]) -> list[int]:
+    """The years the rules read in these texts (after a prefix, after a month, or in a full date), once each, in order: the ones a person may want to say differently."""
+    found: dict[int, None] = {}
+    for text in texts:
+        spots = [(m.start(), m.group("year")) for m in _ZU_KA_YEAR.finditer(text)]
+        spots += [(m.start("year"), m.group("year")) for pattern in (_ZU_MONTH_YEAR_ONLY, _ZU_CALENDAR_DATE) for m in pattern.finditer(text) if m.group("year")]
+        for _, raw in sorted(spots):
+            digits = re.search(r"(?:19|20)[0-9]{2}", raw)
+            if digits:
+                found.setdefault(int(digits.group()), None)
+    return list(found)
 
 
 def _zulu_native_date_tts(match: re.Match[str]) -> str:
@@ -1403,12 +1638,12 @@ def _zulu_native_date_tts(match: re.Match[str]) -> str:
         date = f"{_code_switch_number_word(day)} {english_month}"
     else:
         date = f"mhla {_zulu_date_subject_day(day)} ku{month}"
-    # A day+month+year date's own trailing year is deliberately left as raw
-    # digits, matching this function's established, tested behavior (see
-    # test_zulu_native_dates_v131822.py) -- the real, user-reported defect
-    # this session fixes is only the DAY-LESS "Month YYYY"/"ka-YYYY" case
-    # (_ZU_BARE_YEAR below), which never reaches this function at all.
-    return date + year
+    # The trailing year of a day+month+year date used to be left as raw digits (the voice then read it with Zulu-accented English).  A year is said like every other year
+    # (human decision 2026-11-10/11: all numbers are code-switched), and a person's spelling of it (a year entry such as 2006) applies here too.
+    digits = re.search(r"(?:19|20)[0-9]{2}", year)
+    if digits is None:
+        return date + year
+    return date + year[:digits.start()] + _zulu_year_tts(int(digits.group()))
 
 
 # A year with no day attached, immediately preceded by a month name -- e.g.
@@ -1509,16 +1744,33 @@ def _english_ordinal_day_word(value: int) -> str:
 # still applies before whichever prefix actually starts, so an unrelated
 # word merely ending in "u" immediately before "ka-YYYY" is still excluded
 # exactly as before -- only the specific "ku"+"ka-" glue is now recognized.
+# A year after any of the hyphenated prepositions ("ngo-2021", "u-2029", "sika-2015") is said in English like the "ka-" one (listener, 2026-11-09:
+# "ngo-2021" went to the voice as raw digits and its last "1" was not "wan").
 _ZU_KA_YEAR = re.compile(
-    r"(?<!\w)(?P<prefix>(?:ku)?ka-)(?P<year>(?:19|20)[0-9]{2})(?!\w)",
+    r"(?<![\w-])(?P<prefix>(?:(?:ku)?ka|sika|ngo|nga|na|ne|no|wa|we|ya|u|e|(?-i:[a-z]{0,4})wezi)-)(?P<year>(?:19|20)[0-9]{2})(?!\w)",          # the "wezi" family (wezi-, owezi-, ngowezi-, yowezi-) is a year form; "elingu-2024" is a docket number
     re.IGNORECASE | re.UNICODE,
 )
+# The English "of" the translator leaves between a day and its month ("Kusukela ngo-4th of November"). Listener, 2026-11-08: it must be
+# said "ngo-fooo Novemba" (first tried with "ka" between, then taken out by ear). Only the connector and the month are taken here (the day is the ordinal's own entry, "4th" -> "fooo", which
+# ends where this begins), so a day the lexicon spells keeps its spelling, and the English "of month" is replaced by the everyday month name alone.
+_ZU_ENGLISH_OF_MONTH = re.compile(
+    rf"(?:(?<=\d\s)|(?<=\d(?:st|nd|rd|th)\s))of\s+(?P<month>{_ZU_MONTH_PATTERN})(?!\w)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def written_ordinal(day: int) -> str:
+    """4 -> ``4th``, 22 -> ``22nd``: how a day is written in English, the key its spelling is kept under in a job's lexicon."""
+    if 10 <= day % 100 <= 20:
+        return f"{day}th"
+    return f"{day}" + {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
 
 
 def _zulu_dynamic_date_candidates(
     text: str,
     *,
     language: str,
+    day_word: Callable[[int], str | None] | None = None,
 ) -> list[tuple[int, int, PronunciationEntry]]:
     if language.casefold() != "zu-za":
         return []
@@ -1594,7 +1846,8 @@ def _zulu_dynamic_date_candidates(
         english_month = _ZU_MONTH_ENGLISH_CODE_SWITCH_BY_ALIAS.get(
             match.group("month").casefold(), match.group("month"),
         )
-        after = english_month + match.group("sep") + _english_ordinal_day_word(int(match.group("day")))
+        # the day as the job's rules spell it ("4th" -> "fooo", the English number), else the plain English ordinal
+        after = english_month + match.group("sep") + ((day_word(int(match.group("day"))) if day_word else None) or _english_ordinal_day_word(int(match.group("day"))))
         candidates.append(
             (
                 match.start(),
@@ -1636,6 +1889,28 @@ def _zulu_dynamic_date_candidates(
                         "for a Zulu-possessive 'ka-' year reference",
                         ZU_NATIVE_YEAR_PRONUNCIATION_VERSION,
                         "Approved/display digits remain immutable",
+                    ),
+                ),
+            )
+        )
+    for match in _ZU_ENGLISH_OF_MONTH.finditer(text):
+        before = match.group(0)
+        candidates.append(
+            (
+                match.start(),
+                match.end(),
+                PronunciationEntry(
+                    display_text=before,
+                    spoken_text=before,
+                    tts_text=_ZU_MONTH_LOANWORD_BY_ALIAS[match.group("month").casefold()],
+                    language=language,
+                    source="application_default",
+                    confidence=1.0,
+                    kind="date",
+                    notes=(
+                        "Application-controlled everyday isiZulu month name for the English 'of <month>' after a day",
+                        ZU_NATIVE_YEAR_PRONUNCIATION_VERSION,
+                        "Approved/display text remains immutable",
                     ),
                 ),
             )
@@ -1819,6 +2094,59 @@ class PronunciationResult:
         }
 
 
+# -- the item classes ---------------------------------------------------------------------------------------------------------
+# Turning written text into the text a voice reads is "text normalisation", and the standard way to organise it is by semiotic class: each kind of item (a date, an amount, a figure,
+# an ordinal, a title, letters said one by one ...) has its own detector and its own spoken-form generator.  The Azure zu-ZA voices ignore SSML <say-as> and <phoneme> (measured
+# 2026-11-11), so this front end has to be ours.  Every class below answers one question the same way: "which spans of this text are mine, and what are they said as?"  A defect a
+# listener hears is first CLASSIFIED (which item is it?) and fixed in that class, not patched beside it.  What a person's ear can override in each class is stated with it.
+@dataclass(frozen=True)
+class SpokenContext:
+    """What a class may need to find its items: the text and language, the voice, and the person's decisions found in the dictionary."""
+
+    text: str
+    language: str
+    voice: str | None
+    day_word: Callable[[int], str | None]
+    figure_overrides: Mapping[str, str]
+    reviewed_entry: Callable[[str], "PronunciationEntry | None"]
+
+
+@dataclass(frozen=True)
+class ItemClass:
+    name: str
+    kinds: frozenset[str]          # the entry kinds a caller may ask for that this class answers (None asked = every class runs)
+    find: Callable[[SpokenContext], Iterable[tuple[int, int, "PronunciationEntry"]]]
+    example: str                   # one written item and what it is said as, for the record and the tests
+    ear_override: str              # what the listener's committed spelling replaces in this class
+
+
+ITEM_CLASSES: tuple[ItemClass, ...] = (
+    ItemClass("date", frozenset({"date"}), lambda c: _zulu_dynamic_date_candidates(c.text, language=c.language, day_word=c.day_word),
+              "ngoNovemba 4 -> ngoNovemba fooo", "the day (an ordinal entry such as 4th); the year (a year entry such as 2006)"),
+    ItemClass("currency", frozenset({"currency"}), lambda c: _zulu_dynamic_currency_candidates(c.text, language=c.language),
+              "u-R4,500 -> izinkulungwane ezine namakhulu amahlanu zamaRandi", "nothing yet"),
+    ItemClass("figure", frozenset({"number", "currency"}), lambda c: _zulu_dynamic_number_candidates(c.text, language=c.language, override=c.figure_overrides),
+              "ku-75.8% -> ku-seventy-fayiv-phoynt-eyt wamaphesenti,   eSection 79 -> eSection seventy-nayn", "everything after the Zulu prefix (an entry such as 75.8% or 79)"),
+    ItemClass("reference_number", frozenset({"english_code_switch", "number"}), lambda c: _zulu_dynamic_reference_number_candidates(c.text, language=c.language),
+              "ikhodi 12345 -> ikhodi wan tuu triiy four fayiv", "nothing yet"),
+    ItemClass("legal_number", frozenset({"english_code_switch", "number"}), lambda c: _zulu_dynamic_legal_number_candidates(c.text, language=c.language),
+              "ngesitatimende sika-204 -> ngesitatimende sika-tuu-ow-four", "nothing yet"),
+    ItemClass("phone_number", frozenset({"english_code_switch", "number"}), lambda c: _zulu_dynamic_phone_number_candidates(c.text, language=c.language),
+              "shayela 082 123 4567 -> shayela zeeroh eyt tuu, wan tuu triiy, four fayiv seeks seven", "nothing yet"),
+    ItemClass("ordinal", frozenset({"english_code_switch", "number"}), lambda c: _zulu_dynamic_ordinal_candidates(c.text, language=c.language),
+              "owesi-10 -> owesi-ten", "nothing yet"),
+    ItemClass("title", frozenset({"other"}), lambda c: _zulu_dynamic_honorific_candidates(c.text, language=c.language),
+              "sinoDkt Arthur -> sinoDokotela Arthur", "nothing yet"),
+    ItemClass("initialism", frozenset({"initials"}), lambda c: _zulu_dynamic_prefixed_initialism_candidates(c.text, language=c.language, reviewed_entry=c.reviewed_entry("kzn")),
+              "i-MK -> i-Em Khey", "the letters' spelling (an initials entry such as MK)"),
+)
+
+
+def item_class_table() -> list[dict[str, str]]:
+    """The classes as rows (name, example, what the ear can override): for the docs, the tests and the audit."""
+    return [{"class": c.name, "example": c.example, "ear_override": c.ear_override} for c in ITEM_CLASSES]
+
+
 @dataclass(frozen=True)
 class PronunciationDictionary:
     dictionary_version: str
@@ -1923,6 +2251,33 @@ class PronunciationDictionary:
         kinds: set[str] | None = None,
         voice: str | None = None,
     ) -> PronunciationResult:
+        years: dict[str, str] = {}          # years a person spelled by ear ("2006"): this job's entries first, then the shared ones
+        for listed in [*self.job_overrides, *self.entries]:
+            if listed.kind == "english_code_switch":
+                for shown in listed.match_texts():
+                    if re.fullmatch(r"(?:19|20)\d{2}", shown) and shown not in years and listed.tts_text_for_voice(voice):
+                        years[shown] = listed.tts_text_for_voice(voice)
+        tens: dict[str, str] = {}          # tens words a person spelled by ear ("seventy"): one choice for every figure in that ten
+        for listed in [*self.job_overrides, *self.entries]:
+            if listed.kind == "english_code_switch":
+                for shown in listed.match_texts():
+                    if shown.casefold() in TENS_WORDS and shown.casefold() not in tens and listed.tts_text_for_voice(voice):
+                        tens[shown.casefold()] = listed.tts_text_for_voice(voice)
+        token = _YEAR_OVERRIDE.set(years)
+        tens_token = _TENS_OVERRIDE.set(tens)
+        try:
+            return self._apply(spoken_text, kinds=kinds, voice=voice)
+        finally:
+            _TENS_OVERRIDE.reset(tens_token)
+            _YEAR_OVERRIDE.reset(token)
+
+    def _apply(
+        self,
+        spoken_text: str,
+        *,
+        kinds: set[str] | None = None,
+        voice: str | None = None,
+    ) -> PronunciationResult:
         """``voice``, when given, selects a matched entry's per-voice
         `tts_text_by_voice` override (falling back to its shared `tts_text`
         for any voice not listed) -- lets the same source text render
@@ -1936,11 +2291,14 @@ class PronunciationDictionary:
             if kinds is not None and entry.kind not in kinds:
                 continue
             for match_text in entry.match_texts():
+                if entry.kind == "english_code_switch" and _WHOLE_FIGURE_ENTRY.fullmatch(match_text):
+                    continue          # a whole-number figure entry is spoken only by the figure rule (see figure_overrides below)
                 # Short (<4 char) all-caps entries -- initialisms/acronyms like "DA",
                 # "MK", "ANC" -- are exactly the ones prone to an accidental substring
                 # collision under IGNORECASE (e.g. "da" inside "Rabanda"). Only relax
                 # the start boundary for a genuinely long-enough proper-noun match.
                 glue_needs_capital = False
+                glued_initialism = False
                 if match_text[:1].isupper() and len(match_text) >= 4 and entry.kind not in {"initials", "acronym"}:
                     start_boundary = rf"(?:(?<!\w)|{_GLUED_PREFIX_LOOKBEHIND})"
                 elif len(match_text) >= 4 and entry.kind not in {"initials", "acronym"}:
@@ -1949,6 +2307,12 @@ class PronunciationDictionary:
                     # vocabulary from being matched inside longer isiZulu words.
                     start_boundary = rf"(?:(?<!\w)|{_GLUED_PREFIX_LOOKBEHIND})"
                     glue_needs_capital = True
+                elif 2 <= len(match_text) <= 5 and match_text.isalpha() and match_text.isupper():
+                    # An initialism with a lowercase Zulu prefix glued straight on ("eJB Marks", "kuSABC"): taken only where the text writes the
+                    # letters in capitals after a lowercase prefix, which keeps "da" inside "Rabanda" from matching "DA".
+                    start_boundary = rf"(?:(?<!\w)|{_GLUED_PREFIX_LOOKBEHIND})"
+                    glue_needs_capital = True
+                    glued_initialism = True
                 else:
                     start_boundary = r"(?<!\w)"
                 pattern = re.compile(
@@ -1957,6 +2321,8 @@ class PronunciationDictionary:
                 for match in pattern.finditer(text):
                     if glue_needs_capital and match.start() > 0 and re.match(r"\w", text[match.start() - 1]) and not text[match.start()].isupper():
                         continue
+                    if glued_initialism and match.start() > 0 and re.match(r"\w", text[match.start() - 1]) and text[match.start():match.end()] != match_text:
+                        continue          # a glued initialism must be written in capitals
                     candidates.append(
                         (
                             match.start(),
@@ -1967,61 +2333,31 @@ class PronunciationDictionary:
                             entry,
                         )
                     )
-        if kinds is None or "date" in kinds:
-            for start, end, entry in _zulu_dynamic_date_candidates(
-                text,
-                language=self.language,
-            ):
-                # Explicit job/global entries retain authority over the
-                # application fallback when both begin at the same span.
-                candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
-        if kinds is None or "currency" in kinds:
-            for start, end, entry in _zulu_dynamic_currency_candidates(
-                text,
-                language=self.language,
-            ):
-                candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
-        if kinds is None or "number" in kinds or "currency" in kinds:
-            for start, end, entry in _zulu_dynamic_number_candidates(
-                text,
-                language=self.language,
-            ):
-                candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
-        if kinds is None or "english_code_switch" in kinds or "number" in kinds:
-            for start, end, entry in _zulu_dynamic_reference_number_candidates(
-                text,
-                language=self.language,
-            ):
-                candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
-        if kinds is None or "english_code_switch" in kinds or "number" in kinds:
-            for start, end, entry in _zulu_dynamic_ordinal_candidates(
-                text,
-                language=self.language,
-            ):
-                candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
-        if kinds is None or "other" in kinds:
-            for start, end, entry in _zulu_dynamic_honorific_candidates(
-                text,
-                language=self.language,
-            ):
-                # Explicit job/global entries remain authoritative over the
-                # deterministic application fallback.
-                candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
-        if kinds is None or "initials" in kinds:
-            reviewed_kzn_entry = next(
-                (
-                    entry
-                    for _scope_priority, entry in scoped_entries
-                    if entry.kind == "initials" and any(value.casefold() == "kzn" for value in entry.match_texts())
-                ),
-                None,
-            )
-            for start, end, entry in _zulu_dynamic_prefixed_initialism_candidates(
-                text,
-                language=self.language,
-                reviewed_entry=reviewed_kzn_entry,
-            ):
-                candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
+        day_entries = [*self.job_overrides, *self.entries]
+
+        def day_word(day: int) -> str | None:
+            written = written_ordinal(day).casefold()
+            for day_entry in day_entries:
+                if any(value.casefold() == written for value in day_entry.match_texts()):
+                    return day_entry.tts_text_for_voice(voice)
+            return None
+
+        figure_overrides: dict[str, str] = {}          # figures a person spelled by ear ("75.8%", "79"): this job's entries first, then the shared ones
+        for _scope, listed in scoped_entries:
+            if listed.kind == "english_code_switch":
+                for shown in listed.match_texts():
+                    if re.fullmatch(r"\d{1,2}(?:\.\d{1,3})?%?", shown) and shown not in figure_overrides and listed.tts_text_for_voice(voice):
+                        figure_overrides[shown] = listed.tts_text_for_voice(voice)
+
+        def reviewed_entry(word: str) -> "PronunciationEntry | None":
+            return next((entry for _scope_priority, entry in scoped_entries if entry.kind == "initials" and any(v.casefold() == word for v in entry.match_texts())), None)
+
+        context = SpokenContext(text=text, language=self.language, voice=voice, day_word=day_word, figure_overrides=figure_overrides, reviewed_entry=reviewed_entry)
+        for item_class in ITEM_CLASSES:
+            if kinds is None or kinds & item_class.kinds:
+                for start, end, entry in item_class.find(context):
+                    # Explicit job/global entries retain authority over the application fallback when both begin at the same span.
+                    candidates.append((start, end, 2, -(end - start), str(entry.entry_id), entry))
         candidates.sort(key=lambda item: (item[0], item[2], item[3], item[4]))
         selected: list[tuple[int, int, PronunciationEntry]] = []
         occupied_until = -1
@@ -2034,11 +2370,19 @@ class PronunciationDictionary:
         output: list[str] = []
         substitutions: list[PronunciationSubstitution] = []
         cursor = 0
-        for start, end, entry in selected:
+        # words of one English name or term written together ("eNorth West University", "Municipal Structures Act") are said as ONE word: joined with hyphens, they flow
+        joins = [index > 0 and _one_name(selected[index - 1], selected[index], text) for index in range(len(selected))]
+        for index, (start, end, entry) in enumerate(selected):
             applied_tts_text = entry.tts_text_for_voice(voice)
-            output.append(text[cursor:start])
+            output.append("-" if joins[index] else text[cursor:start])
             output.append(applied_tts_text)
-            output.append(_name_vowel_hiatus_separator(applied_tts_text, entry.kind, text[end:]))
+            # what is said next, not what was written: a day spelled "fooo" before "of November" (said "ka Novemba") has no vowel meeting it
+            if index + 1 < len(selected):
+                following = text[end:selected[index + 1][0]] + selected[index + 1][2].tts_text_for_voice(voice)
+            else:
+                following = text[end:]
+            if not (index + 1 < len(selected) and joins[index + 1]):          # inside a joined name the two vowels sit in one word
+                output.append(_name_vowel_hiatus_separator(applied_tts_text, entry.kind, following))
             before = text[start:end]
             substitutions.append(
                 PronunciationSubstitution(

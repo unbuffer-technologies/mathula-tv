@@ -2459,19 +2459,11 @@ def _build_batch_payload(
     if pronunciation_only:
         batch_local_context.pop("commission_master_case", None)
         batch_local_context.pop("context_providers", None)
+    # The shared parts come first and what changes from batch to batch comes last: the model reads the request as one text, and a provider can reuse
+    # (cache) only the start that two requests have in common. With the batch number and the entities in front, no batch shared more than the
+    # instructions with the next (16% of the input was served from cache).
     return {
         "request_contract": "mathula-autocorrect-entity-cluster-batch-v2",
-        "batch": {"index": batch_index, "count": batch_count},
-        "candidate_entities": [copy.deepcopy(dict(item)) for item in batch],
-        "transcript_context": _compact_transcript_context(
-            transcript,
-            batch,
-            radius=0 if pronunciation_only else 1,
-            max_text_chars=700 if pronunciation_only else 1_600,
-        ),
-        "known_entity_registry": (
-            [] if pronunciation_only else _compact_registry_for_candidates(registry_evidence, batch)
-        ),
         "source_metadata": dict(source_metadata),
         "local_context": batch_local_context,
         "research_profile": dict(research_profile),
@@ -2498,6 +2490,17 @@ def _build_batch_payload(
             "preserve_anonymous_witness_designations": True,
             "return_every_entity_as_correction_or_unresolved": True,
         },
+        "batch": {"index": batch_index, "count": batch_count},
+        "candidate_entities": [copy.deepcopy(dict(item)) for item in batch],
+        "transcript_context": _compact_transcript_context(
+            transcript,
+            batch,
+            radius=0 if pronunciation_only else 1,
+            max_text_chars=700 if pronunciation_only else 1_600,
+        ),
+        "known_entity_registry": (
+            [] if pronunciation_only else _compact_registry_for_candidates(registry_evidence, batch)
+        ),
     }
 
 

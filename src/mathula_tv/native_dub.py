@@ -458,23 +458,19 @@ CONFIRMED_TRANSLATION_PITFALLS: tuple[str, ...] = (
     "which is mispronounced beyond recognition). Keep \"General\" as an unmodified English "
     "code-switch, glued with the ordinary isiZulu prefix (\"uGeneral\", \"kuGeneral\"), exactly "
     "like \"Advocate\" and \"Mr.\"/\"Mnu.\" elsewhere in this transcript.",
-    "An English attributive date in bare \"Month Day\" word order with no ordinal suffix (e.g. "
-    "\"the November 1 elections\", modifying a following noun) must NOT be translated by "
-    "literally mirroring that English word order into a Zulu-spelled month followed by a bare "
-    "trailing digit (e.g. \"...lwangoNovemba 1\") -- isiZulu does not read a bare digit naturally "
-    "in that position. Restructure the date using isiZulu's own native day-before-month "
-    "construction instead: \"umhla\"/\"ngomhla\"/\"mhla\" (the day) followed by the day rendered "
-    "as an ordinal agreeing with \"umhla\" (e.g. \"wokuqala\" for the 1st, \"wesibili\" for the "
-    "2nd) and then \"ku-\"/\"ka-\" plus the month name -- the SAME construction this transcript "
-    "already produces correctly elsewhere for an ordinal-suffixed English date (\"wake up on the "
-    "4th\" -> \"ngomhlaka-4\"). Restructure the surrounding clause's grammar as needed (for "
-    "example as a relative clause modifying the noun the date describes) rather than forcing the "
-    "date phrase to sit in the original English attributive position unchanged. ALWAYS use the "
-    "established English-borrowed isiZulu month name in this construction (e.g. \"Novemba\", "
-    "\"Mashi\", \"Disemba\") -- NEVER the old traditional/calendar month name (e.g. \"Lwezi\", "
-    "\"Ndasa\", \"Zibandlela\"), which most real isiZulu speakers today do not recognize. Real "
-    "user feedback: \"probably only 10% of people who understand zulu know what 'lwamhla lu-1 "
-    "kuLwezi' means, let's only use the borrowed english words.\"",
+    "A calendar date (a day of a month, with or without an ordinal suffix, \"of\" or \"the\": \"the 4th of "
+    "November\", \"November 4\", \"4 November\", \"November 1\") is written the way the isiZulu newspaper "
+    "Isolezwe writes it: the MONTH FIRST, then the day as plain digits, with the isiZulu preposition glued "
+    "on the month -- \"ngoNovemba 4\" (on/from 4 November), \"uDisemba 1\" (until 1 December), "
+    "\"ngoJanuwari 5, 2027\" (with a year after a comma). \"Kusukela ngoNovemba 4, ...\" for \"From the 4th "
+    "of November, ...\". NEVER keep the English \"of\" or the English day-first order (\"ngo-4th of "
+    "November\" is wrong), NEVER write an ordinal suffix (\"4th\") and NEVER build the \"umhla\"/\"ngomhla\"/"
+    "\"mhla\" + ordinal + \"ku-\" construction (\"ngomhla wesine kuNovemba\"): Isolezwe's readers see "
+    "\"ngoNovemba 4\" and the dub's voice reads the day in English. Use the established "
+    "English-borrowed isiZulu month name (\"Novemba\", \"Mashi\", \"Disemba\") -- NEVER the old "
+    "traditional calendar name (\"Lwezi\", \"Ndasa\", \"Zibandlela\"), which most real isiZulu speakers "
+    "today do not recognize. A month with no day (\"the November elections\") stays \"ngoNovemba\" or "
+    "\"kuNovemba\" with no digits.",
 )
 DEFAULT_ROLLING_SYLLABLE_BATCH_SIZE = 8
 DEFAULT_ZULU_CONTENT_SYLLABLES_PER_SECOND = 5.3
@@ -1164,6 +1160,13 @@ YouTube's, model_wrote = an earlier restoration, listener_decided = the final te
 YouTube's captions behave: where a new segment is confused in the same way, resolve it the
 way the listener did (keep the transcript where the listener kept it, take the caption's
 words only where the listener did), and never copy an example's words into another segment.
+listener_words, when present, lists words the listener identified by language (english,
+zulu, sepedi, setswana, sesotho, afrikaans, other) and may carry a comment: where the
+transcript has such a word, or a misheard form of it, keep it as that language's word as
+spoken, never translate it. listener_comment, in an example or a word, is the listener's own
+explanation: follow it. listener_notes are the listener's comments on segments of THIS video
+(id = the segment id): they come from someone who heard the real audio, so treat each as an
+instruction about that segment, within the rule never to move content between segment IDs.
 
 The input segments use id/spk/text. Return sparse corrections only; do NOT echo original
 text. Also return one small reusable context_ledger: a neutral <=120-word programme
@@ -2688,11 +2691,15 @@ def run_native_pass1(
 
     youtube = youtube_hints(Path(job_root), segments)          # YouTube's captions, for the segments the English recogniser and they disagree on
     gap_list = youtube_gaps(Path(job_root), segments)          # and for the stretches the transcript has no segment for
+    from .language_questions import notes as listener_notes
+
+    job_notes = listener_notes(Path(job_root))          # the listener's own comments on this video's segments: they steer this video, so a new comment makes pass 1 run again
     input_hash = _hash_payload({
         "transcript_sha256": checksum(transcript_path),
         "overrides": overrides,
         "youtube": youtube,
         "youtube_gaps": gap_list,
+        **({"listener_notes": job_notes} if job_notes else {}),
         "prompt_version": PASS1_PROMPT_VERSION,
         "provider_version": FOUNDRY_GROK_PROVIDER_VERSION,
     })
@@ -2723,12 +2730,19 @@ def run_native_pass1(
     if gap_list:
         payload["youtube_gaps"] = [{"after": g["after"], "gap_s": round((g["end_ms"] - g["start_ms"]) / 1000.0, 1), "yt": g["yt"]} for g in gap_list]
         _emit_progress(progress, f"[native pass 1] {len(gap_list)} stretch(es) have captions but no transcript segment: shown to the restoration")
-    from .language_questions import apply_to_segments, examples as listener_examples, work_dir_of
+    from .language_questions import apply_to_segments, examples as listener_examples, known_words, work_dir_of
 
     shown = listener_examples(work_dir_of(Path(job_root)))          # not part of the input hash: a lesson from one video must not redo another video's finished pass 1
     if shown:
         payload["listener_examples"] = shown
         _emit_progress(progress, f"[native pass 1] {len(shown)} earlier correction(s) by the listener shown to the restoration")
+    if job_notes:
+        payload["listener_notes"] = job_notes
+        _emit_progress(progress, f"[native pass 1] {len(job_notes)} comment(s) by the listener on this video's segments shown to the restoration")
+    named = known_words(work_dir_of(Path(job_root)))
+    if named:
+        payload["listener_words"] = named
+        _emit_progress(progress, f"[native pass 1] {len(named)} word(s) the listener named a language for shown to the restoration")
     response = provider.complete_json(
         operation="native_stt_restoration",
         system_prompt=PASS1_SYSTEM_PROMPT,
@@ -6969,6 +6983,8 @@ def render_native_dub(
             "The untouched video duration remains authoritative.",
         )
 
+    scheduled = _retime_sentence_gaps(scheduled, job_root=Path(job_root), audio_dir=paths.root / "audio" / "retimed",
+                                      report_path=paths.root / "sentence_retiming.json", progress=progress)
     clips = [
         {
             "unit_id": item["group_id"],
@@ -10621,6 +10637,43 @@ def _schedule_source_timeline(
         )
         scheduled.append(value)
     return scheduled
+
+
+def _retime_sentence_gaps(
+    scheduled: Sequence[Mapping[str, Any]], *, job_root: Path, audio_dir: Path, report_path: Path,
+    progress: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Move the silence between a unit's sentences so each sentence starts near where the source speaker's sentence starts (see sentence_retiming).  The speech and each unit's
+    length are untouched; a unit with one sentence, or whose sentences cannot be matched with confidence, is left exactly as it was.  ``MATHULA_SENTENCE_RETIMING=0`` turns it off."""
+    items = [dict(item) for item in scheduled]
+    if os.environ.get("MATHULA_SENTENCE_RETIMING", "1").strip().lower() in {"0", "off", "false", "no"}:
+        return items
+    from . import sentence_retiming
+
+    try:
+        words = read_json(Path(job_root) / "analysis" / "azure_diarization.json").get("words") or []
+    except (OSError, ValueError):
+        return items
+    reports: list[dict[str, Any]] = []
+    for item in items:
+        try:
+            output = audio_dir / f"{item['group_id']}.sentence-retimed.wav"
+            window_end = int(item.get("source_end_ms") or item["scheduled_end_ms"])
+            extra_ms = max(0, window_end - int(item["scheduled_start_ms"]) - int(item["tts_duration_ms"]) - 50)          # the unit's shortfall against its window: spent at the source's pauses, not left at the end
+            report = sentence_retiming.retime(Path(item["path"]), output, words, int(item["scheduled_start_ms"]), window_end, extra_ms)
+        except Exception as exc:                                       # noqa: BLE001 - retiming is a refinement: a unit it cannot read keeps its audio
+            report = {"applied": False, "why": f"{type(exc).__name__}: {str(exc)[:120]}"}
+        if report.get("applied"):
+            item["path"] = str(output)
+            grown = int(report["duration_after_ms"]) - int(item["tts_duration_ms"])
+            if grown:
+                item["tts_duration_ms"] = int(report["duration_after_ms"])
+                item["scheduled_end_ms"] = int(item["scheduled_end_ms"]) + grown
+                item["end_alignment_error_ms"] = int(item.get("end_alignment_error_ms") or 0) + grown
+            _emit_progress(progress, f"[native dub] {item['group_id']}: sentence gaps moved toward the speaker's (onset error {report['onset_error_s']['before']} s -> {report['onset_error_s']['after']} s)")
+        reports.append({"unit_id": str(item["group_id"]), **report})
+    atomic_write_json(report_path, {"schema_version": "mathula-sentence-retiming-v1", "units": reports})
+    return items
 
 
 def _load_manual_overrides(path: Path) -> dict[str, Any]:

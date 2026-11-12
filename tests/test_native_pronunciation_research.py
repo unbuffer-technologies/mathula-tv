@@ -234,6 +234,18 @@ def test_ensure_research_reuses_cache_without_a_second_call(tmp_path, monkeypatc
     assert backend.calls == 1  # not called again
 
 
+def test_research_done_with_the_round_trip_check_is_reused_when_the_check_is_switched_off(tmp_path, monkeypatch):
+    job_root = _job_root(tmp_path)
+    backend = _FakeResearchBackend()
+    monkeypatch.setattr("mathula_tv.native_dub.AzureResponsesWebResearchProvider.from_environment", lambda: backend)
+    context_ledger = _context_ledger("Ayanda Nyati")
+    glossary = _glossary()
+    _ensure_native_pronunciation_research(job_root=job_root, context_ledger=context_ledger, glossary=glossary, progress=None, skip_round_trip_verification=False)
+    assert backend.calls == 1
+    _ensure_native_pronunciation_research(job_root=job_root, context_ledger=context_ledger, glossary=glossary, progress=None, skip_round_trip_verification=True)
+    assert backend.calls == 1          # the pronunciations are no longer checked by speaking and listening: the job's research is still good
+
+
 def test_ensure_research_regenerates_when_glossary_changes(tmp_path, monkeypatch):
     job_root = _job_root(tmp_path)
     backend = _FakeResearchBackend()

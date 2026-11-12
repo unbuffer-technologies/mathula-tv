@@ -436,3 +436,37 @@ def test_timing_search_rejects_overlong_audio_and_emits_targeted_repair_signal()
     assert fitted.repair_signal.reason == "azure_tts_exceeds_hard_timing_window"
     assert fitted.repair_signal.attempted_rates_percent == tuple(rates)
     assert fitted.repair_signal.required_duration_reduction_ratio < 1
+
+
+def _cached_backend(boundary, cache_dir):
+    return AzureTTSBackend(boundary, configured_voices=("zu-ZA-ThandoNeural",), default_voice="zu-ZA-ThandoNeural", max_retries=0, sleep=[].append, cache_dir=cache_dir)
+
+
+def test_a_phrase_the_voice_has_already_said_is_taken_from_the_cache_in_the_next_run(tmp_path):
+    boundary = Boundary(voices=[json_response(VOICES)], audio=[AzureTTSResponse(200, pcm_wav(tone_ms=500))])
+    first = _cached_backend(boundary, tmp_path / "cache").synthesize(request(), tmp_path / "run1" / "u01.wav")
+    second = _cached_backend(boundary, tmp_path / "cache").synthesize(request(), tmp_path / "run2" / "u01.wav")          # a new run, a new folder, the same SSML
+    assert len(boundary.audio_calls) == 1
+    assert (tmp_path / "run2" / "u01.wav").read_bytes() == (tmp_path / "run1" / "u01.wav").read_bytes()
+    assert second.duration_ms == first.duration_ms and second.sha256 == first.sha256 and Path(second.output_path).parent.name == "run2"
+    assert (tmp_path / "run2" / "u01.azure_tts.ssml").is_file() and (tmp_path / "run2" / "u01.azure_tts.json").is_file()          # the run keeps its own complete artifacts
+
+
+def test_a_changed_word_is_synthesised_again_and_a_damaged_cache_entry_is_a_miss(tmp_path):
+    boundary = Boundary(voices=[json_response(VOICES)], audio=[AzureTTSResponse(200, pcm_wav(tone_ms=500)), AzureTTSResponse(200, pcm_wav(tone_ms=700)), AzureTTSResponse(200, pcm_wav(tone_ms=500))])
+    backend_ = _cached_backend(boundary, tmp_path / "cache")
+    backend_.synthesize(request(), tmp_path / "a" / "u01.wav")
+    backend_.synthesize(request(text="Sawubona Mzansi yonke."), tmp_path / "b" / "u01.wav")          # different text: different SSML: the voice says it
+    assert len(boundary.audio_calls) == 2
+    for entry in (tmp_path / "cache").rglob("*.wav"):
+        entry.write_bytes(entry.read_bytes()[:-10])                                                    # damaged
+    backend_.synthesize(request(), tmp_path / "c" / "u01.wav")
+    assert len(boundary.audio_calls) == 3
+
+
+def test_without_a_cache_directory_every_run_synthesises(tmp_path):
+    boundary = Boundary(voices=[json_response(VOICES)], audio=[AzureTTSResponse(200, pcm_wav(tone_ms=500)), AzureTTSResponse(200, pcm_wav(tone_ms=500))])
+    plain = backend(boundary)
+    plain.synthesize(request(), tmp_path / "a" / "u01.wav")
+    plain.synthesize(request(), tmp_path / "b" / "u01.wav")
+    assert len(boundary.audio_calls) == 2

@@ -64,30 +64,45 @@ You work through tools and decide your own method. You are scored on:
    accept an overrun to remove a shortfall.
    Silence padding: the renderer closes a shortfall of up to 150 ms with trailing silence, and for a
    speaker turn of several consecutive units it can spread a larger shortfall over the real gaps between
-   them (each gap widened by at most 1.5 s; nothing if the units are back to back). That is a fallback,
-   not a goal: a viewer hears padding as a pause, so prefer wording that fills the time.
+   them (each gap widened by at most 1.5 s; nothing if the units are back to back). Prefer wording that
+   fills the time, but only wording the speaker's meaning carries. Never add a word, a phrase or an
+   English-derived piece of Zulu just to fill a window: a short line that leaves a fraction of a second
+   is correct and the silence is harmless. A filler a Zulu speaker would not say is a worse defect than a
+   short unit. Understanding and natural speech come before the last 300 ms of fit.
    Length guide: open_clip gives each segment fits_about_chars, the Zulu length that fills its window at this voice's natural speed (about 12
    characters per second). Write your first draft to that length, with what the speaker said: a compact first draft has landed 30% short and
    cost most of the run to close unit by unit. Every measurement tells you the unit's chars and, when it is more than 6% off its window,
    add_about_chars or cut_about_chars: the size of the edit at the rate that very text measured. Edit by that amount (fuller phrasing of what
-   the speaker said, never a restatement) so one more measurement closes the unit, and do the units that are furthest off first.
+   the speaker said, never a restatement) so one more measurement closes the unit, and do the units that are furthest off first. When the
+   measurement says leave_short, the gap is under half a second: add nothing.
 
-   Figures. Write numbers and amounts as digits ("u-4,500", "abantu abangu-500"). They are spoken in native
-   isiZulu (izinkulungwane ezine namakhulu amahlanu zamaRandi), which takes longer than English. Dates and
-   ordinals are spoken as code-switched English. When a unit does not fit its window, you may make a figure
-   shorter by writing ~en straight after it ("u-4,500~en", "abantu abangu-500~en"): it is then spoken in English
-   ("four thousand fayiv hundred rand"). The ~en is never spoken, and the digits stay for the number checks.
-   Use it only where the time requires it; native is the default.
+   Figures. Write numbers and amounts as digits with the isiZulu prefix the sentence needs ("kuka-31%", "abantu abangu-11",
+   "eminyakeni engu-20", "ngo-2006"); never spell a small figure out in isiZulu words. A figure of one or two digits (with its
+   decimals and %) is spoken as code-switched English after its prefix ("angu-thethi waan"), so the prefix and the unit word are
+   your choice: ask figure_style("31 percent") (or "20 years", "11 municipalities", "in 2006") for how translators wrote that kind of
+   figure before you write a percentage, an age, a duration, a head count or a year. Dates and ordinals are spoken as code-switched
+   English too. Larger amounts ("u-4,500", "abantu abangu-500") are spoken in native isiZulu (izinkulungwane ezine namakhulu
+   amahlanu zamaRandi), which takes longer than English. When a unit does not fit its window, you may make such an amount shorter by
+   writing ~en straight after it ("u-4,500~en"): it is then spoken in English ("four thousand fayiv hundred rand"). The ~en is
+   never spoken, and the digits stay for the number checks. Use it only where the time requires it; native is the default there.
+
+   Dates. Write a day of a month the way the isiZulu newspaper Isolezwe writes it: the MONTH FIRST with the isiZulu preposition glued on, then the day
+   as plain digits: "Kusukela ngoNovemba 4, ..." for "From the 4th of November, ...", "kuze kube uDisemba 1", "ngoJanuwari 5, 2027". Never keep the English
+   "of" or the day-first order ("ngo-4th of November" is wrong), never an ordinal suffix ("4th"), and never the "ngomhla wesine kuNovemba" construction.
+   Use the everyday borrowed month names (Novemba, Mashi, Disemba), not the old calendar names (Lwezi, Ndasa, Zibandlela). The renderer reads the day in English.
 
    Loanwords first. When Zulu has an everyday word for an English word, a native word or an established loanword (isayensi for science,
    ubuchwepheshe for technology, ibhiliyoni for billion), write that Zulu word, with the prefix the sentence needs, instead of keeping the
    English: a Zulu voice says a Zulu word naturally, a Zulu listener hears ordinary Zulu, and the dub stops fighting the voice's rule that every
-   written vowel is spoken in full. Keep an English word only for a name, a title, an acronym, or a word with no everyday Zulu word.
+   written vowel is spoken in full. Keep an English word only for a name, a title, an acronym, or a word with no everyday Zulu word. A word that
+   translators themselves write in English behind a particle (i-microphone) has its everyday Zulu form already: that borrowed form is the one to write.
    When you are not sure what to do with an English word, ask what real Zulu does: attested_zulu(word, zulu_forms) shows the Zulu forms that
    translated text pairs with it, whether the English word stays English there, how Zulu news sites write it, and how often a form you are thinking
    of has been written. The ladder:
-   an attested Zulu word or loan if there is one; otherwise code-switch, which means keeping the English word as the speaker says it (same number, plural
-   -s included), with a hyphenated particle if the grammar needs one (ne-, ye-). Never invent a form
+   first a borrowed form that real text writes (a loanword such as igranti or imeya, or the English word kept with a hyphenated particle, i-microphone: attested_zulu
+   shows how translators, news and speakers write a word); then an attested native Zulu word; otherwise code-switch, which means keeping the English word
+   as the speaker says it (same number, plural -s included), with a hyphenated particle if the grammar needs one (ne-, ye-). A formal native coinage never
+   outranks a borrowed form that translators, news and speakers write (i-microphone before umbhobho, although both are used: the borrowed form is the product's choice for widest reach). Never invent a form
    that real text does not write. Only when real text itself adapts such a word, create_loanword builds Zulu forms of it by the loan rules from the
    dictionary's sounds (a vowel inserted where Zulu has no cluster and at the end, p t k b written ph th kh bh) and shows what each changes; nothing is
    listened to or spoken. Write the one you choose in the text with the prefix the sentence needs, and call use_loanword to remember it.
@@ -102,6 +117,21 @@ You work through tools and decide your own method. You are scored on:
 
 3. Naturalness: retell the way a person would say it informally. This is not a word-for-word transfer.
    Use the whole clip's context.
+   Comprehension and fluidity are what the listener gets, so they are part of fitting the time, not a casualty of it. Hear each unit as a
+   listener who hears it once: short common words, one idea per sentence, the verb early, the sentence ending on its stress. Fit by choosing
+   among natural ways to say what the speaker said (a longer or shorter synonym, a different construction), never by padding or by cutting
+   a fact. Where English has a set phrase, say what a Zulu speaker says in that moment, not a translation of the English words.
+   A unit that sounds stiff, glued or word-for-word is a defect even when it fits to the millisecond.
+   Length by grammar. You know isiZulu's grammar and registers more widely than any one speaker does, so make it your length control: the
+   language says one meaning at many lengths, and choosing among those constructions is how a unit fits its window and sounds natural at once.
+   {grammar_pointer}To shorten without losing a fact: let a verb extension carry what a phrase would (-el-
+   for "for/to/at", -is- for "make do", -w- for "by" clauses, -an- for "each other"), leave out an emphatic pronoun the subject concord
+   already carries unless the speaker stresses it, use the conjunctive verb form where a complement follows, turn a relative clause into a
+   participial or an infinitive, take the shorter of two equally common words. To lengthen with content the English does carry: the tense and
+   aspect forms its "still", "already", "just", "used to", "was about to" imply, an emphatic pronoun where the speaker leans on it, a full
+   relative clause or demonstrative where it makes the sentence plainer. When a unit is off, draft two or three renderings that differ in
+   construction, measure them together in one measure_tts_batch call, and keep the one that is clearest and most natural of those that fit.
+   Never lengthen with an intensifier, a repeated word or a word the English lacks, and never shorten by dropping a fact, a qualifier or a negation.
    This is a SOCIAL MEDIA product: simplicity and maximum reach are the point. A viewer gives a clip a second or
    two, so use plain, short, everyday wording that lands immediately for as many people as possible.
    Widest understanding beats formality. Choose the word that the most everyday isiZulu listeners understand the
@@ -119,10 +149,58 @@ You work through tools and decide your own method. You are scored on:
    line stays weighted), keep the pauses they take for effect by ending the sentence there, keep the phrases they repeat repeated, and
    let the words they lean on (stressed_words) land at the end of a phrase or right after a pause. This shapes wording only: never
    lengthen a unit past its window for it, never invent a pause, and the meaning and plain wording above still come first.
-   The voice leaves only about half a second after a sentence. Where the sheet shows the speaker holding a pause of 600 ms or more
-   (pauses_inside), you may write ~pause900 (milliseconds, 200-2000) at the matching spot in your isiZulu: "...ngentela yethu. ~pause900 Uma
-   uya esitolo...". It is never spoken, it is a silence of that length that counts toward the unit's duration like any other part, and
-   it is also the cheapest way to fill a window honestly. Use it only for pauses the speaker really takes, at most two per unit.
+   Where the sheet shows the speaker holding a pause of 600 ms or more (pauses_inside), you may write ~pause1500 (milliseconds, 200-2000)
+   at the matching spot in your isiZulu: "...ngentela yethu. ~pause1500 Uma uya esitolo...". It is never spoken. ~pauseN is the TOTAL silence at that spot, punctuation
+   included: a full stop already leaves about 0.9 s and a comma about 0.15 s by itself, so "ngentela yethu. ~pause1500" is the stop's 0.9 s plus the rest, 1.5 s in all, and
+   "ngentela yethu. ~pause700" adds nothing (the stop alone is longer than 0.7 s). To match a speaker's pause shorter than about 1.1 s, do not end the phrase with a full stop:
+   end it with a comma or no mark and write ~pause (the speaker's pause in ms) after it. The pause counts toward the unit's duration like any other part, and it is also the
+   cheapest way to fill a window honestly. Use it only for pauses the speaker really takes (open_clip's phrasing gives each pause's length), at most two per unit. After
+   the voice has spoken, the renderer also moves the silence between your sentences so each one starts near where the source speaker's sentence starts (the speech and the unit's
+   length are never touched), so write the sentences in the order the speaker made them and let the pauses be the speaker's.
+
+   Pacing and punctuation. Punctuation is how these voices breathe, and what each mark costs was measured (the silence left between two
+   clauses, the same words each time): no mark leaves none, so the clauses run on; an ellipsis ("...") is ignored and also leaves none; a
+   comma, semicolon, colon or dash all leave the same short breath, about 0.12-0.18 s, and two marks together do not add up; a full stop,
+   question mark, exclamation mark or new line leaves about 0.9 s, whatever follows it. So punctuate as a speaker breathes: a comma where a
+   speaker would take a breath between phrases, nothing inside a phrase that belongs together, a full stop only where the thought is over. A
+   full stop in the middle of a thought costs nearly a second and makes the line stilted; a comma the speaker did not take costs 0.15 s. Do
+   not use punctuation or ~pause to fill time that the wording should fill, and match the speaker's own pauses (pauses_inside) before any
+   of your own. A hyphen joins the pieces of one word (i-microphone, ne-, the parts of a figure) and adds no silence of its own; spacing
+   inside a number or a name does not add silence either, so join figures and names as written and do not split them with commas. But a figure is what the viewer has to take in: after each percentage or amount that is followed by more words, a
+   comma gives the listener the breath to digest it ("ku-75.8%, ngo-2006, laya ku-44.05%, kulo nyaka"); never run two figures together with no
+   break between them. The renderer adds that comma after a percentage if you leave it out, so write it yourself where you want the break.
+
+   Learn from the listener. recall_lessons also returns ear_lessons: what the person who listens to these dubs has heard wrong before, by item class (a title read raw, digits read in a
+   Zulu accent, a name run together, a figure with no breath), with what fixed it, and the spellings they chose over the rules'. Read them before your first draft and write so they do
+   not recur. They are the same gap, seen again: between what you wrote and what the listener heard.
+
+   See what the voice gets. What you write is not what the voice reads: a dictionary of rules turns your digits, titles, abbreviations and English names into the spoken form,
+   and a listener found its gaps one by one ("Dkt" read raw, "Section 79" read in digits, a name said as separate words). Before you submit, call say_it on any unit that holds a
+   figure, a year, a title, an abbreviation or an English name, and read the spoken form the way a listener would hear it. 'still_as_written' lists what no rule converted: write
+   that another way (spell the title out, put the figure after its prefix) or say in approach_notes what you could not fix. It only shows; the spelling of a word is still decided by
+   the rules and by the listener's ear.
+
+   Listening load. The viewer hears each line once and cannot re-read it, so write for what the ear can take in, not only for fit. The
+   words between two breath marks are one breath group: it should carry one new fact and last about two to three seconds of speech,
+   rarely more than about six (a run past about eight is flagged). A figure that carries the point gets the breath after it, and when isiZulu word order allows, put the figure
+   at the end of its phrase so the breath lands right after it. Never run two figures, or a figure and a name, into each other with no
+   break. The delivery sheet shows how the speaker spaced the line for the listener (breaths_inside, figures_spoken, pauses_inside): give
+   the viewer the same room. check_text and every submit_dub result measure this (figures_run_together, long_run_without_breath, listening_load); the flags are evidence,
+   you decide. When a sentence is too dense for a listener, split it or reorder it, with the facts and names unchanged, instead of
+   cutting it; a sentence end costs about 0.9 s, so spend it where the thought really ends.
+
+   A conversation, not a text. Most clips are people talking to each other: a presenter, a reporter, a guest, each turn answering the one before and handing over by name
+   ("Yeah, Mfundo, ...", "Kenny, ...", "Indeed, Ayanda, ..."). open_clip says so (conversation) and shows, for each segment, where its speaker really paused (phrasing: |0.7s| is a
+   pause of 0.7 s). Take your punctuation from that, not from habit: the speakers ran a name of address into the words beside it with no pause at all
+   ("Indeed, Ayanda, hopefully" was said without a gap on either side of Ayanda). A comma is about 0.15 s of silence in your Zulu and a full stop 0.9 s, so a comma on both sides of
+   every name of address makes people who are talking to each other sound like a script being read, and a listener hears it at once. Write a name of address in the same breath as the words round it, put a pause where the
+   speaker's thought changes, and answer the speaker before you in the way a person answers a colleague. submit_dub lists the commas of your text that no pause of the speaker's matches
+   (comma_check): read it as the listener's view of your punctuation. It also lists the pauses of 0.8 s or more that the speaker held (phrasing |1.4s|) where your Zulu has
+   none that long: a speaker who stops for 1.4 s mid-sentence ("as well as ... Masemola") and a dub that runs straight on get out of step with the picture, so put a
+   ~pauseN (the total silence) at that place.
+
+Words the voice cannot say: a listener heard the voice stutter on "imininingwane" (and its forms, "emininingwaneni"): never write it. Where the English says details write the English word "details" with the Zulu prefix the sentence needs, hyphenated: you choose the concord ("anikeze ama-details", "angene kuma-details",
+"nama-details", "ngama-details", "ze-details"), as everyday speakers say it; where it says information write "ulwazi". check_text and submit_dub name any such word in your text.
 
 Tools give you real measurements. Azure TTS timing is not predictable from word counts, and with no speed
 control you must get the wording right. The scorer re-measures your final text with the same function, so
@@ -156,15 +234,28 @@ When you are satisfied, call submit_dub (it returns your score and which units a
 and resubmit). Then reply with a short plain-text summary of your approach and stop.
 """
 
-SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.replace("{max_dead_air}", f"{DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT}%")
+# Said only when the grammar reference follows: with it switched off the sentence would point at nothing (the first grammar-off runs of the comparison had that flaw).
+GRAMMAR_POINTER = "The grammar reference below (six modules, from real news and a checked corpus) is the rule system to apply. "
+
+SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.replace("{max_dead_air}", f"{DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT}%").replace("{grammar_pointer}", "")
 
 
-def build_system_prompt(playbook: dict | None = None, *, max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT) -> str:
-    """The rules (always) plus the learned strategy notes (if a playbook is given)."""
+def _grammar_version_in(system_prompt: str) -> str | None:
+    """Which grammar reference the agent was given (None when the prompt carries none): written into agent_summary.json so a result can be tied to the text it saw."""
+    from . import zulu_grammar
+
+    return zulu_grammar.VERSION if zulu_grammar.HEADER[:40] in system_prompt else None
+
+
+def build_system_prompt(playbook: dict | None = None, *, max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, grammar: bool | None = None) -> str:
+    """The rules (always), the isiZulu grammar reference (unless switched off: MATHULA_AGENT_GRAMMAR=0 or grammar=False), and the learned strategy notes (if a playbook is given).
+    The reference replaces the pass-2 grammar block this prompt used to carry: its claims were not checked against data and the new modules cover and correct them."""
+    from . import zulu_grammar
     from .playbook import render_section
 
-    base = _SYSTEM_PROMPT_TEMPLATE.replace("{max_dead_air}", f"{max_dead_air_pct}%")
-    return base + render_section(playbook)
+    use_grammar = zulu_grammar.enabled() if grammar is None else grammar
+    base = _SYSTEM_PROMPT_TEMPLATE.replace("{max_dead_air}", f"{max_dead_air_pct}%").replace("{grammar_pointer}", GRAMMAR_POINTER if use_grammar else "")
+    return base + ("\n\n" + zulu_grammar.reference() + "\n" if use_grammar else "\n") + render_section(playbook)
 
 _UNIT_SCHEMA = {
     "type": "object",
@@ -201,8 +292,9 @@ TOOL_SPECS = [
           "context ledger, glossary and speaker modes. Call this first. If source_corrections is present, the English had "
           "words the speaker's audio showed were misheard; the english already carries the fix, so translate that meaning.",
           {"clip_id": {"type": "string"}}, ["clip_id"]),
-    _tool("recall_lessons", "Mistakes native-speaker reviewers marked 'bad' in earlier clips, with corrections "
-          "where given. Cross-clip memory.", {"limit": {"type": "integer"}}, []),
+    _tool("recall_lessons", "Cross-clip memory. Mistakes native-speaker reviewers marked 'bad' in earlier clips, with corrections where given; and (ear_lessons) what the listener has heard wrong "
+          "in earlier dubs, by item class (title, figure, year, name, pacing, spelling), with what was written, what was heard and what fixed it. Call it first and read both.",
+          {"limit": {"type": "integer"}}, []),
     _tool("measure_tts", "Synthesize text with Azure TTS at natural speed and report how it sits in "
           "[start_ms, end_ms]: measured_ms, shortfall_pct (speech missing), tail_pad_ms (trailing silence the "
           "renderer adds itself when the gap is tiny), residual_shortfall_pct (what is left as dead air), "
@@ -222,7 +314,7 @@ TOOL_SPECS = [
            "last_free_gap_ms": {"type": "integer", "description": "free_gap_after_ms of the turn's last unit."}},
           ["members"]),
     _tool("check_text", "Free deterministic checks on one unit (no TTS): required literals, restated references, "
-          "invented names, doubling, English leakage.",
+          "invented names, doubling, English leakage, English weekday names.",
           {"zulu_text": {"type": "string"}, "source_text": {"type": "string"}}, ["zulu_text", "source_text"]),
     _tool("submit_dub", "Submit the dub as ordered, non-overlapping units covering every English segment. "
           "Returns the official score and flagged units. You may resubmit. With partial=true, send ONLY the units you "
@@ -248,6 +340,24 @@ TOOL_SPECS = [
           "no source writes (all counts 0) is not to be invented; one that Zulu news sites write at least twice is attested. The caution says how far the evidence reaches.",
           {"word": {"type": "string", "description": "the English word, e.g. pension"},
            "zulu_forms": {"type": "array", "items": {"type": "string"}, "description": "forms you are thinking of writing, e.g. [\"impesheni\"]"}}, ["word"]),
+    _tool("human_translations", "How professional translators wrote an English word or phrase in isiZulu: the aligned pairs whose English contains it (about 270,000 pairs: 10,671 news "
+          "pairs by professional translators from Umsuka, and government text from Autshumato), shortest English first, each with its source, and how many pairs there are in all. Use it "
+          "for a stock phrase (a greeting, thanks, a title) or a term, to see how human translators handled it: a segment that translates a short phrase shows what they put and what they "
+          "left out. The pairs are sometimes shifted by a line and the government text is older and formal: it is evidence to weigh, not an answer. Free: no try, no model.",
+          {"phrase": {"type": "string", "description": "the English phrase, e.g. good afternoon, press briefing, microphone"},
+           "limit": {"type": "integer", "description": "pairs to return (default 5, at most 8)"}}, ["phrase"]),
+    _tool("say_it", "See your own line as the voice will receive it: the spoken form (figures and years in English after their Zulu prefix, titles expanded, names respelled by the rules), "
+          "each change the dictionary made (was -> now), and what stayed as written (the field still_as_written: digits, abbreviations, capitals no rule converted, which the voice then reads by itself and often wrongly). "
+          "It is the same dictionary measure_tts uses. Call it on a unit's text before you submit: if something is wrong for a listener (a title left raw, a figure still in digits, a name that will "
+          "run together), write it another way. Free: no try, no speech.",
+          {"text": {"type": "string", "description": "the isiZulu line, as you would submit it"},
+           "speaker_id": {"type": "string", "description": "the unit's speaker (default SPEAKER_00); the voice can have its own spellings"}}, ["text"]),
+    _tool("figure_style", "How professional translators wrote a FIGURE in isiZulu: give the English phrase with its figure in digits (\"31 percent\", \"20 years\", \"in 2006\", \"11 municipalities\", "
+          "\"at 7am\") and you get the pairs whose English has that shape, with how the isiZulu writes the number: the prefix before the digits (abangu-, engama-, ngo-, ka-, none), whether the % "
+          "sign stays, a real example of each, and how often the number is spelled out instead of written in digits. The renderer says any figure of one or two digits in English after its "
+          "prefix, so the prefix and the unit word are yours to choose: ask before you write a percentage, an age, a duration, a year, a head count or a time. Several prefixes can be right "
+          "(angu-/angama-): this shows usage, not a rule. Free: no try, no model.",
+          {"phrase": {"type": "string", "description": "the English phrase with one figure in digits, e.g. 31 percent, 11 municipalities, in 2006"}}, ["phrase"]),
     _tool("get_submission", "The units currently accepted (all, or only unit_ids), with their text and any flags from "
           "the last score. Use it to see your own current state, e.g. after your history was trimmed.",
           {"unit_ids": {"type": "array", "items": {"type": "string"}}}, []),
@@ -496,6 +606,25 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
         slim["turns_ending_early"] = padding
     if result.get("flagged_units"):
         slim["flagged_units"] = result["flagged_units"]
+    if result.get("spoken_form_gaps"):
+        slim["spoken_form_gaps"] = result["spoken_form_gaps"]
+        slim["spoken_form_gaps_note"] = ("Soft evidence, not a gate: these units still hold digits, an abbreviation or capitals that no rule converted, so the voice will read them by itself, "
+                                         "often wrongly. Call say_it on the unit to see the whole spoken form; write the item another way, or leave it if it is right as it stands (a time, a fraction).")
+    if result.get("listening_load"):
+        slim["listening_load"] = result["listening_load"]
+        slim["listening_load_note"] = ("Soft evidence, not a gate: a figure run into the next with no breath, or a stretch of about eight seconds with no breath, is hard for a listener to follow. "
+                                       "Give a figure that carries the point its breath, or split the sentence at the end of a thought; leave it if the speaker ran on the same way.")
+    if result.get("comma_check"):
+        slim["comma_check"] = result["comma_check"]
+        slim["comma_check_note"] = ("Soft evidence, not a gate, measured on the source audio: a comma costs about 0.15 s of silence, and these units have commas beside a name of address "
+                                    "that the speaker said in the same breath as the words round it (or far more commas than the speaker had pauses). Take the comma out where the speaker ran "
+                                    "the words together; keep it where the phrasing of the segment shows a pause. pauses_the_speaker_held_that_the_dub_does_not is the other direction: the speaker "
+                                    "held a pause of 0.8 s or more (phrasing |1.4s|) where your Zulu has only a comma or nothing, so your sentence runs ahead of the speaker and then waits; "
+                                    "write ~pauseN (the total silence, in ms) after the word that ends the thought, or end the sentence there.")
+    if result.get("voice_limit_words"):
+        slim["voice_limit_words"] = result["voice_limit_words"]
+        slim["voice_limit_words_note"] = ("Soft evidence, not a gate: a word the voice stutters on (a listener heard it). Swap it for the word named, and rephrase the clause around the new word; "
+                                          "do not respell it.")
     if (result.get("meaning") or {}).get("loss"):
         slim["meaning_loss"] = result["meaning"]["loss"]
     if (result.get("meaning") or {}).get("claims"):
@@ -531,7 +660,7 @@ def build_dispatch(
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
         "get_submission": workbench.get_submission,
     }
-    for name in ("create_loanword", "use_loanword", "attested_zulu"):       # vocabulary tools (the loan rules on the dictionary's sounds, a corpus lookup), where the workbench has them; the agent has no recogniser and no pronunciation tool
+    for name in ("create_loanword", "use_loanword", "attested_zulu", "human_translations", "figure_style", "say_it"):       # vocabulary tools (the loan rules on the dictionary's sounds, a corpus lookup), where the workbench has them; the agent has no recogniser and no pronunciation tool
         if hasattr(workbench, name):
             tools[name] = getattr(workbench, name)
     return tools
@@ -572,6 +701,35 @@ def unmet_targets(result: dict[str, Any] | None, *, max_dead_air_pct: float) -> 
     if residual is not None and residual > max_dead_air_pct:
         unmet.append(f"residual dead air is {residual}% (bar: {max_dead_air_pct}% or less)")
     return unmet
+
+
+LISTENER_POINTS_SHOWN = 8              # the wrap-up names at most this many open listener points
+_LISTENER_POINT_KEYS = ("pauses_the_speaker_held_that_the_dub_does_not", "commas_where_the_speaker_did_not_pause")
+
+
+def open_listener_points(result: dict[str, Any] | None) -> list[str]:
+    """The soft listener evidence of the last accepted submission that is still open (comma_check): pauses the source speaker held and the Zulu does not, commas the speaker
+    did not take.  Not gates; the wrap-up shows them while the agent can still act, because at the final submit they arrived after the stop rule had already said 'finish' (prod-84, prod-85)."""
+    points: list[str] = []
+    for item in (result or {}).get("comma_check") or []:
+        if not isinstance(item, dict):
+            continue
+        for key in _LISTENER_POINT_KEYS:
+            for line in item.get(key) or []:
+                points.append(f"{item.get('item_id')}: {line}")
+    for item in (result or {}).get("voice_limit_words") or []:
+        if isinstance(item, dict):
+            points.extend(f"{item.get('item_id')}: {line}" for line in item.get("words") or [])
+    return points[:LISTENER_POINTS_SHOWN]
+
+
+def _listener_points_message(points: list[str]) -> str:
+    return (", but the listener's view of the same submission has open points (soft evidence, not gates; the speaker's pauses are measured on the source audio):\n- "
+            + "\n- ".join(points)
+            + "\nYou have a few turns: for the points that are right, change only those units' text (write ~pauseN, the total silence in ms, after the word that ends the thought; "
+              "or take out a comma where the speaker ran the words together), check them with ONE measure_tts_batch, send only those units with submit_dub partial=true, then reply "
+              "with one short sentence and no tool call. Leave a point alone if acting on it would cost a name, a number or the meaning, or the unit has no room for the silence. "
+              "Do not touch any other unit; this is a single round, not a loop.")
 
 
 def pushback_message(result: dict[str, Any], unmet: list[str], *, tts_left: int) -> str:
@@ -841,10 +999,14 @@ def _run_agent(
             if wrapup_at is None and not unmet_targets(latest, max_dead_air_pct=good_enough_pct):
                 wrapup_at = turn + wrapup_turns
                 residual = (latest.get("headline") or {}).get("residual_dead_air_pct")
+                points = open_listener_points(latest)
                 text = ("Your last submission meets the bar by the harness's own score: no hard-gate failures, no collisions, nothing overruns, no meaning lost"
                         + (f", residual dead air {residual}%" if residual is not None else "")
-                        + ". Finish now: reply with one short sentence and no tool call. Only if one unit is plainly wrong (a name, a number, a date or its meaning) fix that "
-                          "one thing first; timing is locked for the units that fit, and every further turn costs tokens.")
+                        + (_listener_points_message(points) if points else
+                           ". Finish now: reply with one short sentence and no tool call. Only if one unit is plainly wrong (a name, a number, a date or its meaning) fix that "
+                           "one thing first; timing is locked for the units that fit, and every further turn costs tokens."))
+                if points:
+                    trace.log("listener_points", turn=turn, points=points)
                 messages.append({"role": "user", "content": text})
                 trace.log("wrapup", turn=turn, turns_left=wrapup_turns, residual=residual, text=text)
         if wrapup_at is not None and turn >= wrapup_at:
@@ -859,6 +1021,7 @@ def _run_agent(
         "tokens": tokens, "tool_calls": tool_counts, "speed_policy": speed_policy,
         "pushbacks": pushbacks, "unmet_at_end": unmet, "compactions": compactions,
         "playbook": playbook_version,
+        "grammar": _grammar_version_in(system_prompt), "system_prompt_chars": len(system_prompt),
         **({"judge_tokens": dict(workbench.judge.usage)} if getattr(workbench, "judge", None) else {}),
         "tts_used": (workbench.episode or {}).get("tts_used"), "submissions": (workbench.episode or {}).get("submissions"),
         "model": client.config.deployment,

@@ -37,8 +37,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlsplit
 
-from . import ear_clips, language_questions as language, pronunciation_book as book, zulu_rules as rules
-from .job_pronunciations import VOICES, Prepared, spell, with_committed_words
+from . import ear_clips, language_questions as language, pronunciation_book as book, youtube_captions, zulu_rules as rules
+from .job_pronunciations import VOICES, Prepared, refresh_lexicons, spell, with_committed_words
 
 SESSION_SECONDS = 12 * 3600
 LOGIN_FAILURES = 5
@@ -194,7 +194,20 @@ class Console:
         prepared = self._prepared_for(job_root)
         texts = [str(i.get("zulu_text") or "") for i in items]
         spelled = spell(prepared, texts, progress=lambda _m: None)
+        have = {str(s["word"]).casefold() for s in spelled}
+        for pinned in self._pinned_words():          # words the listener wants to hear and decide before any text holds them (a swap the agent will write: ama-details)
+            if pinned.casefold() not in have:
+                found = prepared.interpreter.rules_spelling(pinned)
+                if found is not None:
+                    spelled.append({"word": pinned, **found})
         return job_root, items, with_committed_words(spelled, book.load(self.book_path)["entries"], texts), prepared
+
+    def _pinned_words(self) -> list[str]:
+        """``pinned_words.json`` in the work directory: words always offered in every job's list."""
+        try:
+            return [str(w) for w in json.loads((self.work_dir / "pinned_words.json").read_text(encoding="utf-8")) if str(w).strip()]
+        except (OSError, ValueError):
+            return []
 
     def words(self, job: str, run: str) -> list[dict[str, Any]]:
         _, items, spelled, _ = self._spelled(job, run)
@@ -463,19 +476,62 @@ class Console:
         prepared.refresh_lessons()
         spell(prepared, [str(i.get("zulu_text") or "") for i in items], progress=lambda _m: None)          # fills prepared.unsure and prepared.resolved
 
-        def place(word: str) -> dict[str, str]:
+        reader = youtube_captions.reading(job_root)
+        voices = self._voices(job_root)
+        found_captions = youtube_captions.find(job_root)
+        track = found_captions[0].name.split(".")[-2] if found_captions else ""
+
+        def hear(index: int | None) -> dict[str, Any]:
+            """What the listener can play and read for a question about the dub item ``index``: its source audio window, YouTube's caption for it, and the dub as the voice reads it."""
+            if index is None:
+                return {}
+            item = items[index]
+            start, end = item.get("start_ms"), item.get("end_ms")
+            span = {"start_ms": int(start), "end_ms": int(end)} if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end > start else {}
+            caption = reader(span["start_ms"] / 1000, span["end_ms"] / 1000) if reader and span else ""
+            return {**span, "item": index, "caption": caption[:600], "track": track, "voice": voices.get(str(item.get("speaker_id") or ""), VOICES[0]), "tts_text": self._raw_text(item)[:self.RAW_TEXT_MAX]}
+
+        def place(word: str) -> dict[str, Any]:
             pattern = ear_clips.word_pattern(word)
-            item = next((i for i in items if pattern.search(str(i.get("zulu_text") or ""))), None)
-            return {"dub": self._around(str(item.get("zulu_text") or ""), pattern), "source": str(item.get("source_text") or "")[:400]} if item else {"dub": "", "source": ""}
+            index = next((n for n, i in enumerate(items) if pattern.search(str(i.get("zulu_text") or ""))), None)
+            if index is None:
+                return {"dub": "", "source": ""}
+            return {"dub": self._around(str(items[index].get("zulu_text") or ""), pattern), "source": str(items[index].get("source_text") or "")[:400], **hear(index)}
 
         answered = prepared.lessons["words"]
-        rows = [{"kind": "word", "id": language.key_of(u["word"]), "word": u["word"], **place(u["word"]), "answer": None} for u in prepared.unsure]
-        done = [{"kind": "word", "id": key, "word": e["word"], **place(e["word"]), "answer": {"language": e["language"]}} for key, e in answered.items()
-                if any(ear_clips.word_pattern(e["word"]).search(str(i.get("zulu_text") or "")) for i in items)]
-        settled = [{"kind": "word", "id": language.key_of(r["word"]), "word": r["word"], **place(r["word"]), "answer": {"language": r["language"], "by_itself": True}} for r in prepared.resolved]
+        said = lambda key: str((answered.get(key) or {}).get("comment") or "")
+        rows = [{"kind": "word", "id": language.key_of(u["word"]), "word": u["word"], **place(u["word"]), "answer": None, "comment": said(language.key_of(u["word"]))} for u in prepared.unsure]
+        done = [{"kind": "word", "id": key, "word": e["word"], **place(e["word"]), "answer": {"language": e["language"]}, "comment": said(key)} for key, e in answered.items()
+                if e.get("language") and any(ear_clips.word_pattern(e["word"]).search(str(i.get("zulu_text") or "")) for i in items)]
+        settled = [{"kind": "word", "id": language.key_of(r["word"]), "word": r["word"], **place(r["word"]), "answer": {"language": r["language"], "by_itself": True},
+                    "comment": said(language.key_of(r["word"]))} for r in prepared.resolved]
         stretches = language.stretch_questions(job_root)
-        return {"words": rows, "answered": done, "resolved": settled, "stretches": stretches,
+        for s in stretches:                                                  # the dub item that was made from this stretch of the source
+            index = next((n for n, i in enumerate(items) if s["id"] in (i.get("source_segment_ids") or [])), None)
+            own = {k: s[k] for k in ("start_ms", "end_ms", "caption", "track")}          # the stretch's own window and caption, not the whole dub item's
+            s.update({**hear(index), **own, "dub": str(items[index].get("zulu_text") or "")[:self.RAW_TEXT_MAX] if index is not None else ""})
+        return {"words": rows, "answered": done, "resolved": settled, "stretches": stretches, "known": {k: e["language"] for k, e in answered.items() if e.get("language")},
                 "open": len(rows) + sum(1 for s in stretches if not s["answer"]), "languages": list(language.LANGUAGES)}
+
+    RAW_TEXT_MAX = 600                 # characters of a dub item read raw: the first part of a long one
+
+    @staticmethod
+    def _raw_text(item: Mapping[str, Any]) -> str:
+        """The dub item's Zulu exactly as written, with only the pause markers (``~pause800``) turned into spaces: no respelling of any word."""
+        return " ".join(re.sub(r"~pause\d+", " ", str(item.get("zulu_text") or "")).split())
+
+    def raw_audio(self, job: str, run: str, item: int) -> dict[str, Any]:
+        """The dub item read by its speaker's voice with nothing applied to it: not this job's lexicon, not the book, so the listener hears how the voice says the Zulu as it is written."""
+        job_root, items = self._items(job, run)
+        if not isinstance(item, int) or not 0 <= item < len(items):
+            raise ConsoleError(400, "no such dub text")
+        text = self._raw_text(items[item])[:self.RAW_TEXT_MAX]
+        if not text:
+            raise ConsoleError(404, "this dub text is empty")
+        voice = self._voices(job_root).get(str(items[item].get("speaker_id") or ""), VOICES[0])
+        name = hashlib.sha256(f"raw|{voice}|{text}".encode("utf-8")).hexdigest()[:32] + ".wav"
+        self._ensure(name, self.work_dir / "jobs" / self.SMITH_JOB, "SPEAKER_00", voice, text)          # a job root with nothing in it: no lexicon
+        return {"url": f"/audio/{name}", "text": text, "voice": voice}
 
     def _refresh_lessons(self) -> None:
         for prepared in self._prepared.values():
@@ -491,13 +547,13 @@ class Console:
                 word = _clean_word(data.get("word"))
                 prepared = self._prepared_for(job_root)
                 known = next((u for u in [*prepared.unsure, *prepared.resolved] if language.key_of(u["word"]) == language.key_of(word)), None)
-                sig = (known or {}).get("signature") or (prepared.lessons["words"].get(language.key_of(word)) or {}).get("signature") or ""
-                stored = language.answer_word(self.work_dir, word, str(data.get("language") or ""), sig)
+                sig = (known or {}).get("signature") or (prepared.lessons["words"].get(language.key_of(word)) or {}).get("signature") or ""          # a word clicked anywhere else is answered but teaches no pattern
+                stored = language.answer_word(self.work_dir, word, str(data.get("language") or ""), sig, str(data["comment"]) if "comment" in data else None)
             elif kind == "stretch":
                 segment_id = str(data.get("id") or "")
                 if not SEGMENT_ID.match(segment_id):
                     raise ConsoleError(400, "no such stretch")
-                stored = language.answer_stretch(job_root, self.work_dir, segment_id, str(data.get("choice") or ""), str(data.get("text") or ""))
+                stored = language.answer_stretch(job_root, self.work_dir, segment_id, str(data.get("choice") or ""), str(data.get("text") or ""), str(data["comment"]) if "comment" in data else None)
             else:
                 raise ConsoleError(400, "kind is word or stretch")
         except ValueError as exc:
@@ -511,22 +567,34 @@ class Console:
         self._refresh_lessons()
         return self.questions(job, run)
 
-    def segment_audio(self, job: str, segment_id: str) -> dict[str, Any]:
-        """The source audio of one restored segment (the first ``SEGMENT_AUDIO_MAX`` seconds of it), cut from the job's own audio."""
-        if not SEGMENT_ID.match(segment_id):
-            raise ConsoleError(400, "no such stretch")
-        source = self._source(job)
-        if source is None:
+    def _audio_of(self, job: str) -> Path | None:
+        """A job's own source audio (a stretch needs nothing else: not the word timings the word lookup also wants)."""
+        if not JOB_ID.match(job):
+            raise ConsoleError(400, "unknown job")
+        root = self.work_dir / "jobs" / job / "audio"
+        return next((root / n for n in ("analysis_mono.wav", "mix_source_stereo.wav") if (root / n).is_file()), None)
+
+    def segment_audio(self, job: str, segment_id: str | None = None, start_ms: Any = None, end_ms: Any = None) -> dict[str, Any]:
+        """The source audio of one stretch of the video (the first ``SEGMENT_AUDIO_MAX`` seconds of it), cut from the job's own audio: a restored segment by its id, or a window
+        of the video by its times (the stretch a dub item was made from)."""
+        audio = self._audio_of(job)
+        if audio is None:
             raise ConsoleError(404, "this job has no source audio here")
-        segments = json.loads((self.work_dir / "jobs" / job / "native_dub" / "pass1_restored_transcript.json").read_text(encoding="utf-8")).get("segments") or []
-        segment = next((s for s in segments if str(s.get("segment_id")) == segment_id), None)
-        if segment is None:
-            raise ConsoleError(404, "no such stretch")
-        start = max(0.0, float(segment["start_ms"]) / 1000 - 0.15)
-        end = min(float(segment["end_ms"]) / 1000 + 0.15, start + self.SEGMENT_AUDIO_MAX)
+        if segment_id is not None:
+            if not SEGMENT_ID.match(str(segment_id)):
+                raise ConsoleError(400, "no such stretch")
+            segments = json.loads((self.work_dir / "jobs" / job / "native_dub" / "pass1_restored_transcript.json").read_text(encoding="utf-8")).get("segments") or []
+            segment = next((s for s in segments if str(s.get("segment_id")) == segment_id), None)
+            if segment is None:
+                raise ConsoleError(404, "no such stretch")
+            start_ms, end_ms = segment["start_ms"], segment["end_ms"]
+        if not isinstance(start_ms, (int, float)) or not isinstance(end_ms, (int, float)) or end_ms <= start_ms or start_ms < 0:
+            raise ConsoleError(400, "no such stretch")
+        start = max(0.0, float(start_ms) / 1000 - 0.15)
+        end = min(float(end_ms) / 1000 + 0.15, start + self.SEGMENT_AUDIO_MAX)
         name = hashlib.sha256(f"segment|{job}|{start:.3f}|{end:.3f}".encode("utf-8")).hexdigest()[:32] + ".wav"
         if not (self.audio_dir / name).is_file():
-            self._cut(source[1], start, max(0.2, end - start), self.audio_dir / name)
+            self._cut(audio, start, max(0.2, end - start), self.audio_dir / name)
         return {"url": f"/audio/{name}", "start": round(start, 2), "end": round(end, 2)}
 
     # -- wordsmith: any word typed in, heard in both voices -----------------------------------------------------------------------------------
@@ -710,7 +778,17 @@ class Console:
                 differences = next((a["differences"] for a in alternatives if a["spelling"] == spelling), [])
                 book.record_feedback(self.book_path, word=word, rule_spelling=ruled, chosen=spelling, differences=differences, job=job, note=note, english=english, reading=reading,
                                      derivation=derivation)
+        self.refresh_lexicons()
         return entry
+
+    def refresh_lexicons(self) -> dict[str, list[str]]:
+        """The book changed: every job's lexicon takes it now, so the next render of any video that has the word says it as decided (no speech is made here).  A failure here must not
+        undo the commit: the next production run builds the lexicon from the book anyway."""
+        try:
+            return refresh_lexicons(self.work_dir, self.book_path)
+        except Exception as exc:          # noqa: BLE001
+            print(f"[console] the lexicons were not refreshed: {type(exc).__name__}: {exc}", flush=True)
+            return {}
 
     def book_view(self) -> dict[str, Any]:
         data = book.load(self.book_path)
@@ -797,6 +875,23 @@ class Console:
                                                               schema=self.ANALYSIS_SCHEMA).data)
 
     # -- http --------------------------------------------------------------------------------------------------------------------------------
+    @staticmethod
+    def _audio_reply(base: Mapping[str, str], data: bytes, range_header: str | None) -> tuple[int, dict[str, str], bytes]:
+        """A clip, with byte ranges: iPhone Safari will not play an audio element whose server cannot answer a Range request (it asks for bytes 0-1 first)."""
+        head = {**base, "Content-Type": "audio/wav", "Cache-Control": "private, max-age=3600", "Accept-Ranges": "bytes"}
+        match = re.fullmatch(r"\s*bytes=(\d*)-(\d*)\s*", range_header or "")
+        size = len(data)
+        if not match or not (match.group(1) or match.group(2)):
+            return 200, head, data
+        if match.group(1):
+            first = int(match.group(1))
+            last = min(int(match.group(2)), size - 1) if match.group(2) else size - 1
+        else:                                                            # "bytes=-N": the last N bytes
+            first, last = max(size - int(match.group(2)), 0), size - 1
+        if first >= size or first > last:
+            return 416, {**head, "Content-Range": f"bytes */{size}"}, b""
+        return 206, {**head, "Content-Range": f"bytes {first}-{last}/{size}"}, data[first:last + 1]
+
     def handle(self, method: str, target: str, headers: Mapping[str, str], body: bytes = b"") -> tuple[int, dict[str, str], bytes]:
         from .console_ui import PAGE
 
@@ -810,7 +905,7 @@ class Console:
         try:
             if method == "GET" and path == "/":
                 nonce = secrets.token_urlsafe(12)
-                csp = (f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; media-src 'self'; img-src 'self' data:; "
+                csp = (f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; media-src 'self' data:; img-src 'self' data:; "
                        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
                 return 200, {**base, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": csp}, PAGE.replace("__NONCE__", nonce).encode("utf-8")
             cookies = dict(c.strip().split("=", 1) for c in (headers.get("Cookie") or headers.get("cookie") or "").split(";") if "=" in c)
@@ -866,13 +961,17 @@ class Console:
             if method == "POST" and path == "/api/answer-revoke":
                 return reply(200, self.answer_revoke(str(data.get("job")), str(data.get("run")), data.get("word")))
             if method == "POST" and path == "/api/segment-audio":
-                return reply(200, self.segment_audio(str(data.get("job")), str(data.get("id"))))
+                return reply(200, self.segment_audio(str(data.get("job")), str(data["id"]) if data.get("id") else None, data.get("start_ms"), data.get("end_ms")))
+            if method == "POST" and path == "/api/raw-audio":
+                return reply(200, self.raw_audio(str(data.get("job")), str(data.get("run")), data.get("item")))
             if method == "POST" and path == "/api/learn":
                 return reply(200, self.learn())
             if method == "GET" and path == "/api/book":
                 return reply(200, self.book_view())
             if method == "POST" and path == "/api/book/revoke":
-                return reply(200, {"revoked": book.revoke(self.book_path, _clean_word(data.get("word")))})
+                revoked = book.revoke(self.book_path, _clean_word(data.get("word")))
+                self.refresh_lexicons()
+                return reply(200, {"revoked": revoked})
             if method == "GET" and path == "/api/rules":
                 return reply(200, self.rules_view())
             if method == "POST" and path == "/api/rules":
@@ -882,7 +981,7 @@ class Console:
                 name = path[len("/audio/"):]
                 if not AUDIO_NAME.match(name) or not (self.audio_dir / name).is_file():
                     raise ConsoleError(404, "no such clip")
-                return 200, {**base, "Content-Type": "audio/wav", "Cache-Control": "private, max-age=3600"}, (self.audio_dir / name).read_bytes()
+                return self._audio_reply(base, (self.audio_dir / name).read_bytes(), headers.get("Range") or headers.get("range"))
             raise ConsoleError(404, "not found")
         except ConsoleError as exc:
             return reply(exc.status, {"error": exc.message})

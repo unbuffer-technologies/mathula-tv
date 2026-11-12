@@ -158,3 +158,94 @@ def test_run_native_pass1_falls_back_to_source_text_when_duplication_leaves_noth
     # Nothing salvageable from the duplicate -- falls back to this segment's own source text
     # rather than committing an empty restored_text.
     assert restored_by_id["seg-2"]["restored_text"] == "Second sentence here."
+
+
+def test_pass1_shows_the_restoration_youtubes_caption_for_a_language_switch_and_takes_the_correction(tmp_path: Path):
+    import json
+
+    job_root = tmp_path / "job"
+    segments = [
+        {"segment_id": "seg-1", "speaker": "SPEAKER_00", "start": 0.0, "end": 3.0, "source_text": "Good evening to you all."},
+        {"segment_id": "seg-2", "speaker": "SPEAKER_00", "start": 4.0, "end": 8.0, "source_text": "Nally a bunch of anna see yay in new sir"},
+    ]
+    _write_transcript(job_root, segments)
+    folder = job_root / "input" / "youtube_captions"
+    folder.mkdir(parents=True)
+    (folder / "abc.zu-orig.json3").write_text(json.dumps({"events": [
+        {"tStartMs": 0, "dDurationMs": 3000, "segs": [{"utf8": "good evening to you all"}]},
+        {"tStartMs": 4000, "dDurationMs": 4000, "segs": [{"utf8": "nale yabantwana siyayinyusa"}]}]}), encoding="utf-8")
+    provider = _FakePass1Provider(corrections=[{"segment_id": "seg-2", "corrected_text": "Nale yabantwana siyayinyusa", "reason_code": "language_switch"}])
+
+    result = run_native_pass1(job_root=job_root, provider=provider)
+
+    payload = provider.calls[0]["payload"]
+    assert payload["youtube_track"] == "zu-orig"
+    rows = {row["id"]: row for row in payload["segments"]}
+    assert "yt" not in rows["seg-1"] and rows["seg-2"]["yt"] == "nale yabantwana siyayinyusa"          # only the segment that differs carries the caption
+    assert "language_switch" in provider.calls[0]["schema"]["properties"]["corrections"]["items"]["properties"]["reason_code"]["enum"]
+    assert "LANGUAGE SWITCHES" in provider.calls[0]["system_prompt"] and "never translate them" in provider.calls[0]["system_prompt"]
+    restored = {item["segment_id"]: item for item in result["segments"]}
+    assert restored["seg-2"]["restored_text"] == "Nale yabantwana siyayinyusa" and restored["seg-2"]["reason_code"] == "language_switch"
+    assert restored["seg-1"]["restored_text"] == "Good evening to you all."
+
+
+def test_pass1_without_captions_sends_exactly_what_it_sent_before(tmp_path: Path):
+    job_root = tmp_path / "job"
+    _write_transcript(job_root, [{"segment_id": "seg-1", "speaker": "SPEAKER_00", "start": 0.0, "end": 3.0, "source_text": "Good evening to you all."}])
+    provider = _FakePass1Provider(corrections=[])
+    run_native_pass1(job_root=job_root, provider=provider)
+    payload = provider.calls[0]["payload"]
+    assert "youtube_track" not in payload and all("yt" not in row for row in payload["segments"])
+
+
+def test_pass1_adds_speech_the_transcript_skipped_to_the_segment_before_the_gap_and_ignores_a_gap_it_was_not_shown(tmp_path: Path):
+    import json
+
+    job_root = tmp_path / "job"
+    segments = [
+        {"segment_id": "seg-1", "speaker": "SPEAKER_00", "start": 0.0, "end": 3.0, "source_text": "The money from the grant is ours."},
+        {"segment_id": "seg-2", "speaker": "SPEAKER_00", "start": 8.0, "end": 11.0, "source_text": "We will take it back."},
+    ]
+    _write_transcript(job_root, segments)
+    folder = job_root / "input" / "youtube_captions"
+    folder.mkdir(parents=True)
+    (folder / "abc.zu-orig.json3").write_text(json.dumps({"events": [
+        {"tStartMs": 0, "dDurationMs": 3000, "segs": [{"utf8": "the money from the grant is ours"}]},
+        {"tStartMs": 4000, "dDurationMs": 3500, "segs": [{"utf8": "nale yabantwana siyayinyusa"}]}]}), encoding="utf-8")
+
+    class Provider(_FakePass1Provider):
+        def complete_json(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(data={"corrections": [], "additions": [{"after_segment_id": "seg-1", "text": "Nale yabantwana siyayinyusa."},
+                                                                          {"after_segment_id": "seg-9", "text": "Invented."}]},
+                                   model="grok-test", input_tokens=10, output_tokens=5, attempts=1)
+
+    provider = Provider(corrections=[])
+    result = run_native_pass1(job_root=job_root, provider=provider)
+
+    sent = provider.calls[0]["payload"]["youtube_gaps"]
+    assert sent == [{"after": "seg-1", "gap_s": 5.0, "yt": "nale yabantwana siyayinyusa"}] and "MISSED SPEECH" in provider.calls[0]["system_prompt"]
+    restored = {item["segment_id"]: item for item in result["segments"]}
+    assert restored["seg-1"]["restored_text"] == "The money from the grant is ours. Nale yabantwana siyayinyusa."
+    assert restored["seg-1"]["added_from_youtube"] == "Nale yabantwana siyayinyusa." and restored["seg-1"]["changed"] is True and restored["seg-1"]["reason_code"] == "missed_speech"
+    assert restored["seg-1"]["end_ms"] == 7950                                  # the window grows over the gap, never into the next segment (8000 ms)
+    assert restored["seg-2"]["restored_text"] == "We will take it back." and "added_from_youtube" not in restored["seg-2"]
+    assert "Invented" not in json.dumps(result)                                  # an addition for a gap that was not shown is ignored
+
+
+def test_a_model_that_mistypes_a_segment_id_costs_one_correction_not_the_whole_pass(tmp_path: Path):
+    job_root = tmp_path / "job"
+    _write_transcript(job_root, [
+        {"segment_id": "seg-00022", "speaker": "SPEAKER_00", "start": 0.0, "end": 3.0, "source_text": "We want money of rupee."},
+        {"segment_id": "seg-00023", "speaker": "SPEAKER_00", "start": 3.5, "end": 6.0, "source_text": "Thank you very much."},
+        {"segment_id": "seg-00024", "speaker": "SPEAKER_00", "start": 6.5, "end": 9.0, "source_text": "Good bye now."},
+    ])
+    provider = _FakePass1Provider(corrections=[
+        {"segment_id": "seg-23", "corrected_text": "Thank you very much indeed.", "reason_code": "asr_omission"},           # a number that names one segment: mapped
+        {"segment_id": "seg-99", "corrected_text": "Invented.", "reason_code": "asr_omission"},                        # names none: dropped with a warning
+        {"segment_id": "the last one", "corrected_text": "Invented too.", "reason_code": "asr_omission"},
+        {"segment_id": "seg-00022", "corrected_text": "We want money of Rupert.", "reason_code": "name_or_entity"}])
+    result = run_native_pass1(job_root=job_root, provider=provider)
+    restored = {item["segment_id"]: item for item in result["segments"]}
+    assert restored["seg-00023"]["restored_text"] == "Thank you very much indeed." and restored["seg-00022"]["restored_text"] == "We want money of Rupert."
+    assert restored["seg-00024"]["restored_text"] == "Good bye now." and "Invented" not in str(result)

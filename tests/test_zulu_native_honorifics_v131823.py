@@ -30,10 +30,11 @@ def test_exact_chaskalson_phrase_expands_fused_mister_without_visible_change() -
 
     assert result.spoken_text == source
     assert result.tts_text == (
-        "kuka-9. Ngakho sikhulumile noMnumzane Adams neqembu lakhe lezomthetho. "
+        "kuka-nayn. Ngakho sikhulumile noMnumzane Adams neqembu lakhe lezomthetho. "          # the figure is said in English like every other
         "UMnumzane Adams uyatholakala."
     )
     assert [(item.before, item.after) for item in result.substitutions] == [
+        ("kuka-9", "kuka-nayn"),
         ("noMnu.", "noMnumzane"),
         ("UMnu.", "UMnumzane"),
     ]
@@ -146,3 +147,13 @@ def test_honorific_fallback_does_not_change_other_locales() -> None:
 def test_version_markers_force_new_tts_cache_identity() -> None:
     assert ZU_NATIVE_HONORIFIC_PRONUNCIATION_VERSION.endswith("v13.18.23")
     assert DIRECT_DUB_SCHEMA_VERSION.endswith("v13.18.56")
+
+
+def test_a_title_written_without_its_full_stop_before_a_name_is_expanded_too() -> None:
+    # human-reported 2026-11-11: "sinoDkt Arthur Shopola" went to the voice with the raw abbreviation
+    d = _dictionary()
+    assert d.apply("sinoDkt Arthur Shopola. Dkt Arthur, sibonga").tts_text == "sinoDokotela Arthur Shopola. Dokotela Arthur, sibonga"
+    assert d.apply("uMnu Adams kanye noNkk Molefe").tts_text == "uMnumzane Adams kanye noNkosikazi Molefe"
+    assert d.apply("noDkt. Matebula").tts_text == "noDokotela Matebula"                      # with the full stop, as before
+    assert d.apply("ukuthi dkt ushiye").tts_text == "ukuthi dkt ushiye"                          # no capital name after it: not touched
+    assert d.apply("iDktCorp ivele").tts_text == "iDktCorp ivele"                                # part of another word

@@ -115,6 +115,19 @@ def test_hearing_a_spelling_says_the_real_sentence_with_it_in_the_right_voice_an
     assert call(world, "POST", "/api/audio", {**body, "spelling": "<script>"}, cookie)[0] == 400
 
 
+def test_a_clip_is_served_in_byte_ranges_because_iphone_safari_asks_for_them(world):
+    clip = bytes(range(100))
+    reply = world._audio_reply
+    assert reply({}, clip, None)[0] == 200 and reply({}, clip, None)[1]["Accept-Ranges"] == "bytes"
+    status, headers, body = reply({}, clip, "bytes=0-1")                      # Safari's first probe
+    assert (status, body, headers["Content-Range"]) == (206, clip[:2], "bytes 0-1/100")
+    assert reply({}, clip, "bytes=90-")[2] == clip[90:] and reply({}, clip, "bytes=-10")[2] == clip[90:]
+    assert reply({}, clip, "bytes=10-999")[1]["Content-Range"] == "bytes 10-99/100"
+    assert reply({}, clip, "bytes=200-")[0] == 416 and reply({}, clip, "garbage")[0] == 200
+    page = call(world, "GET", "/")[1]["Content-Security-Policy"]
+    assert "media-src 'self' data:" in page                                  # the silent clip that unlocks the player on a phone
+
+
 def test_there_is_a_ceiling_on_new_clips_a_day(world):
     world.max_audio_per_day = 2
     cookie = signed_in(world)
@@ -475,6 +488,8 @@ def _asked_job(world):
     (world.work_dir / "resources" / "cmudict" / "cmudict.dict").write_text("jacob JH EY1 K AH0 B\nheidi HH AY1 D IY0\nwehle W EH1 L IY0\n", encoding="utf-8")
     path = world.work_dir / "experience" / "runs" / "prod-1" / CLIP / "r1" / "submission.json"
     items = json.loads(path.read_text())["items"]
+    items[0].update({"source_segment_ids": ["seg-1"], "start_ms": 1000, "end_ms": 5000, "source_text": "Good evening Heidi and Jacob Zuma said that thing",
+                     "zulu_text": "Sawubona Heidi. ~pause800 UJacob Zuma ukhulumile ne-SABC namuhla."})
     items.append({"item_id": "u3", "speaker_id": "S0", "zulu_text": "Wehle ngesenti elilodwa kuleli sonto.", "source_text": "It only went down by one cent this week.", "start_ms": 6000, "end_ms": 9000})
     path.write_text(json.dumps({"items": items}), encoding="utf-8")
     root = world.work_dir / "jobs" / JOB
@@ -528,3 +543,100 @@ def test_a_stretch_can_be_heard_from_the_job_source_audio_once_and_free(world):
     assert clip["url"].startswith("/audio/") and clip["start"] == 0.85 and clip["end"] == 5.15 and cuts == [(0.85, 4.3)]
     assert call(world, "POST", "/api/segment-audio", {"job": JOB, "id": "seg-1"}, cookie=cookie)[2] == clip and len(cuts) == 1
     assert call(world, "POST", "/api/segment-audio", {"job": JOB, "id": "seg-404"}, cookie=cookie)[0] == 404
+
+
+def test_every_question_brings_the_source_audio_the_youtube_caption_and_the_dub_to_read_raw(world):
+    _asked_job(world)
+    cookie = signed_in(world)
+    q = call(world, "GET", f"/api/questions?job={JOB}&run=prod-1", cookie=cookie)[2]
+    word = q["words"][0]
+    assert word["word"] == "Wehle" and word["start_ms"] == 6000 and word["end_ms"] == 9000 and word["caption"] == "It only went down by one cent this week" and word["track"] == "en-orig"
+    assert word["item"] == 2 and word["voice"] == THANDO and word["tts_text"] == "Wehle ngesenti elilodwa kuleli sonto."
+    stretch = q["stretches"][0]
+    assert stretch["id"] == "seg-1" and stretch["start_ms"] == 1000 and stretch["end_ms"] == 5000 and stretch["caption"].startswith("sawubona") and stretch["track"] == "en-orig"
+    assert stretch["item"] == 0 and stretch["voice"] == THANDO and stretch["dub"].startswith("Sawubona Heidi.") and "~pause" in stretch["dub"] and "~pause" not in stretch["tts_text"]
+
+
+def test_the_raw_tts_of_a_dub_item_is_its_zulu_as_written_in_its_speakers_voice_with_no_lexicon_and_no_book(world):
+    _asked_job(world)
+    roots = []
+    original = world._synthesize
+    world._synthesize = lambda **kw: (roots.append(kw["job_root"]), original(**kw))[1]
+    cookie = signed_in(world)
+    clip = call(world, "POST", "/api/raw-audio", {"job": JOB, "run": "prod-1", "item": 0}, cookie=cookie)[2]
+    assert clip["voice"] == THANDO and clip["text"] == "Sawubona Heidi. UJacob Zuma ukhulumile ne-SABC namuhla." and world.spoken[-1] == (THANDO, clip["text"])
+    assert roots[-1].name == world.SMITH_JOB                                                  # a job root with nothing in it: this job's lexicon is not applied
+    assert call(world, "POST", "/api/raw-audio", {"job": JOB, "run": "prod-1", "item": 1}, cookie=cookie)[2]["voice"] == THEMBA
+    assert call(world, "POST", "/api/raw-audio", {"job": JOB, "run": "prod-1", "item": 0}, cookie=cookie)[2] == clip and len(world.spoken) == 2          # made once, free after
+    for bad in (7, -1, "0", None):
+        assert call(world, "POST", "/api/raw-audio", {"job": JOB, "run": "prod-1", "item": bad}, cookie=cookie)[0] == 400
+    assert call(world, "POST", "/api/raw-audio", {"job": JOB, "run": "prod-1", "item": 0}, csrf=False, cookie=cookie)[0] == 403
+
+
+def test_the_source_audio_of_a_word_question_is_its_dub_items_window(world):
+    _asked_job(world)
+    cuts = _source_job(world, SAID)
+    cookie = signed_in(world)
+    clip = call(world, "POST", "/api/segment-audio", {"job": JOB, "start_ms": 6000, "end_ms": 9000}, cookie=cookie)[2]
+    assert clip["start"] == 5.85 and clip["end"] == 9.15 and cuts == [(5.85, 3.3)]
+    for bad in ({"start_ms": 9000, "end_ms": 6000}, {"start_ms": -1, "end_ms": 5}, {"start_ms": "a", "end_ms": 5}, {}):
+        assert call(world, "POST", "/api/segment-audio", {"job": JOB, **bad}, cookie=cookie)[0] == 400
+
+
+def test_a_comment_to_the_model_is_kept_with_or_without_an_answer_and_a_comment_alone_decides_nothing(world):
+    _asked_job(world)
+    cookie = signed_in(world)
+    sent = call(world, "POST", "/api/answer", {"job": JOB, "run": "prod-1", "kind": "word", "word": "Wehle", "comment": "wehle is the verb ehla, it went down"}, cookie=cookie)[2]
+    assert [w["word"] for w in sent["words"]] == ["Wehle"] and sent["words"][0]["comment"].startswith("wehle is the verb") and sent["words"][0]["answer"] is None and sent["open"] == 2
+    again = call(world, "POST", "/api/answer", {"job": JOB, "run": "prod-1", "kind": "word", "word": "Wehle", "language": "zulu"}, cookie=cookie)[2]
+    assert again["words"] == [] and again["answered"][0]["comment"].startswith("wehle is the verb")                                 # the comment stays when the answer comes
+    body = {"job": JOB, "run": "prod-1", "kind": "stretch", "id": "seg-1"}
+    asked = call(world, "POST", "/api/answer", {**body, "comment": "this is Zulu, he thanks the audience"}, cookie=cookie)[2]
+    row = asked["stretches"][0]
+    assert row["answer"] is None and row["comment"] == "this is Zulu, he thanks the audience" and asked["open"] == 1                  # still open: nothing was decided
+    assert not (world.work_dir / "language_lessons.json").read_text().count('"stretches": [\n  {')                                  # and it is no lesson for other videos yet
+    decided = call(world, "POST", "/api/answer", {**body, "choice": "transcript"}, cookie=cookie)[2]["stretches"][0]
+    assert decided["answer"]["choice"] == "transcript" and decided["comment"] == "this is Zulu, he thanks the audience"
+    lesson = json.loads((world.work_dir / "language_lessons.json").read_text())["stretches"][0]
+    assert lesson["comment"] == "this is Zulu, he thanks the audience" and lesson["choice"] == "transcript"
+    assert call(world, "POST", "/api/answer", {**body, "choice": "guess"}, cookie=cookie)[0] == 400
+    assert call(world, "POST", "/api/answer", {"job": JOB, "run": "prod-1", "kind": "word", "word": "Nothing"}, cookie=cookie)[0] == 400          # neither a language nor a comment
+
+
+def test_a_stretch_can_be_heard_from_a_job_that_has_audio_but_no_word_timings(world):
+    _asked_job(world)
+    (world.work_dir / "jobs" / JOB / "audio").mkdir(parents=True, exist_ok=True)
+    (world.work_dir / "jobs" / JOB / "audio" / "mix_source_stereo.wav").write_bytes(b"RIFFsource")          # the native pipeline's jobs have no corrected_transcript.json
+    cuts = []
+    world._cut = lambda audio_path, start, duration, target: (cuts.append((audio_path.name, round(start, 2))), target.write_bytes(b"RIFFcut"))
+    cookie = signed_in(world)
+    assert call(world, "POST", "/api/segment-audio", {"job": JOB, "id": "seg-1"}, cookie=cookie)[0] == 200 and cuts == [("mix_source_stereo.wav", 0.85)]
+    (world.work_dir / "jobs" / JOB / "audio" / "mix_source_stereo.wav").unlink()
+    assert call(world, "POST", "/api/segment-audio", {"job": JOB, "id": "seg-9"}, cookie=cookie)[0] == 404
+
+
+def test_a_commit_and_a_revoke_reach_the_jobs_lexicon_at_once(world):
+    lexicon = world.work_dir / "jobs" / JOB / "native_dub" / "pronunciation_names.json"
+    lexicon.parent.mkdir(parents=True, exist_ok=True)
+    lexicon.write_text(json.dumps({"entries": [{"display_text": "Jacob", "tts_text": "Jacob", "tts_text_by_voice": {THANDO: "jeykhab", THEMBA: "jeykhab"}, "kind": "english_code_switch", "confidence": 0.9,
+                                                "source": "rules", "reads_as": "word", "english": "x", "derivation": []}]}), encoding="utf-8")
+    cookie = signed_in(world)
+    spelled = lambda: json.loads(lexicon.read_text())["entries"][0]["tts_text_by_voice"]
+    call(world, "POST", "/api/correct", {"job": JOB, "run": "prod-1", "word": "Jacob", "spelling": "jeykob"}, cookie)
+    assert spelled() == {THANDO: "jeykob", THEMBA: "jeykob"}                                    # no production run in between
+    assert call(world, "POST", "/api/book/revoke", {"word": "Jacob"}, cookie)[2] == {"revoked": True}
+    assert spelled() == {THANDO: "jeykhab", THEMBA: "jeykhab"}
+
+
+
+def test_a_pinned_word_is_offered_in_every_jobs_list_before_any_text_holds_it(tmp_path):
+    import json as _json
+    from mathula_tv import console
+
+    work = tmp_path
+    (work / "pinned_words.json").write_text(_json.dumps(["details"]), encoding="utf-8")
+    c = console.Console.__new__(console.Console)
+    c.work_dir = work
+    assert c._pinned_words() == ["details"]
+    (work / "pinned_words.json").write_text("not json", encoding="utf-8")
+    assert c._pinned_words() == []

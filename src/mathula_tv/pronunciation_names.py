@@ -113,8 +113,15 @@ def approved_names(dictionary: Any) -> set[str]:
     return approved
 
 
+AUTHORITATIVE_SOURCES = ("rules", "ear")          # a spelling the English-to-Zulu rules wrote, or one the user chose by ear: it replaces whatever an older entry says
+
+
+def is_authoritative(item: Mapping[str, Any]) -> bool:
+    return str(item.get("source") or "") in AUTHORITATIVE_SOURCES
+
+
 def load_names_entries(path: Path, approved: set[str] | None = None) -> list[Any]:
-    """The lexicon as pronunciation entries, minus any name a person has approved."""
+    """The lexicon as pronunciation entries, minus any name a person has approved; the rules' and the ear's spellings are kept whatever an older entry says."""
     from .pronunciation import PRONUNCIATION_KINDS, PronunciationEntry
 
     if not Path(path).is_file():
@@ -122,7 +129,7 @@ def load_names_entries(path: Path, approved: set[str] | None = None) -> list[Any
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     entries = []
     for item in data.get("entries") or []:
-        if approved and item["display_text"].casefold() in approved:
+        if approved and item["display_text"].casefold() in approved and not is_authoritative(item):
             continue
         kind = item.get("kind") if item.get("kind") in PRONUNCIATION_KINDS else "personal_name"
         entries.append(PronunciationEntry(
@@ -140,7 +147,19 @@ def merge_into_dictionary(dictionary: Any, names_path: Path, job_id: str) -> Any
         return dictionary
     taken = {e.display_text.casefold() for e in entries}
     kept = [o for o in dictionary.job_overrides if o.display_text.casefold() not in taken]
+    if has_authoritative_entries(names_path):
+        # the pronunciations of this job are the dictionary's sounds through the rules: a model's respelling of a name from web research (it came from no
+        # dictionary and no rule) would otherwise win over the rule spelling of a word inside it ("Cyril Ramaphosa" over "Cyril")
+        kept = [o for o in kept if o.source != "web_research"]
     return dictionary.with_job_overrides(job_id, [*kept, *entries])
+
+
+def has_authoritative_entries(path: Path) -> bool:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return any(is_authoritative(item) for item in data.get("entries") or [])
 
 
 def write_lexicon(path: Path, plans: Sequence[Mapping[str, Any]], *, voice: str, kinds: Mapping[str, str]) -> Path:

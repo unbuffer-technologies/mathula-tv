@@ -47,7 +47,7 @@ def test_semantic_rewrite_reapplies_application_pronunciation() -> None:
     assert substitutions[0]["before"] == "noC Mackenzie"
 
 
-def test_zulu_prefixed_cardinals_are_spelled_out_only_for_tts() -> None:
+def test_zulu_prefixed_figures_are_code_switched_only_for_tts() -> None:
     dictionary = with_default_organisation_initialisms(_dictionary())
     spoken = (
         "Ngasebenzisa izigidi ezingu-31 zamaRandi, "
@@ -58,8 +58,8 @@ def test_zulu_prefixed_cardinals_are_spelled_out_only_for_tts() -> None:
 
     assert result.spoken_text == spoken
     assert result.tts_text == (
-        "Ngasebenzisa izigidi ezingamashumi amathathu nanye zamaRandi, "
-        "kwase kundiza abantu abangamashumi ayisishiyagalombili."
+        "Ngasebenzisa izigidi ezingu-thethi-waan zamaRandi, "
+        "kwase kundiza abantu abangu-eighty."
     )
     assert [value.before for value in result.substitutions] == [
         "ezingu-31",
@@ -68,9 +68,7 @@ def test_zulu_prefixed_cardinals_are_spelled_out_only_for_tts() -> None:
     assert all(value.kind == "number" for value in result.substitutions)
 
 
-def test_unreviewed_number_morphology_is_not_guessed() -> None:
+def test_a_figure_below_20_is_code_switched_too() -> None:
     dictionary = with_default_organisation_initialisms(_dictionary())
 
-    assert dictionary.apply("izigidi ezingu-19").tts_text == (
-        "izigidi ezingu-19"
-    )
+    assert dictionary.apply("izigidi ezingu-19").tts_text == "izigidi ezingu-naynteen"

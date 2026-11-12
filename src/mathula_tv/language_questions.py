@@ -39,8 +39,10 @@ STRETCH_MIN_SHARE = 0.5        # share of a restored segment's words the caption
 STRETCH_MIN_WORDS = 5          # a shorter segment overlaps the neighbours' caption lines too much for a difference to mean anything
 STRETCH_MAX = 8                # unanswered stretch questions per job: the strongest differences
 EXAMPLES_MAX = 6               # listener corrections shown to pass 1
+WORDS_MAX = 80                 # words the listener named a language for, shown to pass 1
 EXAMPLE_CHARS = 260
 TEXT_MAX = 1500
+COMMENT_MAX = 600              # the listener's own words to the model about one question
 
 
 def _now() -> str:
@@ -132,23 +134,34 @@ def signature(word: str, *, inside: bool) -> str:
 
 def verdict(lessons: Mapping[str, Any], sig: str) -> str | None:
     """The language that earlier answers settle for words with this signature, or None when there are too few answers or they disagree."""
-    answers = [str(e.get("language")) for e in (lessons.get("words") or {}).values() if isinstance(e, Mapping) and e.get("signature") == sig]
+    answers = [str(e["language"]) for e in (lessons.get("words") or {}).values() if isinstance(e, Mapping) and e.get("language") and e.get("signature") == sig]
     if len(answers) < LEARN_MIN_ANSWERS:
         return None
     language, count = Counter(answers).most_common(1)[0]
     return language if count / len(answers) >= LEARN_AGREEMENT else None
 
 
-def answer_word(work_dir: Path, word: str, language: str, sig: str = "") -> dict[str, Any]:
-    if language not in LANGUAGES:
+def _comment(value: Any) -> str:
+    return " ".join(str(value or "").split())[:COMMENT_MAX]
+
+
+def answer_word(work_dir: Path, word: str, language: str = "", sig: str = "", comment: str | None = None) -> dict[str, Any]:
+    """Keep the listener's answer for a word: its language, and/or a comment to the model (``comment`` None keeps the one it has).  A comment alone does not settle the word."""
+    if language and language not in LANGUAGES:
         raise ValueError(f"language must be one of {', '.join(LANGUAGES)}")
     key = key_of(word)
     if not key:
         raise ValueError("a word is required")
+    note = None if comment is None else _comment(comment)
     lessons = load_lessons(work_dir)
-    lessons["words"][key] = {"word": str(word)[:80], "language": language, "signature": sig, "at": _now()}
+    old = lessons["words"].get(key) or {}
+    if not language and not old.get("language") and not (note if note is not None else old.get("comment")):
+        raise ValueError("choose a language or write a comment")
+    entry = {"word": str(word)[:80], "language": language or old.get("language", ""), "signature": sig if language else old.get("signature", ""),
+             "comment": old.get("comment", "") if note is None else note, "at": _now()}
+    lessons["words"][key] = entry
     _write(lessons_path(work_dir), lessons)
-    return lessons["words"][key]
+    return entry
 
 
 def forget_word(work_dir: Path, word: str) -> bool:
@@ -177,7 +190,7 @@ def stretch_questions(job_root: Path) -> list[dict[str, Any]]:
     probes = [{"segment_id": sid, "start_ms": s.get("start_ms", 0), "end_ms": s.get("end_ms", 0), "text": s.get("model_text") or s.get("restored_text") or s.get("source_text") or ""}
               for sid, s in by_id.items()]
     found = youtube_captions.disagreements(job_root, probes, text_key="text", minimum=STRETCH_MIN_SHARE, min_words=STRETCH_MIN_WORDS)
-    pick = [row for row in sorted((r for r in found if r["segment_id"] not in answers), key=lambda r: -r["share"])[:STRETCH_MAX]]
+    pick = [row for row in sorted((r for r in found if not (answers.get(r["segment_id"]) or {}).get("choice")), key=lambda r: -r["share"])[:STRETCH_MAX]]
     read = youtube_captions.reading(job_root)
     chosen: dict[str, dict[str, Any]] = {row["segment_id"]: row for row in pick}
     for sid in answers:
@@ -191,25 +204,35 @@ def stretch_questions(job_root: Path) -> list[dict[str, Any]]:
         rows.append({"kind": "stretch", "id": sid, "start_ms": int(segment.get("start_ms", 0)), "end_ms": int(segment.get("end_ms", 0)), "speaker": str(segment.get("speaker_id") or ""),
                      "transcript": str(segment.get("source_text") or ""), "model": str(segment.get("model_text") or segment.get("restored_text") or ""),
                      "caption": row["caption"], "track": row["track"], "share": round(float(row["share"]), 2), "reason": str(segment.get("reason_code") or ""),
-                     "answer": answers.get(sid)})
+                     "answer": answers.get(sid) if (answers.get(sid) or {}).get("choice") else None, "comment": str((answers.get(sid) or {}).get("comment") or "")})
     return sorted(rows, key=lambda r: r["start_ms"])
 
 
-def answer_stretch(job_root: Path, work_dir: Path, segment_id: str, choice: str, text: str = "") -> dict[str, Any]:
-    """Keep the listener's answer for one stretch of this job and add it to the shared lessons."""
-    if choice not in CHOICES:
+def answer_stretch(job_root: Path, work_dir: Path, segment_id: str, choice: str = "", text: str = "", comment: str | None = None) -> dict[str, Any]:
+    """Keep the listener's answer for one stretch of this job (which reading was right, and/or a comment to the model) and, once there is a decision, add it to the shared
+    lessons.  A comment alone steers this video's next pass 1 and decides nothing."""
+    if choice and choice not in CHOICES:
         raise ValueError(f"choice must be one of {', '.join(CHOICES)}")
     text = " ".join(str(text or "").split())[:TEXT_MAX]
     if choice == "typed" and not text:
         raise ValueError("type what was said")
+    note = None if comment is None else _comment(comment)
     job_root = Path(job_root)
     segments = _read(job_root / "native_dub" / "pass1_restored_transcript.json").get("segments") or []
     segment = next((s for s in segments if isinstance(s, Mapping) and str(s.get("segment_id")) == segment_id), None)
     if segment is None:
         raise ValueError("no such stretch")
     answers = load_answers(job_root)
-    answers["stretches"][segment_id] = {"choice": choice, "text": text if choice == "typed" else "", "at": _now()}
+    old = answers["stretches"].get(segment_id) or {}
+    if not choice and not old.get("choice") and not (note if note is not None else old.get("comment")):
+        raise ValueError("choose which reading was right or write a comment")
+    kept = {"choice": choice or old.get("choice", ""), "text": (text if choice == "typed" else "") if choice else old.get("text", ""),
+            "comment": old.get("comment", "") if note is None else note, "at": _now()}
+    answers["stretches"][segment_id] = kept
     _write(answers_path(job_root), answers)
+    if not kept["choice"]:
+        return kept                                              # a comment only: nothing was decided, so it is no lesson for other videos yet
+    choice, text = kept["choice"], kept["text"]
     model = str(segment.get("model_text") or segment.get("restored_text") or "")
     transcript = str(segment.get("source_text") or "")
     final = {"model": model, "transcript": transcript, "typed": text}[choice]
@@ -219,9 +242,9 @@ def answer_stretch(job_root: Path, work_dir: Path, segment_id: str, choice: str,
     lessons = load_lessons(work_dir)
     lessons["stretches"] = [e for e in lessons["stretches"] if not (e.get("job") == job_root.name and e.get("segment_id") == segment_id)]
     lessons["stretches"].append({"job": job_root.name, "segment_id": segment_id, "track": files[0].name.split(".")[-2] if files else "", "transcript": _clip(transcript, 600),
-                                 "model": _clip(model, 600), "caption": _clip(caption, 600), "choice": choice, "final": _clip(final, 600), "at": _now()})
+                                 "model": _clip(model, 600), "caption": _clip(caption, 600), "choice": choice, "final": _clip(final, 600), "comment": kept["comment"], "at": _now()})
     _write(lessons_path(work_dir), lessons)
-    return answers["stretches"][segment_id]
+    return kept
 
 
 def apply_to_segments(job_root: Path, segments: MutableSequence[Any]) -> int:
@@ -233,7 +256,7 @@ def apply_to_segments(job_root: Path, segments: MutableSequence[Any]) -> int:
         if not isinstance(segment, dict):
             continue
         answer = answers.get(str(segment.get("segment_id")))
-        if not answer:
+        if not answer or not answer.get("choice"):
             continue
         segment.setdefault("model_text", segment.get("restored_text", ""))
         target = {"model": segment["model_text"], "transcript": segment.get("source_text", ""), "typed": answer.get("text", "")}.get(answer.get("choice"), "")
@@ -248,10 +271,24 @@ def apply_to_segments(job_root: Path, segments: MutableSequence[Any]) -> int:
     return changed
 
 
+def known_words(work_dir: Path) -> list[dict[str, str]]:
+    """The words the listener named a language for (the latest ``WORDS_MAX``), for pass 1's prompt: a word the listener said is Sepedi is kept as Sepedi, one they said is
+    English is kept as English, wherever the recogniser wrote it as something else."""
+    rows = sorted((e for e in load_lessons(work_dir)["words"].values() if isinstance(e, Mapping) and (e.get("language") or e.get("comment"))), key=lambda e: str(e.get("at") or ""))[-WORDS_MAX:]
+    return [{"word": str(e.get("word") or ""), **({"language": str(e["language"])} if e.get("language") else {}), **({"comment": _clip(e["comment"], COMMENT_MAX)} if e.get("comment") else {})}
+            for e in rows if e.get("word")]
+
+
 def examples(work_dir: Path) -> list[dict[str, str]]:
     """The listener's latest corrections of the model's restored text, for pass 1's prompt: what the transcript and the caption said, what the listener decided, and which reading
     won.  The model learns from them when the caption or the transcript is the one to trust."""
     rows = load_lessons(work_dir)["stretches"][-EXAMPLES_MAX:]
     return [{"transcript": _clip(r.get("transcript")), "caption": _clip(r.get("caption")), "caption_track": str(r.get("track") or ""), "model_wrote": _clip(r.get("model")),
-             "listener_decided": _clip(r.get("final")), "winner": {"model": "the model's text", "transcript": "the transcript", "typed": "the listener's own words"}.get(str(r.get("choice")), "")}
+             "listener_decided": _clip(r.get("final")), "winner": {"model": "the model's text", "transcript": "the transcript", "typed": "the listener's own words"}.get(str(r.get("choice")), ""),
+             **({"listener_comment": _clip(r["comment"], COMMENT_MAX)} if r.get("comment") else {})}
             for r in rows]
+
+
+def notes(job_root: Path) -> list[dict[str, str]]:
+    """The listener's comments on this video's own stretches, for pass 1's prompt: ``{"id": segment_id, "note": comment}``, in segment order."""
+    return [{"id": sid, "note": _clip(a["comment"], COMMENT_MAX)} for sid, a in sorted(load_answers(job_root)["stretches"].items()) if isinstance(a, Mapping) and a.get("comment")]

@@ -45,6 +45,15 @@ class StubWorkbench:
     def attested_zulu(self, word, zulu_forms=None):
         return {"english": word, "forms": []}
 
+    def human_translations(self, phrase, limit=5):
+        return {"phrase": phrase, "pairs_in_all": 0, "pairs": []}
+
+    def figure_style(self, phrase):
+        return {"phrase": phrase, "pairs_checked": 0, "ways_the_figure_is_written": []}
+
+    def say_it(self, text, speaker_id="SPEAKER_00"):
+        return {"spoken": text, "changes": [], "still_as_written": []}
+
     def use_loanword(self, word, zulu_word):
         return {"ok": True}
 
@@ -773,3 +782,29 @@ def test_the_stated_bar_has_half_a_point_of_slack_and_the_wrapup_can_be_turned_o
     off = run_agent(ScriptedClient([_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})])] + [_reply(calls=[_call("s0", "submit_dub", {"items": []})])] * 8),
                     ScoringWorkbench(tmp_path / "b", [_score(1.0)] * 8), clip_id="c1", run_id="r", tts_budget=50, max_turns=6, wrapup_turns=0)
     assert off["stop_reason"] == "max_turns"
+
+
+def test_a_run_that_has_met_the_bar_is_shown_the_listener_points_still_open_and_given_one_round_to_act_on_them(tmp_path):
+    from mathula_tv import dub_agent
+
+    held = "after “as well as” the speaker held 1.2 s; near “kakhulu, kanye noFannie” your Zulu leaves 0.15 s (~pause1200 after the word that ends the thought would match)"
+    first = {**_score(1.9), "comma_check": [{"item_id": "unit-002", "commas": 12, "pauses_the_speaker_held_that_the_dub_does_not": [held],
+                                             "commas_where_the_speaker_did_not_pause": ["“Impela, Ayanda” (the speaker said Ayanda with no pause before it: 0.00 s)"]}]}
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s0", "submit_dub", {"items": []})]), _reply(content="done")]
+    client = ScriptedClient(script)
+    summary = run_agent(client, ScoringWorkbench(tmp_path, [first]), clip_id="c1", run_id="r", tts_budget=50, max_turns=20)
+    told = [m["content"] for m in client.seen[-1] if m["role"] == "user" and "meets the bar" in str(m.get("content"))]
+    assert told and "open points" in told[0] and "unit-002" in told[0] and "~pause1200" in told[0] and "partial=true" in told[0] and "Finish now" not in told[0]
+    assert summary["stop_reason"] in ("agent_finished", "bar_met")
+    assert dub_agent.open_listener_points({"comma_check": [{"item_id": f"u{i}", "pauses_the_speaker_held_that_the_dub_does_not": ["x"]} for i in range(20)]}) \
+        == [f"u{i}: x" for i in range(dub_agent.LISTENER_POINTS_SHOWN)]
+
+
+def test_a_run_with_no_listener_points_open_is_told_to_finish_as_before(tmp_path):
+    from mathula_tv import dub_agent
+
+    assert dub_agent.open_listener_points(_score(1.9)) == [] and dub_agent.open_listener_points(None) == []
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s0", "submit_dub", {"items": []})]), _reply(content="done")]
+    client = ScriptedClient(script)
+    run_agent(client, ScoringWorkbench(tmp_path, [_score(1.9)]), clip_id="c1", run_id="r", tts_budget=50, max_turns=20)
+    assert [m for m in client.seen[-1] if m["role"] == "user" and "Finish now" in str(m.get("content"))]

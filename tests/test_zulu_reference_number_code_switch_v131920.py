@@ -38,23 +38,21 @@ def test_reference_number_code_switch_generalizes_to_other_digit_combinations() 
         assert digits in result.spoken_text
 
 
-def test_two_digit_number_is_not_code_switched() -> None:
-    # A bare 1-2 digit number is far more likely to be an ordinary quantity than a
-    # reference/identifier number; the feature is scoped to 3+ digits (see the
-    # confirmed real docket-number case) to avoid over-triggering on small counts.
+def test_two_digit_number_is_not_read_as_a_reference_number() -> None:
+    # A bare 1-2 digit number is an ordinary quantity, not a reference/identifier number: the digit-by-digit reading is scoped to 3+ digits (the confirmed docket-number case).
+    # It is said as an English number word like every other figure (human decision 2026-11-10/11), never digit by digit.
     result = _zulu_dictionary().apply("Wafika ngo 17.")
-    assert result.tts_text == "Wafika ngo 17."
-    assert not result.substitutions
+    assert result.tts_text == "Wafika ngo seventeen."
+    assert "wan" not in result.tts_text and "seven " not in result.tts_text
 
 
 def test_isizulu_prefixed_cardinal_is_not_overridden_by_english_code_switch() -> None:
-    # A number with a real isiZulu grammatical prefix already gets a natural
-    # isiZulu cardinal reading (_zulu_dynamic_number_candidates) -- the English
-    # code-switch must not compete with or override that existing, correct path.
+    # A figure after an isiZulu prefix is code-switched to English number words with the prefix kept (human decision 2026-11-10: native numerals take too much room).
+    # It must not be read digit by digit like a reference number ("tuu fooo").
     result = _zulu_dictionary().apply("emahoreni angaphansi ezingu-24.")
     assert "triiy" not in result.tts_text
     assert "tuu" not in result.tts_text
-    assert "ezinga" in result.tts_text
+    assert "ezingu-twenty-four" in result.tts_text
 
 
 def test_rand_million_amount_is_not_overridden_by_english_code_switch() -> None:

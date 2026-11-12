@@ -55,11 +55,34 @@ def test_a_written_ordinal_is_said_as_the_english_number():
     assert jp.ordinals(["zango-22nd kule nyanga", "ngo-22nd October", "ku-3rd na-4th", "R22 nd", "2020"]) == ["22nd", "3rd", "4th"]
 
 
+def test_a_zulu_surname_the_english_dictionary_happens_to_hold_is_left_alone_because_zulu_text_writes_it_often():
+    """Khumalo, Cele and Buthelezi are in the English dictionary (an English reading of a Zulu name), and a name is capitalised inside a sentence, so they were respelled as
+    English ("siil", "kyumaalo").  What tells whose they are is how often Zulu text writes them; English first names it hardly writes at all."""
+    usage = {"khumalo": 239, "cele": 54, "buthelezi": 136, "mchunu": 39, "andrea": 0, "fannie": 0, "johnson": 34, "kenny": 0, "nelson": 75, "africa": 287, "centre": 128}
+    kept = {"khumalo": .61, "cele": .41, "buthelezi": .63, "nelson": .46, "johnson": .61, "africa": .05, "centre": .08}          # measured on the corpus pairs
+    text = ["uBheki Cele noMnu Khumalo noButhelezi, no-Andrea Johnson noFannie Kenny uNelson eSouth Africa e-Centre"]
+    found = jp.candidates(text, researched={"cele": {}, "khumalo": {}}, dictionary=lambda w: w in usage, zulu_count=lambda w: usage.get(w, 0), zulu_kept=lambda w: kept.get(w, 0))
+    assert found == ["Andrea", "Johnson", "Fannie", "Kenny", "Nelson", "Africa", "Centre"]          # Cele and Khumalo are Zulu; an English name (Nelson, Johnson: not Zulu syllables) or a translated word (Africa, Centre: Zulu text rewrites it) is not
+    assert jp.zulu_name_by_usage("Mchunu", 39) is False and jp.zulu_name_by_usage("Ngcobo", 78) and jp.zulu_name_by_usage("Mkhwanazi", 60)          # a name below the usage floor is not decided on usage; clicks and clusters are Zulu
+
+
 def test_a_zulu_name_is_left_alone_even_when_web_research_gave_it_english_sounds_but_an_english_name_is_not():
-    found = jp.candidates(["uJacob Zuma noCyril Ramaphosa Nomvalo Heidi"], researched={"zuma": {}, "ramaphosa": {}, "nomvalo": {}, "heidi": {}, "jacob": {}},
+    found = jp.candidates(["uJacob Zuma noCyril Ramaphosa Nomvalo Heidi Mchunu"], researched={"zuma": {}, "ramaphosa": {}, "nomvalo": {}, "heidi": {}, "jacob": {}, "mchunu": {}},
                           dictionary=lambda w: w in {"jacob", "heidi"}, zulu_count=lambda w: 0)
-    assert found == ["Jacob", "Heidi"]
+    assert found == ["Jacob", "Heidi"]          # Mchunu has a click letter (c): still a Zulu name
     assert jp.candidates(["i-AI ne-MK"], researched={}, dictionary=lambda w: False, zulu_count=lambda w: 0) == ["AI", "MK"]          # initialisms are not names
+
+
+def test_an_initialism_with_a_zulu_prefix_glued_on_is_found_without_the_prefix():
+    found = jp.candidates(["Ezinye zeziphikiso eJB Marks zalungiswa, kuSABC nakwa-IEC"], researched={}, dictionary=lambda w: False, zulu_count=lambda w: 0)
+    assert found == ["JB", "SABC", "IEC"]
+    assert jp.candidates(["iOS"], researched={"ios": {}}, dictionary=lambda w: False, zulu_count=lambda w: 0) == ["iOS"]          # a word the research knows stays whole
+
+
+def test_a_word_the_listener_asked_for_is_listed_although_the_rules_would_leave_it_alone():
+    text = ["Unobhala we-ANC, uLouis Diremelo, uthi sebefake eMahikeng"]
+    assert jp.candidates(text, researched={}, dictionary=lambda w: False, zulu_count=lambda w: 0) == ["ANC"]                          # a Zulu-shaped name: left alone
+    assert jp.candidates(text, researched={}, dictionary=lambda w: False, zulu_count=lambda w: 0, also_list=["diremelo"]) == ["ANC", "Diremelo"]
 
 
 def test_the_letters_after_a_digit_are_not_a_word(tmp_path):
@@ -68,3 +91,18 @@ def test_the_letters_after_a_digit_are_not_a_word(tmp_path):
     found = candidates(["Ngomhla we-4th kuNovemba, ngo-22nd, ne-3rd, nango-1st. Sawubona Hello."], researched={}, dictionary=lambda w: w in {"th", "nd", "rd", "st", "hello"},
                        zulu_count=lambda w: 0)
     assert "th" not in found and "nd" not in found and "rd" not in found and "st" not in found and "Hello" in found
+
+
+def test_a_day_written_after_its_month_gets_the_spelling_of_its_ordinal():
+    assert jp.ordinals(["Kusukela ngoNovemba 4, kuningi", "kuze kube uDisemba 1,", "ngoJanuwari 5, 2027", "kuNovemba 13 kanye"]) == ["4th", "1st", "5th", "13th"]
+    assert jp.ordinals(["ngoNovemba", "ngoDisemba 2024", "R4 Novemba"]) == []             # a month alone, a year and a day before its month are not "month day"
+
+
+
+def test_a_lowercase_word_the_listener_asked_for_is_listed_as_written():
+    from types import SimpleNamespace
+
+    prepared = SimpleNamespace(also_list=["ngevoti"], researched={}, lessons={}, unsure=[], resolved=[], said=None, zulu_count=lambda w: 0, zulu_kept=lambda w: 0.0,
+                               sounds=SimpleNamespace(word=lambda w: False), interpreter=SimpleNamespace(rules_spelling=lambda w: None))
+    spelled = jp.spell(prepared, ["Abavoti bakhulumile ngevoti, banquma ukunganiki muntu iningi."], progress=lambda m: None)
+    assert [(s["word"], s["spelling"], s["reading"]) for s in spelled] == [("ngevoti", "ngevoti", "as written")]

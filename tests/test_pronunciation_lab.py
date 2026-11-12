@@ -129,19 +129,19 @@ def make_workbench(tmp_path, voice_sounds):
     return workbench, store
 
 
-def test_the_agent_has_the_three_pronunciation_tools_and_they_are_dispatched():
+def test_the_agent_is_not_given_the_pronunciation_tools_even_when_the_workbench_has_them():
     from types import SimpleNamespace
 
     from mathula_tv import dub_agent
 
     names = {t["function"]["name"] for t in dub_agent.TOOL_SPECS}
-    assert {"list_foreign_words", "try_pronunciation", "use_pronunciation"} <= names
+    assert not {"list_foreign_words", "try_pronunciation", "use_pronunciation"} & names
     workbench = SimpleNamespace(**{n: (lambda *a, **k: None) for n in ("open_clip", "recall_lessons", "measure_tts", "measure_tts_batch", "check_text",
                                                                       "preview_turn_padding", "submit_dub", "get_submission", "list_foreign_words",
                                                                       "try_pronunciation", "use_pronunciation")})
     dispatch = dub_agent.build_dispatch(workbench, clip_id="clipa", run_id="r", tts_budget=5)
-    assert {"list_foreign_words", "try_pronunciation", "use_pronunciation"} <= set(dispatch)
-    assert "list_foreign_words" in dub_agent.SYSTEM_PROMPT and "Never glue a Zulu prefix" in dub_agent.SYSTEM_PROMPT
+    assert not {"list_foreign_words", "try_pronunciation", "use_pronunciation"} & set(dispatch)
+    assert "Never glue a Zulu prefix" in dub_agent.SYSTEM_PROMPT
 
 
 def test_the_agent_is_pointed_at_the_english_words_its_dub_keeps(tmp_path):
@@ -827,17 +827,14 @@ def test_a_chosen_loanword_is_remembered_for_later_clips_but_only_if_it_was_crea
 
     workbench, _ = make_workbench(tmp_path, {})
 
-    class Loan(FakeLab):
-        def source(self, word):
-            return {"found": True, "phones": ["b", "ʌ", "s"], "occurrences": 2, "each_occurrence": []}
-
-        def voice_reading(self, spelling):
-            return ["b", "a", "s", "i"]
-
-    workbench._pronunciation_lab = Loan({})
+    (tmp_path / "resources" / "cmudict").mkdir(parents=True)
+    (tmp_path / "resources" / "cmudict" / "cmudict.dict").write_text("bus B AH1 S\n", encoding="utf-8")
     with pytest.raises(ValueError, match="create 'bhasi'"):
         workbench.use_loanword("bus", "bhasi")
-    workbench.create_loanword("bus")
+    made = workbench.create_loanword("bus")
+    assert made["dictionary_sounds"] and made["zulu_words"][0]["zulu_word"] == "bhasi" and made["zulu_words"][0]["with_i"] == "ibhasi"
+    assert all(set(row) == {"zulu_word", "with_i", "syllables", "changes_from_the_most_typical"} for row in made["zulu_words"])          # no voice, no listener, no score
+    assert "dictionary has no sounds" in workbench.create_loanword("Xqzvk")["error"]
     prefixed = workbench.use_loanword("bus", "ibhasi")                                   # the form with its noun prefix is the word made
     assert prefixed["zulu_word"] == "bhasi"
     out = workbench.use_loanword("bus", "bhasi")
@@ -968,8 +965,7 @@ def test_a_created_loanword_nobody_writes_is_not_remembered_and_not_offered_agai
     (directory / "lexicon").mkdir(parents=True)
     (directory / "autshumato.zu.txt").write_text("Ibhasi sekwephuzile .\n", encoding="utf-8")
     (directory / "autshumato.en.txt").write_text("The bus is late .\n", encoding="utf-8")
-    workbench._pronunciation_lab._created = {"bus": {"ibhasi"}, "provident": {"phurovideni"}}
-    workbench._pronunciation_lab.source = lambda word: {"found": True, "phones": ["b", "ʌ", "s"], "occurrences": 1, "each_occurrence": []}
+    workbench._loans = {"bus": {"ibhasi"}, "provident": {"phurovideni"}}
     assert workbench.use_loanword("bus", "ibhasi").get("remembered", True) is True and zulu_for(path_for(tmp_path), "bus") == "ibhasi"
     answer = workbench.use_loanword("provident", "phurovideni")
     assert answer["remembered"] is False and "not written anywhere" in answer["note"] and zulu_for(path_for(tmp_path), "provident") is None
@@ -992,10 +988,41 @@ def test_a_measurement_says_how_many_characters_to_add_or_cut_to_fill_the_window
 
     assert spoken_chars("Sawubona ~ baba [pause]") == len("Sawubona  baba ")
     text = "a" * 100
-    assert length_gap(text, {"measured_ms": 7300, "window_ms": 10000}) == {"chars": 100, "add_about_chars": 35}          # 27% short: 100 x (10 / 7.3 - 1) = 37 -> 35
+    from mathula_tv.dub_workbench import ADD_NOTE
+
+    assert length_gap(text, {"measured_ms": 7300, "window_ms": 10000}) == {"chars": 100, "add_about_chars": 35, "add_note": ADD_NOTE}   # 27% short: 100 x (10 / 7.3 - 1) = 37 -> 35
     assert length_gap(text, {"measured_ms": 12000, "window_ms": 10000}) == {"chars": 100, "cut_about_chars": 15}          # past the window: 100 x (1 - 10 / 12) = 17 -> 15
     assert length_gap(text, {"measured_ms": 9700, "window_ms": 10000}) == {"chars": 100}                                  # within 6%: no advice
     assert length_gap("", {"measured_ms": 1, "window_ms": 1}) == {} and length_gap(text, {}) == {}
+
+
+def test_a_short_stock_line_that_leaves_under_half_a_second_is_told_to_stay_short_not_given_characters_to_add():
+    from mathula_tv.dub_workbench import LEAVE_SHORT_NOTE, length_gap
+
+    # prod-74 u02: "Sanibonani." measured 825 of 1120 ms (26% short) and was told "add_about_chars: 5"; it became "Sanibonani ntambama."
+    gap = length_gap("Sanibonani.", {"measured_ms": 825, "window_ms": 1120})
+    assert gap == {"chars": 11, "shortfall_ms": 295, "leave_short": LEAVE_SHORT_NOTE}
+    assert "add_about_chars" not in gap
+    # the same relative gap on a long unit is still advice to add (a real shortfall), just 450 ms is the line
+    assert "add_about_chars" in length_gap("a" * 60, {"measured_ms": 3000, "window_ms": 3600})
+    # the boundary: 450 ms short leaves it be, 451 does not
+    assert "leave_short" in length_gap("a" * 20, {"measured_ms": 1000, "window_ms": 1450})
+    assert "add_about_chars" in length_gap("a" * 20, {"measured_ms": 1000, "window_ms": 1451})
+    # a cut is never affected
+    assert length_gap("a" * 20, {"measured_ms": 1500, "window_ms": 1000}) == {"chars": 20, "cut_about_chars": 5}      # 20 x (1 - 1000 / 1500) = 6.7 -> 5
+
+
+def test_the_agent_prompt_forbids_padding_to_fill_a_window_and_asks_for_comprehension_and_fluidity():
+    from mathula_tv import dub_agent
+
+    prompt = dub_agent._SYSTEM_PROMPT_TEMPLATE
+    assert "Never add a word" in prompt and "leave_short" in prompt
+    assert "Comprehension and fluidity" in prompt
+    assert "ntambama" not in prompt        # a rule for the failure (padding), not for one word it showed up in
+    assert "Length by grammar" in prompt and "measure_tts_batch" in prompt
+    built = dub_agent.build_system_prompt(grammar=True)
+    assert "ISIZULU GRAMMAR REFERENCE" in built and built.index("Length by grammar") < built.index("ISIZULU GRAMMAR REFERENCE")
+    assert "ISIZULU GRAMMATICAL FOUNDATION" not in built        # the unchecked pass-2 block is replaced by the six checked modules
 
 
 def test_a_name_and_an_initialism_the_speaker_says_are_offered_so_heidi_and_sg_reach_the_lab():

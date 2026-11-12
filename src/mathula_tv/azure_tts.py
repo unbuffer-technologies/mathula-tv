@@ -319,6 +319,7 @@ class AzureTTSBackend:
         trim_digital_silence_ms: int = 2000,
         maximum_response_bytes: int = 100 * 1024 * 1024,
         sleep: Callable[[float], None] = time.sleep,
+        cache_dir: Path | str | None = None,
     ):
         voices = tuple(dict.fromkeys(str(voice).strip() for voice in configured_voices if str(voice).strip()))
         if not voices:
@@ -349,6 +350,7 @@ class AzureTTSBackend:
         self.trim_digital_silence_ms = trim_digital_silence_ms
         self.maximum_response_bytes = maximum_response_bytes
         self.sleep = sleep
+        self.cache_dir = Path(cache_dir) if cache_dir else None          # audio by the content of the request: a phrase the voice has already said is never paid for twice
         self.ssml_builder = SafeSSMLBuilder(
             allowed_voices=voices,
             bounds=self.ssml_bounds,
@@ -464,39 +466,13 @@ class AzureTTSBackend:
             if existing is not None:
                 return existing
 
-        self.validate_voice(voice, request.language)
-
-        def parse(response: AzureTTSResponse) -> tuple[bytes, dict[str, int]]:
-            self._raise_for_response(response, operation="synthesis")
-            if len(response.body) > self.maximum_response_bytes:
-                raise AzureTTSError(
-                    "Azure TTS audio response exceeds the configured size limit",
-                    category="invalid_output",
-                    retryable=False,
-                )
-            try:
-                return canonicalize_pcm_wav(
-                    response.body,
-                    sample_rate=self.sample_rate,
-                    channels=self.channels,
-                    sample_width=self.sample_width,
-                    trim_digital_silence_ms=self.trim_digital_silence_ms,
-                )
-            except ValueError as exc:
-                raise AzureTTSError(
-                    f"Azure TTS returned invalid WAV audio: {exc}",
-                    category="invalid_output",
-                    retryable=True,
-                ) from exc
-
-        (audio, metadata), attempt = self._with_retries(
-            lambda: self.boundary.synthesize_ssml(
-                document.xml,
-                output_format=self.output_format,
-                timeout_seconds=self.timeout_seconds,
-            ),
-            parse,
-        )
+        cached = None if force else self._cache_get(document, voice)
+        if cached is not None:
+            audio, metadata = cached
+            attempt = 1
+        else:
+            audio, metadata, attempt = self._synthesize_remote(document, voice, request.language)
+            self._cache_put(document, voice, audio, metadata)
         output_hash = hashlib.sha256(audio).hexdigest()
         warnings: list[str] = []
         if metadata["trimmed_leading_ms"]:
@@ -546,6 +522,77 @@ class AzureTTSBackend:
             (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
         )
         return result
+
+    def _cache_key(self, document: SSMLDocument, voice: str) -> str:
+        payload = {"ssml_hash": document.sha256, "voice": voice, "sample_rate": self.sample_rate, "channels": self.channels, "sample_width": self.sample_width,
+                   "output_format": self.output_format, "trim_digital_silence_ms": self.trim_digital_silence_ms}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def _cache_path(self, document: SSMLDocument, voice: str) -> Path:
+        key = self._cache_key(document, voice)
+        return self.cache_dir / key[:2] / key
+
+    def _cache_get(self, document: SSMLDocument, voice: str) -> tuple[bytes, dict[str, int]] | None:
+        if self.cache_dir is None:
+            return None
+        base = self._cache_path(document, voice)
+        try:
+            meta = json.loads(base.with_suffix(".json").read_text(encoding="utf-8"))
+            audio = base.with_suffix(".wav").read_bytes()
+            if hashlib.sha256(audio).hexdigest() != meta["sha256"]:
+                return None
+            return audio, {name: int(meta[name]) for name in ("duration_ms", "trimmed_leading_ms", "trimmed_trailing_ms")}
+        except (OSError, ValueError, KeyError, TypeError):
+            return None                      # a missing or damaged entry is just a miss: the voice says it again
+
+    def _cache_put(self, document: SSMLDocument, voice: str, audio: bytes, metadata: dict[str, int]) -> None:
+        if self.cache_dir is None:
+            return
+        base = self._cache_path(document, voice)
+        try:
+            base.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(base.with_suffix(".wav"), audio)
+            meta = {name: int(metadata[name]) for name in ("duration_ms", "trimmed_leading_ms", "trimmed_trailing_ms")}
+            meta["sha256"] = hashlib.sha256(audio).hexdigest()
+            _atomic_write_bytes(base.with_suffix(".json"), json.dumps(meta).encode("utf-8"))          # promoted last: it marks the entry complete
+        except OSError:
+            pass                              # a cache that cannot be written costs nothing but the next synthesis
+
+    def _synthesize_remote(self, document: SSMLDocument, voice: str, language: str) -> tuple[bytes, dict[str, int], int]:
+        self.validate_voice(voice, language)
+
+        def parse(response: AzureTTSResponse) -> tuple[bytes, dict[str, int]]:
+            self._raise_for_response(response, operation="synthesis")
+            if len(response.body) > self.maximum_response_bytes:
+                raise AzureTTSError(
+                    "Azure TTS audio response exceeds the configured size limit",
+                    category="invalid_output",
+                    retryable=False,
+                )
+            try:
+                return canonicalize_pcm_wav(
+                    response.body,
+                    sample_rate=self.sample_rate,
+                    channels=self.channels,
+                    sample_width=self.sample_width,
+                    trim_digital_silence_ms=self.trim_digital_silence_ms,
+                )
+            except ValueError as exc:
+                raise AzureTTSError(
+                    f"Azure TTS returned invalid WAV audio: {exc}",
+                    category="invalid_output",
+                    retryable=True,
+                ) from exc
+
+        (audio, metadata), attempt = self._with_retries(
+            lambda: self.boundary.synthesize_ssml(
+                document.xml,
+                output_format=self.output_format,
+                timeout_seconds=self.timeout_seconds,
+            ),
+            parse,
+        )
+        return audio, metadata, attempt
 
     def _ssml_document(self, request: AzureTTSRequest, voice: str) -> SSMLDocument:
         if request.ssml_document is not None:

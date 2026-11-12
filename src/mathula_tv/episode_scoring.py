@@ -88,23 +88,40 @@ def find_restated_references(spoken_text: str, *, window: int = 3) -> list[dict[
     spot: a legitimately repeated noun a few words apart ("umsebenzi ...
     nomsebenzi") also matches; it is a review flag, not a verdict.
     """
-    tokens = [t for t in _tokens(spoken_text) if len(t) > 5]
+    text = str(spoken_text or "")
+    tokens = [m for m in _WORD.finditer(text) if len(m.group(0)) > 5]
     hits: list[dict[str, str]] = []
-    for index, word in enumerate(tokens):
+    for index, found in enumerate(tokens):
+        word = found.group(0)
         stem = _stem(word)
         if len(stem) < 6:
             continue
-        for other in tokens[index + 1:index + 1 + window]:
+        for later in tokens[index + 1:index + 1 + window]:
+            other = later.group(0)
             if other.lower() != word.lower() and _stem(other) == stem:
                 hits.append({
                     "first": word, "second": other, "stem": stem,
-                    "name_like": _name_like(word) or _name_like(other),
+                    "name_like": _name_like(word, text, found.start()) or _name_like(other, text, later.start()),
                 })
     return hits
 
 
-def _name_like(word: str) -> bool:
-    return word[:1].isupper() or any(ch.isupper() for ch in word[1:])
+def _sentence_start(text: str, position: int) -> bool:
+    """Does a word at ``position`` open a sentence or a quotation?  Then its capital says nothing about it being a name (as in find_fabricated_entities)."""
+    before = text[:position].rstrip()
+    if not before or before[-1] in _CAPITAL_STARTS_AFTER:
+        return True
+    return before[-1] in "”’\"'" and len(before) > 1 and before[-2] in ".?!,"
+
+
+def _name_like(word: str, text: str = "", position: int = -1) -> bool:
+    """A capital INSIDE the word (uSimthandile, kuMasipala) or a leading capital in the middle of a sentence.  A leading capital that only starts a sentence ("Ohulumeni bomfelandawonye ...",
+    the common noun for governments) is not a name: it used to make a faithful repetition of a common word a hard failure (prod-81 spent 20 turns on it)."""
+    if any(ch.isupper() for ch in word[1:]):
+        return True
+    if not word[:1].isupper():
+        return False
+    return not (text and position >= 0 and _sentence_start(text, position))
 
 
 def split_restatements(spoken_text: str, source_text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

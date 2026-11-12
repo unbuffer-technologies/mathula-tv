@@ -95,11 +95,17 @@ def word_parses(word: str) -> bool:
     if normalized in KNOWN_UNPARSED_INTERJECTIONS:
         return True
     fst = _load_fst()
-    try:
-        next(fst.apply_up(normalized))
-        return True
-    except StopIteration:
-        return False
+    # Read the analyses to the end (or to the cap) instead of taking the first and dropping the iterator: measured on the server, an abandoned iterator keeps about
+    # 3.4 MB for the rest of the process (500 words held 1.7 GB, and the process crashed by about 700 words), while a read-out one costs about 23 KB per word.
+    found = False
+    for seen, _ in enumerate(fst.apply_up(normalized), 1):
+        found = True
+        if seen >= _ANALYSIS_CAP:
+            break
+    return found
+
+
+_ANALYSIS_CAP = 200          # a gibberish string can have a huge number of analyses; stop reading there (the rare abandoned iterator is the lesser evil)
 
 
 def unparsed_words(text: str, *, known_proper_nouns=()) -> list[str]:

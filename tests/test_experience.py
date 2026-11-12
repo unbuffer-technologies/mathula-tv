@@ -351,3 +351,16 @@ def test_a_submission_measures_its_units_side_by_side_and_keeps_their_order(tmp_
     assert time.monotonic() - started < 0.55            # two 0.3 s syntheses overlapped, not 0.6 s one after the other
     assert state["peak"] == 2
     assert [g["group_id"] for g in card["groups"]] == ["a", "b"] and [g["measured_ms"] for g in card["groups"]] == [1000, 4000]
+
+
+def test_a_capital_that_only_starts_a_sentence_does_not_make_a_common_noun_a_name():
+    # prod-81: "zohulumeni basekhaya. Ohulumeni bomfelandawonye" (local government / coalition governments: the English says government twice) was a HARD failure for 20 turns
+    from mathula_tv.episode_scoring import split_restatements
+
+    text = "Kulungile, siqhubeka nezindaba zohulumeni basekhaya. Ohulumeni bomfelandawonye sebezoba yinjwayelo kuleli."
+    hits = find_restated_references(text)
+    assert hits and not any(h["name_like"] for h in hits)
+    gate, soft = split_restatements(text, "All right, we continue with local government news. Coalition governments are about to become a new norm.")
+    assert gate == [] and soft                                                                  # a review flag, not a hard failure
+    assert any(h["name_like"] for h in find_restated_references("Sifuna umsebenzi ongashintshi kamasipala kuMasipala waseLekwa."))          # a capital inside the word is still a name
+    assert any(h["name_like"] for h in find_restated_references("Ngikhulume noMasipala wethu kamasipala namuhla."))                        # a mid-sentence leading capital too

@@ -129,6 +129,14 @@ def test_a_reading_saved_in_lowercase_still_finds_the_english_word_glued_to_a_zu
     assert dictionary.apply("ukuphela isifundoscience").tts_text == "ukuphela isifundoscience"                               # lowercase glue: not this word
 
 
+def test_an_initialism_with_a_lowercase_zulu_prefix_glued_on_is_respelled_only_when_written_in_capitals():
+    dictionary = _dictionary().with_job_overrides("job-1", [
+        {"display_text": "JB", "spoken_text": "JB", "tts_text": "jeyi-biii", "kind": "initials"}])
+    assert dictionary.apply("zeziphikiso eJB Marks zalungiswa").tts_text == "zeziphikiso ejeyi-biii Marks zalungiswa"
+    assert dictionary.apply("ukuthi JB uyafika").tts_text == "ukuthi jeyi-biii uyafika"
+    assert dictionary.apply("Ngithe ejb nakwajbu").tts_text == "Ngithe ejb nakwajbu"                  # lowercase glue: another word
+
+
 def test_a_researched_name_to_be_said_as_written_does_not_shadow_the_readings_chosen_for_its_words():
     from mathula_tv.pronunciation import PronunciationEntry, with_web_researched_organisation_pronunciations
 
@@ -142,6 +150,46 @@ def test_a_researched_name_to_be_said_as_written_does_not_shadow_the_readings_ch
     words = [PronunciationEntry(display_text=w, spoken_text=w, tts_text=t, source="names_stage", reviewed_by="automatic", confidence=0.9, kind="english_code_switch")
              for w, t in (("Tshela", "Tsela"), ("Thupa", "Tupa"))]
     as_written = with_web_researched_organisation_pronunciations(base, research("Tshela Thupa"))
-    assert as_written.with_job_overrides("job", [*as_written.job_overrides, *words]).apply("i-Tshela Thupa").tts_text == "i-Tsela Tupa"
+    assert as_written.with_job_overrides("job", [*as_written.job_overrides, *words]).apply("i-Tshela Thupa").tts_text == "i-Tsela-Tupa"
     respelt = with_web_researched_organisation_pronunciations(base, research("Tsela Tupa"))
     assert any(e.display_text == "Tshela Thupa" for e in respelt.job_overrides)                  # a real respelling of the phrase is still kept
+
+
+def test_a_spelling_the_rules_or_the_ear_wrote_replaces_every_older_reading_of_its_word(tmp_path):
+    # the default initialism entries (ANC is spelt out by the voice), a model's respelling from web research and a name with aliases all lose to it
+    base = _dictionary().with_job_overrides("job-1", [
+        {"display_text": "Western Cape High Court", "spoken_text": "Western Cape High Court", "tts_text": "Westen Keyp Hay Khout",
+         "kind": "organisation_name", "source": "web_research", "aliases": ["Western", "Cape", "Court"]}])
+    path = tmp_path / NAMES_FILE
+    path.write_text(json.dumps({"schema": "x", "voice": "v", "entries": [
+        {"display_text": "ANC", "tts_text": "ANC", "tts_text_by_voice": {"v": "eyi-en-siii"}, "kind": "english_code_switch", "source": "rules"},
+        {"display_text": "Western", "tts_text": "Western", "tts_text_by_voice": {"v": "westen"}, "kind": "english_code_switch", "source": "rules"},
+        {"display_text": "Court", "tts_text": "Court", "tts_text_by_voice": {"v": "khoot"}, "kind": "english_code_switch", "source": "rules"},
+        {"display_text": "sotswebhu", "tts_text": "sotswebhu", "tts_text_by_voice": {"v": "sotswebu"}, "kind": "english_code_switch", "source": "ear"},
+    ]}), encoding="utf-8")
+    assert "anc" in approved_names(base)          # the old filter would have dropped it
+    merged = merge_into_dictionary(base, path, "job-1")
+    assert merged.apply("i-ANC ikhulume", voice="v").tts_text == "i-eyi-en-siii, ikhulume"          # the comma is the existing separator between a name ending in a vowel and a word starting with one
+    assert merged.apply("Western Cape High Court", voice="v").tts_text == "westen Cape High khoot"          # the researched respelling is gone; words with no entry stay as written
+    assert merged.apply("osotswebhu", voice="v").tts_text == "osotswebhu" or "sotswebu" in merged.apply("sotswebhu", voice="v").tts_text
+
+
+def test_a_lexicon_that_is_not_the_rules_or_the_ears_still_leaves_researched_readings_alone(tmp_path):
+    base = _dictionary().with_job_overrides("job-1", [
+        {"display_text": "Moses Mabhida", "spoken_text": "Moses Mabhida", "tts_text": "Moh-zez Mabhida", "kind": "personal_name", "source": "web_research"}])
+    path = write_lexicon(tmp_path / NAMES_FILE, [{"name": "Sibonelo", "result": "Sibonelo", "changed": True, "decisions": []}], voice="v", kinds={})
+    merged = merge_into_dictionary(base, path, "job-1")
+    assert merged.apply("Moses Mabhida").tts_text == "Moh-zez Mabhida"
+
+
+def test_the_words_of_one_english_name_written_together_are_joined_so_they_flow():
+    entries = [{"display_text": w, "spoken_text": w, "tts_text": t, "kind": "english_code_switch"} for w, t in
+               (("North", "nooth"), ("West", "west"), ("University", "yuuniveesiti"), ("science", "sayensi"))]
+    d = _dictionary().with_job_overrides("job-1", entries)
+    assert d.apply("sinoDkt Shopola eNorth West University kuphela").tts_text == "sinoDokotela Shopola enooth-west-yuuniveesiti kuphela"          # the prefix e stays outside
+    assert d.apply("sihlala North West.").tts_text == "sihlala nooth-west."
+    assert d.apply("North, West").tts_text == "nooth, west"                         # punctuation between them: two phrases
+    assert d.apply("North  West").tts_text == "nooth  west"                         # not exactly one space
+    assert d.apply("North science West").tts_text == "nooth-sayensi-west"           # two English words side by side are one compound, capital or not ("panic attack")
+    assert d.apply("ngasebenzisa science ne-North").tts_text == "ngasebenzisa sayensi ne-nooth"          # a Zulu word or a prefix between them: two terms
+    assert d.apply("science ngiyabonga North").tts_text == "sayensi ngiyabonga nooth"

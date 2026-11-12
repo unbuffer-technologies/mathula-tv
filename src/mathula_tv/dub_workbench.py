@@ -127,18 +127,30 @@ def spoken_chars(text: str) -> int:
     return len(re.sub(r"~|\[[^\]]*\]", "", PAUSE_MARKER.sub(" ", text or "")))     # a ~pause800 marker is silence: its letters are not spoken
 
 
-def length_gap(text: str, measured: dict[str, Any]) -> dict[str, int]:
+SHORT_SHORTFALL_MS = 450         # a unit this close to its window (or closer) is told to stay as it is, not given characters to add
+ADD_NOTE = ("only with what the English says; if it is all said, a shorter unit is correct and a ~pause the speaker took is the honest filler")
+LEAVE_SHORT_NOTE = ("silence closes this gap and it is a share of the whole clip's time, so leave the unit as it is: adding a word the speaker did not say "
+                    "to fill it costs the listener an odd or wrong phrase")
+
+
+def length_gap(text: str, measured: dict[str, Any]) -> dict[str, Any]:
     """How much to write to fill the window, from this very measurement: the unit's characters, and, when it speaks more than 6% short of its window
     (or past it), the characters to add (or cut), to the nearest 5, at the rate this text measured.  The agent saw only 'shortfall_pct' before and had
-    to guess the size of the edit, so a first draft 27% short took most of a run to close."""
+    to guess the size of the edit, so a first draft 27% short took most of a run to close.  A gap of SHORT_SHORTFALL_MS or less gets no characters to
+    add: prod-74's 'Sanibonani.' (825 of 1120 ms) was told to add 5 characters and became 'Sanibonani ntambama.', which Zulu does not say; a short
+    faithful line that leaves a fraction of a second is right, and the renderer closes it with silence."""
     chars, spoken, window = spoken_chars(text), int(measured.get("measured_ms") or 0), int(measured.get("window_ms") or 0)
     if not (chars and spoken and window):
         return {}
     gap = chars * (window / spoken - 1)
     if abs(gap) < chars * LENGTH_GAP_MIN_PCT / 100:
         return {"chars": chars}
+    if gap > 0 and window - spoken <= SHORT_SHORTFALL_MS:
+        return {"chars": chars, "shortfall_ms": window - spoken, "leave_short": LEAVE_SHORT_NOTE}
     amount = max(5, int(round(abs(gap) / 5)) * 5)
-    return {"chars": chars, "add_about_chars" if gap > 0 else "cut_about_chars": amount}
+    if gap > 0:
+        return {"chars": chars, "add_about_chars": amount, "add_note": ADD_NOTE}
+    return {"chars": chars, "cut_about_chars": amount}
 
 
 WORDS_MEASURED = 30             # words, names and initialisms the word list measures as written against the speaker (one clip of the voice each): all of the list, which candidate_words caps at 30. At 20 only the first 20 in the order of the text were measured, so Western (0.42) and the others after them sat unmeasured at the end of prod-52's list
@@ -154,6 +166,8 @@ class BudgetExhausted(RuntimeError):
 
 
 class Workbench:
+    _spoken_cache: dict[str, Any] = {}               # the spoken-Zulu transcripts, read once per process
+
     def __init__(
         self, store: ExperienceStore, tts_factory: Callable[[], Any], *,
         scope: dict[str, Any] | None = None, subdir: str | None = None, measure_root: Path | None = None,
@@ -325,13 +339,22 @@ class Workbench:
                 "this voice's natural speed, about 12 characters per second. Dubs that fitted landed within roughly 20% of it; first drafts that "
                 "retold compactly landed about 30% short, which then took most of the run to close unit by unit. Draft to this length from the start, "
                 "with what the speaker said (padding with additions fails the restatement and fabrication gates). Each measurement then gives the unit's "
-                "chars and add_about_chars or cut_about_chars, the edit that closes the gap at the rate that text measured.")
+                "chars and add_about_chars or cut_about_chars, the edit that closes the gap at the rate that text measured. A unit "
+                "that leaves under half a second stays as it is: leave_short means add nothing.")
+        if os.environ.get("MATHULA_AGENT_HINTS", "0").strip().lower() in {"1", "on", "true", "yes"}:
+            hints = self._pairs_db().hints([(str(s["segment_id"]), str(s["english"] or "")) for s in opened["segments"] if s.get("yours", True)])
+            if hints:
+                opened["human_translation_hints"] = hints
+                opened["human_translation_note"] = (
+                    "How professional translators wrote phrases that occur in this clip (Umsuka news pairs, Autshumato government text): evidence to weigh, not answers. The pairs are "
+                    "sometimes shifted by a line, the government text is older and formal, and a phrase can have several good renderings. Ask human_translations(phrase) for more pairs.")
         if mine is not None:
             opened["your_scope"] = (
                 "You dub ONLY the segments marked yours:true (one speaker turn). The rest of the clip is "
                 "context so your retelling fits the whole story. submit_dub covers just your segments; "
                 f"the next speech after your turn starts at {self.scope.get('next_start_ms')} ms."
             )
+        self._add_phrasing(opened, clip_id)
         sheet = self._delivery_sheet(clip_id)
         if sheet:
             from .delivery import for_agent
@@ -347,6 +370,42 @@ class Workbench:
                                  "why": c.get("reason", "")} for c in self.source_corrections],
             }
         return opened
+
+    def _source_word_timings(self, clip_id: str) -> list[dict[str, Any]]:
+        """The source audio's word timings for this clip's job (read once)."""
+        if getattr(self, "_source_words", None) is None:
+            from .comma_check import load_words
+
+            entry = self.store.load_corpus()["clips"][clip_id]
+            self._source_words = load_words(Path(self.store.root).parent / "jobs" / str(entry["job_id"]))
+        return self._source_words
+
+    def _add_phrasing(self, opened: dict[str, Any], clip_id: str) -> None:
+        """How the people in the clip really talk, from the source audio: each segment's English with the speakers' real pauses marked, and who talks to whom in what order.
+        The agent writes commas from habit; this puts the speakers' own breathing in front of it before it writes a word.  Evidence, never a gate."""
+        from .comma_check import conversation, phrased
+
+        try:
+            words = self._source_word_timings(clip_id)
+            talk = conversation(opened["segments"])
+            if talk:
+                opened["conversation"] = talk
+            if not words:
+                return
+            marked = 0
+            for segment in opened["segments"]:
+                text = phrased(str(segment.get("english") or ""), words, int(segment["start_ms"]), int(segment["end_ms"]))
+                if text and text != str(segment.get("english") or "").strip():
+                    segment["phrasing"] = text
+                    marked += 1
+            if marked:
+                opened["phrasing_note"] = (
+                    "phrasing is each segment's English with the pauses its speaker really took: |0.7s| is a pause of 0.7 s (a quarter second or more is shown). A comma of the written "
+                    "English with no mark after it was not a pause in speech: a name of address, an 'Indeed,' or a 'Yeah,' is often run into the words round it. "
+                    "In your Zulu a comma is about 0.15 s of silence and a full stop about 0.9 s, so put them where the speaker took a breath and nowhere else. "
+                    "Every submit_dub result lists the commas of your text that no pause of the speaker's matches (comma_check).")
+        except Exception:                                             # noqa: BLE001 - an advisory view must never stop a clip from opening
+            return
 
     def _delivery_sheet(self, clip_id: str) -> dict[str, Any] | None:
         """How the clip's speakers deliver (see delivery): read from the job, where prepare_agent_inputs writes it."""
@@ -544,6 +603,39 @@ class Workbench:
         resources = self._resources()
         return True if resources is None else resources.attested(form)
 
+    def _pairs_db(self):
+        if getattr(self, "_human_pairs", None) is None:
+            from .human_translations import PairsDB
+
+            self._human_pairs = PairsDB(Path(self.store.root).parent / "resources" / "grammar" / "human_pairs.sqlite")
+        return self._human_pairs
+
+    def human_translations(self, phrase: str, limit: int = 5) -> dict[str, Any]:
+        """How professional translators wrote an English word or phrase: the English-isiZulu pairs (Umsuka news, Autshumato government text) whose English contains it, the shortest
+        first, with where each came from and how many pairs there are in all.  Free: no try, no model.  Evidence to weigh, never an answer picked for the agent."""
+        return self._pairs_db().lookup(str(phrase), limit=max(1, min(int(limit or 5), 8)))
+
+    def say_it(self, text: str, speaker_id: str = "SPEAKER_00") -> dict[str, Any]:
+        """The Zulu line as the voice will receive it (see say_it.py): the spoken form, each change the dictionary made, and what stayed as written.  Free: no try, no speech."""
+        from .native_dub import _native_dub_pronunciation_dictionary, _NATIVE_DUB_PRONUNCIATION_DICTIONARY_BY_JOB
+        from .say_it import say_it
+
+        dictionary = _NATIVE_DUB_PRONUNCIATION_DICTIONARY_BY_JOB.get(str(self.pronunciation_root), None) if self.pronunciation_root else None
+        dictionary = dictionary or _native_dub_pronunciation_dictionary()
+        voice = None
+        try:
+            voice = str(pick_voice_info(self.voices, speaker_id, 0, 1, self.segments).get("selected_voice") or "") or None
+        except Exception:                                             # noqa: BLE001 - the voice only selects a per-voice spelling; the default is fine
+            voice = None
+        return say_it(dictionary, str(text), voice)
+
+    def figure_style(self, phrase: str) -> dict[str, Any]:
+        """How professional translators wrote a figure in isiZulu (the prefix before the digits, the unit word, or the number in words), from the pairs whose English has the same
+        shape: "31 percent", "20 years", "in 2006", "11 municipalities".  Free: no try, no model.  Evidence to weigh, never an answer picked for the agent."""
+        from .zulu_figures import figure_style
+
+        return figure_style(self._pairs_db().db, str(phrase))
+
     def attested_zulu(self, word: str, zulu_forms: list[str] | None = None) -> dict[str, Any]:
         """What real written isiZulu does with an English word, and how often forms the agent is thinking of have been written (see attestation).  No try
         is spent and no model is asked."""
@@ -552,7 +644,23 @@ class Workbench:
         resources = attestation.load(Path(self.store.root).parent)
         if resources is None:
             return {"error": "the attestation resources are not installed on this machine; decide as you would without them and keep an English word as the speaker says it"}
-        return attestation.lookup(resources, word, [str(f) for f in zulu_forms or []])
+        answer = attestation.lookup(resources, word, [str(f) for f in zulu_forms or []])
+        spoken = Workbench._spoken_zulu(self)
+        if spoken is not None:                                  # what people SAY, from human-transcribed speech, beside the formal written evidence above
+            answer["spoken"] = spoken.lookup(word, [str(f) for f in zulu_forms or []])
+        return answer
+
+    def _spoken_zulu(self):
+        from . import spoken_zulu
+
+        path = Path(self.store.root).parent / "resources" / "spoken"
+        cache = Workbench._spoken_cache
+        if str(path) not in cache:
+            try:
+                cache[str(path)] = spoken_zulu.SpokenZulu.from_directory(path)
+            except Exception:
+                cache[str(path)] = None                            # unreadable transcripts must not stop a lookup
+        return cache[str(path)]
 
     def glued_class_prefix_words(self) -> list[dict[str, str]]:
         """English words that the Zulu text carries with a noun-class prefix glued straight on ("MaFighter") although the speaker says the English
@@ -893,8 +1001,36 @@ class Workbench:
         doubled = find_unsupported_doubling(zulu_text, source_text)
         if doubled:
             problems.append({"flag": "unsupported_doubling", "evidence": doubled})
+        from .zulu_word_notes import weekday_notes
+
+        weekdays = weekday_notes(zulu_text)
+        if weekdays:
+            problems.append({"flag": "english_weekday", "evidence": weekdays})
         if english_leakage(zulu_text) >= 0.2:
             problems.append({"flag": "english_leakage"})
+        from .listening_load import figures_run_together, long_runs
+
+        together = figures_run_together(zulu_text)
+        if together:
+            problems.append({"flag": "figures_run_together", "evidence": together})          # a listener needs a breath to take a figure in
+        runs = long_runs(zulu_text)
+        if runs:
+            problems.append({"flag": "long_run_without_breath", "evidence": runs})
+        from .comma_check import draft_check
+
+        try:
+            commas = draft_check(zulu_text, source_text, self._source_word_timings(self._episode()["clip_id"]))
+        except Exception:                                             # noqa: BLE001 - an advisory view must never fail a check
+            commas = []
+        if commas:
+            problems.append({"flag": "commas_the_speaker_did_not_take", "evidence": commas,
+                             "note": ("a comma is about 0.15 s of silence; the speaker said a name of address in the same breath as the words round it. A line that says the speaker "
+                                      "held a pause is the opposite: the speaker stopped there for that long and your Zulu does not (write ~pauseN, the total silence, after the word that ends the thought)")})
+        from .voice_limits import find as voice_limit_lines
+
+        limits = voice_limit_lines(zulu_text)
+        if limits:
+            problems.append({"flag": "word_the_voice_stumbles_on", "evidence": limits, "note": "a listener heard this word stutter; a different word is better than a respelling"})
         return {"ok": not any("gate" in p for p in problems), "problems": problems, "gates_checked": list(GATE_NAMES)}
 
     def recall_lessons(self, limit: int = 25) -> dict[str, Any]:
@@ -905,7 +1041,9 @@ class Workbench:
                     lessons.append({k: label.get(k) for k in (
                         "clip_id", "tags", "english", "zulu", "bad_substring", "corrected_zulu", "note")})
         lessons.sort(key=lambda item: item.get("clip_id") or "")
-        return {"count": len(lessons), "lessons": lessons[-int(limit):]}
+        from . import ear_lessons
+
+        return {"count": len(lessons), "lessons": lessons[-int(limit):], "ear_lessons": ear_lessons.for_agent(Path(self.store.root).parent)}
 
     def get_submission(self, unit_ids: list[str] | None = None) -> dict[str, Any]:
         """The current accepted units (all, or just ``unit_ids``), with any timing/gate flags from the last score."""
@@ -1065,8 +1203,57 @@ class Workbench:
                 {"item_id": g["group_id"], "gates": [n for n, v in g["gates"].items() if v["failed"]], "flags": g["flags"]}
                 for g in card["groups"] if g["flags"] or any(v["failed"] for v in g["gates"].values())
             ], items),
+            "listening_load": self._listening_load(items),
+            "spoken_form_gaps": self._spoken_form_gaps(items),
+            "comma_check": self._comma_check(items),
+            "voice_limit_words": self._voice_limit_words(items),
         }
         return self.last_submit
+
+    @staticmethod
+    def _voice_limit_words(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Words in the units that the voice cannot say well (see voice_limits): shown on every submit, free, never a gate."""
+        from .voice_limits import for_items
+
+        try:
+            return for_items(items)[:UNIT_TEXTS_SHOWN]
+        except Exception:                                             # noqa: BLE001 - an advisory view must never fail a submission
+            return []
+
+    def _comma_check(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Commas the source speaker did not take (see comma_check), measured on the source audio's word timings: shown on every submit, free, never a gate."""
+        from .comma_check import comma_checks
+
+        try:
+            return comma_checks(items, self._source_word_timings(self._episode()["clip_id"]))[:UNIT_TEXTS_SHOWN]
+        except Exception:                                             # noqa: BLE001 - an advisory view must never fail a submission
+            return []
+
+    def _spoken_form_gaps(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Units whose text still holds digits, an abbreviation or capitals that no rule converted (see say_it): shown on every submit, so the agent sees what the voice will guess at
+        without having to ask.  Free, and never blocks a submission."""
+        found = []
+        for item in items:
+            try:
+                gaps = self.say_it(str(item.get("zulu_text") or ""), str(item.get("speaker_id") or "SPEAKER_00")).get("still_as_written")
+            except Exception:                                             # noqa: BLE001 - an advisory view must never fail a submission
+                continue
+            if gaps:
+                found.append({"item_id": str(item["item_id"]), "still_as_written": gaps})
+        return found[:UNIT_TEXTS_SHOWN]
+
+    @staticmethod
+    def _listening_load(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Units whose text runs figures together or goes on too long without a breath (see listening_load): soft evidence the agent sees on every submit, whether or not it calls check_text."""
+        from .listening_load import figures_run_together, long_runs
+
+        found = []
+        for item in items:
+            text = str(item.get("zulu_text") or "")
+            together, runs = figures_run_together(text), long_runs(text, limit=1)
+            if together or runs:
+                found.append({"item_id": str(item["item_id"]), **({"figures_run_together": together} if together else {}), **({"long_run_without_breath": runs} if runs else {})})
+        return found[:UNIT_TEXTS_SHOWN]
 
     @staticmethod
     def _with_texts(entries: list[dict[str, Any]], items: list[dict[str, Any]]) -> list[dict[str, Any]]:

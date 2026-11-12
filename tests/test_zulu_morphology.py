@@ -118,3 +118,31 @@ def test_unparsed_words_still_flags_a_genuine_bad_word_next_to_a_fused_token():
     # The digit/hyphen skip must not swallow an unrelated, genuinely invalid
     # word elsewhere in the same sentence.
     assert zm.unparsed_words("ka2024 gibberishxyz manje.") == ["gibberishxyz"]
+
+
+def test_word_parses_reads_the_analyses_out_instead_of_abandoning_the_iterator(monkeypatch):
+    """Measured on the server: an abandoned ZulMorph iterator keeps ~3.4 MB (500 words held 1.7 GB), a read-out one ~23 KB."""
+    from mathula_tv import zulu_morphology
+
+    class Fst:
+        def __init__(self, analyses):
+            self.analyses, self.finished = analyses, False
+
+        def apply_up(self, word):
+            def gen():
+                for i in range(self.analyses):
+                    yield f"{word}[{i}]"
+                self.finished = True
+            return gen()
+
+    few = Fst(3)
+    monkeypatch.setattr(zulu_morphology, "_load_fst", lambda: few)
+    assert zulu_morphology.word_parses("umuntu") is True and few.finished is True        # read to the end
+
+    none = Fst(0)
+    monkeypatch.setattr(zulu_morphology, "_load_fst", lambda: none)
+    assert zulu_morphology.word_parses("xqzv") is False and none.finished is True
+
+    runaway = Fst(10_000)
+    monkeypatch.setattr(zulu_morphology, "_load_fst", lambda: runaway)
+    assert zulu_morphology.word_parses("gibberish") is True and runaway.finished is False  # stopped at the cap, not 10,000 analyses later

@@ -103,13 +103,34 @@ class ForTheAgentAndRendererTest(unittest.TestCase):
         self.assertNotIn("loudness_vs_usual_db", delivery.for_agent(self.SHEET, ["s2"])["segments"][0])
         self.assertIn("recognise", view["note"])
 
+    def test_the_listener_view_has_the_breaths_and_whether_the_speaker_stopped_after_each_figure(self):
+        sheet = {"schema_version": delivery.SCHEMA_VERSION, "speakers": {}, "segments": {"s1": {
+            "speaker_id": "A", "start_ms": 0, "end_ms": 4000, "words": 10, "pauses": [],
+            "breaths": [{"ms": 240, "after": "elections", "before": "has"}, {"ms": 180, "after": "margin", "before": "has"}],
+            "figures": [{"figure": "31%", "stop_after_ms": 0, "next": "in"}, {"figure": "11", "stop_after_ms": None, "next": None}]}}}
+        row = delivery.for_agent(sheet)["segments"][0]
+        self.assertEqual(row["breaths_inside"], ["240 ms after 'elections'", "180 ms after 'margin'"])
+        self.assertEqual(row["figures_spoken"], ["31%: 0 ms stop, then 'in'", "11: ends the segment"])
+        self.assertIn("LISTENER", delivery.AGENT_NOTE)
+
+    def test_short_stops_are_breaths_and_the_time_a_speaker_takes_to_say_a_number_is_not_a_pause(self):
+        words = [{"text": "from", "start": 0.0, "end": 0.2}, {"text": "75.8%", "start": 1.8, "end": 1.84},      # 1.6 s of speech the recogniser put in the gap
+                 {"text": "in", "start": 1.9, "end": 2.0}, {"text": "2006", "start": 2.2, "end": 2.5},
+                 {"text": "margin", "start": 2.7, "end": 3.0}, {"text": "has", "start": 3.2, "end": 3.4}, {"text": "fallen", "start": 4.0, "end": 4.3}]
+        self.assertEqual([p["after"] for p in delivery._pauses(words)], ["has"])                                  # 0.6 s: a pause; the gap before 75.8% is a number being said
+        self.assertEqual([b["after"] for b in delivery._breaths(words)], ["2006", "margin"])                    # 0.2 s stops: breaths (the 0.2 s before 2006 is a figure being said)
+        self.assertEqual([f["figure"] for f in delivery._figures(words)], ["75.8%", "2006"])
+        self.assertEqual(delivery._figures(words)[0]["stop_after_ms"], 60)
+
     def test_pause_marker_becomes_a_break_between_the_pieces_of_speech(self):
-        self.assertEqual(delivery.split_pauses("Imali yethu. ~pause900 Uma uya"), ["Imali yethu.", 900, "Uma uya"])
+        # ~pauseN is the TOTAL silence at the spot: the 0.92 s a full stop leaves (and the 0.11 s every break measures over) counts toward it
+        self.assertEqual(delivery.split_pauses("Imali yethu. ~pause1500 Uma uya"), ["Imali yethu.", 1500 - 920 - 110, "Uma uya"])
+        self.assertEqual(delivery.split_pauses("Imali yethu. ~pause900 Uma uya"), ["Imali yethu. Uma uya"])        # the stop alone is already longer than 0.9 s: no break, one text
         self.assertEqual(delivery.split_pauses("Sawubona"), ["Sawubona"])
-        self.assertEqual(delivery.split_pauses("A ~pause5000 B"), ["A", 2000, "B"])                  # clamped to the longest allowed pause
+        self.assertEqual(delivery.split_pauses("A ~pause5000 B"), ["A", 2000 - 110, "B"])            # clamped to the longest allowed pause
         self.assertEqual(delivery.split_pauses("~pause800 A"), ["A"])                                # none before the first word
         self.assertEqual(delivery.split_pauses("A ~pause800"), ["A"])                                # none after the last: it would be trimmed
-        self.assertEqual(delivery.split_pauses("A ~pause800 ~pause800 B"), ["A", 800, "B"])          # none doubled
+        self.assertEqual(delivery.split_pauses("A ~pause800 ~pause800 B"), ["A", 800 - 110, "B"])    # none doubled
         long = delivery.split_pauses(" ".join(f"w{i} ~pause2000" for i in range(6)) + " end")
         self.assertLessEqual(sum(p for p in long if isinstance(p, int)), delivery.MAX_MARKED_PAUSE_TOTAL_MS)
         self.assertEqual(delivery.strip_pauses("Imali yethu. ~pause900 Uma uya"), "Imali yethu. Uma uya")

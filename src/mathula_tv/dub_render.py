@@ -151,6 +151,8 @@ def prepare_render_root(
             raise RenderAdapterError(f"frozen clip is missing {name}")
     for name in _OPTIONAL_JOB_INPUTS:
         _copy_if_exists(original / "native_dub" / name, native / name)
+    (root / "analysis").mkdir(parents=True, exist_ok=True)
+    _copy_if_exists(original / "analysis" / "azure_diarization.json", root / "analysis" / "azure_diarization.json")          # the source speakers' word timings: the sentence retiming reads them
 
     pass1 = read_json(native / "pass1_restored_transcript.json")
     sentences_path = original / "native_dub" / "pass1_sentences.json"

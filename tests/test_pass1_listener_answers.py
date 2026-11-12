@@ -60,3 +60,21 @@ def test_a_job_s_own_answers_are_applied_to_its_restored_text_whether_pass_1_run
     assert on_disk["restored_text"] == "Nale yabantwana siyayinyusa"
     redone = run_native_pass1(job_root=job, provider=provider, force=True)                      # a fresh run keeps the answer too: the model does not outrank the listener
     assert len(provider.calls) == 2 and {s["segment_id"]: s for s in redone["segments"]}["seg-2"]["restored_text"] == "Nale yabantwana siyayinyusa"
+
+
+def test_the_listeners_comments_steer_the_model_for_this_video_and_make_pass_1_run_again(tmp_path):
+    job, work = _job(tmp_path), tmp_path / "work"
+    provider = Provider()
+    run_native_pass1(job_root=job, provider=provider)
+    assert "listener_notes" not in provider.calls[0]["payload"] and "listener_words" not in provider.calls[0]["payload"]
+    run_native_pass1(job_root=job, provider=provider)
+    assert len(provider.calls) == 1                                                           # nothing changed: reused
+    lq.answer_stretch(job, work, "seg-2", comment="This is Sepedi: he thanks the crowd.")
+    lq.answer_word(work, "Siyabonga", "sepedi", comment="a name, keep it")
+    run_native_pass1(job_root=job, provider=provider)
+    assert len(provider.calls) == 2                                                           # a new comment on this video is a new input
+    sent = provider.calls[1]["payload"]
+    assert sent["listener_notes"] == [{"id": "seg-2", "note": "This is Sepedi: he thanks the crowd."}] and sent["listener_words"] == [{"word": "Siyabonga", "language": "sepedi", "comment": "a name, keep it"}]
+    assert "listener_notes" in provider.calls[1]["system_prompt"] and "listener_comment" in provider.calls[1]["system_prompt"]
+    run_native_pass1(job_root=job, provider=provider)
+    assert len(provider.calls) == 2                                                           # and reused again once it has been read

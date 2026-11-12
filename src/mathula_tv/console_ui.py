@@ -84,7 +84,32 @@ label.opt { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; } l
 .q textarea { margin: 6px 0; }
 .count { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 6px; border-radius: 99px; background: var(--warn-bg); color: var(--warn); font-size: 12px; text-align: center; }
 .chips.gap { margin: 10px 0 4px; }
+.commentbox { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.commentbox textarea { margin: 4px 0 6px; }
 @media (max-width: 600px) { .qline { grid-template-columns: 1fr; } }
+nav { overflow-x: auto; max-width: 100%; scrollbar-width: none; } nav::-webkit-scrollbar { display: none; } nav button { white-space: nowrap; }
+.cols > *, .alt > *, .src > * { min-width: 0; } .card, .row { overflow-wrap: anywhere; }
+.tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.plays .btn, .decide .btn, .chips .btn { touch-action: manipulation; }
+@media (max-width: 700px) {                       /* a phone: the menu gets its own row and slides sideways, inputs are 16px so iOS does not zoom in, buttons are finger-sized */
+  header { padding: 8px 12px; gap: 6px 10px; }
+  header h1 { flex: 1; font-size: 15px; } .spacer { display: none; }
+  header > .btn { order: 2; padding: 6px 12px; } header nav { order: 3; flex: 1 0 100%; }
+  nav button { padding: 9px 14px; }
+  main { padding: 12px; }
+  input, select, textarea, input[type=text], input[type=password] { font-size: 16px; }
+  .btn { min-height: 44px; padding: 10px 14px; }
+  .card { padding: 14px; }
+  .bar select { width: 100%; }
+  .list { max-height: 46vh; }
+  .alt { grid-template-columns: 1fr; }
+  .big { font-size: 24px; }
+  .plays, .decide { gap: 8px; } .decide .btn, .plays .btn { flex: 1 1 auto; }
+  .login { margin: 8vh 16px; max-width: none; }
+  th, td { padding: 6px 8px; }
+  table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .src { grid-template-columns: 1fr; } .src .btns { flex-wrap: wrap; } .src .btns .btn { flex: 1 1 auto; }
+}
 </style>
 </head>
 <body>
@@ -173,7 +198,7 @@ async function play(spelling, voice, sample) {
   say("Making the clip…", true);
   try {
     const r = await api("/api/audio", "POST", { job: state.job, run: state.run, word: state.word, spelling, voice });
-    player.src = r.url; await player.play(); say(null);
+    say(null); playUrl(r.url);
   } catch (e) { say(e.message); }
 }
 async function refreshAfterDecision(text) {
@@ -244,34 +269,51 @@ const answerWord = (word, language) => sendAnswer({ kind: "word", word, language
 async function revokeWord(word) {
   try { state.questions = await api("/api/answer-revoke", "POST", { job: state.job, run: state.run, word }); say(`Taken back: “${word}” will be asked about again.`, true); } catch (e) { say(e.message); }
 }
-async function hearStretch(q, btn) {
-  btn.disabled = true;
-  try { const r = await api("/api/segment-audio", "POST", { job: state.job, id: q.id }); await playUrl(r.url); } catch (e) { say(e.message); }
-  btn.disabled = false;
+async function playApi(path, body, btn) {
+  btn.disabled = true; const label = btn.textContent; btn.textContent = "…";
+  try { const r = await api(path, "POST", body); await playUrl(r.url); } catch (e) { say(e.message); }
+  btn.textContent = label; btn.disabled = false;
 }
 const clock = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+const cardId = (q) => q.kind + ":" + q.id;
+const comments = {};                    // what is written in each comment box, kept while the page redraws
+function hearRow(q) {                   // the source audio of the stretch, and the dub as its voice reads it with nothing applied to it
+  const b = [];
+  if (q.kind === "stretch" || q.start_ms != null) b.push(h("button", { class: "btn", onclick: (e) => playApi("/api/segment-audio", q.kind === "stretch" ? { job: state.job, id: q.id } : { job: state.job, start_ms: q.start_ms, end_ms: q.end_ms }, e.currentTarget) }, "▶ Source audio"));
+  if (q.item != null) b.push(h("button", { class: "btn", onclick: (e) => playApi("/api/raw-audio", { job: state.job, run: state.run, item: q.item }, e.currentTarget) }, `▶ Dub, raw TTS (${voiceName(q.voice)})`));
+  return b.length ? h("div", { class: "chips gap" }, b) : null;
+}
 function line(label, text, win) { return h("div", { class: "qline" + (win ? " win" : "") }, h("span", { class: "muted small" }, label), h("span", {}, text || "—")); }
+function commentBox(q) {                // the listener's own words to the model about this question: kept, and shown to the model the next time it reads this video
+  const box = h("textarea", { rows: 2, placeholder: "Comment for the model: what you know about this (optional). It is kept and shown to the model.", oninput: (e) => { comments[cardId(q)] = e.target.value; } });
+  box.value = comments[cardId(q)] != null ? comments[cardId(q)] : (q.comment || "");
+  const save = h("button", { class: "btn", onclick: () => sendAnswer({ kind: q.kind, ...(q.kind === "word" ? { word: q.word } : { id: q.id }), comment: box.value }, "Comment kept. The model reads it the next time it works on this video, and on later ones too.") }, "Save comment");
+  return h("div", { class: "commentbox" }, h("div", { class: "muted small" }, "Comment for the model"), box, save);
+}
+const withComment = (q) => (comments[cardId(q)] != null ? { comment: comments[cardId(q)] } : {});          // an answer carries what is written in the box
 function wordCard(q) {
   const cur = q.answer && q.answer.language;
   const status = !q.answer ? "Nobody said this word, but the English dictionary has it, so it may be a word from another language." : q.answer.by_itself
     ? `Settled by itself from your earlier answers: ${LANGS[cur]}. Change it if that is wrong.` : `Your answer: ${LANGS[cur]}.`;
   return h("div", { class: "card q" }, h("h2", {}, q.word), h("div", { class: "small muted" }, status),
-    h("div", { class: "qlist" }, line("In the Zulu dub", q.dub), line("English at that moment", q.source)),
-    h("div", { class: "muted small" }, "What language is this word?"),
-    h("div", { class: "chips gap" }, state.questions.languages.map((l) => h("button", { class: "btn" + (cur === l ? " primary" : ""), onclick: () => answerWord(q.word, l) }, LANGS[l])),
-      q.answer && !q.answer.by_itself ? h("button", { class: "btn danger", onclick: () => revokeWord(q.word) }, "Take back") : null));
+    h("div", { class: "qlist" }, line("In the Zulu dub", q.dub), line("English at that moment", q.source), q.caption ? line(`YouTube caption (${q.track})`, q.caption) : null),
+    hearRow(q),
+    h("div", { class: "muted small" }, `What language is “${q.word}”?`),
+    h("div", { class: "chips gap" }, state.questions.languages.map((l) => h("button", { class: "btn" + (cur === l ? " primary" : ""), onclick: () => sendAnswer({ kind: "word", word: q.word, language: l, ...withComment(q) }, `Kept: “${q.word}” is ${LANGS[l]}. It is settled in every job from now on` + (l === "english" ? ", and the rules spell it for the voice." : ", and left as it is written.")) }, LANGS[l])),
+      q.answer && !q.answer.by_itself ? h("button", { class: "btn danger", onclick: () => revokeWord(q.word) }, "Take back") : null),
+    commentBox(q));
 }
 function stretchCard(q) {
   const a = q.answer, box = h("textarea", { rows: 3, placeholder: "What was really said", oninput: (e) => { typed[q.id] = e.target.value; } });
   box.value = typed[q.id] != null ? typed[q.id] : (a && a.choice === "typed" ? a.text : q.model);
-  const hear = h("button", { class: "btn", onclick: (e) => hearStretch(q, e.currentTarget) }, "▶ Hear it");
-  const pick = (choice, text) => sendAnswer({ kind: "stretch", id: q.id, choice, text }, "Kept. It is applied to this video’s text the next time its dub is made, and the model sees it as an example from now on.");
+  const pick = (choice, text) => sendAnswer({ kind: "stretch", id: q.id, choice, text, ...withComment(q) }, "Kept. It is applied to this video’s text the next time its dub is made, and the model sees it as an example from now on.");
   return h("div", { class: "card q" }, h("h2", {}, `${clock(q.start_ms)} · ${q.speaker.replace("AZURE_", "speaker ") || "speaker"}`),
     h("div", { class: "small muted" }, a ? `Your answer: ${{ model: "the model’s text", transcript: "the transcript", typed: "your own words" }[a.choice]}.` : `The restored text and YouTube’s captions (${q.track}) differ: ${Math.round(q.share * 100)}% of the words are not in the caption.`),
     h("div", { class: "qlist" }, line("Transcript (recogniser)", q.transcript, a && a.choice === "transcript"), line("Model’s restored text", q.model, a && a.choice === "model"),
-      line(`Caption (${q.track})`, q.caption), a && a.choice === "typed" ? line("Your words", a.text, true) : null),
-    h("div", { class: "chips gap" }, hear, h("button", { class: "btn", onclick: () => pick("model") }, "The model’s text is right"), h("button", { class: "btn", onclick: () => pick("transcript") }, "The transcript is right")),
-    box, h("button", { class: "btn primary", onclick: () => pick("typed", box.value) }, "Use my words"));
+      line(`YouTube caption (${q.track})`, q.caption), q.dub ? line("The dub (Zulu)", q.dub) : null, a && a.choice === "typed" ? line("Your words", a.text, true) : null),
+    hearRow(q),
+    h("div", { class: "chips gap" }, h("button", { class: "btn", onclick: () => pick("model") }, "The model’s text is right"), h("button", { class: "btn", onclick: () => pick("transcript") }, "The transcript is right")),
+    box, h("button", { class: "btn primary", onclick: () => pick("typed", box.value) }, "Use my words"), commentBox(q));
 }
 function questionsTab() {
   const jobSel = h("select", { onchange: async (e) => { state.job = e.target.value; state.run = state.jobs.find((j) => j.job === state.job).runs[0].run; await loadWords(); render(); } },
@@ -279,6 +321,7 @@ function questionsTab() {
   const q = state.questions;
   const parts = [h("div", { class: "bar" }, jobSel, h("span", { class: "muted small" }, q ? (q.open ? `${q.open} to answer` : "nothing to answer") : "")), state.message && h("div", { class: "msg" + (state.message.ok ? " ok" : "") }, state.message.text)];
   if (!q) return h("div", { class: "qs" }, ...parts, h("div", { class: "card empty" }, "Looking for what the pipeline could not settle…"));
+  parts.push(h("p", { class: "muted small" }, "Each question has the source audio, YouTube’s caption and the dub read raw by its voice (no respelling). Use the comment box to tell the model anything you know: it is kept and shown to the model."));
   parts.push(h("p", { class: "muted" }, "Where the model and YouTube’s captions disagree, or a word of the Zulu dub was never said in the source, the pipeline asks instead of guessing. Every answer is kept as a lesson: the same word is settled in every later video, words that look like ones you answered are settled the same way, and the model is shown your corrections as examples."));
   if (q.words.length) parts.push(h("h3", {}, "Words nobody said"), ...q.words.map(wordCard));
   if (q.stretches.length) parts.push(h("h3", {}, "Where the readings differ"), ...q.stretches.map(stretchCard));
@@ -359,8 +402,23 @@ function alternatives(d) {
 }
 
 const smith = { source: null, text: "", asTyped: false, result: null, spelling: {}, urls: {}, loading: {}, error: null, busy: false, run: 0 };
-function playUrl(url) {
-  return new Promise((resolve) => { player.onended = resolve; player.onerror = resolve; player.src = url; player.play().catch(resolve); });
+// A phone lets a page start sound only inside a tap, and every clip here is started after a wait for the server, so the first tap on the page
+// "unlocks" the one shared player with a moment of silence; after that the clips can follow the tap by themselves (iOS Safari and Chrome on Android).
+const SILENCE = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
+let unlocked = false;
+function unlockPlayer() {
+  if (unlocked) return;
+  unlocked = true;
+  try { player.src = SILENCE; const p = player.play(); if (p && p.catch) p.catch(() => { unlocked = false; }); } catch (e) { unlocked = false; }
+}
+for (const ev of ["touchend", "pointerdown", "click"]) document.addEventListener(ev, unlockPlayer, { capture: true, passive: true });
+function playUrl(url, throwOnBlock) {
+  return new Promise((resolve, reject) => {
+    player.onended = resolve; player.onerror = () => resolve();
+    player.src = url;
+    const p = player.play();
+    if (p && p.catch) p.catch((e) => { if (e && e.name === "NotAllowedError") { const m = "The phone blocked the sound. Tap the button once more to play it."; throwOnBlock ? reject(new Error(m)) : (say(m), resolve()); } else resolve(); });
+  });
 }
 async function smithPlayBoth() { for (const v of state.voices) if (smith.urls[v]) await playUrl(smith.urls[v]); }
 async function smithHear(voices) {                          // makes the clips one voice after the other, so the first can be heard while the second is made

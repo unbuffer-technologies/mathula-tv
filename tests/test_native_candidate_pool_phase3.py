@@ -159,8 +159,32 @@ def test_ensure_zulu_glossary_regenerates_when_pass1_changes(tmp_path):
         "context_ledger": {"summary": "", "entities": [], "speaker_roles": [], "story_beats": []},
     })
 
-    _ensure_zulu_glossary(job_root=job_root, provider=provider, pass1={}, segments=segments, context_ledger={}, progress=None)
+    changed = [{"segment_id": "s1", "speaker_id": "S", "source_text": "There was loadshedding in Soweto."}]          # the corrections change the text the terms are decided from
+    _ensure_zulu_glossary(job_root=job_root, provider=provider, pass1={}, segments=changed, context_ledger={}, progress=None)
     assert provider.calls == 2
+
+
+def test_a_speaker_relabelled_in_pass1_does_not_cost_a_new_glossary(tmp_path):
+    job_root = _job_root_with_pass1(tmp_path)
+    provider = _FakeGlossaryProvider(_valid_glossary())
+    segments = [{"segment_id": "s1", "speaker_id": "S", "source_text": "There was load shedding."}]
+    _ensure_zulu_glossary(job_root=job_root, provider=provider, pass1={}, segments=segments, context_ledger={}, progress=None)
+    paths = native_dub_paths(job_root)
+    atomic_write_json(paths.pass1, {"corrections": [], "context_ledger": {"summary": "", "entities": [], "speaker_roles": [], "story_beats": []}, "relabelled": True})
+    relabelled = [{"segment_id": "s1", "speaker_id": "T", "source_text": "There was load shedding."}]
+    _ensure_zulu_glossary(job_root=job_root, provider=provider, pass1={}, segments=relabelled, context_ledger={}, progress=None)
+    assert provider.calls == 1          # the file changed, the English the terms come from did not
+
+
+def test_a_glossary_longer_than_the_limits_is_trimmed_locally_not_repaired_by_another_call():
+    from mathula_tv.native_dub import _ZULU_GLOSSARY_SCHEMA
+
+    long_answer = _valid_glossary()
+    long_answer["do_not_translate"] = [f"Name {i}" for i in range(44)]
+    long_answer["terms"] = [{"english": f"term {i}", "zulu": f"igama {i}", "kind": "other"} for i in range(60)]
+    jsonschema.validate({"zulu_terminology_glossary": long_answer}, _ZULU_GLOSSARY_SCHEMA)          # accepted: no repair call
+    trimmed = _normalize_zulu_glossary(long_answer)
+    assert len(trimmed["do_not_translate"]) == 30 and len(trimmed["terms"]) == 40
 
 
 def test_ensure_zulu_glossary_force_regenerates_even_with_a_fresh_cache(tmp_path):

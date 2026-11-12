@@ -19,13 +19,14 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-SCHEMA_VERSION = "mathula-delivery-sheet-v1"
+SCHEMA_VERSION = "mathula-delivery-sheet-v2"
 SHEET_NAME = "delivery_sheet.json"
 HOP_S = 0.01
 WINDOW_S = 0.04
 F0_MIN_HZ = 70.0
 F0_MAX_HZ = 400.0
 MIN_PAUSE_S = 0.3                    # a stop between words that a listener hears as a pause
+MIN_BREATH_S = 0.16                  # a shorter stop that still gives the listener a breath: about what a comma leaves in the dub voices (0.12-0.18 s, measured)
 ARTICULATION_GAP_S = 0.25            # shorter gaps are part of speaking; longer ones are pauses and do not count toward pace
 STRESSED_WORDS = 3
 _SMALL_WORDS = {"the", "and", "that", "this", "with", "from", "have", "will", "your", "they", "them", "what", "were", "been", "for",
@@ -33,7 +34,7 @@ _SMALL_WORDS = {"the", "and", "that", "this", "with", "from", "have", "will", "y
 
 
 # -- pause marker ------------------------------------------------------------------------------------------------------------
-# The voice leaves ~0.55 s after a sentence; a speaker who holds a pause for effect (this one up to 2 s) cannot be matched by wording.
+# The voice leaves ~0.9 s after a sentence (measured 2026-11-11); a speaker who holds a pause for effect (this one up to 2 s) cannot be matched by wording.
 # The agent writes ``~pause800`` at the spot; it is never spoken, becomes a silence of that many milliseconds, and counts toward the
 # unit's length like any other part of the speech.
 PAUSE_MARKER = re.compile(r"\s*~pause(\d{3,4})\b\s*", re.IGNORECASE)
@@ -42,26 +43,57 @@ MAX_MARKED_PAUSE_MS = 2000
 MAX_MARKED_PAUSE_TOTAL_MS = 4500              # the SSML builder refuses more silence than this in one document
 
 
+SENTENCE_END_SILENCE_MS = 920               # what the voice leaves after a full stop, question mark or exclamation mark on its own (measured, both voices)
+COMMA_SILENCE_MS = 150                      # ... after a comma, semicolon, colon or dash
+BREAK_OVERHEAD_MS = 110                     # an SSML break of N ms measures N + about 110 ms
+_ENDS_SENTENCE = re.compile(r"[.?!…][\"'”’)\]]*\s*$")
+_ENDS_CLAUSE = re.compile(r"[,;:—–-][\"'”’)\]]*\s*$")
+
+
+def inherent_silence_ms(before: str) -> int:
+    """The silence the voice leaves by itself after this text, from its last mark: 0.92 s after a full stop, 0.15 s after a comma, none after a word."""
+    if _ENDS_SENTENCE.search(before) and not before.rstrip().endswith("..."):
+        return SENTENCE_END_SILENCE_MS
+    return COMMA_SILENCE_MS if _ENDS_CLAUSE.search(before) else 0
+
+
 def split_pauses(text: str) -> list[str | int]:
-    """The text as speech pieces with the marked pauses (milliseconds) between them; each pause clamped, the total capped."""
+    """The text as speech pieces with the marked pauses (milliseconds) between them; each pause clamped, the total capped.
+
+    ``~pauseN`` means the TOTAL silence at that spot: the silence the punctuation before it already leaves (0.92 s after a full stop, 0.15 s after a comma) counts toward N, so
+    "Masemola. ~pause720" is the full stop's 0.92 s, not 0.92 + 0.72 + 0.11 = 1.75 s as it was while the marker was added on top (the speaker had paused 0.72 s: the dub waited
+    1.7 s, and the next phrase came in after the speaker's gesture).  A pause no longer than the punctuation already leaves adds nothing."""
     pieces: list[str | int] = []
     position, total = 0, 0
     for match in PAUSE_MARKER.finditer(text):
         before = text[position:match.start()]
         if before.strip():
             pieces.append(before)
-        pause = max(MIN_MARKED_PAUSE_MS, min(MAX_MARKED_PAUSE_MS, int(match.group(1))))
+        last = next((p for p in reversed(pieces) if isinstance(p, str)), "")
+        inherent = inherent_silence_ms(last) if pieces and isinstance(pieces[-1], str) else 0
+        wanted = max(MIN_MARKED_PAUSE_MS, min(MAX_MARKED_PAUSE_MS, int(match.group(1))))
+        pause = wanted - inherent - BREAK_OVERHEAD_MS
+        if inherent == 0:
+            pause = max(MIN_MARKED_PAUSE_MS, pause)
         pause = min(pause, MAX_MARKED_PAUSE_TOTAL_MS - total)
-        if pause >= MIN_MARKED_PAUSE_MS and pieces and not isinstance(pieces[-1], int):       # none at the very start, none doubled
+        if pause >= MIN_MARKED_PAUSE_MS and pieces and not isinstance(pieces[-1], int):       # none at the very start, none doubled, none the punctuation already covers
             pieces.append(pause)
             total += pause
+        elif pieces and isinstance(pieces[-1], str):
+            pieces[-1] = pieces[-1].rstrip() + " "                     # no break here: the two texts are one run of speech and need their space back ("Masemola. Ake", not "Masemola.Ake")
         position = match.end()
     rest = text[position:]
     if rest.strip() or not pieces:
         pieces.append(rest)
     while pieces and isinstance(pieces[-1], int):                                              # a pause at the very end would be trimmed anyway
         pieces.pop()
-    return pieces
+    merged: list[str | int] = []
+    for piece in pieces:                                                                       # two texts with no break between them (a marker the punctuation covered) are one text
+        if merged and isinstance(piece, str) and isinstance(merged[-1], str):
+            merged[-1] = merged[-1] + piece
+        else:
+            merged.append(piece)
+    return merged
 
 
 def strip_pauses(text: str) -> str:
@@ -160,13 +192,39 @@ def _segment_words(segment: Mapping[str, Any], words: Sequence[Mapping[str, Any]
     return [w for w in words if start - 0.05 <= (float(w["start"]) + float(w["end"])) / 2 <= end + 0.05]
 
 
+def _is_figure(word: Mapping[str, Any]) -> bool:
+    return any(c.isdigit() for c in str(word.get("text", "")))
+
+
 def _pauses(words: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     found = []
     for before, after in zip(words, words[1:]):
         gap = float(after["start"]) - float(before["end"])
-        if gap >= MIN_PAUSE_S:
+        if gap >= MIN_PAUSE_S and not _is_figure(after):          # the recogniser puts the time a speaker takes to SAY a number into the gap before it: that is not a pause
             found.append({"ms": int(round(gap * 1000)), "after": str(before.get("text", "")).strip(".,!?"),
                           "before": str(after.get("text", "")).strip(".,!?")})
+    return found
+
+
+def _breaths(words: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The short stops (a breath, not a pause) the speaker takes between words, in order: where the line is spaced for the listener."""
+    found = []
+    for before, after in zip(words, words[1:]):
+        gap = float(after["start"]) - float(before["end"])
+        if MIN_BREATH_S <= gap < MIN_PAUSE_S and not _is_figure(after):
+            found.append({"ms": int(round(gap * 1000)), "after": str(before.get("text", "")).strip(".,!?"), "before": str(after.get("text", "")).strip(".,!?")})
+    return found
+
+
+def _figures(words: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Each figure the speaker says and the stop right after it (None at the end of the segment): did the speaker let the listener take the figure in?"""
+    found = []
+    for index, word in enumerate(words):
+        if _is_figure(word):
+            nxt = words[index + 1] if index + 1 < len(words) else None
+            found.append({"figure": str(word.get("text", "")).strip(".,!?\"'"),
+                          "stop_after_ms": int(round(max(0.0, (float(nxt["start"]) - float(word["end"])) * 1000))) if nxt is not None else None,
+                          "next": str(nxt.get("text", "")).strip(".,!?") if nxt is not None else None})
     return found
 
 
@@ -222,7 +280,7 @@ def build_sheet(audio_path: Path, segments: Sequence[Mapping[str, Any]], words: 
         ends_by = float(np.median(tail[-max(3, len(tail) // 3):]) - np.median(tail[:max(3, len(tail) // 3)])) if len(tail) >= 10 else None
         raw.append({
             "segment_id": str(segment["segment_id"]), "speaker_id": str(segment.get("speaker_id") or ""), "start_ms": int(segment["start_ms"]),
-            "end_ms": int(segment["end_ms"]), "words": len(inside), "pace_wps": _pace(inside), "pauses": _pauses(inside),
+            "end_ms": int(segment["end_ms"]), "words": len(inside), "pace_wps": _pace(inside), "pauses": _pauses(inside), "breaths": _breaths(inside), "figures": _figures(inside),
             "pause_before_ms": max(0, int(segment["start_ms"]) - int(ordered[index - 1]["end_ms"])) if index else None,
             "st": float(np.median(voiced)) if len(voiced) >= 10 else None,
             "spread_st": float(np.percentile(voiced, 90) - np.percentile(voiced, 10)) if len(voiced) >= 10 else None,
@@ -278,6 +336,7 @@ def build_sheet(audio_path: Path, segments: Sequence[Mapping[str, Any]], words: 
             "spread_vs_usual_st": _round(r["spread_st"] - base["spread"]) if r["spread_st"] is not None and base.get("spread") is not None else None,
             "loudness_vs_usual_db": _round(r["db"] - base["db_seg"]) if r["db"] is not None and base.get("db_seg") is not None else None,
             "ends_by_st": _round(r["ends_by_st"]), "pause_before_ms": r["pause_before_ms"], "pauses": sorted(r["pauses"], key=lambda p: -p["ms"])[:4],
+            "breaths": r["breaths"][:8], "figures": r["figures"],
             "stressed_words": [word for _, word in stressed[:STRESSED_WORDS]], "repeats": r["repeats"],
         }
     for entry in speakers.values():
@@ -303,7 +362,8 @@ def ensure_sheet(job_root: Path, *, progress: Any = print) -> Path | None:
     target = native / SHEET_NAME
     if target.is_file():
         try:
-            if json.loads(target.read_text(encoding="utf-8")).get("pass1_sha256") == sha:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            if existing.get("pass1_sha256") == sha and existing.get("schema_version") == SCHEMA_VERSION:
                 return target
         except ValueError:
             pass
@@ -334,7 +394,10 @@ AGENT_NOTE = (
     "(end the sentence there, so the voice stops there), keep the phrases they repeat repeated, and put the words they lean on "
     "('stressed_words') where isiZulu word order lets them land at the end of a phrase or right after a pause. 'ends_by_st' < 0 "
     "means the sentence falls at the end (a statement), > 0 that it lifts (a question or a build-up). Never stretch a unit past its "
-    "window for delivery's sake, and never invent a pause the speaker did not take."
+    "window for delivery's sake, and never invent a pause the speaker did not take. This is also how the speaker spaced the line for the "
+    "LISTENER, who cannot re-read: 'breaths_inside' are the short stops (about a comma) where the speaker let a phrase land, and "
+    "'figures_spoken' shows each figure and whether the speaker stopped after it. Space your isiZulu so the viewer gets the same room: "
+    "a comma where the speaker breathed, a breath after a figure that carries the point, and never a figure run into the next one."
 )
 
 
@@ -353,6 +416,12 @@ def for_agent(sheet: Mapping[str, Any], segment_ids: Sequence[str] | None = None
         pauses = [f"{p['ms']} ms after '{p['after']}'" for p in (row.get("pauses") or [])[:3]]
         if pauses:
             compact["pauses_inside"] = pauses
+        breaths = [f"{b['ms']} ms after '{b['after']}'" for b in (row.get("breaths") or [])[:6]]
+        if breaths:
+            compact["breaths_inside"] = breaths          # where the speaker spaced the line for the listener without a real pause: a comma's worth
+        figures = [f"{f['figure']}: " + (f"{f['stop_after_ms']} ms stop, then '{f['next']}'" if f.get("next") else "ends the segment") for f in (row.get("figures") or [])]
+        if figures:
+            compact["figures_spoken"] = figures
         for key in ("stressed_words", "repeats"):
             if row.get(key):
                 compact[key] = row[key]

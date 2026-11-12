@@ -271,6 +271,7 @@ def lookup(attestation: Attestation, english_word: str, zulu_forms: Sequence[str
     """The answer for one English word, shaped for the agent: the Zulu forms real text pairs with it, whether it stays English there, and the status
     of any form the agent is thinking of writing."""
     answer = attestation.equivalents(english_word)
+    answer["forms"] = [f for f in answer["forms"] if f["score"] >= MIN_FORM_SCORE]            # a function word (i, ukuthi) shares sentences with everything; its score is ~0 and it only crowds the answer
     answer["checked_forms"] = [attestation.status(form) for form in zulu_forms]
     web = attestation.web
     answer["web_forms"] = web.forms_with(english_word) if web is not None else []
@@ -303,6 +304,7 @@ def lookup(attestation: Attestation, english_word: str, zulu_forms: Sequence[str
     return answer
 
 
+MIN_FORM_SCORE = 0.02
 _cache: dict[str, Attestation] = {}
 
 

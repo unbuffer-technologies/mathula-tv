@@ -65,6 +65,8 @@ class Choice:
     short_stress: int = 1          # 1 the short vowel that carries the word's main stress is written twice too (WhatsApp: wootsap); 0 once
     length: int = 1                 # 1 a stressed long vowel inside a word is written twice (kooti), 0 once (koti)
     join: str = "-"                 # between the letters of an initialism: "-" or " " (the pieces then begin with a capital)
+    middle_long: int = 0            # 0 a letter in the middle of an initialism keeps its vowel single (NEC: en-i-siii); 1 a long vowel there is written long, three times when the
+                                    # letter is a bare vowel and twice after a consonant (en-iii-siii, es-eyi-bii-siii): the listener's spellings of NEC and SABC, 2026-11
 
 
 @dataclass
@@ -183,6 +185,7 @@ RULE_LABELS: dict[str, tuple[str, dict[Any, str]]] = {
     "short_stress": ("A short vowel with the main stress", {1: "written twice (waatsap)", 0: "written once (watsap)"}),
     "length": ("A stressed long vowel inside a word", {1: "written twice (khoot)", 0: "written once (khot)"}),
     "join": ("Between the letters of an initialism", {"-": "a hyphen (eyi-aayi)", " ": "a space, each letter capitalised (Eyi Aayi)"}),
+    "middle_long": ("A long vowel in a letter in the middle of an initialism", {0: "single (en-i-siii)", 1: "written long (en-iii-siii, es-eyi-bii-siii)"}),
 }
 RULES_CONFIG_ENV = "MATHULA_TV_RULES_CONFIG"
 _config_seen: dict[str, Any] = {"path": None, "mtime": None, "defaults": {}}
@@ -256,7 +259,7 @@ def _choices(letters: bool, held: bool) -> list[Choice]:
     except where the listener has picked another default for a choice (``rule_defaults``)."""
     dims = [("epen", ["i", "u"]), ("diph", ["full", "glide"]), ("hold", [1, 0, 2] if held else [1]), ("hold_form", ["repeat", "glide"] if held else ["repeat"]),
             ("cons", [0, 1]), ("length", [1] if letters else [1, 0]), ("aspirate", [1] if letters else [1, 0]), ("final_vowel", [0, 1]), ("cluster_vowel", [0] if letters else [0, 1]), ("letter_vowel", [0] if letters else [1, 0]), ("short_stress", [0] if letters else [1, 0]), ("yod", [0] if letters else [1, 0]),
-            ("join", ["-", " "] if letters else ["-"])]
+            ("join", ["-", " "] if letters else ["-"]), ("middle_long", [0, 1] if letters else [0])]
     chosen = rule_defaults()
     dims = [(name, [chosen[name], *[o for o in options if o != chosen[name]]] if chosen.get(name) in options else options) for name, options in dims]
     combos = itertools.product(*[range(len(options)) for _, options in dims])
@@ -360,6 +363,11 @@ def respell_initialism(word: str, *, limit: int = 8) -> list[dict]:
             phones = to_ipa([t + ("1" if last else "2") if t in VOWELS_ARPABET else t for t in name])
             weights = [(1 if last else 2) if t in VOWELS_ARPABET else None for t in name]
             units = _units(phones, weights, choice, notes, bare_final=choice.final_vowel == 0)          # M is em, not emi: the consonant English ends the letter with stays bare
+            if choice.middle_long and 0 < position < len(names) - 1:
+                for unit in units:
+                    if unit.long and not unit.epenthetic:
+                        unit.vowel *= 2 if unit.onset else 3
+                        notes.append(f"a long vowel in a letter in the middle of an initialism is written long: {unit.vowel}")
             closed = bool(plural) and last                  # the plural closes the last letter: its long vowel is doubled, as in a word, not held
             piece = _write(units, choice, held=last, final_only=closed, notes=notes, double_long=closed)
             pieces.append(piece.capitalize() if choice.join == " " else piece)

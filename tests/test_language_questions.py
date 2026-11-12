@@ -152,3 +152,30 @@ def test_a_short_segment_is_never_a_question_because_the_neighbours_caption_line
     short = [{"segment_id": "seg-1", "start_ms": 1000, "end_ms": 2000, "speaker_id": "S0", "source_text": "ultimately the lesson here", "restored_text": "ultimately the lesson here?", "changed": True}]
     job = _job(tmp_path, short, [(900, 2200, "something else entirely different from it")])
     assert lq.stretch_questions(job) == []
+
+
+def test_a_comment_is_kept_beside_the_answer_shown_to_pass_1_and_a_comment_alone_decides_nothing(tmp_path):
+    job, work = _job(tmp_path, SEGMENTS, CAPTIONS), tmp_path / "work"
+    kept = lq.answer_word(work, "Wehle", comment="the verb ehla, it went down")
+    assert kept["language"] == "" and kept["comment"] == "the verb ehla, it went down"
+    unsure = []
+    assert find(["Wehle ngesenti."], said=lambda w: False, lessons=lq.load_lessons(work), unsure=unsure) == [] and [u["word"] for u in unsure] == ["Wehle"]          # a comment does not settle it
+    lq.answer_word(work, "Wehle", "zulu", LEARNED)
+    assert lq.load_lessons(work)["words"]["wehle"]["comment"] == "the verb ehla, it went down" and lq.load_lessons(work)["words"]["wehle"]["language"] == "zulu"
+    lq.answer_word(work, "Wehle", comment="")                                                                    # an empty comment clears it, the language stays
+    assert lq.load_lessons(work)["words"]["wehle"] == {**lq.load_lessons(work)["words"]["wehle"], "comment": "", "language": "zulu"}
+    lq.answer_word(work, "Lobo", comment="Zulu demonstrative: lobo bufakazi, that evidence")
+    assert lq.known_words(work) == [{"word": "Wehle", "language": "zulu"}, {"word": "Lobo", "comment": "Zulu demonstrative: lobo bufakazi, that evidence"}] or \
+        {tuple(sorted(r.items())) for r in lq.known_words(work)} == {(("language", "zulu"), ("word", "Wehle")), (("comment", "Zulu demonstrative: lobo bufakazi, that evidence"), ("word", "Lobo"))}
+    with pytest.raises(ValueError):
+        lq.answer_word(work, "Nothing")
+    with pytest.raises(ValueError):
+        lq.answer_stretch(job, work, "seg-1")
+    note = lq.answer_stretch(job, work, "seg-1", comment="  He thanks the crowd in Zulu.  ")
+    assert note["choice"] == "" and note["comment"] == "He thanks the crowd in Zulu." and lq.load_lessons(work)["stretches"] == []        # no decision: no lesson for other videos
+    assert lq.notes(job) == [{"id": "seg-1", "note": "He thanks the crowd in Zulu."}]
+    segments = json.loads((job / "native_dub" / "pass1_restored_transcript.json").read_text())["segments"]
+    assert lq.apply_to_segments(job, segments) == 0 and "model_text" not in segments[0]                           # a comment does not change the text
+    assert lq.stretch_questions(job)[0]["answer"] is None and lq.stretch_questions(job)[0]["comment"] == "He thanks the crowd in Zulu."
+    lq.answer_stretch(job, work, "seg-1", "transcript")                                                          # the decision keeps the comment and now is a lesson with it
+    assert lq.examples(work)[0]["listener_comment"] == "He thanks the crowd in Zulu." and lq.notes(job)[0]["note"] == "He thanks the crowd in Zulu."
