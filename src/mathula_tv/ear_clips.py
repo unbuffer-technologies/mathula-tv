@@ -27,7 +27,11 @@ def sentences(text: str) -> list[str]:
 def word_pattern(word: str) -> "re.Pattern[str]":
     """The word wherever the Zulu text writes it: bare, after a hyphenated prefix (i-MK) or with a Zulu prefix glued on (uJacob).  Group 1 is the prefix, group 2 the word."""
     # a glued prefix is taken only before a capital ("uJacob", "namaPakistan"), as the renderer does: "nhlobo" does not hold "lobo" and "kwehle" does not hold "wehle"
-    return re.compile(r"(?<![A-Za-z'])((?:[A-Za-z]{1,6}-)?(?:(?-i:[A-Za-z]{1,4}(?=" + re.escape(word[:1].upper()) + r")))?)(" + re.escape(word) + r")(?![A-Za-z'])", re.IGNORECASE)
+    # a figure is whole: "7" is not the 7 of "2017", "30" is not the 30 of "9.30" (the clip for "7" said "ngo-201seven", "two hundred one, seven": human, 2026-11-12)
+    digits = any(c.isdigit() for c in word)
+    behind = r"(?<![A-Za-z'0-9])(?<![0-9][.,:])" if digits else r"(?<![A-Za-z'])"
+    ahead = r"(?![A-Za-z'0-9])(?![.,:][0-9])" if digits else r"(?![A-Za-z'])"
+    return re.compile(behind + r"((?:[A-Za-z]{1,6}-)?(?:(?-i:[A-Za-z]{1,4}(?=" + re.escape(word[:1].upper()) + r")))?)(" + re.escape(word) + r")" + ahead, re.IGNORECASE)
 
 
 def substitute(sentence: str, word: str, spelling: str) -> str:

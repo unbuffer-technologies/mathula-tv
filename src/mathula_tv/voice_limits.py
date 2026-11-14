@@ -19,7 +19,24 @@ VOICE_LIMIT_WORDS: tuple[dict[str, Any], ...] = (
     {"pattern": re.compile(r"\b\w*mininingwan\w*", re.IGNORECASE | re.UNICODE), "word": "imininingwane",
      "instead": "ama-details when the English says details (the English word kept, as everyday speakers say it: ama-details is in the 482 h spoken corpus), ulwazi when it says information",
      "why": "the voice blurs its repeated -ni-ni- syllables into a stutter"},
+    {"pattern": re.compile(r"(?<![\w-])(?:mm?-?h?m+|hm+m*|mh?m+)(?![\w-])", re.IGNORECASE | re.UNICODE), "word": "Mm-hmm",
+     "instead": "Yebo (or Cha for a no) when the speaker is agreeing, or nothing when it is only the other person's murmur under the speaker; never the sound itself",
+     "why": "a hummed sound written in letters is read letter by letter (\"mhim\", \"Mm-himi\"): a listener heard it at the end of a turn"},
 )
+
+
+# A murmur in the ENGLISH ("Mm-hmm", "Mhm", "Uh-huh"): usually the other person listening, caught inside a speaker's unit.  Shown with the unit when the clip opens so the agent decides about
+# it before drafting (the YouTube captions had "Mm-hmm." as the interviewer's murmur at the end of an analyst's answer; the agent copied it and the voice read it letter by letter).
+MURMUR = re.compile(r"(?<![\w-])(?:mm?-?hm+|mhm+|uh-?huh|um-?hm+|mmm+)(?![\w-])", re.IGNORECASE | re.UNICODE)
+MURMUR_NOTE = ("Some segments hold a murmur in the English (murmur_in_the_english: Mm-hmm, Mhm, Uh-huh): usually the other person listening, caught inside this speaker's segment. It is a sound, "
+               "not speech, and the voice reads a written hum letter by letter. Leave it out; if the speaker is plainly answering with it, write Yebo (or Cha).")
+
+
+def murmurs(text: str) -> list[str]:
+    seen: dict[str, str] = {}
+    for m in MURMUR.finditer(str(text or "")):
+        seen.setdefault(m.group(0).casefold(), m.group(0))          # once each, the first spelling, in order
+    return list(seen.values())
 
 
 def find(text: str) -> list[str]:

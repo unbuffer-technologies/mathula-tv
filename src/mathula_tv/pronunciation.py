@@ -806,7 +806,10 @@ def prefixed_figures(texts: Iterable[str]) -> list[tuple[str, str, bool]]:
     """The figures written after an isiZulu prefix in the texts ("ku-75.8%", "abangu-11"), once each, as (number, decimals, percent): the ones a person may want to say differently."""
     found: dict[str, tuple[str, str, bool]] = {}
     for text in texts:
+        times = [(m.start(), m.end()) for m in _time_of_day_matches(text)]          # a time of day is listed as a time (written_times), not as a decimal figure
         for match in [*_ZU_PREFIXED_TWO_DIGIT_CARDINAL.finditer(text), *_ZU_BARE_FIGURE.finditer(_PAUSE_MARKER.sub(" ", text))]:
+            if any(start <= match.start() < end for start, end in times):
+                continue
             key = match.group("number") + ("." + match.group("decimals") if match.group("decimals") else "") + ("%" if match.group("percent") else "")
             found.setdefault(key, (match.group("number"), match.group("decimals") or "", bool(match.group("percent"))))
     return list(found.values())
@@ -1219,7 +1222,10 @@ def _zulu_dynamic_reference_number_candidates(
     if language.casefold() != "zu-za":
         return []
     candidates: list[tuple[int, int, PronunciationEntry]] = []
+    legal = {start for start, _end, _number, _letter in _legal_number_matches(text)}          # the legal class reads these
     for match in _ZU_BARE_REFERENCE_NUMBER.finditer(text):
+        if match.start() in legal:
+            continue
         before = match.group(0)
         after = " ".join(_ZU_ENGLISH_DIGIT_WORDS[digit] for digit in before)
         end = match.end()
@@ -1260,9 +1266,9 @@ _ZU_LEGAL_ZERO = "ow"             # how a zero is said inside a legal number (th
 # "-ka" after a statement or section word ("ngesitatimende sika-204"), or after a word that NAMES a thing by its number (Bill 204, Room 101, Flight 123, Resolution 1325).  Two-digit
 # sections ("Section 79", "seventy-nine") keep the figure rule; a quantity ("abantu 204") has no such word before it and stays a cardinal.
 _ZU_LEGAL_CONTEXT = re.compile(r"(?:sigaba|sigabeni|siqephu|sahluko|sitatimende|mthetho|sivumelwano|section|act|clause|regulation|schedule)", re.IGNORECASE)
-_ZU_LEGAL_GLUED = re.compile(r"(?<![\w-])(?P<head>[A-Za-z]{0,6}ka)-(?P<number>[1-9][0-9]{2})(?![\w])", re.UNICODE)
+_ZU_LEGAL_GLUED = re.compile(r"(?<![\w-])(?P<head>[A-Za-z]{0,6}ka)-(?P<number>[1-9][0-9]{2})(?P<letter>[A-Z])?(?![\w])", re.UNICODE)
 _ZU_LEGAL_SPACED = re.compile(
-    r"(?<!\w)(?P<head>(?:[A-Za-z]{0,8}(?:sigaba|sigabeni|siqephu|sahluko)|(?i:Section|Act|Clause|Regulation|Schedule|Bill|Resolution|Article|Chapter|Paragraph|Rule|Annexure|Case|Room|Flight|Route|Form|Item|Ward|Block|Gate|Platform|Terminal|Bay|Unit))\s+)(?P<number>[1-9][0-9]{2,3})(?![\w])(?<!(?:19|20)[0-9]{2})",
+    r"(?<!\w)(?P<head>(?:[A-Za-z]{0,8}(?:sigaba|sigabeni|siqephu|sahluko)|(?i:Section|Act|Clause|Regulation|Schedule|Bill|Resolution|Article|Chapter|Paragraph|Rule|Annexure|Case|Room|Flight|Route|Form|Item|Ward|Block|Gate|Platform|Terminal|Bay|Unit))\s+)(?P<number>[1-9][0-9]{2,3})(?P<letter>[A-Z])?(?![\w])(?<!(?:19|20)[0-9]{2})",
     re.UNICODE,
 )
 
@@ -1271,19 +1277,25 @@ def _legal_digit_words(number: str) -> str:
     return "-".join(_ZU_LEGAL_ZERO if digit == "0" else _ZU_ENGLISH_DIGIT_WORDS[digit] for digit in number)
 
 
-def _zulu_dynamic_legal_number_candidates(text: str, *, language: str) -> list[tuple[int, int, PronunciationEntry]]:
-    if language.casefold() != "zu-za":
-        return []
+def _legal_number_matches(text: str) -> list[tuple[int, int, str, str]]:
+    """The legal numbers of a text as (start of the number, end, digits, letter): the number alone, not the section word before it (that word keeps its own entry: a job
+    lexicon's "Section" outranked a longer span and left "105A" raw, and "Section 204" was read as a quantity)."""
     found: list[tuple[int, int, str, str]] = []
     for match in _ZU_LEGAL_GLUED.finditer(text):
         if _ZU_LEGAL_CONTEXT.search(text[max(0, match.start() - 45):match.start()]) and not _money_context(text, match.start()):
-            found.append((match.start(), match.end(), match.group("head") + "-", match.group("number")))
+            found.append((match.start("number"), match.end(), match.group("number"), match.group("letter") or ""))
     for match in _ZU_LEGAL_SPACED.finditer(text):
-        found.append((match.start(), match.end(), match.group("head"), match.group("number")))
+        found.append((match.start("number"), match.end(), match.group("number"), match.group("letter") or ""))
+    return found
+
+
+def _zulu_dynamic_legal_number_candidates(text: str, *, language: str) -> list[tuple[int, int, PronunciationEntry]]:
+    if language.casefold() != "zu-za":
+        return []
     candidates = []
-    for start, end, head, number in found:
+    for start, end, number, letter in _legal_number_matches(text):          # a section can carry a letter: "105A" is "one oh five A"
         candidates.append((start, end, PronunciationEntry(
-            display_text=text[start:end], spoken_text=text[start:end], tts_text=head + _legal_digit_words(number), language=language,
+            display_text=text[start:end], spoken_text=text[start:end], tts_text=_legal_digit_words(number) + (" " + _ZU_AZURE_LETTER_NAMES[letter] if letter else ""), language=language,
             source="application_default", confidence=1.0, kind="english_code_switch",
             notes=("Application-controlled digit-by-digit reading of a legal number (section two oh four)", ZU_LEGAL_NUMBER_VERSION, "Approved/display digits remain immutable"),
         )))
@@ -1318,6 +1330,75 @@ def _zulu_dynamic_phone_number_candidates(text: str, *, language: str) -> list[t
             notes=("Application-controlled digit-by-digit reading of a telephone number, a breath between the groups", ZU_PHONE_NUMBER_VERSION, "Approved/display digits remain immutable"),
         )))
     return candidates
+
+
+ZU_TIME_VERSION = "mathula-zu-time-of-day-v1"
+# A time of day written with a point or a colon after an isiZulu prefix ("ngo-9.30", "ngo-14:30") is said as a time, "nine thirty" (human, 2026-11-12: "9.30 looks like the time, not a decimal
+# number"); the figure rule read it as a decimal ("nine point three zero").  It is a time only with evidence: the prefix of "at / about" (ngo-, nga-, ka-, ku-) or a time word within the
+# sentence (am, pm, o'clock, ekuseni, ntambama ...), minutes 00-59 in two digits, hours 1-23, no percent sign and no quantity word after it ("ngo-9.30 million" stays a decimal).
+# The hour and minutes are the same English figure words the figure rule uses; a minute under ten is "ow" and the digit ("nine ow-fayiv"), 00 is just the hour.  A person's spelling
+# of the written time ("9.30", the key the figure list shows) replaces the whole reading.
+_ZU_TIME_OF_DAY = re.compile(
+    r"(?<![\w-])(?P<prefix>(?-i:[a-z]{1,10})(?<=[aeiou]))\s*-\s*(?P<hour>[1-9]|1[0-9]|2[0-3])[.:](?P<minute>[0-5][0-9])"
+    r"(?![0-9A-Za-z%])(?!,[0-9])(?!\s*(?:million|billion|trillion|ayizigidi|izigidi|ibhiliyoni|amabhiliyoni|amaphesenti|per))",
+    re.IGNORECASE | re.UNICODE,
+)
+_ZU_TIME_PREFIXES = frozenset({"ngo", "nga", "ka", "ku", "kwa", "kuze"})
+_ZU_TIME_WORD = re.compile(r"(?<![A-Za-z])(?:a\.?m\.?|p\.?m\.?|o'clock|ekuseni|ntambama|ebusuku|emini|ngehora|ihora|amahora|ngentsimbi|ntathu)(?![A-Za-z])", re.IGNORECASE)
+
+
+def time_of_day_words(hour: int, minute: int) -> str:
+    """The English words a time is said with after its prefix: 9.30 -> "nayn thethi", 9.05 -> "nayn ow-fayiv", 14.00 -> "two"."""
+    said = _code_switch_figure_words(hour)
+    if minute:
+        said += " " + (f"{_ZU_LEGAL_ZERO}-{_ZU_ENGLISH_DIGIT_WORDS[str(minute)]}" if minute < 10 else _code_switch_figure_words(minute))
+    return said
+
+
+def _time_of_day_matches(text: str) -> list[re.Match[str]]:
+    found = []
+    for match in _ZU_TIME_OF_DAY.finditer(text):
+        around = text[max(0, match.start() - 70):match.end() + 70]
+        if ":" in match.group(0) or match.group("prefix").casefold() in _ZU_TIME_PREFIXES or _ZU_TIME_WORD.search(around):          # a colon is a time ("ngabo-5:00") on its own
+            found.append(match)
+    return found
+
+
+def _zulu_dynamic_time_candidates(text: str, *, language: str, override: Mapping[str, str] | None = None) -> list[tuple[int, int, PronunciationEntry]]:
+    if language.casefold() != "zu-za":
+        return []
+    candidates = []
+    for match in _time_of_day_matches(text):
+        hour, minute = int(match.group("hour")), int(match.group("minute"))
+        written = f"{hour}.{match.group('minute')}"
+        words = (override or {}).get(written) or time_spelling(hour, minute)
+        candidates.append((match.start(), match.end(), PronunciationEntry(
+            display_text=match.group(0), spoken_text=match.group(0), tts_text=f"{match.group('prefix')}-{words}", language=language,
+            source="application_default", confidence=1.0, kind="english_code_switch",
+            notes=("Application-controlled time-of-day reading (nine thirty), not a decimal figure", ZU_TIME_VERSION, "Approved/display digits remain immutable"),
+        )))
+    return candidates
+
+
+def time_spelling(hour: int, minute: int) -> str:
+    """The words a written time is said with, a 24-hour time on the clock face: 14.30 -> "tuu thethi"."""
+    return time_of_day_words(hour - 12 if hour > 12 else hour, minute)
+
+
+def written_times(texts: Iterable[str]) -> list[tuple[str, str]]:
+    """The times the rules read in these texts (``ngo-9.30``, ``ngabo-5:00``), once each, as (the written time with a point, its words): the ones a person may want to say differently."""
+    found: dict[str, str] = {}
+    for text in texts:
+        for match in _time_of_day_matches(text):
+            hour, minute = int(match.group("hour")), int(match.group("minute"))
+            found.setdefault(f"{hour}.{match.group('minute')}", time_spelling(hour, minute))
+    return list(found.items())
+
+
+def _without_times(text: str, candidates: Iterable[tuple[int, int, "PronunciationEntry"]]) -> list[tuple[int, int, "PronunciationEntry"]]:
+    """The figure rule's candidates minus the ones that sit on a time of day (the time class reads those)."""
+    times = [(m.start(), m.end()) for m in _time_of_day_matches(text)]
+    return [c for c in candidates if not any(start <= c[0] < end for start, end in times)]
 
 
 # An ordinal written as an isiZulu concord glued to digits ("owesi-10", "ngowesi-7") is spoken the way people
@@ -2125,7 +2206,9 @@ ITEM_CLASSES: tuple[ItemClass, ...] = (
               "ngoNovemba 4 -> ngoNovemba fooo", "the day (an ordinal entry such as 4th); the year (a year entry such as 2006)"),
     ItemClass("currency", frozenset({"currency"}), lambda c: _zulu_dynamic_currency_candidates(c.text, language=c.language),
               "u-R4,500 -> izinkulungwane ezine namakhulu amahlanu zamaRandi", "nothing yet"),
-    ItemClass("figure", frozenset({"number", "currency"}), lambda c: _zulu_dynamic_number_candidates(c.text, language=c.language, override=c.figure_overrides),
+    ItemClass("time", frozenset({"english_code_switch", "number"}), lambda c: _zulu_dynamic_time_candidates(c.text, language=c.language, override=c.figure_overrides),
+              "ngo-9.30 -> ngo-nayn thethi", "the whole time, by its written form (an entry such as 9.30)"),
+    ItemClass("figure", frozenset({"number", "currency"}), lambda c: _without_times(c.text, _zulu_dynamic_number_candidates(c.text, language=c.language, override=c.figure_overrides)),
               "ku-75.8% -> ku-seventy-fayiv-phoynt-eyt wamaphesenti,   eSection 79 -> eSection seventy-nayn", "everything after the Zulu prefix (an entry such as 75.8% or 79)"),
     ItemClass("reference_number", frozenset({"english_code_switch", "number"}), lambda c: _zulu_dynamic_reference_number_candidates(c.text, language=c.language),
               "ikhodi 12345 -> ikhodi wan tuu triiy four fayiv", "nothing yet"),

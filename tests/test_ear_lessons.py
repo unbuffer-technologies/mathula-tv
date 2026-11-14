@@ -95,3 +95,12 @@ def test_a_complaint_adds_its_line_to_the_standing_test_once(tmp_path):
     assert ear_lessons.add_hard_text("Ngo-7 ekuseni  abantu abangu-9.", fixture) is True
     assert ear_lessons.add_hard_text("Ngo-7 ekuseni abantu abangu-9.", fixture) is False                     # the same line with other spacing: already there
     assert fixture.read_text(encoding="utf-8") == "Ngo-7 ekuseni abantu abangu-9.\n"
+
+
+def test_a_figure_word_is_whole_not_a_piece_of_a_longer_number():
+    from mathula_tv.ear_clips import substitute, word_pattern
+
+    assert substitute("ngicabanga ukuthi ngo-2017 kodwa engu-7", "7", "seven") == "ngicabanga ukuthi ngo-2017 kodwa engu-seven"          # the clip said "ngo-201seven"
+    assert not word_pattern("30").search("ngo-9.30")
+    assert word_pattern("7").search("ngo-7.")                                                                                              # a full stop after the figure is not a decimal point
+    assert word_pattern("9.30").search("ngo-9.30 kwakuzoba")

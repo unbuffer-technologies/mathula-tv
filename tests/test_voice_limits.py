@@ -25,3 +25,20 @@ def test_an_english_word_kept_after_any_plural_or_locative_concord_is_found_for_
     for token in ("ama-details", "kuma-details", "nama-details", "ngama-details", "kwama-details", "ngoma-details"):
         assert core(token) == "details", token
     assert core("multi-party") == "multi-party"          # an English compound is left alone: the concord rule only adds pieces ending in -ma
+
+
+def test_a_hummed_backchannel_is_flagged_but_zulu_words_are_not():
+    from mathula_tv import voice_limits
+
+    assert voice_limits.find("Ngoba izintshisekelo zingadlula ilungelo lokuphepha. Mm-hmm.")
+    assert voice_limits.find("Hmm, cha.") and voice_limits.find("Mhm.") and voice_limits.find("mmm")
+    assert not voice_limits.find("Umhlaba umhlambi mhlophe, uMhlanga, imimoya, ummeli, abantu.")          # real words that hold m and h
+
+
+def test_a_murmur_in_the_english_is_found_so_the_clip_open_can_name_it():
+    from mathula_tv.voice_limits import MURMUR_NOTE, murmurs
+
+    assert murmurs("…the right of Matlala to safety. Mm-hmm.") == ["Mm-hmm"]
+    assert murmurs("Mhm. There's quite a lot. Uh-huh, mhm") == ["Mhm", "Uh-huh"]
+    assert murmurs("Hmm, I think the Mhlanga committee met in Umhlanga.") == []          # hmm is flagged in the Zulu text, not as a murmur; real words with m and h are not
+    assert "Leave it out" in MURMUR_NOTE

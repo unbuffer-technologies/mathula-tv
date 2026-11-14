@@ -274,8 +274,12 @@ def spell(prepared: Prepared, texts: Iterable[str], *, progress: Callable[[str],
                         "derivation": [f"{figure} is a figure after a Zulu prefix: said in English with the prefix kept" + (", 'point' as 'phoynt', each digit on its own" if decimals else "")
                                        + (", then 'wamaphesenti' for the %" if percent else "")]})
         progress(f"  {figure} -> {said}  [number]")
-    from .pronunciation import tens_words_used, written_years, year_spelling
+    from .pronunciation import tens_words_used, written_times, written_years, year_spelling
 
+    for written, said in written_times(texts):          # ngo-9.30: a time, said "nayn thethi"; the listener may say it better by ear
+        spelled.append({"word": written, "spelling": said, "reading": "number", "english": [said],
+                        "derivation": [f"{written} is a time of day: said in English as a time, with the prefix kept, not as a decimal figure"]})
+        progress(f"  {written} -> {said}  [number]")
     for tens in tens_words_used(texts):          # seventy: one spelling for 70-79, set by ear once (the voice reads the plain English word with an accent)
         said = "thethi" if tens == "thirty" else tens
         spelled.append({"word": tens, "spelling": said, "reading": "number", "english": [tens],

@@ -43,3 +43,17 @@ def test_other_things_named_by_a_three_digit_number_are_read_digit_by_digit_but_
     assert read("Room 101") == "Room wan-ow-wan"
     assert read("Flight 123") == "Flight wan-tuu-triiy"
     assert read("abantu 204") == "abantu amakhulu amabili nane"                                          # a quantity
+
+
+def test_a_section_with_a_letter_is_read_one_digit_at_a_time_and_the_letter_by_its_name():
+    assert read("nge-Section 105A ihluleka").endswith("wan-ow-fayiv Ey ihluleka")          # "105A" was left to the voice as raw digits (job 37bae6ec, 2026-11-13)
+    assert read("ngesitatimende sika-204B.") == "ngesitatimende sika-tuu-ow-four Bee."
+    assert "ow-" not in read("abantu abangu-105A")                                          # no section word before it: not legal
+
+
+def test_a_job_lexicon_entry_for_the_section_word_does_not_stop_the_number_being_read_digit_by_digit():
+    from mathula_tv.pronunciation import PronunciationEntry
+
+    section = PronunciationEntry(display_text="Section", spoken_text="Section", tts_text="seekshin", language="zu-ZA", source="job", confidence=1.0, kind="english_code_switch")
+    said = with_default_organisation_initialisms(PronunciationDictionary("v1", entries=(section,), language="zu-ZA", job_id="x")).apply("nge-Section 105A ihluleka. Section 204 yango.").tts_text
+    assert said == "nge-seekshin wan-ow-fayiv Ey ihluleka. seekshin tuu-ow-four yango."          # "Section 204" was read as "two hundred and eight" and "105A" was left raw (job 37bae6ec)

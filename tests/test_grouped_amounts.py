@@ -187,7 +187,7 @@ def test_a_bare_figure_of_one_or_two_digits_is_code_switched_too():
     # not figures of this rule
     assert read("R50 kuphela") == read("R50 kuphela")                                                              # an amount stays the amounts' rule
     assert read("ngo-4th Novemba") == read("ngo-4th Novemba")                                                      # an ordinal stays the ordinal rule
-    assert read("ngo-14:30 ekuseni") == "ngo-14:30 ekuseni"                                  # a time
+    assert read("ngo-14:30 ekuseni") == "ngo-tuu thethi ekuseni"                                # a time: the time rule reads it (2026-11-12)
     assert read("ikhodi 12345 yafakwa") == "ikhodi wan tuu triiy four fayiv yafakwa"          # a reference number: digit by digit, as before
     assert read("ikhasi 2/3") == "ikhasi 2/3" and read("amakhasi 79-80") == "amakhasi 79-80"  # a fraction, a range
     assert read("abantu abangu-4,500") == read("abantu abangu-4,500")                       # an amount: the amounts' rule

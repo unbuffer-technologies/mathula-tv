@@ -2780,7 +2780,9 @@ def run_native_pass1(
                     f"preceding segment {restored_segments[-1]['segment_id']}'s own already-restored "
                     "content; stripped the duplicate and kept the remainder.",
                 )
-        item["restored_text"] = candidate_text
+        from .english_times import normalise as _times_as_colon      # a time is written 9:30 whichever way the recogniser wrote it (see english_times)
+
+        item["restored_text"] = _times_as_colon(candidate_text)
         item["changed"] = correction is not None
         if correction:
             item["reason_code"] = correction["reason_code"]
@@ -2788,7 +2790,7 @@ def run_native_pass1(
         if added:                                                 # speech the transcript skipped, found in YouTube's captions, goes at the end of the segment before it
             from .source_suspects import _extend_window
 
-            item["restored_text"] = f"{item['restored_text']} {added['text']}".strip()
+            item["restored_text"] = f"{item['restored_text']} {_times_as_colon(added['text'])}".strip()
             item["added_from_youtube"] = added["text"]
             item["changed"] = True
             item.setdefault("reason_code", "missed_speech")
@@ -14475,9 +14477,15 @@ def _missing_required_literals(
             required_count = min(required_count, cap_counts.get(str(requirement["literal"]), required_count))
         if required_count <= 0:
             continue
-        if candidate_text.count(match_literal) < required_count:
+        if _same_time_notation(candidate_text).count(_same_time_notation(match_literal)) < required_count:
             missing.append({**requirement, "required_count": required_count})
     return missing
+
+
+def _same_time_notation(text: str) -> str:
+    """"9:30" and "9.30" are one time: the English may write either and so may the Zulu (a colon cannot be read as a decimal, which is why the agent is told to prefer it).  Before this, a
+    Zulu "ngo-9:30" failed the required-literal gate for the English "9.30" (training run prod-93: the agent weighed ngo-9:30, saw the gate demand 9.30, and wrote the point)."""
+    return re.sub(r"(?<=\d):(?=\d{2}(?!\d))", ".", text)
 
 
 def _sentence_preserves_required_literals(

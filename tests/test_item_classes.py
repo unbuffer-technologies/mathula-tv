@@ -14,7 +14,7 @@ def _dictionary():
 
 def test_every_item_class_is_documented_and_runs_on_empty_text():
     names = [c.name for c in ITEM_CLASSES]
-    assert names == ["date", "currency", "figure", "reference_number", "legal_number", "phone_number", "ordinal", "title", "initialism"]
+    assert names == ["date", "currency", "time", "figure", "reference_number", "legal_number", "phone_number", "ordinal", "title", "initialism"]
     for row in item_class_table():
         assert row["example"] and row["ear_override"]
     d = _dictionary()
