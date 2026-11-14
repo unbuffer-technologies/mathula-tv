@@ -25,6 +25,15 @@ def test_the_zulu_forms_that_share_the_most_sentences_with_an_english_word_are_i
     assert a.equivalents("unheard") == {"english": "unheard", "sentences": 0, "forms": [], "kept_in_english": 0, "with_particle": []}
 
 
+def test_the_translation_forms_used_to_align_a_dub_are_the_equivalents_without_the_report_and_cost_one_index_lookup():
+    a = small()
+    forms = a.translation_forms("bus")
+    assert forms[0][0] == "ibhasi" and forms[0][1] > 0.5                                                # best form first, with its Dice score
+    assert a.translation_forms("Bus") == forms and a.translation_forms("bus") is forms                  # case-insensitive, and cached
+    assert a.translation_forms("computer") == [] and a.translation_forms("unheard") == []              # too few shared sentences, or none
+    assert all(form != "covid" for form, _ in a.translation_forms("covid"))                             # the English word kept in the Zulu is not its own translation
+
+
 def test_an_english_word_that_stays_english_in_the_zulu_is_reported_as_code_switched():
     covid = small().equivalents("covid")
     assert covid["sentences"] == 3 and covid["kept_in_english"] == 3                                   # i-Covid, I-Covid, e-Covid: the word is there every time

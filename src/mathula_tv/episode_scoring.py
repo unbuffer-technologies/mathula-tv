@@ -16,7 +16,7 @@ import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Callable, Any, Mapping, Sequence
 
 from .atomic_io import read_json
 from .delivery import strip_pauses
@@ -25,6 +25,7 @@ from .experience_store import text_hash
 
 SCORECARD_SCHEMA = "mathula-episode-scorecard-v1"
 SHORTFALL_FLAG_PCT = 15.0
+SHORTFALL_FLAG_MS = 2000          # a unit that ends this long before its window, whatever its length, is dead air the viewer sees (the speaker is still talking on screen)
 GATE_NAMES = (
     "required_literals", "restated_reference", "fabricated_entity", "known_bad_text", "untranslated", "english_with_class_prefix",
 )
@@ -162,6 +163,26 @@ def normalise_number_format(text: str, *, source: bool = False) -> str:
     return value
 
 
+LITERAL_CONTEXTS_SHOWN = 6
+
+
+def describe_missing_literal(requirement: Mapping[str, Any], candidate_text: str) -> str:
+    """One missing required literal in words the writer can act on: how many times the English says it, how many times the Zulu has it, and WHERE in the English each occurrence is (the clause
+    around it), so a repeated acronym or figure can be restored at the right place and not just counted.  "IDAC x5" told the agent only a total (training run prod-95, missing_evidence)."""
+    from .native_dub import _same_time_notation
+
+    literal = str(requirement.get("literal"))
+    match = str(requirement.get("match_literal", literal))
+    needed = int(requirement.get("required_count") or 0)
+    found = _same_time_notation(str(candidate_text or "")).count(_same_time_notation(match))
+    occurrences = list(requirement.get("source_occurrences") or [])
+    where = " ".join(f"({o.get('occurrence')}) {o.get('source_context')}" for o in occurrences[:LITERAL_CONTEXTS_SHOWN])
+    if len(occurrences) > LITERAL_CONTEXTS_SHOWN:
+        where += f" (and {len(occurrences) - LITERAL_CONTEXTS_SHOWN} more)"
+    head = f"{literal} x{needed}: the English says it {needed} time{'s' if needed != 1 else ''}, your Zulu has it {found} time{'s' if found != 1 else ''}"
+    return head + (f". In the English: {where}" if where else "")
+
+
 def find_unsupported_doubling(spoken_text: str, source_text: str) -> list[str]:
     """Adjacent identical Zulu words when the English never doubled a word."""
     if re.search(r"\b(\w+)\W+\1\b", str(source_text or ""), flags=re.IGNORECASE):
@@ -181,16 +202,26 @@ def _known_entity_tokens(
         known.update(t.lower() for t in _tokens(str(item)))
     for entity in ledger.get("entities") or []:
         known.update(t.lower() for t in _tokens(str(entity.get("name") or "")))
+    # find_fabricated_entities compares the CORE of a prefixed token ("uFakazi" -> "fakazi"), so a Zulu form the glossary or the ledger holds counts by its core too
+    for term in glossary.get("terms") or []:
+        for token in _tokens(str(term.get("zulu") or "")):
+            upper_at = next((i for i, ch in enumerate(token) if ch.isupper()), None)
+            if upper_at:                                                          # a capital after a glued prefix (iKhomishana, uFakazi)
+                known.add(token[upper_at:].lower())
     return known
 
 
-def find_fabricated_entities(spoken_text: str, known_tokens: set[str]) -> list[str]:
+def find_fabricated_entities(spoken_text: str, known_tokens: set[str], explains: Callable[[str], bool] | None = None) -> list[str]:
     """Capitalised mid-sentence names that appear nowhere in source/glossary/ledger.
 
     Strips Zulu prefixes glued to a name ("uAndre" -> "Andre", "eMbombela" ->
     "Mbombela") and tolerates localised spellings by matching on a 5-letter
     prefix ("Novemba" ~ "November"). Blind spot: a correct name the ledger never
     captured is reported (that is useful -- it means the ledger missed it).
+
+    ``explains(token)`` says whether real parallel text writes this Zulu word where the English of the unit has one of its words (attestation.translates): iKhomishana for
+    "Commission", isiNgisi for "English", uSayitsheni for "Sergeant".  Those are capitalised translations, not names; a list of such cores (_CAPITALISED_COMMON_CORES) always lags
+    the words an agent chooses, and the agent twice worked around it by lower-casing or respelling (training runs prod-93, prod-94).
     """
     found: list[str] = []
     for match in _WORD.finditer(str(spoken_text or "")):
@@ -213,6 +244,8 @@ def find_fabricated_entities(spoken_text: str, known_tokens: set[str]) -> list[s
             known.startswith(core[:5]) or core.startswith(known[:5])
             for known in known_tokens if len(known) >= 5
         ):
+            continue
+        if explains is not None and explains(token):
             continue
         found.append(token)
     return found
@@ -286,6 +319,7 @@ def _score_group(
     item: Mapping[str, Any],
     *,
     known_tokens: set[str],
+    explains: Callable[[str], bool] | None = None,
     labels: Sequence[Mapping[str, Any]],
     rush_flag_pct: float,
     speed_policy: str = "pipeline",
@@ -316,13 +350,13 @@ def _score_group(
     else:
         gates["required_literals"] = {
             "failed": bool(missing),
-            "evidence": [f"{m['literal']} x{m['required_count']}" for m in missing],
+            "evidence": [describe_missing_literal(m, normalise_number_format(spoken, source=False)) for m in missing],
         }
     restated, soft_restated = split_restatements(spoken, source_text)
     gates["restated_reference"] = {
         "failed": bool(restated), "evidence": [f"{h['first']} / {h['second']}" for h in restated],
     }
-    fabricated = find_fabricated_entities(spoken, known_tokens)
+    fabricated = find_fabricated_entities(spoken, known_tokens, explains)
     gates["fabricated_entity"] = {"failed": bool(fabricated), "evidence": fabricated}
     spoken_cf = spoken.casefold()
     bad_hits = [
@@ -341,7 +375,7 @@ def _score_group(
     gates["english_with_class_prefix"] = {"failed": bool(prefixed), "evidence": prefixed}
 
     flags: list[str] = []
-    if residual_pct >= SHORTFALL_FLAG_PCT:
+    if residual_pct >= SHORTFALL_FLAG_PCT or shortfall_ms - tail_pad >= SHORTFALL_FLAG_MS:          # a long unit can hide a 5 s hole under 15% (job 37bae6ec u14: 5.1 s of 60.1 s, 8.5%)
         flags.append("dead_air")
     if speed_policy == "natural":
         # No speed-up exists in this world: a unit that needs ANY speed-up to finish inside its
@@ -482,8 +516,9 @@ def score_items(
     render: Mapping[str, Any] | None = None,
     timing_plan: Mapping[str, Any] | None = None,
     speed_policy: str = "pipeline",
+    source_explains: Callable[[str, str], bool] | None = None,
 ) -> dict[str, Any]:
-    """Score normalized items -- the approach-agnostic core.
+    """Score normalized items -- the approach-agnostic core.  ``source_explains(token, source_text)``: see find_fabricated_entities.
 
     ``speed_policy``: "pipeline" tolerates the renderer's bounded speed-up (flag at the
     natural-speed ceiling); "natural" allows none -- a unit that cannot finish inside its
@@ -504,9 +539,11 @@ def score_items(
     for item in items:
         known = _known_entity_tokens(str(item.get("source_text") or ""), glossary, ledger)
         group_labels = [*labels_by_group.get(str(item.get("group_id")), []), *all_bad_substrings]
+        source_text = str(item.get("source_text") or "")
         groups.append(_score_group(
             item, known_tokens=known, labels=group_labels, rush_flag_pct=float(DEFAULT_MAX_NATURAL_SPEED_PERCENT),
             speed_policy=speed_policy,
+            explains=(lambda token, _s=source_text: source_explains(token, _s)) if source_explains else None,
         ))
 
     annotate_collisions(groups, speed_policy)

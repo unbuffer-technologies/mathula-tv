@@ -143,6 +143,7 @@ def score_submission_dir(
     next_start_after_ms: int | None = None,
     voices: Mapping[str, Mapping[str, Any]] | None = None,
     pronunciation_root: Path | None = None,
+    source_explains: Any = None,
 ) -> dict[str, Any]:
     """Re-measure and score an agent submission against the frozen clip inputs.
 
@@ -221,7 +222,7 @@ def score_submission_dir(
         })
     card = score_items(
         items, glossary=glossary, ledger=ledger, labels=labels, usage=usage,
-        approach="agent_submission", speed_policy=speed_policy,
+        approach="agent_submission", speed_policy=speed_policy, source_explains=source_explains,
     )
     card["submission"] = {
         "approach_notes": str(submission.get("approach_notes") or ""),

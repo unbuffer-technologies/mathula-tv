@@ -27,10 +27,17 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z']*")
+_EN_TOKEN = re.compile(r"[a-z][a-z']*")
+TRANSLATES_MIN_SHARED = 5          # aligned sentences a Zulu stem must share with an English word
+TRANSLATES_MIN_DICE = 0.25         # and the Dice score of the pair (commission/ikhomishana 0.35, english/isingisi 0.29, sergeant/usayitsheni 0.67; a frequent word such as president beside a name stays far below)
+TRANSLATES_MIN_CORE = 5            # letters a capitalised core needs before it is looked up
 ORDINARY_MIN = 20                # a prefixed place name written this often in real text is ordinary Zulu
 ORDINARY_MIN_NO_ENGLISH_STEM = 5     # the same when the place's stem (Nkandla) is not an English word
 ORDINARY_COMMON = 100            # a lower-case form this common is an everyday Zulu word
 MIN_PAIRS = 3                    # a Zulu form must share at least this many sentences with the English word to count as its equivalent
+TRANSLATION_TOP = 5              # forms kept per English word when the dub is aligned to the speaker (word_alignment)
+TRANSLATION_MIN_SCORE = 0.10     # and their Dice score (speaker/somlomo .47, lawyer/ummeli .27, signature/ukusayina .23, initials/osonhlamvukazi .13; noise stays under .02)
+TRANSLATION_MAX_LINES = 20000    # a word in more sentences than this is a function word
 
 
 WEB_MIN = 2                      # a form written this often on Zulu news sites is attested (one occurrence may be a typo)
@@ -137,6 +144,7 @@ class Attestation:
             self.frequency.update(found)
             self.document_frequency.update(set(found))
         lowered = [line.lower() for line in english_lines]
+        self._en_lines = lowered
         self._english = "\n".join(lowered)
         self._starts: list[int] = []
         position = 0
@@ -223,6 +231,68 @@ class Attestation:
         common = self.written_count(lower)
         return token[:1].isupper() and common >= ORDINARY_COMMON and self.written_count(token) <= 0.2 * common
 
+    # -- a Zulu form that translates a word of the English --------------------------------
+    def _zulu_lines_holding(self, core: str) -> list[int]:
+        """The aligned lines whose Zulu side holds a word that contains ``core`` with a few letters of grammar round it (a noun-class prefix, a locative, a plural)."""
+        if not hasattr(self, "_zulu_starts_sorted"):
+            self._zulu_starts_sorted = sorted(self._zulu_line_starts)
+        pattern = re.compile(r"(?<![a-z'])[a-z]{0,5}" + re.escape(core) + r"[a-z]{0,4}(?![a-z'])")
+        found: list[int] = []
+        last = -1
+        for match in pattern.finditer(self._zulu_lower):
+            index = bisect.bisect_right(self._zulu_starts_sorted, match.start()) - 1
+            if index != last:
+                found.append(index)
+                last = index
+        return found
+
+    def english_associates(self, core: str, *, min_shared: int = TRANSLATES_MIN_SHARED, min_dice: float = TRANSLATES_MIN_DICE) -> dict[str, float]:
+        """The English words that share the aligned sentences of a Zulu stem (a Dice score, so common function words do not win): ``{"commission": 0.35}`` for ikhomishana.  Empty
+        when the stem is too rare to say anything."""
+        cache = self.__dict__.setdefault("_associates", {})
+        if core in cache:
+            return cache[core]
+        lines = self._zulu_lines_holding(core)
+        answer: dict[str, float] = {}
+        if len(lines) >= min_shared:
+            if not hasattr(self, "_en_df"):
+                self._en_df = Counter()
+                for line in self._en_lines:
+                    self._en_df.update(set(_EN_TOKEN.findall(line)))
+            together: Counter[str] = Counter()
+            for index in lines:
+                together.update(set(_EN_TOKEN.findall(self._en_lines[index])))
+            for word, shared in together.items():
+                if shared >= min_shared:
+                    dice = 2 * shared / (len(lines) + self._en_df[word])
+                    if dice >= min_dice:
+                        answer[word] = round(dice, 3)
+        cache[core] = answer
+        return answer
+
+    def translates(self, zulu_token: str, english_source: str) -> bool:
+        """Does real parallel text write this Zulu word where the English has a word of ``english_source``?  iKhomishana translates "Commission", isiNgisi "English", uSayitsheni "Sergeant":
+        capitalised Zulu words that are not names and have nothing to do with an invented one.  An invented name has no aligned sentences (or only the weak, frequent-word co-occurrences that
+        the Dice score rejects)."""
+        token = str(zulu_token or "")
+        token = token.split("-")[-1]
+        upper_at = next((i for i, ch in enumerate(token) if ch.isupper()), 0)
+        core = token[upper_at:].lower()
+        if len(core) < TRANSLATES_MIN_CORE:
+            return False
+        words = set(_EN_TOKEN.findall(str(english_source or "").lower()))
+        words |= {w[:-1] for w in words if w.endswith("s")} | {w + "s" for w in words}
+        # the stem as written, then shortened by the grammar that can follow it: eKhomishaneni (locative -ni) has no sentence in the corpus, its stem khomishan has 388
+        for variant in [core] + [core[:-k] for k in (2, 3, 4) if len(core) - k >= TRANSLATES_MIN_CORE]:
+            associates = self.english_associates(variant)
+            if not associates:
+                continue
+            if any(word[:5] == variant[:5] for word in associates):          # the English side writes the same word (Ramaphosa, Novemba/November): a name or a localised spelling, which the gate's own rules judge, never a translation
+                return False
+            if any(word in words for word in associates):
+                return True
+        return False
+
     # -- an English word ---------------------------------------------------------------
     def _lines_with(self, word: str) -> list[int]:
         pattern = re.compile(r"(?<![a-z'])" + re.escape(word.lower()) + r"(?:s|es)?(?![a-z'])")
@@ -234,6 +304,36 @@ class Attestation:
                 found.append(index)
                 last = index
         return found
+
+    def _english_index(self) -> dict[str, list[int]]:
+        """English word -> the aligned lines that have it (built once, about two seconds; the regex scan of ``_lines_with`` takes a quarter of a second per word)."""
+        if not hasattr(self, "_en_index"):
+            index: dict[str, list[int]] = {}
+            for number, line in enumerate(self._en_lines):
+                for word in set(_EN_TOKEN.findall(line)):
+                    index.setdefault(word, []).append(number)
+            self._en_index = index
+        return self._en_index
+
+    def translation_forms(self, english_word: str, *, top: int = TRANSLATION_TOP, min_score: float = TRANSLATION_MIN_SCORE) -> list[tuple[str, float]]:
+        """The Zulu forms real parallel text writes where the English has this word, as (form, Dice score) best first: ``speaker`` -> somlomo .47, usomlomo .35.  The same evidence as
+        ``equivalents`` without the report around it, from an index, so the dub's words can be aligned to the speaker's by it.  Empty for a word the corpus has too few or too many times."""
+        word = str(english_word or "").lower().strip()
+        cache = self.__dict__.setdefault("_translation_forms", {})
+        if word in cache:
+            return cache[word]
+        index = self._english_index()
+        lines = sorted(set(index.get(word, ())) | set(index.get(word + "s", ())) | set(index.get(word + "es", ())))
+        answer: list[tuple[str, float]] = []
+        if MIN_PAIRS <= len(lines) <= TRANSLATION_MAX_LINES:
+            together: Counter[str] = Counter()
+            for number in lines:
+                together.update(set(tokens(self.zulu_lines[number])))
+            scored = sorted(((2 * pairs / (len(lines) + self.document_frequency[form]), form) for form, pairs in together.items()
+                             if pairs >= MIN_PAIRS and form not in (word, word + "s", word + "es")), reverse=True)
+            answer = [(form, round(score, 3)) for score, form in scored[:top] if score >= min_score]
+        cache[word] = answer
+        return answer
 
     def equivalents(self, english_word: str, *, top: int = 8) -> dict[str, Any]:
         """What the Zulu side of the corpus writes where the English side has this word: the Zulu forms that share the most sentences with it (a Dice
