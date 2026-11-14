@@ -230,15 +230,23 @@ def ensure_frozen(store: Any, job_root: Path, clip_id: str) -> dict[str, Any]:
 def run_production(
     settings: Any, client: Any, *, job_id: str, clip_id: str | None = None, run_id: str | None = None,
     playbook_version: str | None = None, render: bool = True, reflect_after: bool = True, judge_meaning: bool = True,
-    max_turns: int = 80, max_total_tokens: int = 2_000_000, tts_budget: int = 600, repair_from: str | None = None,
-    hook: bool = False, audio_only: bool = False,
+    max_turns: int | None = None, max_total_tokens: int | None = None, tts_budget: int | None = None, repair_from: str | None = None,
+    hook: bool = False, audio_only: bool = False, mode: str | None = None, compact: bool = True, budget: str | None = None, resume: bool = False,
 ) -> dict[str, Any]:
     from .cli import create_tts_backend
-    from .dub_agent import ChatClient, build_system_prompt, run_agent
+    from .dub_agent import BUDGET_LIMITS, ChatClient, agent_budget, agent_mode, build_system_prompt, run_agent
     from .dub_judge import UnitJudge
     from .dub_workbench import Workbench
     from .experience_store import ExperienceStore
 
+    mode = agent_mode(mode)
+    budget = agent_budget(budget)
+    limits = BUDGET_LIMITS[budget]
+    max_turns = max_turns or limits["max_turns"]
+    max_total_tokens = max_total_tokens or limits["max_total_tokens"]
+    tts_budget = tts_budget or limits["tts_budget"]
+    print(f"[budget] {budget}: up to {max_turns} turns, {max_total_tokens:,} tokens, {tts_budget} measurements" + (" (quality first: the bar is a minimum, the agent decides when it is done)" if budget == "free" else ""))
+    print(f"[mode] {mode}" + (" (the agent records its choice points; reasoning summaries are kept)" if mode == "training" else "") + ("; history is not compacted" if not compact else ""))
     store = ExperienceStore(settings.work_dir)
     job_root = Path(settings.work_dir) / "jobs" / job_id
     clip_id = clip_id or job_id[:8]
@@ -247,7 +255,9 @@ def run_production(
     playbook = load_playbook(store, playbook_version) if playbook_version else current_playbook(store)
 
     seed_items = None
-    if repair_from:
+    if resume:
+        print(f"[resume] continuing run {run_id} from its checkpoint")
+    elif repair_from:
         seed_items = json.loads((store.repeat_dir(repair_from, clip_id, 1) / "submission.json").read_text(encoding="utf-8"))["items"]
         try:        # an earlier run may have typed a chosen spelling into a unit's text: the word goes back, the render respells it
             from .pronunciation_memory import load as load_memory, memory_path, restore_written_words
@@ -257,6 +267,13 @@ def run_production(
                 print(f"[repair] {note}")
         except Exception as exc:
             print(f"[repair] respellings in the seeded text were not checked: {type(exc).__name__}")
+    try:        # the stem analyser (ZulMorph) the decisions list is checked with: say up front whether this run can reach it
+        from .zulu_stems import status as stem_status
+
+        reached = stem_status()
+        print(f"[stems] ZulMorph {'reached ' + str(reached['via']) if reached['available'] else 'NOT reachable: settled terms are compared by plain form only'}")
+    except Exception as exc:        # noqa: BLE001 - never stops a run
+        print(f"[stems] analyser check failed: {type(exc).__name__}")
     judge = UnitJudge(ChatClient(client.config)) if judge_meaning and hasattr(client, "config") else None
     workbench = Workbench(store, lambda: create_tts_backend(settings), judge=judge)
     if repair_from:        # the English each unit of the earlier submission was written against
@@ -266,10 +283,17 @@ def run_production(
                                          for g in json.loads((seed_dir / "scorecard.json").read_text(encoding="utf-8")).get("groups") or []}
         except (OSError, ValueError, KeyError):
             workbench.seed_unit_texts = None
+        try:        # the terms the earlier run settled (submit_dub decisions), so a repair does not word them again
+            saved = store.repeat_dir(repair_from, clip_id, 1) / "decisions.json"
+            if saved.is_file():
+                workbench.seed_decisions = {str(e["english"]).casefold(): e for e in json.loads(saved.read_text(encoding="utf-8")).get("decisions") or [] if isinstance(e, dict) and e.get("english")}
+        except (OSError, ValueError):
+            pass
     summary = run_agent(
         client, workbench, clip_id=clip_id, run_id=run_id, repeat=1, max_turns=max_turns,
-        max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=build_system_prompt(playbook),
-        playbook_version=playbook["version"], seed_items=seed_items)
+        max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=build_system_prompt(playbook, mode=mode, budget=budget),
+        playbook_version=playbook["version"], seed_items=seed_items, mode=mode, free_finish=(budget == "free"), resume=resume,
+        dead_air_slack_pct=limits["dead_air_slack_pct"], compact_after_tokens=limits["compact_after_tokens"] if compact else 0)
     run_dir = store.repeat_dir(run_id, clip_id, 1)
     print(f"[mem] agent finished: {rss_mb()} MB resident")
     met_bar = summary.get("stop_reason") in ("agent_finished", "bar_met")
@@ -335,17 +359,33 @@ def main(argv: list[str] | None = None) -> int:
                         help="render the hook edit and footer overlay and write the job-ID-named handoff files for posting")
     parser.add_argument("--no-render", action="store_true")
     parser.add_argument("--audio-only", action="store_true",
-                        help="training mode: synthesise, time and mix the dub audio and check it, but encode no video and make no hook")
+                        help="synthesise, time and mix the dub audio and check it, but encode no video and make no hook (a quick check of a run; not the agent's training mode, see --mode)")
     parser.add_argument("--no-reflect", action="store_true")
     parser.add_argument("--no-judge", action="store_true")
-    parser.add_argument("--max-tokens", type=int, default=2_000_000)
+    parser.add_argument("--max-tokens", type=int, default=None, help="token ceiling (default from the budget policy)")
+    parser.add_argument("--budget", choices=("free", "lean"), default=None,
+                        help="free (default, or MATHULA_AGENT_BUDGET): quality first, no pressure to economise, generous limits, the bar is a minimum and the agent decides when it is done. lean: tight limits, the bar ends the run")
+    parser.add_argument("--mode", choices=("live", "training"), default=None,
+                        help="live (default, or MATHULA_AGENT_MODE): token-lean, what runs in production. training: the agent also records its choice points and unit strategies, the model's reasoning summaries are kept, and thinking_report.md is written beside the trace")
+    parser.add_argument("--resume", action="store_true", help="continue the run --run-id from its checkpoint (every turn saves one): nothing is redone, the conversation is restored whole")
+    parser.add_argument("--pause", action="store_true", help="ask the running --run-id to stop at the end of its current turn and save its checkpoint; resume it with --resume")
+    parser.add_argument("--no-compact", action="store_true", help="keep the whole conversation in context (no compaction): costs many more input tokens; for training runs")
     args = parser.parse_args(argv)
 
     from .config import load_settings
-    from .dub_agent import ResponsesClient
+    from .dub_agent import ResponsesClient, request_pause
     from .foundry_grok import native_gpt_config_from_environment
 
     settings = load_settings()
+    if args.pause or args.resume:
+        if not args.run_id:
+            parser.error("--pause and --resume need --run-id")
+    if args.pause:
+        from .experience_store import ExperienceStore
+
+        folder = ExperienceStore(settings.work_dir).repeat_dir(args.run_id, args.clip or args.job[:8], 1)
+        print(f"pause requested: {request_pause(folder)}  (the run stops at the end of its current turn; resume with --resume)")
+        return 0
     prepared = prepare_agent_inputs(settings, args.job)
     if args.prepare_only:
         print(json.dumps(prepared, indent=2))
@@ -354,7 +394,8 @@ def main(argv: list[str] | None = None) -> int:
     report = run_production(
         settings, client, job_id=args.job, clip_id=args.clip, run_id=args.run_id, playbook_version=args.playbook,
         render=not args.no_render, reflect_after=not args.no_reflect, judge_meaning=not args.no_judge,
-        max_total_tokens=args.max_tokens, repair_from=args.repair_from, hook=args.hook, audio_only=args.audio_only)
+        max_total_tokens=args.max_tokens, repair_from=args.repair_from, hook=args.hook, audio_only=args.audio_only,
+        mode=args.mode, compact=not args.no_compact, budget=args.budget, resume=args.resume)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     return 0 if report["met_bar"] else 2
 

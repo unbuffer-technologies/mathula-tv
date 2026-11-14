@@ -77,3 +77,9 @@ def test_workbench_preview_turn_padding_is_free_arithmetic():
     ])
     assert plan["window_ms"] == 8000 and plan["measured_ms"] == 6500
     assert plan["shortfall_ms"] == 1500 and plan["mechanism"] == "gap_widening"
+
+
+def test_a_long_unit_that_ends_seconds_early_is_dead_air_even_under_the_percentage_limit():
+    g = _group("w", 0, 60_000, 54_900, "t3", free_gap=400)          # 5.1 s of 60 s is 8.5%: under 15%, still a hole the viewer sees (job 37bae6ec u14)
+    assert "dead_air" in g["flags"]
+    assert "dead_air" not in _group("x", 0, 60_000, 58_500, "t4", free_gap=400)["flags"]          # 1.5 s: left alone

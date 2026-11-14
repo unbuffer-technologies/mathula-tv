@@ -54,6 +54,9 @@ class StubWorkbench:
     def say_it(self, text, speaker_id="SPEAKER_00"):
         return {"spoken": text, "changes": [], "still_as_written": []}
 
+    def source_readings(self, segment_id="", phrase=""):
+        return {"segments": [], "note": "stub"}
+
     def use_loanword(self, word, zulu_word):
         return {"ok": True}
 
@@ -808,3 +811,259 @@ def test_a_run_with_no_listener_points_open_is_told_to_finish_as_before(tmp_path
     client = ScriptedClient(script)
     run_agent(client, ScoringWorkbench(tmp_path, [_score(1.9)]), clip_id="c1", run_id="r", tts_budget=50, max_turns=20)
     assert [m for m in client.seen[-1] if m["role"] == "user" and "Finish now" in str(m.get("content"))]
+
+
+def test_a_unit_that_ends_seconds_before_its_window_is_a_wrapup_point_even_when_the_runs_dead_air_is_low():
+    from mathula_tv import dub_agent
+
+    result = {"headline": {"residual_dead_air_pct": 1.9}, "flagged_units": [
+        {"item_id": "u14", "gates": [], "flags": ["dead_air"], "ends_early_ms": 5087},
+        {"item_id": "u07", "gates": [], "flags": ["dead_air"], "ends_early_ms": 1500},          # under 2 s: not a point
+        {"item_id": "u03", "gates": [], "flags": ["overrun"]}]}
+    points = dub_agent.open_listener_points(result)
+    assert len(points) == 1 and points[0].startswith("u14: the Zulu ends 5.1 s before") and "61 more characters" in points[0]
+
+
+def test_the_submit_tool_takes_decisions_and_the_result_carries_the_working_state_through_compaction():
+    from mathula_tv.dub_agent import SYSTEM_PROMPT, TOOL_SPECS, slim_submit
+
+    spec = next(s for s in TOOL_SPECS if s["function"]["name"] == "submit_dub")
+    assert "decisions" in spec["function"]["parameters"]["properties"] and "Decisions so far" in SYSTEM_PROMPT
+    slim = slim_submit({"accepted": True, "headline": {}, "decisions_so_far": [{"english": "strategy", "zulu": "isu", "in_units": ["u16"]}],
+                        "settled_units": ["u01", "u02"], "speaker_rates_chars_per_s": {"SPEAKER_00": 12.1}})
+    assert slim["decisions_so_far"][0]["zulu"] == "isu" and slim["settled_units"] == ["u01", "u02"] and "cleared from the conversation" in slim["working_state_note"]
+
+
+def test_a_long_clips_opened_result_is_not_cut_and_a_runaway_one_still_is():
+    from mathula_tv import dub_agent
+
+    assert dub_agent._clip("x" * 100_000) == "x" * 100_000          # an hour of dialogue and delivery sheet fits whole
+    runaway = dub_agent._clip("x" * (dub_agent.MAX_TOOL_RESULT_CHARS + 500))
+    assert runaway.endswith("[truncated 500 chars]")
+
+
+def test_training_mode_gives_the_agent_choice_point_fields_the_training_prompt_and_asks_for_reasoning_summaries(tmp_path):
+    from mathula_tv.dub_agent import TRAINING_PROMPT, agent_mode, build_system_prompt, tool_specs
+
+    assert agent_mode(None) == "live" and agent_mode("Training") == "training" and agent_mode("nonsense") == "live"
+    live_submit = next(s for s in tool_specs("live") if s["function"]["name"] == "submit_dub")["function"]["parameters"]["properties"]
+    training_submit = next(s for s in tool_specs("training") if s["function"]["name"] == "submit_dub")["function"]["parameters"]["properties"]
+    assert "choice_points" not in live_submit and {"choice_points", "unit_strategies"} <= set(training_submit)
+    assert "choice_points" not in next(s for s in TOOL_SPECS if s["function"]["name"] == "submit_dub")["function"]["parameters"]["properties"]          # the shared specs are never edited
+    assert TRAINING_PROMPT.strip() in build_system_prompt(None, mode="training") and TRAINING_PROMPT.strip() not in build_system_prompt(None)
+
+    seen = {}
+
+    class Client(ScriptedClient):
+        reasoning_summary = None
+
+        def complete(self, messages, **kw):
+            seen["tools"] = [t["function"]["name"] for t in kw.get("tools") or []]
+            seen["summary_asked"] = self.reasoning_summary
+            return self.replies.pop(0)
+
+    reply = _reply(content="done")
+    reply["choices"][0]["message"]["_reasoning"] = "I compared two words for strategy and kept isu because the glossary has it."
+    reply["choices"][0]["message"]["tool_calls"] = []
+    workbench = StubWorkbench(tmp_path)
+    client = Client([_reply(calls=[_call("a", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("c", "submit_dub", {"items": []})]), reply])
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", mode="training")
+    assert summary["agent_mode"] == "training" and seen["summary_asked"] == "detailed"
+    trace = [json.loads(line) for line in (Path(workbench.store.repeat_dir("r", "c1", 1)) / "trace.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(row.get("reasoning", "").startswith("I compared two words") for row in trace if row.get("kind") == "model")
+    assert (Path(workbench.store.repeat_dir("r", "c1", 1)) / "thinking_report.md").is_file()
+
+
+def test_the_responses_client_asks_for_a_reasoning_summary_only_when_told_to_and_returns_it_for_the_trace(monkeypatch):
+    from mathula_tv import dub_agent
+
+    bodies = []
+    monkeypatch.setattr(dub_agent, "post_with_retry", lambda url, headers, body, **kw: bodies.append(body) or {
+        "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "Weighed isu against icebo."}]}, {"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+        "usage": {"input_tokens": 5, "output_tokens": 2}})
+    client = dub_agent.ResponsesClient(SimpleNamespace(endpoint="https://x", deployment="d", api_key="k", reasoning_effort="low", timeout_seconds=30))
+    client.complete([{"role": "user", "content": "hi"}])
+    assert "summary" not in bodies[0]["reasoning"]
+    client.reasoning_summary = "detailed"
+    reply = client.complete([{"role": "user", "content": "hi"}])
+    assert bodies[1]["reasoning"] == {"effort": "low", "summary": "detailed"}
+    assert reply["choices"][0]["message"]["_reasoning"] == "Weighed isu against icebo."
+
+
+def test_every_key_the_workbench_puts_in_a_submit_result_has_a_route_to_the_agent():
+    """slim_submit is an allow-list: a key the workbench computes and slim_submit never copies is evidence nobody sees.  This reads the workbench source for the keys of last_submit and
+    fails when one has no route (add it to SUBMIT_KEY_ROUTES and slim_submit), and checks that a result holding every key really delivers each route."""
+    import ast
+
+    from mathula_tv.dub_agent import SUBMIT_KEY_ROUTES, slim_submit
+
+    source = (Path(__file__).resolve().parent.parent / "src" / "mathula_tv" / "dub_workbench.py").read_text(encoding="utf-8")
+    keys: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Attribute) and t.attr == "last_submit" for t in node.targets) and isinstance(node.value, ast.Dict):
+            for key, value in zip(node.value.keys, node.value.values):
+                if isinstance(key, ast.Constant):
+                    keys.add(key.value)
+                elif key is None:                                                         # **({...} if cond else {}): the keys of that one dict, not of the dicts nested in it
+                    target = value.body if isinstance(value, ast.IfExp) else value
+                    if isinstance(target, ast.Dict):
+                        keys.update(k.value for k in target.keys if isinstance(k, ast.Constant))
+    assert len(keys) >= 18, keys
+    assert not keys - set(SUBMIT_KEY_ROUTES), f"computed by the workbench but never shown to the agent: {sorted(keys - set(SUBMIT_KEY_ROUTES))}"
+    full = {"accepted": True, "warnings": ["w"], "headline": {"group_count": 3, "gate_failures": 0}, "gates": {"a": {"failed": False, "n": 1}}, "merged": {"sent": 1}, "regressions_accepted": [1],
+            "note": "n", "meaning": {"loss": [{"u": 1}], "claims": [{"u": 2}]}, "timing_lock": {"fitting_segments": 1}, "turn_padding": [{"turn_id": "t", "residual_ms": 500, "units": ["u1"]}],
+            "flagged_units": [{"item_id": "u1", "gates": [], "flags": ["x"]}], "listening_load": [{"item_id": "u1"}], "spoken_form_gaps": [{"item_id": "u1"}], "comma_check": [{"item_id": "u1"}],
+            "voice_limit_words": [{"item_id": "u1"}], "figures_as_spoken": [{"item_id": "u1"}], "decisions_so_far": [{"english": "a"}], "settled_units": ["u2"], "units_overview": ["u1 1ch 0"],
+            "naturalness": [{"item_id": "u1"}], "speaker_rates_chars_per_s": {"A": 12.0}}
+    assert set(full) == set(SUBMIT_KEY_ROUTES)
+    slim = slim_submit(full)
+    for key, targets in SUBMIT_KEY_ROUTES.items():
+        assert all(t in slim for t in targets), f"{key} did not reach the agent as {targets}"
+
+
+def test_the_free_budget_policy_takes_the_cost_framing_out_and_leaves_the_lean_prompt_as_it_was():
+    import re
+
+    from mathula_tv.dub_agent import BUDGET_LIMITS, agent_budget, build_system_prompt
+
+    flat = lambda text: re.sub(r"\s+", " ", text)                                         # noqa: E731
+    lean, free = flat(build_system_prompt(None)), flat(build_system_prompt(None, budget="free"))
+    for phrase in ("Measurements are budgeted.", "each extra turn costs more than the last", "much cheaper than rewriting", "you have budget left"):
+        assert phrase in lean and phrase not in free, phrase
+    assert "QUALITY FIRST" in free and "QUALITY FIRST" not in lean and "not the finish line" in free
+    assert agent_budget(None) == "free" and agent_budget("LEAN") == "lean" and agent_budget("nonsense") == "free"
+    assert BUDGET_LIMITS["free"]["max_turns"] > BUDGET_LIMITS["lean"]["max_turns"] and BUDGET_LIMITS["free"]["dead_air_slack_pct"] == 0.0
+    assert BUDGET_LIMITS["lean"]["max_turns"] == 80 and BUDGET_LIMITS["lean"]["tts_budget"] == 600          # lean keeps today's limits
+
+
+def test_a_quality_first_run_is_not_stopped_when_the_bar_is_met_and_is_told_once_with_its_open_points(tmp_path):
+    from mathula_tv.dub_agent import free_bar_message
+
+    message = free_bar_message(1.4, ["u5: 9 Zulu sentences for 4 English"], first=True)
+    assert "minimum, not the finish line" in message and "u5: 9 Zulu sentences" in message and "no tool call" in message
+    assert "minimum, not the finish line" not in free_bar_message(1.4, ["u9: x"], first=False) and "New open points" in free_bar_message(1.4, ["u9: x"], first=False)
+
+
+def test_a_quality_first_run_keeps_going_after_the_bar_is_met_hears_it_once_and_ends_only_when_the_agent_says_it_is_done(tmp_path):
+    scores = [_score(1.9)] + [_score(1.8)] * 30
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})])]
+    for i in range(12):                                                # twelve submissions after the bar is met: the lean rule would have stopped it after six
+        script.append(_reply(calls=[_call(f"s{i}", "submit_dub", {"items": []})]))
+    script.append(_reply(content="I judge no unit would be better now."))
+    client = ScriptedClient(script)
+    summary = run_agent(client, ScoringWorkbench(tmp_path, scores), clip_id="c1", run_id="r", tts_budget=50, max_turns=80, free_finish=True)
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 14 and summary["free_finish"] is True
+    told = [m["content"] for m in client.seen[-1] if m["role"] == "user" and "not the finish line" in str(m.get("content"))]
+    assert len(told) == 1 and "meets the minimum bar" in told[0] and "1.9%" in told[0]                  # told once, not at every submission
+    assert not [m for m in client.seen[-1] if m["role"] == "user" and "Finish now" in str(m.get("content"))]
+
+
+class _PausingClient(ScriptedClient):
+    """A scripted client that asks for a pause (a PAUSE file in the run's folder) while answering its n-th call."""
+
+    def __init__(self, replies, workbench, pause_on_call):
+        super().__init__(replies)
+        self.workbench, self.pause_on_call = workbench, pause_on_call
+
+    def complete(self, messages, **kw):
+        reply = super().complete(messages, **kw)
+        if len(self.seen) == self.pause_on_call:
+            from mathula_tv.dub_agent import request_pause
+
+            request_pause(self.workbench.store.repeat_dir("r", "c1", 1))
+        return reply
+
+
+def test_a_paused_run_is_saved_whole_and_resumes_from_the_next_turn_without_redoing_anything(tmp_path):
+    from mathula_tv import dub_agent
+
+    folder = tmp_path / "r" / "c1" / "r1"
+    first_bench = ScoringWorkbench(tmp_path, [_score(1.9), _score(1.8)])
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s1", "submit_dub", {"items": []})]), _reply(calls=[_call("s2", "submit_dub", {"items": []})])]
+    client = _PausingClient(script, first_bench, pause_on_call=3)
+    paused = run_agent(client, first_bench, clip_id="c1", run_id="r", tts_budget=50, free_finish=True)
+    assert paused["stop_reason"] == "paused" and paused["turns"] == 3 and "--resume" in paused["resume"]
+    state = dub_agent.load_state(folder)
+    assert state["turn"] == 3 and state["stop_reason"] == "paused" and state["workbench"]["last_submit"] == first_bench.last_submit
+    assert state["flags"]["told_bar"] is True                                                   # the bar was met at the first submission: that is remembered, not announced twice
+    assert len(state["messages"]) == len(client.seen[-1]) + 2                                    # the system prompt, the task, every call and result, and the last reply with its tool result
+
+    second_bench = ScoringWorkbench(tmp_path, [_score(1.7)])                                    # a new process: the workbench starts empty
+    after = _PausingClient([_reply(calls=[_call("s3", "submit_dub", {"items": []})]), _reply(content="I judge no unit would be better.")], second_bench, pause_on_call=99)
+    summary = run_agent(after, second_bench, clip_id="c1", run_id="r", tts_budget=50, free_finish=True, resume=True)
+    assert summary["resumed_from_turn"] == 3 and summary["turns"] == 5 and summary["stop_reason"] == "agent_finished"
+    assert len(after.seen[0]) == len(state["messages"])                                          # the first call after the resume sends exactly the saved conversation: no turn is redone
+    assert summary["tokens"]["in"] > paused["tokens"]["in"] and summary["tool_calls"]["submit_dub"] == 3 and second_bench.last_submit == _score(1.7)
+    told = [m for m in after.seen[-1] if m["role"] == "user" and "not the finish line" in str(m.get("content"))]
+    assert len(told) == 1                                                                        # still told once in the whole conversation
+    assert not (folder / "PAUSE").exists()
+
+
+def test_resuming_with_no_checkpoint_says_so_and_a_crash_loses_at_most_the_call_in_flight(tmp_path):
+    import pytest
+
+    from mathula_tv import dub_agent
+
+    with pytest.raises(FileNotFoundError):
+        run_agent(ScriptedClient([]), ScoringWorkbench(tmp_path, []), clip_id="c1", run_id="r", resume=True)
+    bench = ScoringWorkbench(tmp_path / "x", [_score(1.9)])
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s1", "submit_dub", {"items": []})])]
+
+    class Crash(ScriptedClient):
+        def complete(self, messages, **kw):
+            if not self.replies:
+                raise RuntimeError("the machine went away")
+            return super().complete(messages, **kw)
+
+    with pytest.raises(RuntimeError):
+        run_agent(Crash(script), bench, clip_id="c1", run_id="r", tts_budget=50, free_finish=True)
+    state = dub_agent.load_state(bench.store.repeat_dir("r", "c1", 1))
+    assert state["turn"] == 2 and state["stop_reason"] == "running"                              # saved at the start of turn 3, before the call that died
+
+
+def test_the_resume_uses_the_current_system_prompt_so_a_fix_can_be_picked_up_mid_run(tmp_path):
+    bench = ScoringWorkbench(tmp_path, [_score(1.9)])
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s1", "submit_dub", {"items": []})])]
+    client = _PausingClient(script, bench, pause_on_call=2)
+    run_agent(client, bench, clip_id="c1", run_id="r", tts_budget=50, system_prompt="OLD RULES")
+    after = ScriptedClient([_reply(content="done"), _reply(content="done"), _reply(content="done")])
+    run_agent(after, ScoringWorkbench(tmp_path, []), clip_id="c1", run_id="r", tts_budget=50, system_prompt="NEW RULES", resume=True, free_finish=True, max_turns=3, max_pushbacks=0)
+    assert after.seen[0][0]["content"] == "NEW RULES"
+
+
+def _points_result(score, cadence_units):
+    result = dict(score)
+    result["naturalness"] = [{"item_id": u, "cadence": f"{u}: 6 Zulu sentences for 2 English, 3.8 words each"} for u in cadence_units]
+    return result
+
+
+def test_a_quality_first_agent_that_stops_with_open_points_is_sent_back_to_them_and_only_while_it_acts(tmp_path):
+    from mathula_tv import dub_agent
+
+    scores = [_points_result(_score(1.9), ["u5"]), _points_result(_score(1.8), ["u5"]), _points_result(_score(1.7), [])]
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s1", "submit_dub", {"items": []})]),
+              _reply(content="done"),                                                         # stops with u5 open: sent back (round 1)
+              _reply(calls=[_call("s2", "submit_dub", {"items": []})]), _reply(content="done again"),     # acted, u5 still open: sent back (round 2)
+              _reply(calls=[_call("s3", "submit_dub", {"items": []})]), _reply(content="now done")]      # acted, nothing open: finishes
+    client = ScriptedClient(script)
+    summary = run_agent(client, ScoringWorkbench(tmp_path, scores), clip_id="c1", run_id="r", tts_budget=50, free_finish=True, max_turns=40)
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 7
+    sent = [m["content"] for m in client.seen[-1] if m["role"] == "user" and "You stopped, but your last submission still has" in str(m.get("content"))]
+    assert len(sent) == 2 and "Round 1 of 3" in sent[0] and "Round 2 of 3" in sent[1] and "u5:" in sent[0] and chr(10) + "- u5:" in sent[0]
+    trace = [json.loads(line) for line in (Path(tmp_path) / "r" / "c1" / "r1" / "trace.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["round"] for r in trace if r.get("kind") == "quality_pushback"] == [1, 2]
+    assert [r["agent_said"] for r in trace if r.get("kind") == "quality_pushback"] == ["done", "done again"]          # what the agent said when it stopped is kept
+
+
+def test_an_agent_that_answers_the_push_back_without_changing_anything_is_not_asked_again_and_the_rounds_are_bounded(tmp_path):
+    scores = [_points_result(_score(1.9), ["u5"])]
+    client = ScriptedClient([_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s1", "submit_dub", {"items": []})]),
+                             _reply(content="u5 stays: measured, adding the silence overruns by 400 ms"), _reply(content="u5 stays, as said")])
+    summary = run_agent(client, ScoringWorkbench(tmp_path, scores), clip_id="c1", run_id="r", tts_budget=50, free_finish=True, max_turns=40)
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 4                  # one round: it declined, and that is its answer
+    from mathula_tv.dub_agent import MAX_QUALITY_ROUNDS
+
+    assert MAX_QUALITY_ROUNDS == 3
+    lean = ScriptedClient([_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s1", "submit_dub", {"items": []})]), _reply(content="done")])
+    done = run_agent(lean, ScoringWorkbench(tmp_path / "lean", [_points_result(_score(1.9), ["u5"])]), clip_id="c1", run_id="r", tts_budget=50, max_turns=40)
+    assert done["stop_reason"] in ("agent_finished", "bar_met") and not [m for m in lean.seen[-1] if "You stopped, but your last submission" in str(m.get("content"))]          # lean runs are unchanged

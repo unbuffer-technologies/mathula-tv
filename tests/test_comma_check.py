@@ -109,3 +109,40 @@ def test_a_pause_at_a_sentence_end_is_covered_by_the_full_stop_up_to_about_a_sec
 def test_the_full_stop_that_ends_the_sentence_does_not_stand_in_for_a_pause_the_speaker_held_before_its_last_words():
     found = _held(ZULU_NO_PAUSE, ENGLISH_BEFORE, 1.2)                      # a 1.2 s pause before "Masemola"; the Zulu's stop comes after it
     assert found and "1.2 s" in " ".join(found["pauses_the_speaker_held_that_the_dub_does_not"])
+
+
+
+LONG_ZULU = ("Ubale uDumisani Khumalo noNhlanhla Mkhwanazi okuthiwa nguyena ababefuna kakhulu emhlabeni wonke jikelele ngenxa yamacala amaningi abawenzile phambilini nabanye abantu "
+             "abaningi abaphethe amabhizinisi amakhulu futhi abaziwayo ezindaweni eziningi zombuso nezinkampani zangasese ezisebenza eduze nemikhakha yezokuphepha yezwe lonke kanye noFannie Masemola.")
+
+
+def _at(text, fraction, marker):
+    """The text with ``marker`` put after the first word that ends past ``fraction`` of its length."""
+    i = text.index(" ", int(fraction * len(text)))
+    return text[:i] + " " + marker + text[i:]
+
+
+def test_a_marker_a_little_way_from_the_proportional_place_answers_the_pause_in_a_long_retold_sentence(monkeypatch):
+    # the speaker held 1.4 s after "...as well as"; the Zulu puts its ~pause1400 about 15% of the sentence earlier because the word order differs
+    near = _at(LONG_ZULU, 0.74, "~pause1400")                                                    # 0.74 of the sentence: the speaker's pause falls near 0.89
+    monkeypatch.setattr(cc, "NEAR_FRACTION", 0.0)
+    assert _held(near, ENGLISH_BEFORE, 1.4)                                                      # the old window (35 letters) called it missing
+    monkeypatch.setattr(cc, "NEAR_FRACTION", 0.2)
+    assert _held(near, ENGLISH_BEFORE, 1.4) is None
+    assert _held(_at(LONG_ZULU, 0.2, "~pause1400"), ENGLISH_BEFORE, 1.4)                         # a marker far from the place still does not answer it
+    assert _held(LONG_ZULU, ENGLISH_BEFORE, 1.4)                                                 # nor does no marker at all
+
+
+def test_one_silence_cannot_answer_two_pauses_the_speaker_held():
+    english = "we know Dumisani Khumalo and Nhlanhla Mkhwanazi who was the big catch as well as"
+    spec, t = [], 0.0
+    held_after = {english.split().index("catch"), len(english.split()) - 1}                       # after "catch" and after the last word: two held pauses of 1.2 s, three words apart
+    for n, word in enumerate(english.split()):
+        spec.append((word, t, t + 0.3))
+        t += 0.3 + (1.2 if n in held_after else 0.0)
+    spec.append(("Masemola.", t, t + 0.5))
+    words, end = _words(*spec), int((t + 0.5) * 1000) + 50
+    one = _at(LONG_ZULU, 0.83, "~pause1200")                                                     # within reach of both pauses (about 0.77 and 0.89 of the sentence)
+    assert cc.comma_check(one, words, 0, end)                                                    # one silence for two pauses: one is still missing
+    two = _at(_at(LONG_ZULU, 0.77, "~pause1200"), 0.9, "~pause1200")
+    assert cc.comma_check(two, words, 0, end) is None

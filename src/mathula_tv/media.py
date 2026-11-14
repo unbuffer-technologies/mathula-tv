@@ -175,7 +175,7 @@ def render_video(source: Path, audio: Path, output: Path) -> None:
     probe(source); probe(audio)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".partial.mp4")
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", str(temporary)]
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", "-shortest", str(temporary)]          # stereo 48 kHz: the dub bus is mono 24 kHz and a mono AAC track will not play on every TV, VLC or Windows setup (the progress path in native_dub already did this)
     try:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError:

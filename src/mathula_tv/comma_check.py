@@ -140,7 +140,8 @@ def _stands_alone(tokens: list[str], at: int, side: str) -> bool:
 
 
 LONG_PAUSE_S = 0.8           # a pause of this much is the speaker holding the thought: the dub should hold it too, and a comma (0.15 s) does not
-NEAR_CHARS = 35              # "the same place" in the Zulu: this many letters either side of where the pause falls in the sentence (about 2.5 s of speech)
+NEAR_CHARS = 35
+NEAR_FRACTION = 0.2          # how far from its proportional place a silence may sit and still be the speaker's pause: this share of the sentence (a retold sentence moves words), at least NEAR_CHARS              # "the same place" in the Zulu: this many letters either side of where the pause falls in the sentence (about 2.5 s of speech)
 HELD_AT_STOP_MS = 920        # the silence a full stop leaves by itself
 RETIMING_REACH_MS = 900      # sentence_retiming moves a sentence end's silence by up to this much toward the speaker's
 _END_MARK = re.compile(r"[.?!…][\"'”’)\]]*$")
@@ -184,14 +185,87 @@ def _english_sentences(inside: list[dict[str, Any]]) -> list[list[dict[str, Any]
     return sentences
 
 
-def held_pauses(text: str, inside: list[dict[str, Any]]) -> list[str]:
+def _place_in_zulu(k: int, pairs: list[tuple[int, int]], e_sentence: list[dict[str, Any]], z_sentence: list[dict[str, Any]],
+                   cumulative_e: list[int], total_z: int) -> tuple[float, int]:
+    """Where in the Zulu (letters from the sentence start) the silence after English word ``k`` belongs, and how far from it a silence may sit and still answer: found between the two
+    aligned words that enclose ``k`` (word_alignment) by how far ``k`` is from each, so the error is the stretch between two anchors and not the length of the sentence.  A word that is
+    itself aligned puts the place at the end of its Zulu word."""
+    for e_index, z_index in pairs:
+        if e_index == k:
+            return float(z_sentence[z_index]["end"]), NEAR_CHARS
+    before = [(e, z) for e, z in pairs if e < k]
+    after = [(e, z) for e, z in pairs if e > k]
+    e0, z0 = (before[-1][0], z_sentence[before[-1][1]]["end"]) if before else (-1, 0)
+    if after:
+        e1, z1 = after[0][0], z_sentence[after[0][1]]["end"] - len(str(z_sentence[after[0][1]]["word"]))
+        e1_start = cumulative_e[e1 - 1] if e1 else 0                    # the English letters before the next aligned word starts
+    else:
+        e1, z1, e1_start = len(e_sentence), total_z, cumulative_e[-1]
+    e0_end = cumulative_e[e0] if e0 >= 0 else 0
+    z1 = max(z1, z0)
+    span_e = max(1, e1_start - e0_end)
+    fraction = min(1.0, max(0.0, (cumulative_e[k] - e0_end) / span_e))
+    return z0 + fraction * (z1 - z0), max(NEAR_CHARS, int(NEAR_FRACTION * (z1 - z0)))
+
+
+def _held_pauses_aligned(zulu: list[list[dict[str, Any]]], inside: list[dict[str, Any]], aligner: Any) -> list[str] | None:
+    """The held pauses found by the aligned words (word_alignment) over the whole unit, or None when nothing could be aligned (the position-only check then runs).  The speaker's
+    sentences and the Zulu's do not pair by number (``Yes, yes, yes.`` is three Zulu words in two sentences, and every pause after it is one sentence out), so no sentence pairing is
+    used: the silence after English word k is looked for at the place the words round it are said, within the stretch between the two aligned words that enclose it."""
+    flat: list[dict[str, Any]] = []
+    offset = 0
+    for sentence in zulu:
+        flat.extend({**w, "end": w["end"] + offset} for w in sentence)
+        offset += sentence[-1]["end"]
+    pairs = aligner([str(w["text"]) for w in inside], [str(w["word"]) for w in flat])
+    if not pairs:
+        return None
+    lengths = [len(str(w["text"])) + 1 for w in inside]
+    cumulative_e = [sum(lengths[:i + 1]) for i in range(len(lengths))]
+    total_z = flat[-1]["end"]
+    used: set[int] = set()
+    found: list[str] = []
+    for k, word in enumerate(inside):
+        gap = _gap_after(inside, k)
+        if gap is None or gap < LONG_PAUSE_S:
+            continue
+        sentence_end = str(word["text"]).rstrip("\"'”’)").endswith((".", "?", "!"))
+        need_ms = int(round(gap * 1000))
+        target, window = _place_in_zulu(k, pairs, inside, flat, cumulative_e, total_z)
+        candidates = [w for w in flat if id(w) not in used and abs(w["end"] - target) <= window
+                      and (w["silence"] >= 0.75 * need_ms or (sentence_end and w["stop"] and w["silence"] + RETIMING_REACH_MS >= need_ms))]          # a stop's silence is moved toward the speaker's at a sentence end
+        if candidates:
+            used.add(id(min(candidates, key=lambda w: abs(w["end"] - target))))
+            continue
+        near = [w for w in flat if abs(w["end"] - target) <= NEAR_CHARS] or [min(flat, key=lambda w: abs(w["end"] - target))]
+        best = max(near, key=lambda w: w["silence"])
+        anchor = min(near, key=lambda w: abs(w["end"] - target))
+        index = flat.index(anchor)
+        around = " ".join(w["word"] for w in flat[max(0, index - 1):index + 2])
+        said = " ".join(str(w["text"]) for w in inside[max(0, k - 2):k + 1])
+        found.append(f"after “{said}” the speaker held {gap:.1f} s; near “{around}” your Zulu leaves {best['silence'] / 1000:.2f} s "
+                     f"(~pause{int(round(gap * 100)) * 10} after the word that ends the thought would match)")
+    return list(dict.fromkeys(found))[:4]
+
+
+def held_pauses(text: str, inside: list[dict[str, Any]], aligner: Any = None) -> list[str]:
     """The pauses of 0.8 s or more that the source speaker held inside this unit and the Zulu does not hold: at that place in the sentence the Zulu has no stop and no ``~pauseN``
-    that long (a comma leaves 0.15 s, a full stop 0.92 s).  The place is found by how far into its sentence the pause falls (sentence by sentence when the English and the Zulu
-    have as many sentences, over the whole unit otherwise), so it is a position to within a few words, not an exact word."""
+    that long (a comma leaves 0.15 s, a full stop 0.92 s).  With an ``aligner`` (word_alignment: names, numbers and words the parallel corpus translates tie the Zulu's words to the
+    speaker's) the place is found between the two aligned words that enclose the pause, over the whole unit; on prod-97 and prod-99 this removed the pauses the agent had rightly declined
+    (its ~pause stood right after the translated phrase while the sentence's proportional place fell a sentence away, because ``Yes, yes, yes.`` is two Zulu sentences) and reported misses the
+    position check never saw.  Without one, or when nothing aligns, the place is found by how far into its sentence the pause falls (sentence by sentence when the English and the Zulu
+    have as many sentences, over the whole unit otherwise), so it is a position, not an exact word: a silence within NEAR_FRACTION (0.2) of the sentence, and at least NEAR_CHARS letters, of
+    that place answers the pause, and one silence answers one pause.  prod-97 and prod-98 showed why the window has to scale with the sentence: the agent declined three points because its
+    pause was already in the unit a few words from where the proportional place fell (a retold sentence moves its words); on the agents' final texts the points shown fell by about half
+    (11 -> 4, 14 -> 6, 17 -> 7, 6 -> 3), and with every ~pause marker deleted the check still reported 10-15 of the 33-37 held pauses."""
     zulu = _zulu_sentences(text)
     english = _english_sentences(inside)
     if not zulu or not english:
         return []
+    if aligner is not None:
+        found_aligned = _held_pauses_aligned(zulu, inside, aligner)
+        if found_aligned is not None:
+            return found_aligned
     if len(zulu) != len(english):                       # the sentences do not pair up: the whole unit is one stretch on each side
         offset = 0
         flat: list[dict[str, Any]] = []
@@ -205,6 +279,9 @@ def held_pauses(text: str, inside: list[dict[str, Any]]) -> list[str]:
     for z_sentence, e_sentence in zip(zulu, english):
         lengths = [len(str(w["text"])) + 1 for w in e_sentence]
         total_e, total_z = sum(lengths), z_sentence[-1]["end"]
+        tolerance = max(NEAR_CHARS, int(NEAR_FRACTION * total_z))
+        inner = z_sentence[:-1] or z_sentence                          # the stop that ends the sentence belongs to the sentence's own end, which is after the speaker's next words
+        used: set[int] = set()                                          # one silence is one pause: it cannot answer two of the speaker's
         cumulative = 0
         for k, word in enumerate(e_sentence):
             cumulative += lengths[k]
@@ -213,14 +290,19 @@ def held_pauses(text: str, inside: list[dict[str, Any]]) -> list[str]:
                 continue
             at_end = k == len(e_sentence) - 1
             target = total_z if at_end else cumulative / total_e * total_z
-            inner = z_sentence[:-1] or z_sentence                      # the stop that ends the sentence belongs to the sentence's own end, which is after the speaker's next words
-            near = [w for w in inner if abs(w["end"] - target) <= NEAR_CHARS] or [min(inner, key=lambda w: abs(w["end"] - target))]
-            if at_end:
-                near = [z_sentence[-1]]
-            best = max(near, key=lambda w: w["silence"])
             need_ms = int(round(gap * 1000))
-            if best["silence"] >= 0.75 * need_ms or (at_end and best["stop"] and best["silence"] + RETIMING_REACH_MS >= need_ms):
-                continue            # at a sentence end the renderer moves the stop's silence toward the speaker's (up to RETIMING_REACH_MS), so a stop covers a pause that much longer
+            if at_end:
+                last = z_sentence[-1]
+                if last["silence"] >= 0.75 * need_ms or (last["stop"] and last["silence"] + RETIMING_REACH_MS >= need_ms):
+                    continue            # at a sentence end the renderer moves the stop's silence toward the speaker's (up to RETIMING_REACH_MS), so a stop covers a pause that much longer
+                near, best = [last], last
+            else:
+                candidates = [w for w in inner if id(w) not in used and abs(w["end"] - target) <= tolerance and w["silence"] >= 0.75 * need_ms]
+                if candidates:
+                    used.add(id(min(candidates, key=lambda w: abs(w["end"] - target))))
+                    continue
+                near = [w for w in inner if abs(w["end"] - target) <= NEAR_CHARS] or [min(inner, key=lambda w: abs(w["end"] - target))]
+                best = max(near, key=lambda w: w["silence"])
             anchor = min(near, key=lambda w: abs(w["end"] - target))
             index = z_sentence.index(anchor)
             around = " ".join(w["word"] for w in z_sentence[max(0, index - 1):index + 2])
@@ -230,12 +312,12 @@ def held_pauses(text: str, inside: list[dict[str, Any]]) -> list[str]:
     return list(dict.fromkeys(found))[:4]
 
 
-def comma_check(text: str, words: list[dict[str, Any]], start_ms: int, end_ms: int) -> dict[str, Any] | None:
+def comma_check(text: str, words: list[dict[str, Any]], start_ms: int, end_ms: int, aligner: Any = None) -> dict[str, Any] | None:
     """What is worth telling the agent about this unit's commas and pauses, or None when there is nothing."""
     inside = _window(words, start_ms, end_ms)
     if not inside:
         return None
-    held = held_pauses(text, inside)
+    held = held_pauses(text, inside, aligner)
     text = re.sub(r"~pause\d+", " ", text)
     tokens = _TOKEN.findall(text)
     commas = [i for i, token in enumerate(tokens) if token == ","]
@@ -274,11 +356,11 @@ def comma_check(text: str, words: list[dict[str, Any]], start_ms: int, end_ms: i
     return result
 
 
-def comma_checks(items: Iterable[Mapping[str, Any]], words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def comma_checks(items: Iterable[Mapping[str, Any]], words: list[dict[str, Any]], aligner: Any = None) -> list[dict[str, Any]]:
     found = []
     for item in items:
         try:
-            checked = comma_check(str(item.get("zulu_text") or ""), words, int(item.get("start_ms")), int(item.get("end_ms")))
+            checked = comma_check(str(item.get("zulu_text") or ""), words, int(item.get("start_ms")), int(item.get("end_ms")), aligner)
         except (TypeError, ValueError):
             continue
         if checked:

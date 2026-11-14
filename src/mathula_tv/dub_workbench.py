@@ -20,9 +20,10 @@ from typing import Any, Callable
 
 from .atomic_io import atomic_write_json, read_json
 from .dub_fit import measure_text_fit
+from .voice_limits import MURMUR_NOTE, murmurs
 from .dub_submission import score_submission_dir, validate_submission, write_submission
 from .episode_scoring import (
-    GATE_NAMES, _known_entity_tokens, english_leakage, find_fabricated_entities,
+    GATE_NAMES, _known_entity_tokens, describe_missing_literal, english_leakage, find_fabricated_entities,
     find_restated_references, find_unsupported_doubling,
 )
 from .dub_pronunciation import register_clip_pronunciation
@@ -154,7 +155,11 @@ def length_gap(text: str, measured: dict[str, Any]) -> dict[str, Any]:
 
 
 WORDS_MEASURED = 30             # words, names and initialisms the word list measures as written against the speaker (one clip of the voice each): all of the list, which candidate_words caps at 30. At 20 only the first 20 in the order of the text were measured, so Western (0.42) and the others after them sat unmeasured at the end of prod-52's list
-UNIT_TEXTS_SHOWN = 8            # flagged units and claims whose current Zulu text a submit result carries, so the agent need not call get_submission to read them
+PAIR_EXPECTED_MIN = 5.0          # naturalness: a pair of common words that never meets although chance would put it 5 times in the corpora (false alarm 1.0-1.5% of real sentences)
+GATE_EVIDENCE_CHARS = 700          # characters of one failed gate's evidence a submit result carries (check_text gives it whole)
+MAX_DECISIONS = 60              # settled terms the workbench keeps and shows (submit_dub decisions)
+FIGURES_SHOWN = 30             # written numbers a submit result shows with the words the voice is given for them (figures_as_spoken)
+UNIT_TEXTS_SHOWN = 8           # flagged units and claims whose current Zulu text a submit result carries, so the agent need not call get_submission to read them
 UNIT_TEXT_CHARS = 360
 CLAIMS_PER_SUBMIT = 6           # units a submit result asks the agent to check against the English, at most
 
@@ -163,6 +168,35 @@ SAVED_READINGS_MEASURED = 24   # saved readings measured for the reminder (the w
 
 class BudgetExhausted(RuntimeError):
     """Raised when the agent asks for more measurements than its episode budget allows."""
+
+
+
+
+def units_overview(card: dict[str, Any]) -> list[str]:
+    """Every unit in one short string, so the agent can see the whole submission's fit without reading it: ``u14 858ch -1.0s`` is 858 characters ending 1.0 s before its window, ``+0.4s`` running
+    0.4 s over, ``0`` fitting.  The latest submit result is the one thing compaction keeps, so this is what stops a get_submission turn just to see how the rest stands."""
+    lines = []
+    for g in card.get("groups", []):
+        window, measured = int(g.get("window_ms") or 0), int(g.get("measured_ms") or 0)
+        gap = measured - window
+        fit = "0" if abs(gap) < 250 else f"{'+' if gap > 0 else '-'}{abs(gap) / 1000:.1f}s"
+        lines.append(f"{g['group_id']} {len(str(g.get('spoken_text') or ''))}ch {fit}")
+    return lines
+
+def settled_units(card: dict[str, Any]) -> list[str]:
+    """The units with no flag and no failed gate at this submit: the ones to leave alone unless a point names them (kept in the latest submit result, so compaction does not lose it)."""
+    return [str(g["group_id"]) for g in card.get("groups", []) if not g.get("flags") and not any(v["failed"] for v in g["gates"].values())]
+
+
+def speaker_rates(card: dict[str, Any]) -> dict[str, float]:
+    """Characters per second of speech each speaker's voice measured in this submit (the median over the speaker's units): the rate a length edit should be reckoned at."""
+    rates: dict[str, list[float]] = {}
+    for g in card.get("groups", []):
+        measured = int(g.get("measured_ms") or 0)
+        text = str(g.get("spoken_text") or "")
+        if measured > 0 and text:
+            rates.setdefault(str(g.get("speaker_id") or ""), []).append(len(text) / (measured / 1000.0))
+    return {speaker: round(sorted(values)[len(values) // 2], 1) for speaker, values in rates.items() if values}
 
 
 class Workbench:
@@ -187,6 +221,8 @@ class Workbench:
         self.pronunciation_root: Path | None = None
         self.segments: list[dict[str, Any]] = []
         self.source_corrections: list[dict[str, Any]] = []
+        self.decisions: dict[str, dict[str, Any]] = {}              # how the agent settled recurring terms (submit_dub decisions), kept across compaction and into a repair run
+        self.seed_decisions: dict[str, dict[str, Any]] = {}
         self.seed_unit_texts: dict[str, str] | None = None       # repair runs: the English each unit of the earlier submission was written against
         self.glossary_changes: list[dict[str, str]] = []
         self._pronunciation_lab: Any = None
@@ -286,6 +322,15 @@ class Workbench:
         }
         if not self.store.read_run(run_id):
             self.store.write_run(run_id, parameters={"approach": "agent", "tts_budget": budget, "speed_policy": speed_policy})
+        saved = directory / "decisions.json"
+        if not self.decisions:          # a resumed run keeps its own; a repair run starts with the earlier run's
+            try:
+                loaded = read_json(saved).get("decisions") if saved.is_file() else None
+            except (OSError, ValueError):
+                loaded = None
+            for entry in (loaded or list(self.seed_decisions.values())):
+                if isinstance(entry, dict) and entry.get("english") and entry.get("zulu"):
+                    self.decisions[str(entry["english"]).casefold()] = dict(entry)
         pass1 = read_json(native / "pass1_restored_transcript.json")
         self.segments = list(pass1["segments"])
         if not self.voices:
@@ -323,6 +368,7 @@ class Workbench:
                 {"segment_id": s["segment_id"], "speaker_id": s.get("speaker_id"), "start_ms": s["start_ms"],
                  "end_ms": s["end_ms"], "english": s.get("restored_text") or s.get("source_text"),
                  **({"fits_about_chars": guide[str(s["segment_id"])]} if str(s["segment_id"]) in guide else {}),
+                 **({"murmur_in_the_english": murmurs(s.get("restored_text") or s.get("source_text"))} if murmurs(s.get("restored_text") or s.get("source_text")) else {}),
                  **({"yours": s["segment_id"] in mine} if mine is not None else {})}
                 for s in pass1["segments"]
             ],
@@ -333,6 +379,8 @@ class Workbench:
             # Measurements use each speaker's assigned voice, the one the renderer will use.
             "voices": {sid: v.get("selected_voice") for sid, v in self.voices.items()},
         }
+        if any(s.get("murmur_in_the_english") for s in opened["segments"]):
+            opened["murmur_note"] = MURMUR_NOTE
         if guide:
             opened["length_guide"] = (
                 "fits_about_chars is the Zulu length (characters, spaces included, pauses and ~markers not counted) that fills a segment's window at "
@@ -355,6 +403,7 @@ class Workbench:
                 f"the next speech after your turn starts at {self.scope.get('next_start_ms')} ms."
             )
         self._add_phrasing(opened, clip_id)
+        self._add_dialogue(opened, clip_id, ledger_doc.get("context_ledger", ledger_doc))
         sheet = self._delivery_sheet(clip_id)
         if sheet:
             from .delivery import for_agent
@@ -379,6 +428,31 @@ class Workbench:
             entry = self.store.load_corpus()["clips"][clip_id]
             self._source_words = load_words(Path(self.store.root).parent / "jobs" / str(entry["job_id"]))
         return self._source_words
+
+    def _add_dialogue(self, opened: dict[str, Any], clip_id: str, ledger: dict[str, Any]) -> None:
+        """The clip as a conversation (see dialogue_view): turns in order, the question each answers, and the murmurs of other people inside a turn, from the segments and YouTube's speaker
+        marks.  Opened with the clip, so compaction keeps it.  Evidence, never a gate; a clip with one speaker has none."""
+        from . import youtube_captions
+        from .dialogue_view import NOTE, build
+
+        try:
+            if len({str(s.get("speaker_id") or "") for s in opened["segments"]}) < 2:
+                return
+            entry = self.store.load_corpus()["clips"][clip_id]
+            lines: list[tuple[float, float, str]] = []
+            found = youtube_captions.find(Path(self.store.root).parent / "jobs" / str(entry["job_id"]))
+            if found:
+                lines = youtube_captions.events(found[0])
+            roles = {}
+            for role in ledger.get("speaker_roles") or []:
+                if isinstance(role, dict) and role.get("speaker_id"):
+                    roles[str(role["speaker_id"])] = str(role.get("name") or role.get("identified_name") or role.get("role") or "")[:60]
+            turns = build(opened["segments"], lines, roles)
+            if turns:
+                opened["dialogue"] = turns
+                opened["dialogue_note"] = NOTE
+        except Exception:                                             # noqa: BLE001 - an advisory view must never fail opening a clip
+            return
 
     def _add_phrasing(self, opened: dict[str, Any], clip_id: str) -> None:
         """How the people in the clip really talk, from the source audio: each segment's English with the speakers' real pauses marked, and who talks to whom in what order.
@@ -614,6 +688,26 @@ class Workbench:
         """How professional translators wrote an English word or phrase: the English-isiZulu pairs (Umsuka news, Autshumato government text) whose English contains it, the shortest
         first, with where each came from and how many pairs there are in all.  Free: no try, no model.  Evidence to weigh, never an answer picked for the agent."""
         return self._pairs_db().lookup(str(phrase), limit=max(1, min(int(limit or 5), 8)))
+
+    def source_readings(self, segment_id: str = "", phrase: str = "") -> dict[str, Any]:
+        """What the pipeline heard at one moment of the source (see source_readings.py): the recogniser's text and what pass 1 changed, its per-word confidence, YouTube's caption for the same
+        moment and where the two differ, and the sentences either side.  Free: no model, no speech.  Evidence to weigh, never an answer picked for the agent."""
+        import json as _json
+
+        from . import source_readings, youtube_captions
+
+        episode = self._episode()
+        entry = self.store.load_corpus()["clips"][episode["clip_id"]]
+        job_root = Path(self.store.root).parent / "jobs" / str(entry["job_id"])
+        if getattr(self, "_raw_words", None) is None:
+            try:
+                self._raw_words = _json.loads((job_root / "analysis" / "transcript_en_raw.json").read_text(encoding="utf-8")).get("words") or []
+            except (OSError, ValueError):
+                self._raw_words = []
+        files = youtube_captions.find(job_root)
+        captions = youtube_captions.events(files[0]) if files else []
+        track = files[0].name.split(".")[-2] if files else ""
+        return source_readings.build(self.segments, words=self._raw_words, captions=captions, track=track, segment_id=str(segment_id or ""), phrase=str(phrase or ""))
 
     def say_it(self, text: str, speaker_id: str = "SPEAKER_00") -> dict[str, Any]:
         """The Zulu line as the voice will receive it (see say_it.py): the spoken form, each change the dictionary made, and what stayed as written.  Free: no try, no speech."""
@@ -968,6 +1062,19 @@ class Workbench:
         plan.update(window_ms=window, measured_ms=measured)
         return plan
 
+    def _source_explains(self):
+        """``explains(token, source_text)`` for the fabricated-entity gate: does real parallel text write this Zulu word where the English has a word of the source (attestation.translates)?
+        None when the resources are not installed (the gate then behaves as it always did)."""
+        if not hasattr(self, "_explains_hook"):
+            from . import attestation
+
+            try:
+                resources = attestation.load(Path(self.store.root).parent)
+            except Exception:                                             # noqa: BLE001 - an optional resource must never stop a check
+                resources = None
+            self._explains_hook = (lambda token, source: bool(resources.translates(token, source))) if resources is not None else None
+        return self._explains_hook
+
     def check_text(self, zulu_text: str, source_text: str) -> dict[str, Any]:
         from .native_dub import _missing_required_literals
 
@@ -979,11 +1086,15 @@ class Workbench:
             ledger_doc.get("context_ledger", ledger_doc),
         )
         missing = _missing_required_literals(source_text=source_text, candidate_text=zulu_text)
-        restated = find_restated_references(zulu_text)
-        fabricated = find_fabricated_entities(zulu_text, known)
+        from .delivery import strip_pauses
+
+        spoken = strip_pauses(zulu_text)          # the scorer reads the text without its ~pauseN markers; a capital after one is a sentence start, not a name
+        hook = self._source_explains()
+        restated = find_restated_references(spoken)
+        fabricated = find_fabricated_entities(spoken, known, (lambda token: hook(token, source_text)) if hook else None)
         problems: list[dict[str, Any]] = []
         if missing:
-            problems.append({"gate": "required_literals", "evidence": [f"{m['literal']} x{m['required_count']}" for m in missing]})
+            problems.append({"gate": "required_literals", "evidence": [describe_missing_literal(m, zulu_text) for m in missing]})
         if restated:
             problems.append({"gate": "restated_reference", "evidence": [f"{h['first']} / {h['second']}" for h in restated]})
         if fabricated:
@@ -1119,7 +1230,8 @@ class Workbench:
 
     def submit_dub(
         self, items: list[dict[str, Any]], approach_notes: str = "", partial: bool = False,
-        remove: list[str] | None = None,
+        remove: list[str] | None = None, decisions: list[dict[str, Any]] | None = None,
+        choice_points: list[dict[str, Any]] | None = None, unit_strategies: list[dict[str, Any]] | None = None, missing_evidence: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         replaced: list[str] = []
         sent = len(items)
@@ -1157,7 +1269,7 @@ class Workbench:
             speed_policy=episode.get("speed_policy", "pipeline"),
             segments=segments if self.scope else None,
             next_start_after_ms=self.scope.get("next_start_ms") if self.scope else None,
-            voices=self.voices, pronunciation_root=self.pronunciation_root,
+            voices=self.voices, pronunciation_root=self.pronunciation_root, source_explains=self._source_explains(),
         )
         status = segment_timing_status(card, items)
         regressions = ratchet_regressions(self.locked_segments, status) if self.timing_ratchet else []
@@ -1185,6 +1297,8 @@ class Workbench:
         self.locked_segments = {sid for sid, entry in status.items() if entry["ok"]}
         atomic_write_json(directory / "scorecard.json", card)
         self.last_items = [dict(i) for i in items]
+        self._keep_decisions(decisions, directory)
+        self._log_thinking(choice_points, unit_strategies, items, directory, int(episode["submissions"]), missing_evidence)
         self.last_submit = {
             "accepted": True, "warnings": warnings, "headline": card["headline"], "gates": card["gates"],
             **({"merged": {"sent": sent, "replaced": replaced, "units_now": len(items)}} if partial else {}),
@@ -1199,16 +1313,141 @@ class Workbench:
                  "residual_ms": t["padding"]["residual_ms"]}
                 for t in card["turns"] if t["shortfall_ms"]
             ],
-            "flagged_units": self._with_texts([
-                {"item_id": g["group_id"], "gates": [n for n, v in g["gates"].items() if v["failed"]], "flags": g["flags"]}
-                for g in card["groups"] if g["flags"] or any(v["failed"] for v in g["gates"].values())
-            ], items),
+            "flagged_units": self._with_texts([self._flagged_entry(g) for g in card["groups"] if g["flags"] or any(v["failed"] for v in g["gates"].values())], items),
             "listening_load": self._listening_load(items),
             "spoken_form_gaps": self._spoken_form_gaps(items),
             "comma_check": self._comma_check(items),
             "voice_limit_words": self._voice_limit_words(items),
+            "figures_as_spoken": self._figures_as_spoken(items),
+            "decisions_so_far": self._decisions_view(items),
+            "settled_units": settled_units(card),
+            "units_overview": units_overview(card),
+            "naturalness": self._naturalness(items),
+            "speaker_rates_chars_per_s": speaker_rates(card),
         }
         return self.last_submit
+
+    def _naturalness(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """How natural the units are against real Zulu (see naturalness and cadence): word pairs that never meet in the corpora although two common words would, and units chopped into sentences
+        shorter than almost any real speaker's.  Evidence on every submit, free, never a gate; the pair check needs the index built by scripts/naturalness_eval.py --final (the cadence check does not)."""
+        from .cadence import cadence_line
+        from .naturalness import NgramIndex, check, directory, register_check
+
+        try:
+            if not hasattr(self, "_ngram_index"):
+                self._ngram_index = NgramIndex.load(directory(Path(self.store.root).parent))
+            found = []
+            for item in items:
+                entry: dict[str, Any] = {}
+                if self._ngram_index is not None:
+                    pairs = check(self._ngram_index, str(item.get("zulu_text") or ""), expected_min=PAIR_EXPECTED_MIN)["unseen_pairs"][:2]
+                    if pairs:
+                        entry["pairs_that_never_meet_in_real_zulu"] = pairs
+                    register = register_check(self._ngram_index, str(item.get("zulu_text") or ""))
+                    if register:
+                        entry["reads_like_translated_government_zulu"] = (
+                            f"{register['above']} of {register['sentences']} sentences score like translated government text and not like native speech or news (only about 5% of native sentences score this high; "
+                            + (f"words pulling it: {', '.join(register['pulling'])}, which may be right for this subject). " if register["pulling"] else "). ")
+                            + "Say it the way a speaker would, in native word order and wording, unless the wording is exactly what the English needs.")
+                line = cadence_line(item)
+                if line:
+                    entry["cadence"] = line
+                if entry:
+                    found.append({"item_id": str(item.get("item_id")), **entry})
+            return found[:UNIT_TEXTS_SHOWN]
+        except Exception:                                             # noqa: BLE001 - an advisory view must never fail a submission
+            return []
+
+    def _keep_decisions(self, decisions: list[dict[str, Any]] | None, directory: Path) -> None:
+        """The terms the agent says it settled (english, zulu, note), merged by the English; saved beside the submission so a resumed or repair run starts with them."""
+        for entry in decisions or []:
+            if not isinstance(entry, dict):
+                continue
+            english, zulu = " ".join(str(entry.get("english") or "").split())[:60], " ".join(str(entry.get("zulu") or "").split())[:80]
+            if english and zulu and (english.casefold() in self.decisions or len(self.decisions) < MAX_DECISIONS):
+                self.decisions[english.casefold()] = {"english": english, "zulu": zulu, "note": " ".join(str(entry.get("note") or "").split())[:120]}
+        try:
+            atomic_write_json(directory / "decisions.json", {"decisions": list(self.decisions.values())})
+        except OSError:
+            pass
+
+    @staticmethod
+    def _stem_analyses(terms: list[str], items: list[dict[str, Any]]) -> dict[str, list[str]]:
+        """ZulMorph analyses (zulu_stems) for the words of the terms and for the words of the units that could hold one of their stems.  The letters only choose which words are worth
+        analysing (a stem is part of every form that holds it); the morphology decides whether they are the word."""
+        from . import zulu_stems
+
+        wanted = {w for term in terms for w in zulu_stems.words_of(term)}
+        analyses = dict(zulu_stems.analyse(sorted(wanted)))
+        known = set(wanted)
+        for word in wanted:
+            known |= zulu_stems.extract_stems(analyses.get(word) or ())
+        candidates = {w for item in items for w in zulu_stems.words_of(str(item.get("zulu_text") or "")) if any(stem in w for stem in known)}
+        analyses.update(zulu_stems.analyse(sorted(candidates)))
+        return analyses
+
+    def _decisions_view(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Each settled term with the units that still use it.  "Still uses it" is decided by stem (zulu_stems: ZulMorph reads isu, amasu and ngamasu as one word), not by the letters; when
+        the analyser cannot be reached the comparison is of the plain forms and the message says so, so the agent is not told a term drifted when only its prefix changed."""
+        from . import zulu_stems
+
+        if not self.decisions:
+            return []
+        analyses = self._stem_analyses([entry["zulu"] for entry in self.decisions.values()], items)
+        view = []
+        for entry in self.decisions.values():
+            units = [str(i["item_id"]) for i in items if zulu_stems.holds(entry["zulu"], str(i.get("zulu_text") or ""), analyses)]
+            gone = ("no unit uses a form of this word" if analyses else "not found as written in any unit (the stem analyser is not available here, so a prefixed form would be missed)")
+            view.append({"english": entry["english"], "zulu": entry["zulu"], **({"note": entry["note"]} if entry.get("note") else {}), "in_units": units[:12] if units else gone})
+        return view[:MAX_DECISIONS]
+
+    def _log_thinking(self, choice_points: list[dict[str, Any]] | None, unit_strategies: list[dict[str, Any]] | None, items: list[dict[str, Any]], directory: Path, submission: int,
+                      missing_evidence: list[dict[str, Any]] | None = None) -> None:
+        """Training mode: the agent's choice points and unit strategies, one JSON line each in thinking.jsonl beside the submission.  A choice point is checked against the text it was sent
+        with (``chosen_in_text``, by stem), so a record that does not match what was written shows.  Live mode sends none and this does nothing."""
+        if not choice_points and not unit_strategies and not missing_evidence:
+            return
+        from . import zulu_stems
+
+        def clip(value: Any, limit: int = 400) -> str:
+            return " ".join(str(value or "").split())[:limit]
+
+        texts = {str(i["item_id"]): str(i.get("zulu_text") or "") for i in items}
+        points = [c for c in (choice_points or []) if isinstance(c, dict)][:40]
+        try:
+            analyses = self._stem_analyses([clip(c.get("zulu"), 120) for c in points], items)
+        except Exception:                                             # noqa: BLE001 - a record must never fail a submission
+            analyses = {}
+        lines = []
+        for c in points:
+            unit, zulu = clip(c.get("unit"), 20), clip(c.get("zulu"), 120)
+            lines.append({"submission": submission, "kind": "choice", "unit": unit, "english": clip(c.get("english")), "zulu": zulu,
+                          "alternatives": [clip(a, 160) for a in (c.get("alternatives") or [])[:6]] if isinstance(c.get("alternatives"), list) else [],
+                          "why": clip(c.get("why")), "evidence": clip(c.get("evidence")),
+                          "chosen_in_text": bool(zulu and unit in texts and zulu_stems.holds(zulu, texts[unit], analyses)), "unit_known": unit in texts})
+        for m in [m for m in (missing_evidence or []) if isinstance(m, dict)][:20]:
+            lines.append({"submission": submission, "kind": "missing_evidence", "unit": clip(m.get("unit"), 20), "wanted": clip(m.get("wanted"), 300), "why": clip(m.get("why"), 300)})
+        for u in [u for u in (unit_strategies or []) if isinstance(u, dict)][:40]:
+            lines.append({"submission": submission, "kind": "strategy", "unit": clip(u.get("unit"), 20), "strategy": clip(u.get("strategy"), 300)})
+        try:
+            with open(directory / "thinking.jsonl", "a", encoding="utf-8") as handle:
+                for line in lines:
+                    handle.write(json.dumps(line, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _flagged_entry(g: dict[str, Any]) -> dict[str, Any]:
+        """One flagged unit as the agent sees it in a submit result: the gates that failed WITH their evidence (which required literal, which name), not only that a gate failed.  prod-98: after a
+        hard-gate failure on u08 the agent got the unit id and had to infer which literal ("I inferred it was the source's three officers")."""
+        failed = {n: v for n, v in g["gates"].items() if v["failed"]}
+        entry: dict[str, Any] = {"item_id": g["group_id"], "gates": list(failed), "flags": g["flags"]}
+        evidence = {n: [str(e)[:GATE_EVIDENCE_CHARS] for e in (v.get("evidence") or [])[:3]] for n, v in failed.items() if v.get("evidence")}
+        if evidence:
+            entry["gate_evidence"] = evidence
+        if "dead_air" in g["flags"]:
+            entry["ends_early_ms"] = int(g.get("shortfall_ms") or 0) - int(g.get("tail_pad_ms") or 0)
+        return entry
 
     @staticmethod
     def _voice_limit_words(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1225,9 +1464,22 @@ class Workbench:
         from .comma_check import comma_checks
 
         try:
-            return comma_checks(items, self._source_word_timings(self._episode()["clip_id"]))[:UNIT_TEXTS_SHOWN]
+            return comma_checks(items, self._source_word_timings(self._episode()["clip_id"]), self._word_aligner())[:UNIT_TEXTS_SHOWN]
         except Exception:                                             # noqa: BLE001 - an advisory view must never fail a submission
             return []
+
+    def _word_aligner(self):
+        """The aligner that says which Zulu word says what an English word said (word_alignment, from the parallel corpus), so a held pause is looked for where its words are and not at the
+        same fraction of the sentence; None when the corpus is not installed (the check then uses the position alone)."""
+        if not hasattr(self, "_aligner_hook"):
+            from . import attestation, word_alignment
+
+            try:
+                resources = attestation.load(Path(self.store.root).parent)
+            except Exception:                                             # noqa: BLE001 - an optional resource must never stop a check
+                resources = None
+            self._aligner_hook = word_alignment.make_aligner(resources.translation_forms) if resources is not None else None
+        return self._aligner_hook
 
     def _spoken_form_gaps(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Units whose text still holds digits, an abbreviation or capitals that no rule converted (see say_it): shown on every submit, so the agent sees what the voice will guess at
@@ -1241,6 +1493,23 @@ class Workbench:
             if gaps:
                 found.append({"item_id": str(item["item_id"]), "still_as_written": gaps})
         return found[:UNIT_TEXTS_SHOWN]
+
+    def _figures_as_spoken(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Each figure, year, time or number the units write, and the words the voice is given for it (see say_it): shown on every submit so the agent reads its own numbers as a
+        listener will hear them ("ngo-9.30" -> "ngo-nayn thethi") without having to ask.  Free, bounded, and never blocks a submission."""
+        found, total = [], 0
+        for item in items:
+            try:
+                changes = self.say_it(str(item.get("zulu_text") or ""), str(item.get("speaker_id") or "SPEAKER_00")).get("changes") or []
+            except Exception:                                             # noqa: BLE001 - an advisory view must never fail a submission
+                continue
+            said = [f"{c['was']} -> {c['now']}" for c in changes if any(ch.isdigit() for ch in str(c.get("was") or ""))]
+            if said:
+                found.append({"item_id": str(item["item_id"]), "spoken": said[:6]})
+                total += len(said[:6])
+            if total >= FIGURES_SHOWN:
+                break
+        return found
 
     @staticmethod
     def _listening_load(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

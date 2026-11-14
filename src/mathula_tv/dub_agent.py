@@ -37,7 +37,8 @@ DEFAULT_MAX_PUSHBACKS = 2
 DEAD_AIR_SLACK_PCT = 0.5          # the run counts as having met the bar this far above the stated residual dead air: the last half point is not audible and costs dozens of turns
 WRAPUP_TURNS = 6                  # once the bar is met the agent may use this many more turns for a plainly wrong unit, then the run ends (prod-69: bar met at turn 21, run ended at turn 80)
 MET_STOP_REASONS = frozenset({"agent_finished", "bar_met"})
-MAX_TOOL_RESULT_CHARS = 60000   # a 28-segment clip with ledger + glossary is ~19k; this is a runaway ceiling
+MAX_TOOL_RESULT_CHARS = 150000  # a runaway ceiling, not a budget. The opened clip of a 15-minute, 21-unit clip is about 40-45k characters and grows with the clip (its segments, delivery sheet and
+                                # dialogue); at 60k a clip of 25 minutes or more lost its tail (the delivery sheet, then the dialogue) without the agent being told why. 150k holds about an hour.
 
 _SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert English-to-isiZulu news dubbing agent working for Mathula TV.
@@ -154,7 +155,7 @@ You work through tools and decide your own method. You are scored on:
    included: a full stop already leaves about 0.9 s and a comma about 0.15 s by itself, so "ngentela yethu. ~pause1500" is the stop's 0.9 s plus the rest, 1.5 s in all, and
    "ngentela yethu. ~pause700" adds nothing (the stop alone is longer than 0.7 s). To match a speaker's pause shorter than about 1.1 s, do not end the phrase with a full stop:
    end it with a comma or no mark and write ~pause (the speaker's pause in ms) after it. The pause counts toward the unit's duration like any other part, and it is also the
-   cheapest way to fill a window honestly. Use it only for pauses the speaker really takes (open_clip's phrasing gives each pause's length), at most two per unit. After
+   cheapest way to fill a window honestly. Use it only for pauses the speaker really takes (open_clip's phrasing gives each pause's length), at most two per unit, and one more for each held pause of 0.8 s or more that the held-pause points name for that unit (the speaker's pause is the limit, not a number). After
    the voice has spoken, the renderer also moves the silence between your sentences so each one starts near where the source speaker's sentence starts (the speech and the unit's
    length are never touched), so write the sentences in the order the speaker made them and let the pauses be the speaker's.
 
@@ -180,6 +181,19 @@ You work through tools and decide your own method. You are scored on:
    that another way (spell the title out, put the figure after its prefix) or say in approach_notes what you could not fix. It only shows; the spelling of a word is still decided by
    the rules and by the listener's ear.
 
+   A time of day is written with a colon, never a point: ngo-9:30, not ngo-9.30 (the English source may write either). "9.30" is also a decimal figure and a point can be read as one;
+   the colon is a time and nothing else, and the rules say it as a time ("nine thirty").
+
+   Decisions so far. Your earlier drafts, measurements and checks are cleared from the conversation as you work (only the latest submit and its result stay). When you settle how a term or
+   phrase that recurs in this clip is said in Zulu (the word for a concept, an institution, a phrase the speaker keeps coming back to), pass it in submit_dub decisions as {english, zulu, note},
+   at most twelve a call. Every submit result then returns decisions_so_far (each with the units that still hold it), settled_units (no open flag: leave them alone unless a point names them)
+   and speaker_rates_chars_per_s (the measured speech rate, to reckon a length edit at). Use them to keep one word for one idea across the clip; a repair run starts with the earlier run's decisions.
+
+   Natural speech. The goal is a dub that sounds like a person talking, not one that merely fits and keeps the facts. Every submit shows naturalness evidence measured against real isiZulu:
+   word pairs that never meet in the corpora although two common words would, and units chopped into sentences shorter than almost any real speaker uses (every full stop leaves about 0.9 s of
+   silence, so a unit of short sentences is mostly pauses). Treat them as a listener's ear would: a pair that never meets is usually a calque from the English, so say it the way a speaker would;
+   join sentences with commas where the speaker kept going; use a full stop only where the thought is over. Filling a window with extra short sentences is not the same as filling it naturally.
+
    Listening load. The viewer hears each line once and cannot re-read it, so write for what the ear can take in, not only for fit. The
    words between two breath marks are one breath group: it should carry one new fact and last about two to three seconds of speech,
    rarely more than about six (a run past about eight is flagged). A figure that carries the point gets the breath after it, and when isiZulu word order allows, put the figure
@@ -198,6 +212,8 @@ You work through tools and decide your own method. You are scored on:
    (comma_check): read it as the listener's view of your punctuation. It also lists the pauses of 0.8 s or more that the speaker held (phrasing |1.4s|) where your Zulu has
    none that long: a speaker who stops for 1.4 s mid-sentence ("as well as ... Masemola") and a dub that runs straight on get out of step with the picture, so put a
    ~pauseN (the total silence) at that place.
+
+When the English of a segment looks odd, ambiguous or wrong (a double negative, a name, a number, a sentence that does not make sense), call source_readings before you decide what it meant: it shows what the recogniser heard, how sure it was word by word, what YouTube's caption says for the same moment, and where the two differ. It cannot play the audio; two readings that agree are strong evidence.
 
 Words the voice cannot say: a listener heard the voice stutter on "imininingwane" (and its forms, "emininingwaneni"): never write it. Where the English says details write the English word "details" with the Zulu prefix the sentence needs, hyphenated: you choose the concord ("anikeze ama-details", "angene kuma-details",
 "nama-details", "ngama-details", "ze-details"), as everyday speakers say it; where it says information write "ulwazi". check_text and submit_dub name any such word in your text.
@@ -247,7 +263,168 @@ def _grammar_version_in(system_prompt: str) -> str | None:
     return zulu_grammar.VERSION if zulu_grammar.HEADER[:40] in system_prompt else None
 
 
-def build_system_prompt(playbook: dict | None = None, *, max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, grammar: bool | None = None) -> str:
+STATE_NAME = "agent_state.json"
+PAUSE_NAME = "PAUSE"
+STATE_SCHEMA = "agent-state-v1"
+
+
+def state_path(directory: Path) -> Path:
+    return Path(directory) / STATE_NAME
+
+
+def request_pause(directory: Path) -> Path:
+    """Ask a running agent to stop at the end of its current turn: it saves its checkpoint and returns ``paused``.  ``dub_production --pause`` does this for a run id."""
+    path = Path(directory) / PAUSE_NAME
+    path.write_text("pause requested\n", encoding="utf-8")
+    return path
+
+
+def save_state(directory: Path, state: dict[str, Any]) -> None:
+    """The agent's whole position, atomically: the conversation (with the model's own reasoning items, which are replayed verbatim), the counters and flags, and the workbench's in-memory
+    results (its last accepted units, its last submit result, the segments that fitted).  Written at the start of every turn, so a stop or a crash loses at most the call in flight."""
+    from .atomic_io import atomic_write_json
+
+    atomic_write_json(state_path(directory), {"schema_version": STATE_SCHEMA, **state})
+
+
+def load_state(directory: Path) -> dict[str, Any] | None:
+    path = state_path(directory)
+    if not path.is_file():
+        return None
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) and state.get("schema_version") == STATE_SCHEMA and isinstance(state.get("messages"), list) else None
+
+
+def workbench_snapshot(workbench: Any) -> dict[str, Any]:
+    return {"last_items": getattr(workbench, "last_items", None), "last_submit": getattr(workbench, "last_submit", None),
+            "locked_segments": sorted(getattr(workbench, "locked_segments", None) or [])}
+
+
+def restore_workbench(workbench: Any, snapshot: Mapping[str, Any]) -> None:
+    """Put a checkpoint's results back into a freshly opened workbench (open_clip has already reloaded the episode counters, the decisions and the voices from disk)."""
+    if snapshot.get("last_items") is not None:
+        workbench.last_items = [dict(i) for i in snapshot["last_items"]]
+    if snapshot.get("last_submit") is not None:
+        workbench.last_submit = snapshot["last_submit"]
+    if hasattr(workbench, "locked_segments"):
+        workbench.locked_segments = set(snapshot.get("locked_segments") or [])
+
+
+BUDGET_POLICIES = ("free", "lean")
+
+
+def agent_budget(value: str | None = None) -> str:
+    """``free`` (the default for now: quality first, no pressure to economise: generous limits, the bar is a minimum and the agent decides when it is done, more of its own history kept) or
+    ``lean`` (token-lean: tight limits, the bar ends the run).  From the argument, else MATHULA_AGENT_BUDGET.  The owner chose free on 2026-11-13: spend now, so the agent builds the
+    experience (decisions, lessons, tools) that lets it spend less later."""
+    policy = str(value or os.environ.get("MATHULA_AGENT_BUDGET") or "free").strip().lower()
+    return policy if policy in BUDGET_POLICIES else "free"
+
+
+BUDGET_LIMITS: dict[str, dict[str, Any]] = {
+    "free": {"max_turns": 200, "max_total_tokens": 8_000_000, "tts_budget": 3000, "compact_after_tokens": 60_000, "dead_air_slack_pct": 0.0},
+    "lean": {"max_turns": 80, "max_total_tokens": 2_000_000, "tts_budget": 600, "compact_after_tokens": 15_000, "dead_air_slack_pct": DEAD_AIR_SLACK_PCT}  # lean: the old COMPACT_AFTER_TOKENS,
+}
+
+_COST_RE_MEASURE = "Measurements are budgeted."
+_COST_PARA = """Every tool call re-sends your whole history, so each extra turn costs more than the last. After you
+submit, your earlier working steps (drafts, measurements, checks) are trimmed from your history: the clip,
+your latest submit_dub call and its result are always kept."""
+_COST_PARTIAL = "Sending only what changed is much cheaper than rewriting the whole clip."
+FREE_PROMPT = """
+QUALITY FIRST. There is no token, turn or measurement pressure on this run: the people running it want the highest quality you can reach and are prepared to spend for it, so that what you
+learn here makes later runs better. Take as many turns, measurements, checks and rewrites as quality needs. The bar below is the minimum, not the finish line: when a submission meets it, keep
+going while any unit could sound more like a person talking, say the speaker's meaning more exactly, or sit better in its window; finish when you judge that no unit would be better, not when
+the bar is first met. Re-read your own text as a listener would, compare alternatives, and use every tool and every piece of evidence the harness shows you. If you ever need information that
+you were not given, say so in approach_notes.
+"""
+
+
+def free_prompt(base: str) -> str:
+    """The system prompt with the cost framing taken out and the quality-first paragraph in (the lean prompt is unchanged).  Matches across the prompt's own line breaks."""
+    base = base.replace(_COST_RE_MEASURE, "Measure as much as you need.", 1)
+    base = base.replace(_COST_PARA, "After you submit, your earlier working steps (drafts, measurements, checks) are trimmed from your history to keep it short: the clip, your latest submit_dub call "
+                                    "and its result (with decisions_so_far, settled_units, units_overview) are always kept.", 1)
+    base = re.sub(r"Sending only what\s+changed is much cheaper than rewriting the whole clip\.", "Sending only what changed keeps every other unit exactly as it is.", base, count=1)
+    base = re.sub(r"If you stop while a submission is still below that bar and you have budget left,\s+you will be sent back", "If you stop while a submission is still below that bar, you will be sent back", base, count=1)
+    return base + FREE_PROMPT
+
+
+def free_bar_message(residual: Any, points: list[str], *, first: bool) -> str:
+    """Quality-first runs are not stopped when the bar is met: the agent is told it is met, shown the open points, and left to decide when it is done."""
+    head = ("Your last submission meets the minimum bar by the harness's own score: no hard-gate failures, no collisions, nothing overruns, no meaning lost"
+            + (f", residual dead air {residual}%" if residual is not None else "") + ". That is the minimum, not the finish line. " if first else "New open points on your latest submission. ")
+    body = (("The listener's view of the same submission has open points (soft evidence, not gates):\n- " + "\n- ".join(points) + "\nAct on the ones that are right; leave one alone if acting on it would cost a name, "
+             "a number or the meaning. ") if points else "")
+    tail = "Keep improving whatever could sound more like a person talking; when you judge that no unit would be better, reply with one short sentence and no tool call."
+    return head + body + tail
+
+
+MAX_QUALITY_ROUNDS = 3          # how many times a quality-first run is sent back to its open points when it stops (bounded: a loop needs a ceiling)
+QUALITY_POINTS_SHOWN = 12
+
+
+def quality_pushback_message(points: list[str], number: int) -> str:
+    """Sent when a quality-first agent stops while its last submission still has open listener points: act on each, or give a reason you measured.  In prod-95 and prod-96 the agent was told the
+    bar was met and given the points, and finished on the next turn: once with 'further pause changes would break the current collision-free timing', which it had not measured."""
+    lines = [f"You stopped, but your last submission still has {len(points)} open point(s) (soft evidence, not gates; measured on the source audio and against real isiZulu):"]
+    lines += [f"- {point}" for point in points]
+    lines.append(
+        "Before you finish, take each one. Either change the unit (a held pause is written ~pauseN, the total silence in ms, after the word that ends the thought; check the result with "
+        "measure_tts or measure_tts_batch, and shorten words elsewhere in the unit if it would overrun; send only the changed units with submit_dub partial=true), or, if you decide a point "
+        "should stay, say why in one line of your reply. A reason you measured counts; 'it would break the timing' without a measurement does not. "
+        f"Round {number} of {MAX_QUALITY_ROUNDS}: when you have acted on what is right, reply with no tool call.")
+    return "\n".join(lines)
+
+
+AGENT_MODES = ("live", "training")
+
+
+def agent_mode(value: str | None = None) -> str:
+    """``live`` (the default: token-lean, what runs in production) or ``training`` (the agent also records why it chose what it chose; see TRAINING_PROMPT).  From the argument, else MATHULA_AGENT_MODE."""
+    mode = str(value or os.environ.get("MATHULA_AGENT_MODE") or "live").strip().lower()
+    return mode if mode in AGENT_MODES else "live"
+
+
+TRAINING_PROMPT = """
+TRAINING MODE. This run is studied, not published: the people reading it want to understand how you decide. Work exactly as you would otherwise (the same tools, the same bar, no extra
+turns); the only difference is what you write down. Everything you record is read by someone who does NOT read Zulu, so write it in English (Zulu only for the Zulu words themselves).
+- submit_dub takes choice_points: every place where you weighed two or more ways of saying something, or chose against a flag, a lesson, a tool's suggestion or the corpus. For each:
+  {unit, english (the chunk), zulu (the form you chose, exactly as written in the unit), alternatives (the other forms you considered, with a few words on each), why (the reason, in English),
+  evidence (what you relied on or set aside: a tool result, a lesson, a measurement, the glossary, the speaker's pauses, your own sense of the Zulu)}. A word with no real alternative is not a
+  choice point. Send them in the same submit_dub call as the units they belong to; at most 40 a call.
+- submit_dub also takes unit_strategies: for each unit you rewrote or built, {unit, strategy}: one line on how you approached it (close to the English or retold, what you restructured and why).
+- submit_dub also takes missing_evidence: anything you wanted to know while deciding and were not given (a count, an example, a check, a piece of context, a way to hear the result): {unit
+  (optional), wanted, why}. This is how the people running this learn what to show you next, so say it plainly whenever you notice the gap; an empty list is a fine answer when you had what you needed.
+- When you decline to act on evidence the harness showed you (a flag, a listener point, a suggestion), say so in a choice point with evidence "set aside" and the reason.
+"""
+
+
+def tool_specs(mode: str = "live") -> list[dict[str, Any]]:
+    """The tools the agent is given: the same in both modes, except that in training mode submit_dub also takes choice_points and unit_strategies."""
+    if mode != "training":
+        return TOOL_SPECS
+    import copy
+
+    specs = copy.deepcopy(TOOL_SPECS)
+    for spec in specs:
+        if spec["function"]["name"] == "submit_dub":
+            props = spec["function"]["parameters"]["properties"]
+            props["choice_points"] = {"type": "array", "maxItems": 40, "description": "Training mode. Where you weighed alternatives or went against evidence (English).",
+                                      "items": {"type": "object", "properties": {"unit": {"type": "string"}, "english": {"type": "string"}, "zulu": {"type": "string"},
+                                                                                  "alternatives": {"type": "array", "items": {"type": "string"}}, "why": {"type": "string"},
+                                                                                  "evidence": {"type": "string"}}, "required": ["unit", "english", "zulu", "why"]}}
+            props["missing_evidence"] = {"type": "array", "maxItems": 20, "description": "Training mode. Information you wanted while deciding and were not given (English).",
+                                         "items": {"type": "object", "properties": {"unit": {"type": "string"}, "wanted": {"type": "string"}, "why": {"type": "string"}}, "required": ["wanted", "why"]}}
+            props["unit_strategies"] = {"type": "array", "maxItems": 40, "description": "Training mode. One line per unit you built or rewrote (English).",
+                                        "items": {"type": "object", "properties": {"unit": {"type": "string"}, "strategy": {"type": "string"}}, "required": ["unit", "strategy"]}}
+    return specs
+
+
+def build_system_prompt(playbook: dict | None = None, *, max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, grammar: bool | None = None, mode: str = "live", budget: str = "lean") -> str:
     """The rules (always), the isiZulu grammar reference (unless switched off: MATHULA_AGENT_GRAMMAR=0 or grammar=False), and the learned strategy notes (if a playbook is given).
     The reference replaces the pass-2 grammar block this prompt used to carry: its claims were not checked against data and the new modules cover and correct them."""
     from . import zulu_grammar
@@ -255,7 +432,8 @@ def build_system_prompt(playbook: dict | None = None, *, max_dead_air_pct: float
 
     use_grammar = zulu_grammar.enabled() if grammar is None else grammar
     base = _SYSTEM_PROMPT_TEMPLATE.replace("{max_dead_air}", f"{max_dead_air_pct}%").replace("{grammar_pointer}", GRAMMAR_POINTER if use_grammar else "")
-    return base + ("\n\n" + zulu_grammar.reference() + "\n" if use_grammar else "\n") + render_section(playbook)
+    prompt = base + ("\n\n" + zulu_grammar.reference() + "\n" if use_grammar else "\n") + render_section(playbook) + (TRAINING_PROMPT if mode == "training" else "")
+    return free_prompt(prompt) if budget == "free" else prompt
 
 _UNIT_SCHEMA = {
     "type": "object",
@@ -324,7 +502,9 @@ TOOL_SPECS = [
           {"items": {"type": "array", "items": _UNIT_SCHEMA}, "approach_notes": {"type": "string"},
            "partial": {"type": "boolean", "description": "true = update only the units you send."},
            "remove": {"type": "array", "items": {"type": "string"},
-                      "description": "partial only: ids of current units to delete (e.g. units you re-split)."}}, ["items"]),
+                      "description": "partial only: ids of current units to delete (e.g. units you re-split)."},
+           "decisions": {"type": "array", "maxItems": 12, "description": "Optional. Terms or phrases that recur in this clip and that you have settled how to say in Zulu; they come back with every submit. english: the term; zulu: ONE form exactly as written in your units (a word or a phrase, no alternatives, no slashes); note: a few words IN ENGLISH (the reader of this log does not read Zulu).",
+                         "items": {"type": "object", "properties": {"english": {"type": "string"}, "zulu": {"type": "string"}, "note": {"type": "string"}}, "required": ["english", "zulu"]}}}, ["items"]),
     _tool("create_loanword", "For an English noun the speaker says that has NO everyday Zulu word: make a Zulu word for it the way Zulu adapts loans "
           "(science -> isayensi, bus -> ibhasi, spoon -> isipunu), by rule, from the dictionary's sounds for the word (p t k b written ph th kh bh, vowels "
           "reduced to a e i o u, a vowel inserted where Zulu has no cluster and at the end of the word). The forms come back with what each changes from the "
@@ -346,6 +526,11 @@ TOOL_SPECS = [
           "left out. The pairs are sometimes shifted by a line and the government text is older and formal: it is evidence to weigh, not an answer. Free: no try, no model.",
           {"phrase": {"type": "string", "description": "the English phrase, e.g. good afternoon, press briefing, microphone"},
            "limit": {"type": "integer", "description": "pairs to return (default 5, at most 8)"}}, ["phrase"]),
+    _tool("source_readings", "What the pipeline heard at one moment of the source, for when the English of a segment looks odd, ambiguous or wrong (a double negative, a name, a number, a sentence "
+          "that does not make sense): the recogniser's text and what the restoration changed in it, the recogniser's confidence for each word and the words it was unsure of, YouTube's caption for the "
+          "same moment (a second recogniser run on the same audio) and the words the two readings differ on, and the sentences either side. Give a segment_id from open_clip, or a few words of the "
+          "English. It cannot play the audio or say what the speaker meant: two readings that agree are strong evidence, a low-confidence word is the one to doubt. Free: no try, no model.",
+          {"segment_id": {"type": "string", "description": "a segment id from open_clip, e.g. seg-00007"}, "phrase": {"type": "string", "description": "a few words of the English, if you do not have the id"}}, []),
     _tool("say_it", "See your own line as the voice will receive it: the spoken form (figures and years in English after their Zulu prefix, titles expanded, names respelled by the rules), "
           "each change the dictionary made (was -> now), and what stayed as written (the field still_as_written: digits, abbreviations, capitals no rule converted, which the voice then reads by itself and often wrongly). "
           "It is the same dictionary measure_tts uses. Call it on a unit's text before you submit: if something is wrong for a listener (a title left raw, a figure still in digits, a name that will "
@@ -436,6 +621,7 @@ class ResponsesClient:
         self.retries = retries
         self.sleep = sleep
         self.url = f"{config.endpoint}/openai/v1/responses"
+        self.reasoning_summary: str | None = None          # "detailed" in training mode: the model's own summary of its reasoning each turn, logged to the trace
 
     @staticmethod
     def to_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -471,6 +657,10 @@ class ResponsesClient:
             for item in output if item.get("type") == "function_call"
         ]
         message: dict[str, Any] = {"role": "assistant", "content": text or None, "_raw": output}
+        summary = "\n".join(part.get("text", "") for item in output if item.get("type") == "reasoning"
+                            for part in item.get("summary") or [] if isinstance(part, dict) and part.get("text"))
+        if summary:
+            message["_reasoning"] = summary          # only for the trace: it is not sent back (the raw reasoning items are)
         if calls:
             message["tool_calls"] = calls
         usage = response.get("usage") or {}
@@ -490,6 +680,8 @@ class ResponsesClient:
         }
         if self.config.reasoning_effort:
             body["reasoning"] = {"effort": self.config.reasoning_effort}
+        if self.reasoning_summary:
+            body.setdefault("reasoning", {})["summary"] = self.reasoning_summary
         if tools:
             body["tools"] = self.to_tools(tools)
         if json_mode:
@@ -523,9 +715,9 @@ def _clip(text: str) -> str:
 COMPACT_AFTER_TOKENS = 15_000
 _KEEP_STEP_TOOLS = frozenset({"open_clip", "recall_lessons"})
 COMPACTION_NOTE = (
-    "[Earlier working steps (drafts, measurements, checks, past feedback) were removed to save tokens. The harness "
-    "holds your accepted submission: call get_submission to see the current units. Your latest submit_dub call and "
-    "its result are below; the opened clip above is unchanged.]"
+    "[Earlier working steps (drafts, measurements, checks, past feedback) were removed to keep the conversation short. Your latest submit_dub call and its result are below, and the result "
+    "already shows where every unit stands: units_overview (each unit's length and fit), flagged_units (the text of the units that need work), settled_units, decisions_so_far. "
+    "Work from those; call get_submission only to read the text of a unit that is not listed. The opened clip above is unchanged.]"
 )
 
 
@@ -583,6 +775,17 @@ CLAIMS_NOTE = (
     "units, and send all of them in one partial submit.")
 
 
+SUBMIT_KEY_ROUTES: dict[str, tuple[str, ...]] = {
+    # every key Workbench.submit_dub puts in its result -> the key(s) of slim_submit's result that carry it to the agent.  A key with no route would be computed and never shown: the guard
+    # in tests/test_dub_agent.py reads the workbench source and fails when a new key is added without a route here (slim_submit is an allow-list).
+    "accepted": ("accepted",), "warnings": ("warnings",), "headline": ("headline",), "gates": ("gates",), "merged": ("merged",),
+    "regressions_accepted": ("regressions_accepted",), "note": ("note",), "meaning": ("meaning_loss", "claims_to_check"), "timing_lock": ("timing_lock",),
+    "turn_padding": ("turns_ending_early",), "flagged_units": ("flagged_units",), "listening_load": ("listening_load",), "spoken_form_gaps": ("spoken_form_gaps",),
+    "comma_check": ("comma_check",), "voice_limit_words": ("voice_limit_words",), "figures_as_spoken": ("figures_as_spoken",), "decisions_so_far": ("decisions_so_far",),
+    "settled_units": ("settled_units",), "units_overview": ("units_overview",), "naturalness": ("naturalness",), "speaker_rates_chars_per_s": ("speaker_rates_chars_per_s",),
+}
+
+
 def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
     """The model-facing view of a submit_dub result (the harness keeps the full one)."""
     if not result.get("accepted"):
@@ -621,6 +824,25 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
                                     "the words together; keep it where the phrasing of the segment shows a pause. pauses_the_speaker_held_that_the_dub_does_not is the other direction: the speaker "
                                     "held a pause of 0.8 s or more (phrasing |1.4s|) where your Zulu has only a comma or nothing, so your sentence runs ahead of the speaker and then waits; "
                                     "write ~pauseN (the total silence, in ms) after the word that ends the thought, or end the sentence there.")
+    if result.get("decisions_so_far"):
+        slim["decisions_so_far"] = result["decisions_so_far"]
+    if result.get("settled_units"):
+        slim["settled_units"] = result["settled_units"]
+    if result.get("units_overview"):
+        slim["units_overview"] = result["units_overview"]
+    if result.get("naturalness"):
+        slim["naturalness"] = result["naturalness"]
+        slim["naturalness_note"] = ("Soft evidence, not a gate, measured against real isiZulu (a 2-million-word spoken corpus and 11 million words of written text): pairs_that_never_meet_in_real_zulu are two common words side by side that never occur together although they should have by chance, which often means a calque or a wrong collocation; reads_like_translated_government_zulu is a unit whose sentences score like translated government text rather than native speech or news (the contrast is translated against native, so political and legal wording is not penalised for being formal); cadence is a unit chopped into sentences shorter than almost any real speaker uses. Reword the pair the way a speaker would say it, or leave it if it is right; join short sentences where the speaker kept going.")
+    if result.get("speaker_rates_chars_per_s"):
+        slim["speaker_rates_chars_per_s"] = result["speaker_rates_chars_per_s"]
+    if result.get("decisions_so_far") or result.get("settled_units"):
+        slim["working_state_note"] = ("Kept here because your earlier steps are cleared from the conversation: decisions_so_far are the terms you settled (use the same Zulu for the same idea; a unit "
+                                      "that no longer holds one drifted), settled_units had no open flag at this submit (leave them unless a point names them), speaker_rates_chars_per_s is the "
+                                      "measured speech rate to reckon a length edit at.")
+    if result.get("figures_as_spoken"):
+        slim["figures_as_spoken"] = result["figures_as_spoken"]
+        slim["figures_as_spoken_note"] = ("Soft evidence, not a gate: each number you wrote and the words the voice is given for it. Read them as a listener will hear them: a time must say "
+                                          "a time (nine thirty), a year a year, a figure its figure; a reading that is wrong means writing it another way (a time with a colon, 9:30), or say in approach_notes what you could not fix.")
     if result.get("voice_limit_words"):
         slim["voice_limit_words"] = result["voice_limit_words"]
         slim["voice_limit_words_note"] = ("Soft evidence, not a gate: a word the voice stutters on (a listener heard it). Swap it for the word named, and rephrase the clause around the new word; "
@@ -660,7 +882,7 @@ def build_dispatch(
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
         "get_submission": workbench.get_submission,
     }
-    for name in ("create_loanword", "use_loanword", "attested_zulu", "human_translations", "figure_style", "say_it"):       # vocabulary tools (the loan rules on the dictionary's sounds, a corpus lookup), where the workbench has them; the agent has no recogniser and no pronunciation tool
+    for name in ("create_loanword", "use_loanword", "attested_zulu", "human_translations", "figure_style", "source_readings", "say_it"):       # vocabulary tools (the loan rules on the dictionary's sounds, a corpus lookup), where the workbench has them; the agent has no recogniser and no pronunciation tool
         if hasattr(workbench, name):
             tools[name] = getattr(workbench, name)
     return tools
@@ -703,11 +925,12 @@ def unmet_targets(result: dict[str, Any] | None, *, max_dead_air_pct: float) -> 
     return unmet
 
 
-LISTENER_POINTS_SHOWN = 8              # the wrap-up names at most this many open listener points
+DEAD_AIR_UNIT_MS = 2000                # a unit that ends this long before its window is a listener point in the wrap-up (see open_listener_points)
+LISTENER_POINTS_SHOWN = 8             # the wrap-up names at most this many open listener points
 _LISTENER_POINT_KEYS = ("pauses_the_speaker_held_that_the_dub_does_not", "commas_where_the_speaker_did_not_pause")
 
 
-def open_listener_points(result: dict[str, Any] | None) -> list[str]:
+def open_listener_points(result: dict[str, Any] | None, *, limit: int = LISTENER_POINTS_SHOWN) -> list[str]:
     """The soft listener evidence of the last accepted submission that is still open (comma_check): pauses the source speaker held and the Zulu does not, commas the speaker
     did not take.  Not gates; the wrap-up shows them while the agent can still act, because at the final submit they arrived after the stop rule had already said 'finish' (prod-84, prod-85)."""
     points: list[str] = []
@@ -720,7 +943,14 @@ def open_listener_points(result: dict[str, Any] | None) -> list[str]:
     for item in (result or {}).get("voice_limit_words") or []:
         if isinstance(item, dict):
             points.extend(f"{item.get('item_id')}: {line}" for line in item.get("words") or [])
-    return points[:LISTENER_POINTS_SHOWN]
+    for item in (result or {}).get("naturalness") or []:          # a unit chopped into very short sentences: said aloud it is mostly full stops
+        if isinstance(item, dict) and item.get("cadence"):
+            points.append(f"{item.get('item_id')}: {item['cadence']}")
+    for item in (result or {}).get("flagged_units") or []:          # a unit that ends well before its window leaves the speaker talking over silence, however short the whole run's dead air is
+        early = int(item.get("ends_early_ms") or 0) if isinstance(item, dict) else 0
+        if early >= DEAD_AIR_UNIT_MS:
+            points.append(f"{item.get('item_id')}: the Zulu ends {early / 1000:.1f} s before the speaker stops (about {round(early / 1000 * 12)} more characters would fill it): the viewer sees them talking in silence")
+    return points[:limit]
 
 
 def _listener_points_message(points: list[str]) -> str:
@@ -860,11 +1090,14 @@ def run_agent(client: ChatClient, workbench: Workbench, **kwargs: Any) -> dict[s
     Only this run's folder is touched: autopilot batches run several repeats at once, so nothing here may clean another run's."""
     from .housekeeping import clean_measure, keep_measure
 
+    paused = False
     try:
-        return _run_agent(client, workbench, **kwargs)
+        summary = _run_agent(client, workbench, **kwargs)
+        paused = summary.get("stop_reason") == "paused"
+        return summary
     finally:
         episode = getattr(workbench, "episode", None)
-        if not keep_measure() and episode and episode.get("dir"):
+        if not paused and not keep_measure() and episode and episode.get("dir"):
             try:
                 clean_measure(workbench.store.root, Path(episode["dir"]))
             except Exception:        # cleaning is housekeeping: it must never turn a finished run into a failure
@@ -878,11 +1111,16 @@ def _run_agent(
     max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, max_pushbacks: int = DEFAULT_MAX_PUSHBACKS,
     task_message: str | None = None, trace_dir: Path | None = None,
     compact_after_tokens: int = COMPACT_AFTER_TOKENS, playbook_version: str | None = None,
-    seed_items: list[dict[str, Any]] | None = None, wrapup_turns: int = WRAPUP_TURNS, dead_air_slack_pct: float = DEAD_AIR_SLACK_PCT,
+    seed_items: list[dict[str, Any]] | None = None, wrapup_turns: int = WRAPUP_TURNS, dead_air_slack_pct: float = DEAD_AIR_SLACK_PCT, mode: str = "live", free_finish: bool = False, resume: bool = False,
 ) -> dict[str, Any]:
-    """``wrapup_turns``: once a submission meets the bar (within ``dead_air_slack_pct`` on residual dead air) the agent is told to finish and has this many turns left;
+    """``resume``: continue from the checkpoint this run saved (agent_state.json: every turn writes one) instead of starting; a run is paused with a PAUSE file in its folder (request_pause) and
+    returns stop_reason "paused".  ``mode``: "live" or "training" (the agent also records its choice points; the reasoning summaries and a thinking report are kept).  ``wrapup_turns``: once a submission meets the bar (within ``dead_air_slack_pct`` on residual dead air) the agent is told to finish and has this many turns left;
     0 turns the rule off.  ``seed_items`` starts a REPAIR run: the units of an earlier accepted submission are re-scored under today's rules
     and the agent is told to change only what misses the bar, leaving every other unit exactly as it was."""
+    mode = agent_mode(mode)
+    specs = tool_specs(mode)
+    if mode == "training" and hasattr(client, "reasoning_summary"):
+        client.reasoning_summary = "detailed"
     directory = Path(trace_dir) if trace_dir else workbench.store.repeat_dir(run_id, clip_id, repeat)
     trace = Trace(directory / "trace.jsonl")
     dispatch = build_dispatch(
@@ -920,11 +1158,64 @@ def _run_agent(
     good_enough_pct = max_dead_air_pct + dead_air_slack_pct
     seen_submit: Any = None
     wrapup_at: int | None = None
+    told_bar = False                          # free_finish: the agent has been told the bar is met
+    quality_rounds = 0                        # free_finish: times the agent was sent back to its open points
+    quality_seen: Any = None                  # the submission the last round was about
+    points_sent: set[str] = set()
 
     def accepted() -> bool:
         return bool(workbench.episode and workbench.episode.get("submissions"))
 
-    for turn in range(1, max_turns + 1):
+    start_turn = 1
+    resumed_from = None
+    if resume:
+        state = load_state(directory)
+        if state is None:
+            raise FileNotFoundError(f"nothing to resume: {state_path(directory)} is missing or unreadable")
+        messages[:] = state["messages"]
+        if messages and messages[0].get("role") == "system":          # the current instructions replace the saved ones: a run is resumed after the prompt or a gate was fixed
+            prompt_changed = messages[0].get("content") != system_prompt
+            messages[0] = {**messages[0], "content": system_prompt}
+        else:
+            prompt_changed = False
+        tokens.update({k: int(v) for k, v in (state.get("tokens") or {}).items()})
+        last_prompt_tokens = int(state.get("last_prompt_tokens") or 0)
+        compactions = int(state.get("compactions") or 0)
+        tool_counts.update({k: int(v) for k, v in (state.get("tool_counts") or {}).items()})
+        flags = state.get("flags") or {}
+        nudged, loanwords_noted, pushbacks = bool(flags.get("nudged")), bool(flags.get("loanwords_noted")), int(flags.get("pushbacks") or 0)
+        told_bar, points_sent, wrapup_at = bool(flags.get("told_bar")), set(flags.get("points_sent") or []), flags.get("wrapup_at")
+        quality_rounds = int(flags.get("quality_rounds") or 0)
+        unmet = list(state.get("unmet") or [])
+        workbench.open_clip(clip_id, run_id, repeat=repeat, tts_budget=tts_budget, speed_policy=speed_policy)
+        restore_workbench(workbench, state.get("workbench") or {})
+        seen_submit = getattr(workbench, "last_submit", None)          # the bar message for that submission was already sent (or not needed): do not send it again
+        start_turn = int(state.get("turn") or 0) + 1
+        resumed_from = start_turn - 1
+        try:
+            (directory / PAUSE_NAME).unlink()
+        except OSError:
+            pass
+        trace.log("resume", turn=start_turn, messages=len(messages), tokens=dict(tokens), system_prompt_changed=prompt_changed, submissions=(workbench.episode or {}).get("submissions"))
+    turn = start_turn - 1
+
+    def checkpoint(completed: int, stop: str = "running") -> None:
+        try:
+            save_state(directory, {
+                "clip_id": clip_id, "run_id": run_id, "turn": completed, "stop_reason": stop, "mode": mode, "free_finish": free_finish, "messages": messages, "tokens": dict(tokens),
+                "last_prompt_tokens": last_prompt_tokens, "compactions": compactions, "tool_counts": dict(tool_counts),
+                "flags": {"nudged": nudged, "loanwords_noted": loanwords_noted, "pushbacks": pushbacks, "told_bar": told_bar, "points_sent": sorted(points_sent), "wrapup_at": wrapup_at, "quality_rounds": quality_rounds},
+                "unmet": list(unmet), "workbench": workbench_snapshot(workbench)})
+        except Exception as exc:                                             # noqa: BLE001 - a checkpoint that cannot be written must never end a run
+            trace.log("checkpoint_failed", turn=completed, error=f"{type(exc).__name__}: {str(exc)[:200]}")
+
+    for turn in range(start_turn, max_turns + 1):
+        if turn > start_turn:
+            checkpoint(turn - 1)                                                          # the position after the previous turn: a stop or a crash costs at most the call in flight
+        if (directory / PAUSE_NAME).exists():
+            stop_reason = "paused"
+            turn -= 1
+            break
         if compact_after_tokens and last_prompt_tokens >= compact_after_tokens:
             compacted, dropped_steps = compact_history(messages)
             if dropped_steps:
@@ -946,7 +1237,7 @@ def _run_agent(
                 early_text = "Your first accepted submission keeps English words that may have a Zulu word." + early
                 messages.append({"role": "user", "content": early_text})
                 trace.log("loanwords_early", turn=turn, text=early_text)
-        response = client.complete(messages, tools=TOOL_SPECS)
+        response = client.complete(messages, tools=specs)
         usage = response.get("usage") or {}
         last_prompt_tokens = int(usage.get("prompt_tokens") or 0)
         tokens["in"] += last_prompt_tokens
@@ -957,7 +1248,7 @@ def _run_agent(
         calls = message.get("tool_calls") or []
         trace.log("model", turn=turn, finish=choice.get("finish_reason"), text=message.get("content"),
                   tool_calls=[{"name": c["function"]["name"], "arguments": c["function"]["arguments"]} for c in calls],
-                  usage=usage)
+                  usage=usage, **({"reasoning": message["_reasoning"]} if message.get("_reasoning") else {}))
         messages.append({k: v for k, v in message.items() if k in ("role", "content", "tool_calls", "_raw") and v is not None})
 
         if not calls:
@@ -981,6 +1272,16 @@ def _run_agent(
                 messages.append({"role": "user", "content": text})
                 trace.log("pushback", turn=turn, number=pushbacks, unmet=unmet, text=text)
                 continue
+            if free_finish and not unmet and quality_rounds < MAX_QUALITY_ROUNDS and tokens["in"] + tokens["out"] < 0.9 * max_total_tokens:
+                submitted = getattr(workbench, "last_submit", None)
+                points = open_listener_points(submitted, limit=QUALITY_POINTS_SHOWN)
+                if points and submitted is not quality_seen:          # a round that changed nothing is the agent's answer: it is not asked again
+                    quality_rounds += 1
+                    quality_seen = submitted
+                    text = quality_pushback_message(points, quality_rounds)
+                    messages.append({"role": "user", "content": text})
+                    trace.log("quality_pushback", turn=turn, round=quality_rounds, points=points, agent_said=str(message.get("content") or "")[:600])
+                    continue
             stop_reason = "finished_below_target" if unmet else "agent_finished"
             break
 
@@ -994,7 +1295,18 @@ def _run_agent(
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": observation})
 
         latest = getattr(workbench, "last_submit", None)
-        if wrapup_turns and latest is not None and latest is not seen_submit:       # a new accepted submission: has it met the bar?
+        if free_finish and latest is not None and latest is not seen_submit:       # quality first: tell the agent the bar is met and what is open; never stop it for it
+            seen_submit = latest
+            if not unmet_targets(latest, max_dead_air_pct=good_enough_pct):
+                new_points = [x for x in open_listener_points(latest) if x not in points_sent]
+                if not told_bar or new_points:
+                    residual = (latest.get("headline") or {}).get("residual_dead_air_pct")
+                    text = free_bar_message(residual, new_points, first=not told_bar)
+                    points_sent.update(new_points)
+                    messages.append({"role": "user", "content": text})
+                    trace.log("bar_reached", turn=turn, first=not told_bar, points=new_points, text=text)
+                    told_bar = True
+        if wrapup_turns and not free_finish and latest is not None and latest is not seen_submit:       # a new accepted submission: has it met the bar?
             seen_submit = latest
             if wrapup_at is None and not unmet_targets(latest, max_dead_air_pct=good_enough_pct):
                 wrapup_at = turn + wrapup_turns
@@ -1026,8 +1338,22 @@ def _run_agent(
         "tts_used": (workbench.episode or {}).get("tts_used"), "submissions": (workbench.episode or {}).get("submissions"),
         "model": client.config.deployment,
     }
+    checkpoint(turn, "finished" if stop_reason != "paused" else "paused")
+    summary["agent_mode"] = mode
+    summary["free_finish"] = free_finish
+    if resumed_from is not None:
+        summary["resumed_from_turn"] = resumed_from
+    if stop_reason == "paused":
+        summary["resume"] = f"python -m mathula_tv.dub_production --job <job> --run-id {run_id} --resume"
     trace.log("end", **summary)
     (directory / "agent_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if mode == "training":
+        try:
+            from .thinking_report import write_report
+
+            write_report(directory)
+        except Exception as exc:                                             # noqa: BLE001 - the report must never turn a finished run into a failure
+            trace.log("thinking_report_failed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
     return summary
 
 
