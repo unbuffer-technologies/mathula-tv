@@ -1084,6 +1084,11 @@ def joined_with_the_word_before(words: Sequence[str], first: int) -> int:
     return first
 
 
+TRAILING_FOLLOW = "Futhi"      # spoken after the last span of a unit (cut away afterwards): with nothing after it the model's generation ends ON the last word, which is then chopped at full volume (prod-x1 "ngomphumela", draw 3 of the primed span ended at -49 dB)
+FINAL_TAIL_KEEP_S = 0.30       # the end of a unit keeps up to this much after its last word (the word's own decay), and fades out over FINAL_FADE_S
+FINAL_FADE_S = 0.08
+
+
 MERGE_GAP_WORDS = 1          # names this close (at most this many words between them) are taken as one stretch from the primed sentence
 
 
@@ -1361,7 +1366,7 @@ class OmniVoiceTTSBackend:
         marked = dr.load(job_root)                                      # the draws the listener approved (draws.py); ``retakes`` tries others without keeping them
 
         leads = [None] + [vt.lead_sentence(spans[i - 1]) for i in range(1, len(spans))]
-        follows = [_first_word(spans[i + 1]) if i + 1 < len(spans) and self.follow_word else None for i in range(len(spans))]          # the first word of the span after: spoken after this one so its last word is not the last thing the model makes
+        follows = [(_first_word(spans[i + 1]) if i + 1 < len(spans) else TRAILING_FOLLOW) if self.follow_word else None for i in range(len(spans))]          # the first word of the span after: spoken after this one so its last word is not the last thing the model makes (the last span of a unit has none: a plain word, cut away like the others)
         notes: list[list[dict[str, Any]]] = []
         take_count = [0]                                                 # which take this is: every take is a draw of its own, and the same one every time
         join_notes: list[dict[str, Any]] = []
@@ -1578,9 +1583,10 @@ class OmniVoiceTTSBackend:
                         end_word, start_next = float(before["end"]) - shift, float(after["start"]) - shift
                         low, high = min(end_word, start_next) - 0.03, max(end_word, start_next) + 0.03
                         tail_s, tail_found = vt.find_cut(core, rate, (low + high) / 2, before_s=(high - low) / 2, after_s=(high - low) / 2)
-                        keep_tail = vt.edge_keep_s(target[index], share=0.6, most_s=vt.TAIL_KEEP_S, least_s=vt.TAIL_MIN_KEEP_S)          # a short join keeps little of the quiet
+                        last_span = index == len(spans) - 1
+                        keep_tail = FINAL_TAIL_KEEP_S if last_span else vt.edge_keep_s(target[index], share=0.6, most_s=vt.TAIL_KEEP_S, least_s=vt.TAIL_MIN_KEEP_S)          # a short join keeps little of the quiet; the end of the unit keeps the word's whole decay
                         tail_s = min(max(tail_s, end_word + vt.TAIL_MIN_KEEP_S), end_word + keep_tail)
-                        core = vt.fade_out(core[:int(tail_s * rate)], rate)
+                        core = vt.fade_out(core[:int(tail_s * rate)], rate, FINAL_FADE_S if last_span else 0.012)
                         tail_pad, kept_tail = 0, round(tail_s - end_word, 3)         # the join is measured from the word, not from the generation's end: see build()
                         entry.update(tail_by="words", tail_word_end_s=round(end_word, 2), tail_next_start_s=round(start_next, 2), tail_cut_s=round(tail_s, 2), tail_found=tail_found, kept_tail_s=kept_tail)
                 if use_words and not leads[index]:                                         # a span that begins cold: sound before its first word is not in the text

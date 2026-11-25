@@ -739,7 +739,7 @@ class Console:
             pins = [draws.take_for(store, text, ref.start_s, ref.end_s) for text in spans]
             generation = self._run_voice(job, run)
             steps = json.dumps(getattr(getattr(self._omni(), "client", None), "default_generation", None), sort_keys=True)
-            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked-stretch-guard-by-word-prefixed-words-whole-word-glued-in-sentence-spaced-in-primed" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
+            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked-stretch-guard-by-word-prefixed-words-whole-word-glued-in-sentence-spaced-in-primed-trailing-follow" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
             prepared.append((name, corpus, group, spans, gaps, pins, store, ref, generation))
         missing = [p for p in prepared if not ((self.audio_dir / f"{p[0]}.wav").is_file() and (self.audio_dir / f"{p[0]}.json").is_file())]
         if missing and not make:                      # only reading: nothing is queued and no GPU is spent

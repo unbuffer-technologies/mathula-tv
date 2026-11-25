@@ -115,7 +115,7 @@ class ScriptedClient:
                 audio = np.concatenate([np.zeros(int(0.1 * RATE), dtype=np.float32), _tone(180, 1.0, 7), _quiet(0.25), audio[int(0.1 * RATE):]])
             count = len(spans[index].split())
             n_lead = (len(lead_here.split()) if lead_here else len(_sentences(spans[index])[0].split())) if led else 0
-            follow = align and self.aligns and index + 1 < len(mains)                     # the service speaks the first word of the next span after this one: a quarter second of quiet, then 0.4 s
+            follow = align and self.aligns and (index + 1 < len(mains) or spans[index].split()[-1:] == [ot.TRAILING_FOLLOW])                     # the service speaks the first word of the next span after this one (the last span of a unit gets a plain word): a quarter second of quiet, then 0.4 s
             seconds = len(audio) / RATE
             spread = _spread(n_lead, 0.1, 1.1) + _spread(count - n_lead - (1 if follow else 0), 1.35 if led else 0.1, seconds - 0.1)
             if follow:
@@ -143,7 +143,7 @@ def test_the_voice_speaks_at_the_reference_pace_with_nothing_pinned_stretched_or
     client = ScriptedClient(lambda call, ref: [_span_audio()])
     audio, rate, answer, report, reference = _backend(tmp_path, client).speak(GROUP, ["Sawubona baba."], [], "job")
     assert len(client.calls) == 1 and reference.start_s >= 1.0 and report["takes"] == 1          # a clean first take is the only one needed
-    assert abs(len(audio) / rate - 3.2) < 0.01                                                    # exactly what the model produced, pads included
+    assert abs(len(audio) / rate - 3.2) < 0.1                                                     # what the model produced, pads included (the unit end now keeps the word's decay up to its own cut)
 
 
 def test_each_span_is_the_best_of_the_takes_not_the_best_whole_take(tmp_path):
@@ -280,7 +280,7 @@ def test_with_word_times_one_request_carries_every_span_and_the_cut_is_between_t
     client = ScriptedClient(lambda call, ref: [_span_audio(), _span_audio()])
     backend = _backend(tmp_path, client)
     audio, rate, answer, report, reference = backend.speak(GROUP, ["Okokuqala kuhle. Siyabonga baba.", "Kunjalo nje."], [150], "job")
-    assert client.requests[0] == {"spans": ["Okokuqala kuhle. Siyabonga baba. Kunjalo", "Siyabonga baba. Kunjalo nje."], "align": True}          # no lead spoken alone: one request, two spans, the first followed by the first word of the second
+    assert client.requests[0] == {"spans": ["Okokuqala kuhle. Siyabonga baba. Kunjalo", "Siyabonga baba. Kunjalo nje. " + ot.TRAILING_FOLLOW], "align": True}          # no lead spoken alone: one request, two spans, the first followed by the first word of the second, the last by a plain word
     assert all(r["align"] for r in client.requests) and backend.service_aligns is True
     note = report["overlap"][0]
     assert note["by"] == "words" and 0.9 < note["lead_end_s"] < 1.0 and 1.2 < note["new_start_s"] < 1.3 and 0.95 < note["cut_s"] < 1.3          # seconds into the span without the model's own 0.1 s of padding
@@ -295,7 +295,7 @@ def test_the_first_word_of_the_next_span_is_spoken_after_a_span_and_cut_off_so_i
     assert tail["tail_cut_s"] >= tail["tail_word_end_s"] + 0.03 - 1e-6                      # the word keeps its own decay
     assert answer["span_ms"][0] / 1000.0 < 3.4                                              # the 0.65 s the service spoke for the next span's first word is not in the audio
     last = client.requests[0]["spans"]
-    assert last[0].split()[-1] == "Kunjalo" and last[1].split()[-1] == "nje."              # the last span has nothing after it
+    assert last[0].split()[-1] == "Kunjalo" and last[1].split()[-1] == ot.TRAILING_FOLLOW              # the last span of the unit is followed by a plain word: the model does not end on its last word
 
 
 def test_a_span_whose_words_are_missing_is_asked_again_the_old_way_for_that_take_only(tmp_path):
@@ -949,3 +949,12 @@ def test_two_names_with_a_word_or_so_between_them_are_taken_as_one_stretch_from_
     assert ot.swap_regions(far, names) == [(0, 1), (4, 5)]                       # two words between: two stretches, as before
     assert ot.swap_regions("Sawubona baba wami.".split(), names) == []
     assert ot.swap_regions("Kanti futhi i-NEC iwamukele".split(), ["nec"]) == [(1, 2)]          # one name: the name with the vowel before it, as before
+
+
+def test_the_last_span_of_a_unit_is_followed_by_a_plain_word_that_is_cut_away_and_it_fades_out(tmp_path):
+    client = ScriptedClient(lambda call, ref: [_span_audio()])
+    audio, rate, answer, report, reference = _backend(tmp_path, client).speak(GROUP, ["Sawubona baba wami."], [], "job")
+    assert client.requests[0]["spans"][0].split()[-1] == ot.TRAILING_FOLLOW                       # the model does not end on the last word
+    assert [w["text"] for w in report["words"]] == ["Sawubona", "baba", "wami."]                  # the plain word is not in the words
+    assert len(audio) / rate < 3.4                                                                 # and not in the audio: the 0.65 s the service spoke for it is cut away
+    assert abs(float(audio[-1])) < 1e-3                                                            # and the end fades out, it does not stop
