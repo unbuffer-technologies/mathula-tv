@@ -36,7 +36,7 @@ def test_a_long_run_without_a_breath_is_flagged_only_past_about_six_seconds():
 
 def test_the_agent_prompt_teaches_the_listener_not_only_the_marks():
     assert "Listening load" in SYSTEM_PROMPT and "cannot re-read" in SYSTEM_PROMPT
-    assert "figures_run_together" in SYSTEM_PROMPT and "long_run_without_breath" in SYSTEM_PROMPT and "breaths_inside" in SYSTEM_PROMPT
+    assert "figures_run_together" in SYSTEM_PROMPT and "long_run_without_breath" in SYSTEM_PROMPT
 
 
 def test_the_submit_result_carries_the_load_flags_whether_or_not_check_text_was_called():

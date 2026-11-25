@@ -47,6 +47,19 @@ def test_a_segment_the_agent_split_goes_by_window_overlap():
     assert owned["a"] == ["seg-1__s00"] and owned["b"] == ["seg-1__s01"]
 
 
+def test_a_parent_glued_from_raw_segments_belongs_to_whichever_unit_lists_any_of_them_by_overlap():
+    # pass 1 glued the ASR fragments seg-4 ("We") .. seg-8 into one parent, "seg-4"; the agent saw the raw segments and cut a unit at the seg-6 / seg-7 boundary (job 33294c3d)
+    members = ["seg-4", "seg-5", "seg-6", "seg-7", "seg-8"]
+    sentences = [{**_sentence("seg-4__s00", "seg-4", "A", 0, 4000, "First."), "parent_segment_ids": members},
+                 {**_sentence("seg-4__s01", "seg-4", "A", 4100, 9000, "Second."), "parent_segment_ids": members},
+                 {**_sentence("seg-4__s02", "seg-4", "A", 9100, 12000, "Third, spoken after the boundary."), "parent_segment_ids": members}]
+    units = [_unit("u1", 0, 9050, "A", "x", "seg-4", "seg-5", "seg-6"), _unit("u2", 9050, 12000, "A", "y", "seg-7", "seg-8")]
+    assert assign_sentences(units, sentences) == {"u1": ["seg-4__s00", "seg-4__s01"], "u2": ["seg-4__s02"]}
+    old_records = [{k: v for k, v in s.items() if k != "parent_segment_ids"} for s in sentences]          # records made before the field existed still read as before
+    with pytest.raises(RenderAdapterError):
+        assign_sentences(units, old_records)
+
+
 def test_a_unit_that_owns_no_sentence_is_a_clear_error():
     merged = [_unit("u1", 0, 9000, "A", "x", "seg-1", "seg-2"), _unit("ghost", 9100, 9400, "A", "y", "seg-2"), UNITS[2]]
     with pytest.raises(RenderAdapterError) as error:

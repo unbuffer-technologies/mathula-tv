@@ -18,6 +18,26 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 DIRECTORY = Path("input") / "youtube_captions"
+DESCRIPTION_CHARS = 1500          # how much of the uploader's description pass 1 and the agent are shown
+
+
+def video_context(job_root: Path) -> dict[str, str]:
+    """What the uploader wrote about the video: its title, channel, description and chapter titles (``input/youtube_source.json``, saved when the video was downloaded).  A human-written source that spells the names of the
+    story (job 833ea12f: the recogniser wrote "Spico Moussimane" and YouTube's automatic captions "manito" for a stretch whose title says "Mosimane"); empty when the job has none."""
+    try:
+        data = json.loads((Path(job_root) / "input" / "youtube_source.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {k: " ".join(str(data.get(k) or "").split())[:200] for k in ("title", "channel") if data.get(k)}
+    description = "\n".join(line.strip() for line in str(data.get("description") or "").strip().splitlines() if line.strip())
+    if description:
+        out["description"] = description[:DESCRIPTION_CHARS]
+    chapters = [" ".join(str(c).split())[:80] for c in data.get("chapters") or [] if str(c).strip()]
+    if chapters:
+        out["chapters"] = "; ".join(chapters)[:400]
+    return out
 
 
 def find(job_root: Path) -> list[Path]:

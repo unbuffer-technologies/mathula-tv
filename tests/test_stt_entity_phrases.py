@@ -104,3 +104,20 @@ def test_configure_source_backend_supports_router_without_affecting_other_backen
         pass
 
     assert configure_source_stt_backend(BlindAuditBackend()) is None
+
+
+def test_whisper_is_never_given_the_registry_as_a_prompt_it_would_echo(monkeypatch, tmp_path):
+    import json
+
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"schema_version": "x", "entities": [{"active": True, "stt_phrases": ["Chief Provincial Inspector Samuel Mashaba"]}]}), encoding="utf-8")
+    monkeypatch.setenv("MATHULA_TV_STT_ENTITY_REGISTRY", str(registry))
+    monkeypatch.setenv("MATHULA_TV_STT_PHRASE_OVERRIDES", str(tmp_path / "none.json"))
+
+    class Whisper:
+        provider = "whisper-pyannote-cloud-run"
+        phrase_list = ("left over",)
+
+    assert configure_source_stt_backend(Whisper()) is None and Whisper.phrase_list == ("left over",)        # nothing attached to the class ...
+    backend = Whisper()
+    assert configure_source_stt_backend(backend) is None and backend.phrase_list == ()                        # ... and the instance is cleared: the audio is all Whisper hears

@@ -1,0 +1,9 @@
+torch==2.8.0
+torchaudio==2.8.0
+faster-whisper>=1.2.0
+pyannote.audio>=4.0.0
+transformers>=4.50
+soundfile
+fastapi
+uvicorn[standard]
+python-multipart

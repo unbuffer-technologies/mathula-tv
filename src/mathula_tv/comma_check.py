@@ -126,6 +126,15 @@ def _capitalised(token: str) -> bool:
     return token != "," and _PREFIX.sub("", token.strip(".!?:;\"'“”"))[:1].isupper()
 
 
+def _name_at(tokens: list[str], k: int) -> bool:
+    """Whether the token at ``k`` is a name inside a sentence (a capital after any Zulu prefix, and not the word that opens the sentence)."""
+    if not 0 < k < len(tokens) or tokens[k] == ",":
+        return False
+    if tokens[k - 1] != "," and tokens[k - 1].rstrip("\"'”’)").endswith((".", "?", "!", ":")):
+        return False
+    return _PREFIX.sub("", tokens[k].strip(".!?:;\"'“”"))[:1].isupper()
+
+
 def _stands_alone(tokens: list[str], at: int, side: str) -> bool:
     """Is the name touching this comma a name of address, standing between marks (", Ayanda,", ". Kenny Maphanga,", "lapho, Ayanda.")?  A name inside a clause ("uJenene Mkhwanazi,
     okwakumele...", "nge-IDAC, nakuba...") is not spoken to anyone: its comma is a clause boundary, which the Zulu may need whatever the English did."""
@@ -335,6 +344,8 @@ def comma_check(text: str, words: list[dict[str, Any]], start_ms: int, end_ms: i
             name = _PREFIX.sub("", raw)
             if not name[:1].isupper() or not _stands_alone(tokens, at, side):
                 continue
+            if _name_at(tokens, i + 1 if side == "after" else i - 1):
+                continue          # a comma between two names ("Kenny, uVusimuzi Matlala") says there are two people: the listener needs it whether or not the speaker paused
             key = _letters(name)
             hits = [k for k, heard in enumerate(spoken) if _similar(key, heard)]
             measured = [(_gap_before(inside, k) if side == "before" else _gap_after(inside, k)) for k in hits]

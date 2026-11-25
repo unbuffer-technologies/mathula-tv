@@ -1,0 +1,196 @@
+{
+ "job": "ada0e55711334e61920511980f7489d1",
+ "run": "prod-110",
+ "units": [
+  {
+   "id": "u01",
+   "speaker": "SPEAKER_00",
+   "start_ms": 150,
+   "end_ms": 34140,
+   "window_s": 33.99,
+   "text": "I-MKP ne-DA basanda kuqeda izingxoxo zabo, kanti uSamkele Maseko umi ngomumo ukusitshela okwakamuva mayelana nalezo zingxoxo ezithile. Njengoba nibona esikrinini senu, nangu uSamkele Maseko exoxa nabaholi be-MKP. Uma nje esekulungele ukukhuluma nathi, nakanjani sizoya kuye bukhoma. Samkele uma usukulungele ukukhuluma nathi, ngicela uqhubeke. Namuhla sikubona ukhuluma nabo laphaya. Khawusitshele, benikhuluma ngani lapho?",
+   "text_pauses": "I-MKP ne-DA basanda kuqeda izingxoxo zabo, kanti uSamkele Maseko umi ngomumo ukusitshela okwakamuva mayelana nalezo zingxoxo ezithile. Njengoba nibona esikrinini senu, nangu uSamkele Maseko exoxa nabaholi be-MKP. Uma nje esekulungele ukukhuluma nathi, nakanjani sizoya kuye bukhoma. Samkele uma usukulungele ukukhuluma nathi, ngicela uqhubeke. ~pause1100 Namuhla sikubona ukhuluma nabo laphaya. Khawusitshele, benikhuluma ngani lapho?"
+  },
+  {
+   "id": "u02",
+   "speaker": "SPEAKER_01",
+   "start_ms": 35500,
+   "end_ms": 37100,
+   "window_s": 1.6,
+   "text": "Wazi kanjani, wavela kuphi?",
+   "text_pauses": "Wazi kanjani, wavela kuphi?"
+  },
+  {
+   "id": "u03",
+   "speaker": "SPEAKER_00",
+   "start_ms": 38380,
+   "end_ms": 39740,
+   "window_s": 1.36,
+   "text": "Sinezinhloli yonke indawo.",
+   "text_pauses": "Sinezinhloli yonke indawo."
+  },
+  {
+   "id": "u04",
+   "speaker": "SPEAKER_01",
+   "start_ms": 40300,
+   "end_ms": 78910,
+   "window_s": 38.61,
+   "text": "Ngiyakubona, ngiyakubona. Sanibonani mnumzane. Kuhle ukunibona nababukeli. Ingxoxo iyingxoxo. Akufanele sizivalele sakhe izindonga; kufanele sakhe amabhuloho. Noma singavumelani, kufanele sixoxe. Njengabantu baseNingizimu Afrika bazo zonke izizinda kufanele sithole esivumelana ngakho, noma izingxoxo zihamba kanjani. Inhloso ukufinyelela esivumelwaneni nokuletha izidingo kubantu. Uma senitholene, ukuthi kanjani nokuthi nini kuzozilungisa. Okusemqoka ukuthi sonke sithole esivumelana ngakho.",
+   "text_pauses": "Ngiyakubona, ngiyakubona. Sanibonani mnumzane. Kuhle ukunibona nababukeli. Ingxoxo iyingxoxo. Akufanele sizivalele sakhe izindonga; kufanele sakhe amabhuloho. Noma singavumelani, kufanele sixoxe. Njengabantu baseNingizimu Afrika bazo zonke izizinda kufanele sithole esivumelana ngakho, noma izingxoxo zihamba kanjani. Inhloso ukufinyelela esivumelwaneni nokuletha izidingo kubantu. Uma senitholene, ukuthi kanjani nokuthi nini kuzozilungisa. Okusemqoka ukuthi sonke sithole esivumelana ngakho."
+  },
+  {
+   "id": "u05",
+   "speaker": "SPEAKER_00",
+   "start_ms": 79430,
+   "end_ms": 106230,
+   "window_s": 26.8,
+   "text": "Uma sibheka izinkinga ezivela KwaZulu-Natal nakomasipala lapho kungekho qembu elineningi elicacile, okubambile manje yizizinda zomnotho, ikakhulukazi e-KZN. E-uMhlathuze, eThekwini, eMsunduzi naseNewcastle, yizona zikhungo ezinkulu zomnotho waKwaZulu-Natal. Nixoxa ngani ngalezi zindawo ezibalulekile abafuna ukuzilawula, njengoba kuyinina iqembu eliholayo kulabo masipala?",
+   "text_pauses": "Uma sibheka izinkinga ezivela KwaZulu-Natal nakomasipala lapho kungekho qembu elineningi elicacile, okubambile manje yizizinda zomnotho, ikakhulukazi e-KZN. E-uMhlathuze, eThekwini, eMsunduzi naseNewcastle, yizona zikhungo ezinkulu zomnotho waKwaZulu-Natal. Nixoxa ngani ngalezi zindawo ezibalulekile abafuna ukuzilawula, njengoba kuyinina iqembu eliholayo kulabo masipala?"
+  },
+  {
+   "id": "u06",
+   "speaker": "SPEAKER_01",
+   "start_ms": 106520,
+   "end_ms": 188410,
+   "window_s": 81.89,
+   "text": "Singakhulumela uhlangothi lwethu kuphela. Siyakuhlonipha ukuthi abafuni ukuveza imibono yabo emphakathini. Thina sicacile: sifuna ukukhulisa amadolobha amancane, siwathuthukise abe yizizinda zomnotho. Uma sidlula kuwo siya emaholidini noma emihlanganweni, siyasazi isimo sawo sokudilika. Iningi lawo limile, sengathi kudonswe ibhuleki lesandla. Sifuna afinyelele ezingeni lokuncintisana namadolobha amakhulu. Bheka amadolobha okufanele ahole umnotho, afana nalawo esikhuluma ngawo; kunenani elikhulu lapho okufanele livulwe. Imali iyangena iphinde iphumele ngaphandle. Sifuna ukukhiqiza, sicubungule izimpahla kuleli bese sizithumela kuwo wonke umhlaba. Kufanele senze okufanayo emadolobheni amancane: siwavulela kanjani amathuba abantu bakhona ukuze bangaphoqeleki ukuya emadolobheni amakhulu? Yilezo izindaba esibhekene nazo neziyingxenye yezingxoxo esinazo. Sifuna ukukhipha abantu abamnyama ebuphofini, sandise isigaba esiphakathi, sifinyelele lapho isibalo sabakhokhi bentela siba sikhulu futhi wonke umuntu athole amathuba alinganayo. Yilawo amaphuzu abalulekile esiwabekayo.",
+   "text_pauses": "Singakhulumela uhlangothi lwethu kuphela. Siyakuhlonipha ukuthi abafuni ukuveza imibono yabo emphakathini. Thina sicacile: sifuna ukukhulisa amadolobha amancane, siwathuthukise abe yizizinda zomnotho. Uma sidlula kuwo siya emaholidini noma emihlanganweni, siyasazi isimo sawo sokudilika. Iningi lawo limile, sengathi kudonswe ibhuleki lesandla. Sifuna afinyelele ezingeni lokuncintisana namadolobha amakhulu. Bheka amadolobha okufanele ahole umnotho, afana nalawo esikhuluma ngawo; ~pause960 kunenani elikhulu lapho okufanele livulwe. Imali iyangena iphinde iphumele ngaphandle. ~pause1840 Sifuna ukukhiqiza, ~pause800 sicubungule izimpahla kuleli bese sizithumela kuwo wonke umhlaba. Kufanele senze okufanayo emadolobheni amancane: siwavulela kanjani amathuba abantu bakhona ukuze bangaphoqeleki ukuya emadolobheni amakhulu? Yilezo izindaba esibhekene nazo neziyingxenye yezingxoxo esinazo. Sifuna ukukhipha abantu abamnyama ebuphofini, sandise isigaba esiphakathi, sifinyelele lapho isibalo sabakhokhi bentela siba sikhulu futhi wonke umuntu athole amathuba alinganayo. Yilawo amaphuzu abalulekile esiwabekayo."
+  },
+  {
+   "id": "u07",
+   "speaker": "SPEAKER_00",
+   "start_ms": 188910,
+   "end_ms": 205310,
+   "window_s": 16.4,
+   "text": "Mnu Zuma kule mifelandawonye, yimaphi amaqembu esenikhulume nawo futhi eningase nisebenzisane nawo? Ngiyazi ukuthi ngehora lesi-4 ninomunye umhlangano eSandton nelinye iqembu lezepolitiki abanye balaba banumzane ababekade bekulo.",
+   "text_pauses": "Mnu Zuma kule mifelandawonye, yimaphi amaqembu esenikhulume nawo futhi eningase nisebenzisane nawo? ~pause1440 Ngiyazi ukuthi ngehora lesi-4 ninomunye umhlangano eSandton nelinye iqembu lezepolitiki abanye balaba banumzane ababekade bekulo."
+  },
+  {
+   "id": "u08",
+   "speaker": "SPEAKER_01",
+   "start_ms": 206030,
+   "end_ms": 264890,
+   "window_s": 58.86,
+   "text": "Wazi kanjani mnumzane? Usuyasihlupha, kodwa kulungile. Ngasohlangothini lwethu sisaxoxa futhi sivulekele wonke umuntu, amaqembu amakhulu, amancane naphakathi. Silapha ukusebenzela abasivotele; igunya ukuletha izidingo kubantu. Sizosebenza nalabo abanombono ofana nowethu, yiyona ndlela esiyithathayo. Asifuni ukuvala iminyango singaxoxanga, kanti kudlala izifuba. Asizikhukhumezi, singabantu abaqondayo futhi sifuna wonke umuntu eze etafuleni. Ngethemba sizothola nombono we-DP, i-DSG ne-Senior Counsel. Sifuna lokhu kusebenze. I-MK icacile: sifuna ukuba kuhulumeni. Sithanda ukuba kuhulumeni. Abantu basinike igunya lokuba kuhulumeni, yilokho esikuphishekelayo. Abafuna ukusebenza nathi bazosebenza nathi, sikubheke ngabomvu ukusebenza nabo.",
+   "text_pauses": "Wazi kanjani mnumzane? Usuyasihlupha, kodwa kulungile. Ngasohlangothini lwethu sisaxoxa futhi sivulekele wonke umuntu, amaqembu amakhulu, amancane naphakathi. Silapha ukusebenzela abasivotele; igunya ukuletha izidingo kubantu. Sizosebenza nalabo abanombono ofana nowethu, yiyona ndlela esiyithathayo. Asifuni ukuvala iminyango singaxoxanga, kanti kudlala izifuba. Asizikhukhumezi, singabantu abaqondayo futhi sifuna wonke umuntu eze etafuleni. Ngethemba sizothola nombono we-DP, i-DSG ne-Senior Counsel. Sifuna lokhu kusebenze. I-MK icacile: sifuna ukuba kuhulumeni. Sithanda ukuba kuhulumeni. Abantu basinike igunya lokuba kuhulumeni, yilokho esikuphishekelayo. Abafuna ukusebenza nathi bazosebenza nathi, sikubheke ngabomvu ukusebenza nabo."
+  },
+  {
+   "id": "u09",
+   "speaker": "SPEAKER_00",
+   "start_ms": 265600,
+   "end_ms": 297440,
+   "window_s": 31.84,
+   "text": "Kulezi zingxoxo, ubani eningase nisebenzisane naye? Ngifuna ukukuphoqa unike abantu umkhondo, ngoba bathi abawufuni umfelandawonye wenhlekelele wenu ne-EFF, i-ANC ne-SACP. Ubani eningase nisebenzisane naye, njengoba beniyingxenye yengqungquthela yamaqembu angakwesobunxele nomhlangano wawo wabezindaba kuleli sonto? Sebenihlanganise u-20%, kodwa nidinga omunye u-30%, aphesheya eSauer Street eJohannesburg.",
+   "text_pauses": "Kulezi zingxoxo, ubani eningase nisebenzisane naye? Ngifuna ukukuphoqa unike abantu umkhondo, ngoba bathi abawufuni umfelandawonye wenhlekelele wenu ne-EFF, i-ANC ne-SACP. Ubani eningase nisebenzisane naye, njengoba beniyingxenye yengqungquthela yamaqembu angakwesobunxele nomhlangano wawo wabezindaba kuleli sonto? Sebenihlanganise u-20%, kodwa nidinga omunye u-30%, aphesheya eSauer Street eJohannesburg."
+  },
+  {
+   "id": "u10",
+   "speaker": "SPEAKER_01",
+   "start_ms": 297480,
+   "end_ms": 324040,
+   "window_s": 26.56,
+   "text": "Ngicaphuna uMengameli wethu uZuma: ngeke ungiphushele ekhoneni, ngazalelwa eqhugwaneni eliyindilinga, ngakho alikho ikhoneni. Okubalulekile ukuthi sifuna ukusebenza nawo wonke umuntu, bonke basebenze nathi. Kunjalo, kuhlanganise ne-DA. Wonke umuntu makasebenze nathi. Uma singathola esivumelana ngakho, kungani singasebenzisani?",
+   "text_pauses": "Ngicaphuna uMengameli wethu uZuma: ~pause1080 ngeke ungiphushele ekhoneni, ngazalelwa eqhugwaneni eliyindilinga, ~pause1280 ngakho alikho ikhoneni. ~pause1280 Okubalulekile ukuthi sifuna ukusebenza nawo wonke umuntu, bonke basebenze nathi. Kunjalo, kuhlanganise ne-DA. Wonke umuntu makasebenze nathi. Uma singathola esivumelana ngakho, kungani singasebenzisani?"
+  },
+  {
+   "id": "u11",
+   "speaker": "SPEAKER_00",
+   "start_ms": 326120,
+   "end_ms": 331480,
+   "window_s": 5.36,
+   "text": "Kodwa uma sibheka lo mhlangano uwonke, nisondela yini ekutholeni esivumelana ngakho?",
+   "text_pauses": "Kodwa uma sibheka lo mhlangano uwonke, nisondela yini ekutholeni esivumelana ngakho?"
+  },
+  {
+   "id": "u12",
+   "speaker": "SPEAKER_01",
+   "start_ms": 332400,
+   "end_ms": 377880,
+   "window_s": 45.48,
+   "text": "OK. Kade nisilandela, ngakho niyazi ukuthi lona bekungumhlangano wethu wokuqala, owokuqala walolu hlobo. Siyabonga ngokuthi bathathe isikhathi bahlonipha umhlangano ngokwesimemo sabo. Asifakwa ekhoneni. Kodwa ekugcineni sekusele izinsuku ezimbalwa, sizobona ukuthi kwenzekani nemiphumela yalezi zingxoxo. Iqiniso nje lokuthi sibe nomhlangano liyisiqalo esihle; sizobona imiphumela nezithelo zawo. Uma kungaphumeleli, kuyobe kungaphumelelanga. Kodwa njenge-MKP sinekusasa kuleli zwe. Sifuna ukuhlanganisa wonke umuntu, siphushele ohlangothini olulodwa futhi sakhe leli zwe. Yingakho silapha.",
+   "text_pauses": "OK. Kade nisilandela, ngakho niyazi ukuthi lona bekungumhlangano wethu wokuqala, owokuqala walolu hlobo. Siyabonga ngokuthi bathathe isikhathi bahlonipha umhlangano ngokwesimemo sabo. Asifakwa ekhoneni. ~pause1400 Kodwa ekugcineni sekusele izinsuku ezimbalwa, sizobona ukuthi kwenzekani nemiphumela yalezi zingxoxo. Iqiniso nje lokuthi sibe nomhlangano liyisiqalo esihle; sizobona imiphumela nezithelo zawo. Uma kungaphumeleli, kuyobe kungaphumelelanga. Kodwa njenge-MKP sinekusasa kuleli zwe. Sifuna ukuhlanganisa wonke umuntu, siphushele ohlangothini olulodwa futhi sakhe leli zwe. Yingakho silapha."
+  },
+  {
+   "id": "u13",
+   "speaker": "SPEAKER_02",
+   "start_ms": 378950,
+   "end_ms": 501330,
+   "window_s": 122.38,
+   "text": "Usukwazile yini ukubafaka umqondo wezomthetho? Cha, lokhu bekungakhulunywa ngezomthetho. Njengoba womabili ama-DP ethu elapha, lokho kukhombisa ubucayi nezinga esithatha ngalo lezi zingxoxo, kuhlanganise nomhlangano olandelayo. Yebo, ekugcineni kungase kube nezindaba zomthetho, ngokuthi kungase kusayinwe izivumelwano nokunye okunjalo. Kodwa empeleni lokhu bekungumhlangano wokuqala wokuxhumana phakathi kwala maqembu. Khumbulani, lesi yisigameko esingumlando. Kungokokuqala ngqa i-DA ne-MKP zixhumana kusukela kwasungulwa i-MKP. Ukuthi nje umhlangano ube khona, kukodwa kuyinto enkulu. Ngokuphathelene nokuqukethwe, kusobala ukuthi asikhululekile ukukudalula ngoba lo mhlangano ububanjwe ngasese. Njengoba i-DP yokuqala isanda kusho, sikhuluma nawo wonke umuntu. Ngakho ngalowo mqondo lona ungomunye nje wemihlangano, kodwa unokubaluleka kwawo. Njengoba usho kahle Samkele, bathi ngeke baxoxe nathi, kodwa manje siyaxoxa. Ukukhuluma iqiniso, nathi sathi ngeke sixoxe nabo, kodwa silapha. Lokho kukhombisa ukuthi kwezepolitiki ungalinge uthi ngeke kwenzeke, nokuthi abadlali ababaluleke kakhulu kwezepolitiki ngabantu. Asikho lapha ngoba senze into emangalisayo. Silapha ngoba abantu bakithi bavote ngendlela esiphoqa ukuba sixoxe, futhi silandela ukuhola kwabo kunokuhlakanipha kwethu noma okuthile okuphathelene nathi. Kuyajabulisa ngalowo mqondo ngoba ngokombono waseNingizimu Afrika, sifunda ukuthi kufanele sixoxe sodwa njengoba sonke sikuleli zwe, ngakho lesi yisiqalo esihle. Sithemba ukuthi ngesikhathi besimema, isimemo esikhulu besiphakathi komholi wabo uGeordin Hill-Lewis noMengameli Zuma. Sithemba ukuthi nalowo mhlangano usazoba khona, kanye neminye imihlangano eminingi esikhathini esizayo.",
+   "text_pauses": "Usukwazile yini ukubafaka umqondo wezomthetho? Cha, lokhu bekungakhulunywa ngezomthetho. Njengoba womabili ama-DP ethu elapha, lokho kukhombisa ubucayi nezinga esithatha ngalo lezi zingxoxo, kuhlanganise nomhlangano olandelayo. ~pause1100 Yebo, ekugcineni kungase kube nezindaba zomthetho, ngokuthi kungase kusayinwe izivumelwano nokunye okunjalo. ~pause880 Kodwa empeleni lokhu bekungumhlangano wokuqala wokuxhumana phakathi kwala maqembu. Khumbulani, lesi yisigameko esingumlando. Kungokokuqala ngqa i-DA ne-MKP zixhumana kusukela kwasungulwa i-MKP. Ukuthi nje umhlangano ube khona, kukodwa kuyinto enkulu. Ngokuphathelene nokuqukethwe, kusobala ukuthi asikhululekile ukukudalula ngoba lo mhlangano ububanjwe ngasese. Njengoba i-DP yokuqala isanda kusho, sikhuluma nawo wonke umuntu. Ngakho ngalowo mqondo lona ungomunye nje wemihlangano, kodwa unokubaluleka kwawo. Njengoba usho kahle Samkele, bathi ngeke baxoxe nathi, kodwa manje siyaxoxa. Ukukhuluma iqiniso, nathi sathi ngeke sixoxe nabo, kodwa silapha. ~pause700 Lokho kukhombisa ukuthi kwezepolitiki ungalinge uthi ngeke kwenzeke, nokuthi abadlali ababaluleke kakhulu kwezepolitiki ngabantu. Asikho lapha ngoba senze into emangalisayo. Silapha ngoba abantu bakithi bavote ngendlela esiphoqa ukuba sixoxe, futhi silandela ukuhola kwabo kunokuhlakanipha kwethu noma okuthile okuphathelene nathi. Kuyajabulisa ngalowo mqondo ngoba ngokombono waseNingizimu Afrika, sifunda ukuthi kufanele sixoxe sodwa njengoba sonke sikuleli zwe, ngakho lesi yisiqalo esihle. Sithemba ukuthi ngesikhathi besimema, isimemo esikhulu besiphakathi komholi wabo uGeordin Hill-Lewis noMengameli Zuma. Sithemba ukuthi nalowo mhlangano usazoba khona, kanye neminye imihlangano eminingi esikhathini esizayo."
+  },
+  {
+   "id": "u14",
+   "speaker": "SPEAKER_03",
+   "start_ms": 502330,
+   "end_ms": 506890,
+   "window_s": 4.56,
+   "text": "i-DSG, kuzo zonke izingxoxo zenu, nicabanga ukuthi nizogcina nithole",
+   "text_pauses": "i-DSG, kuzo zonke izingxoxo zenu, nicabanga ukuthi nizogcina nithole"
+  },
+  {
+   "id": "u15",
+   "speaker": "SPEAKER_02",
+   "start_ms": 507580,
+   "end_ms": 511060,
+   "window_s": 3.48,
+   "text": "isivumelwano samalungu avamile nabantu baseNingizimu Afrika?",
+   "text_pauses": "isivumelwano samalungu avamile nabantu baseNingizimu Afrika?"
+  },
+  {
+   "id": "u16",
+   "speaker": "SPEAKER_03",
+   "start_ms": 511420,
+   "end_ms": 604010,
+   "window_s": 92.59,
+   "text": "Lo mhlangano ube ngesimemo se-Democratic Alliance. Basimema ukuba sihlangane nabo, ngakho njengabantu baseNingizimu Afrika sahlangana nabo. Sizohlangana nabanye abasimemile. Asikachazi zivumelwano noma imigomo yokusebenza; lezi kuseyizingxoxo. Sinomunye umhlangano ntambama, njengoba kusho uSamkele, futhi sihlangana nabantu baseNingizimu Afrika. Sithemba ukuthi esihlangana nabo babelana ngezinto esizikholelwayo, imibono yethu nokunye. Kodwa leli yidemokhrasi evulekile, futhi sithemba ukuxoxa. Okubalulekile kithi yigunya labantu. Sifisa ukuthatha uhulumeni ngokushesha okukhulu ukuze silethe amanzi ahlanzekile nezitaladi ezihlanzekile kubantu bakithi. Senza izithembiso eziningi emkhankasweni wokhetho, futhi sesifikile isikhathi sokuthatha uhulumeni ukuze sizifeze. Sithole isimemo. Njengoba u-Advocate Mpofu esho, umholi wabo ucele ukubona uMengameli Zuma. UMengameli Zuma usamukele leso simemo njengomuntu waseNingizimu Afrika. Babeshilo ukuthi ngeke bahlangane nathi, kodwa basibhalela, savuma ukuhlangana nabo nanoma yiliphi elinye iqembu elifuna ukusibona. Ngakho-ke sivulekele ukukhuluma nawo wonke umuntu. Kithina okubalulekile ukuhlangana nokufeza izithembiso esazenza, ngegunya labantu ngesikhathi sisemkhankasweni wokhetho. DP.",
+   "text_pauses": "Lo mhlangano ube ngesimemo se-Democratic Alliance. Basimema ukuba sihlangane nabo, ngakho njengabantu baseNingizimu Afrika sahlangana nabo. Sizohlangana nabanye abasimemile. Asikachazi zivumelwano noma imigomo yokusebenza; lezi kuseyizingxoxo. Sinomunye umhlangano ntambama, njengoba kusho uSamkele, futhi sihlangana nabantu baseNingizimu Afrika. Sithemba ukuthi esihlangana nabo babelana ngezinto esizikholelwayo, imibono yethu nokunye. Kodwa leli yidemokhrasi evulekile, futhi sithemba ukuxoxa. Okubalulekile kithi yigunya labantu. Sifisa ukuthatha uhulumeni ngokushesha okukhulu ukuze silethe amanzi ahlanzekile nezitaladi ezihlanzekile kubantu bakithi. Senza izithembiso eziningi emkhankasweni wokhetho, futhi sesifikile isikhathi sokuthatha uhulumeni ukuze sizifeze. ~pause800 Sithole isimemo. Njengoba u-Advocate Mpofu esho, umholi wabo ucele ukubona uMengameli Zuma. UMengameli Zuma usamukele leso simemo njengomuntu waseNingizimu Afrika. Babeshilo ukuthi ngeke bahlangane nathi, kodwa basibhalela, savuma ukuhlangana nabo nanoma yiliphi elinye iqembu elifuna ukusibona. Ngakho-ke sivulekele ukukhuluma nawo wonke umuntu. Kithina okubalulekile ukuhlangana nokufeza izithembiso esazenza, ~pause840 ngegunya labantu ngesikhathi sisemkhankasweni wokhetho. DP."
+  },
+  {
+   "id": "u17",
+   "speaker": "SPEAKER_04",
+   "start_ms": 604890,
+   "end_ms": 687890,
+   "window_s": 83.0,
+   "text": "Ngicabanga ukuthi umhlangano wokuqala ubaluleke ngezindlela eziningi, njengoba i-SC isishilo. Kodwa uma sibheka konke, siphuma kulo mhlangano, sinomuzwa, wokwaneliseka, ngokuthi sabelane ngemibono nezimvo ezindabeni eziningi. Sivumelene futhi, ngaphandle kokudalula ama-details alokho obekuxoxwa emhlanganweni, ukuthi emzuliswaneni olandelayo sizobheka ama-details okubambisana. Sizocubungula ukuthi yikuphi ukubambisana okungase kube khona phakathi kwethu, ukuthi lokho kuyosho ukuthini ngempela, nokuthi ukubambisana okunjalo kuzosebenza kanjani. Okokugcina, uma kuzoba khona ukubambisana phakathi kwethu, kufanele kuqondiswe yizimiso ezibanzi, ikakhulukazi izimiso ezibalulekile zenqubomgomo. Lokhu kusho ukuthi lapho singena kulowo hulumeni, kufanele sazi kahle ukuthi yiziphi izimiso ezisihlanganisayo nezisibophayo, yini okulindeleke ukuba siyenze, nokuthi thina sivumelana ukwenzani phakathi kwethu. Okokugcina futhi, uma sibheka zonke izinhlangothi, hhayi i-DA kuphela kodwa wonke amaqembu, wonke athi, sidinga uhulumeni wasekhaya ozinzile. Kufanele kube uhulumeni ozinzile, ozoqinisekisa ukuthi uletha izinsiza kubantu.",
+   "text_pauses": "Ngicabanga ukuthi umhlangano wokuqala ubaluleke ngezindlela eziningi, njengoba i-SC isishilo. Kodwa uma sibheka konke, siphuma kulo mhlangano, ~pause1200 sinomuzwa, ~pause1040 wokwaneliseka, ~pause3640 ngokuthi sabelane ngemibono nezimvo ezindabeni eziningi. Sivumelene futhi, ngaphandle kokudalula ama-details alokho obekuxoxwa emhlanganweni, ukuthi emzuliswaneni olandelayo sizobheka ama-details okubambisana. Sizocubungula ukuthi yikuphi ukubambisana okungase kube khona phakathi kwethu, ukuthi lokho kuyosho ukuthini ngempela, nokuthi ukubambisana okunjalo kuzosebenza kanjani. ~pause1600 Okokugcina, uma kuzoba khona ukubambisana phakathi kwethu, kufanele kuqondiswe yizimiso ezibanzi, ikakhulukazi izimiso ezibalulekile zenqubomgomo. Lokhu kusho ukuthi lapho singena kulowo hulumeni, kufanele sazi kahle ukuthi yiziphi izimiso ezisihlanganisayo nezisibophayo, ~pause1080 yini okulindeleke ukuba siyenze, nokuthi thina sivumelana ukwenzani phakathi kwethu. ~pause2400 Okokugcina futhi, uma sibheka zonke izinhlangothi, hhayi i-DA kuphela kodwa wonke amaqembu, wonke athi, ~pause900 sidinga uhulumeni wasekhaya ozinzile. Kufanele kube uhulumeni ozinzile, ozoqinisekisa ukuthi uletha izinsiza kubantu."
+  },
+  {
+   "id": "u18",
+   "speaker": "SPEAKER_00",
+   "start_ms": 688970,
+   "end_ms": 719470,
+   "window_s": 30.5,
+   "text": "Mnu Yengeni, ngikubuza umbuzo oqondile. Ukushiya kwakho iqembu lakho langaphambili kwakusekelwe ekutheni lelo qembu lidayisela izwe kulabo ababebizwa ngaleso sikhathi ngabamhlophe. Manje usuhlezi ngaphesheya kwetafula nabo kanye labo bantu owawusola i-ANC ngokubadayisela izwe. Umuntu ovamile ohlezi eGingindlovu, ohlezi umshwathi noma ohlezi eNkandla ngeke yini abone lokhu njenge-MKP edayisela umlungu umzabalazo?",
+   "text_pauses": "Mnu Yengeni, ngikubuza umbuzo oqondile. Ukushiya kwakho iqembu lakho langaphambili kwakusekelwe ekutheni lelo qembu lidayisela izwe kulabo ababebizwa ngaleso sikhathi ngabamhlophe. ~pause2500 Manje usuhlezi ngaphesheya kwetafula nabo kanye labo bantu owawusola i-ANC ngokubadayisela izwe. Umuntu ovamile ohlezi eGingindlovu, ohlezi umshwathi noma ohlezi eNkandla ngeke yini abone lokhu njenge-MKP edayisela umlungu umzabalazo?"
+  },
+  {
+   "id": "u19",
+   "speaker": "SPEAKER_04",
+   "start_ms": 720190,
+   "end_ms": 768520,
+   "window_s": 48.33,
+   "text": "Akumayelana nami nalokho engikucabangayo. Kubeke kwacaca ukuthi umphumela walolu khetho, uthi abavoti, abantu uqobo, bakhulumile. Abanikanga muntu iningi eliphelele. Ngamanye amazwi bathi kini: hlalani phansi ndawonye, nixoxe, nilungise izinkinga zethu. Ngakho kuyiphutha manje ukuthi umuntu athi, ngiyayizonda i-ANC kodwa sengikhuluma ne-ANC noma ne-DA. Lapho uyaphuthelwa yiphuzu uqobo. Iphuzu elibaluleke kakhulu ukuthi silapha ngenxa yomphumela wokhetho lohulumeni basekhaya. Yilowo mphumela osihlanganise lapha. Sikhuluma nawo wonke umuntu. Yilokho abantu abasicela ukuba sikwenze, futhi yilokho esikwenzayo njenge-MK.",
+   "text_pauses": "Akumayelana nami nalokho engikucabangayo. Kubeke kwacaca ukuthi umphumela walolu khetho, ~pause980 uthi abavoti, abantu uqobo, bakhulumile. Abanikanga muntu iningi eliphelele. Ngamanye amazwi bathi kini: hlalani phansi ndawonye, nixoxe, nilungise izinkinga zethu. Ngakho kuyiphutha manje ukuthi umuntu athi, ngiyayizonda i-ANC kodwa sengikhuluma ne-ANC noma ne-DA. Lapho uyaphuthelwa yiphuzu uqobo. Iphuzu elibaluleke kakhulu ukuthi silapha ngenxa yomphumela wokhetho lohulumeni basekhaya. Yilowo mphumela osihlanganise lapha. ~pause900 Sikhuluma nawo wonke umuntu. Yilokho abantu abasicela ukuba sikwenze, futhi yilokho esikwenzayo njenge-MK."
+  },
+  {
+   "id": "u20",
+   "speaker": "SPEAKER_01",
+   "start_ms": 769520,
+   "end_ms": 794220,
+   "window_s": 24.7,
+   "text": "Uma ngingangena kulowo mbuzo ofanayo, ngicabanga ukuthi iphuzu elibalulekile okufanele silikhumbule ukuthi uMengameli wethu uselilungu elisebenzayo le-ANC, futhi ubelokhu elwela isikhundla sakhe njengelungu le-ANC. Bengidinga ukuthinta lelo phuzu. Okubaluleke kakhulu ukuthi sonke sibeke izifuba zethu eceleni, sithole esivumelana ngakho, bese siqala ukusebenza.",
+   "text_pauses": "Uma ngingangena kulowo mbuzo ofanayo, ngicabanga ukuthi iphuzu elibalulekile okufanele silikhumbule ukuthi uMengameli wethu uselilungu elisebenzayo le-ANC, futhi ubelokhu elwela isikhundla sakhe njengelungu le-ANC. Bengidinga ukuthinta lelo phuzu. Okubaluleke kakhulu ukuthi sonke sibeke izifuba zethu eceleni, sithole esivumelana ngakho, bese siqala ukusebenza."
+  },
+  {
+   "id": "u21",
+   "speaker": "SPEAKER_00",
+   "start_ms": 795640,
+   "end_ms": 974030,
+   "window_s": 178.39,
+   "text": "Ngiyabonga kakhulu. Lobo ubuholi be-MK Party, buholwa yi-Senior Counsel uDali Mpofu, iPhini likaMengameli uDuduzile Zuma, futhi nizongifaka enkingeni lapho, uTony Yengeni iPhini likaMengameli lesibili, noFloyd Shivambu iPhini likaNobhala-Jikelele lesibili le-MK Party. Manje sebeya komunye umhlangano. Basanda kuhlangana ne-Democratic Alliance lapha ngasese. Phambilini i-DA yathi ngeke isebenzisane ne-MK Party, kodwa kulokhu sesiyibona ixoxa nayo. Njengoba nizwile uTony Yengeni, iPhini likaMengameli lesibili le-MK Party, ethi bazogcina bexoxe ne-Democratic Alliance nokuthi lo bekungumhlangano wokuqala onezithelo. Emhlanganweni wesibili bazoxoxa ngokuthi bangasebenzisana kanjani uma bengangena ndawonye kuhulumeni wasekhaya komasipala. I-MK Party ihola komasipala abangu-19, iningi labo liseKwaZulu-Natal, kodwa ayinalo inani elidingekayo ukuze ibuse yodwa. EUMhlathuze iyahola, naseKwaDukuza iyahola. EThekwini iyahola, eMsunduzi iyahola, naseNewcastle iyahola. Lezo yizizinda ezinhlanu ezinkulu zomnotho wesifundazwe saKwaZulu-Natal. IPietermaritzburg, okuwumasipala waseMsunduzi, iyinhloko-dolobha, kanti iTheku liyisizinda somnotho. IKwaDukuza nayo ingesinye isizinda somnotho wesifundazwe. EUMhlathuze, endaweni yaseRichards Bay lapho kunechweba khona, kuleyo ndawo yaleyo ngxenye yesifundazwe, nayo i-MKP iyahola. Lezi yizona zindawo i-Democratic Alliance ebonakala ifuna ukungena kuzo, kanye nanoma yiliphi elinye iqembu lezepolitiki. UDali Mpofu uphinde wathi bathole incwadi evela kuGeordin Hill-Lewis, umholi we-Democratic Alliance, efuna ukuxoxa nomholi we-MK Party uJacob Zuma, futhi bathemba ukuthi nalowo mhlangano uzoba khona. Uthe balapha ngoba abantu baseNingizimu Afrika banquma ukuthi kungabi khona umnqobi oneningi eliphelele okhethweni lohulumeni basekhaya. Ngakho wonke umuntu kufanele ahlangane, axoxe nabanye, ukuze kuzanywe ukuthola isixazululo ezinkingeni zomphakathi nezomnotho ezisaqhubeka komasipala, nokuthi labo masipala babhekene kanjani nezinkinga zomnotho, amazinga aphezulu okusweleka kwemisebenzi, izinkinga zokulethwa kwezidingo nengqalasizinda embi nedilikayo. Lokhu kubonakala ikakhulukazi kumasipala omkhulu waseJohannesburg, lapho i-DA ibeke khona uHelen Zille futhi iyona qembu elikhulu. Kuzothakazelisa kakhulu ukubona ukuthi lesi simo sizohamba kanjani esifundazweni saKwaZulu-Natal, nokuthi sizoba namuphi umthelela kuhulumeni wesifundazwe sase-KZN, bese ekugcineni sibheka nakuhulumeni wobumbano lukazwelonke.",
+   "text_pauses": "Ngiyabonga kakhulu. Lobo ubuholi be-MK Party, buholwa yi-Senior Counsel uDali Mpofu, iPhini likaMengameli uDuduzile Zuma, futhi nizongifaka enkingeni lapho, uTony Yengeni iPhini likaMengameli lesibili, ~pause920 noFloyd Shivambu iPhini likaNobhala-Jikelele lesibili le-MK Party. Manje sebeya komunye umhlangano. Basanda kuhlangana ne-Democratic Alliance lapha ngasese. Phambilini i-DA yathi ngeke isebenzisane ne-MK Party, kodwa kulokhu sesiyibona ixoxa nayo. Njengoba nizwile uTony Yengeni, iPhini likaMengameli lesibili le-MK Party, ethi bazogcina bexoxe ne-Democratic Alliance nokuthi lo bekungumhlangano wokuqala onezithelo. Emhlanganweni wesibili bazoxoxa ngokuthi bangasebenzisana kanjani uma bengangena ndawonye kuhulumeni wasekhaya komasipala. I-MK Party ihola komasipala abangu-19, iningi labo liseKwaZulu-Natal, kodwa ayinalo inani elidingekayo ukuze ibuse yodwa. ~pause700 EUMhlathuze iyahola, naseKwaDukuza iyahola. EThekwini iyahola, eMsunduzi iyahola, naseNewcastle iyahola. Lezo yizizinda ezinhlanu ezinkulu zomnotho wesifundazwe saKwaZulu-Natal. IPietermaritzburg, okuwumasipala waseMsunduzi, iyinhloko-dolobha, kanti iTheku liyisizinda somnotho. IKwaDukuza nayo ingesinye isizinda somnotho wesifundazwe. EUMhlathuze, endaweni yaseRichards Bay lapho kunechweba khona, kuleyo ndawo yaleyo ngxenye yesifundazwe, nayo i-MKP iyahola. Lezi yizona zindawo i-Democratic Alliance ebonakala ifuna ukungena kuzo, kanye nanoma yiliphi elinye iqembu lezepolitiki. ~pause600 UDali Mpofu uphinde wathi bathole incwadi evela kuGeordin Hill-Lewis, umholi we-Democratic Alliance, efuna ukuxoxa nomholi we-MK Party uJacob Zuma, futhi bathemba ukuthi nalowo mhlangano uzoba khona. Uthe balapha ngoba abantu baseNingizimu Afrika banquma ukuthi kungabi khona umnqobi oneningi eliphelele okhethweni lohulumeni basekhaya. Ngakho wonke umuntu kufanele ahlangane, axoxe nabanye, ukuze kuzanywe ukuthola isixazululo ezinkingeni zomphakathi nezomnotho ezisaqhubeka komasipala, nokuthi labo masipala babhekene kanjani nezinkinga zomnotho, amazinga aphezulu okusweleka kwemisebenzi, izinkinga zokulethwa kwezidingo nengqalasizinda embi nedilikayo. Lokhu kubonakala ikakhulukazi kumasipala omkhulu waseJohannesburg, lapho i-DA ibeke khona uHelen Zille futhi iyona qembu elikhulu. Kuzothakazelisa kakhulu ukubona ukuthi lesi simo sizohamba kanjani esifundazweni saKwaZulu-Natal, nokuthi sizoba namuphi umthelela kuhulumeni wesifundazwe sase-KZN, bese ekugcineni sibheka nakuhulumeni wobumbano lukazwelonke."
+  }
+ ],
+ "total_s": 993.4
+}

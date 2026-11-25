@@ -337,7 +337,9 @@ def _score_group(
     shortfall_pct = (shortfall_ms / window_ms * 100.0) if window_ms else 0.0
     # What the renderer closes with trailing silence is not dead air (see dub_padding).
     tail_pad = min(shortfall_ms, max(0, int(item.get("tail_pad_ms") or 0)))
-    residual_pct = ((shortfall_ms - tail_pad) / window_ms * 100.0) if window_ms else 0.0
+    # Nor is the silence the source speaker took themselves in this window (their held pauses, measured from the audio): a Zulu line that leaves that room is breathing where the speaker breathed.
+    allowed_silence = min(max(0, shortfall_ms - tail_pad), max(0, int(item.get("allowed_silence_ms") or 0)), window_ms // 4)
+    residual_pct = ((shortfall_ms - tail_pad - allowed_silence) / window_ms * 100.0) if window_ms else 0.0
     rush_pct = float(item.get("required_speed_percent") or 0.0)
 
     gates: dict[str, Any] = {}
@@ -375,7 +377,7 @@ def _score_group(
     gates["english_with_class_prefix"] = {"failed": bool(prefixed), "evidence": prefixed}
 
     flags: list[str] = []
-    if residual_pct >= SHORTFALL_FLAG_PCT or shortfall_ms - tail_pad >= SHORTFALL_FLAG_MS:          # a long unit can hide a 5 s hole under 15% (job 37bae6ec u14: 5.1 s of 60.1 s, 8.5%)
+    if residual_pct >= SHORTFALL_FLAG_PCT or shortfall_ms - tail_pad - allowed_silence >= SHORTFALL_FLAG_MS:          # a long unit can hide a 5 s hole under 15% (job 37bae6ec u14: 5.1 s of 60.1 s, 8.5%)
         flags.append("dead_air")
     if speed_policy == "natural":
         # No speed-up exists in this world: a unit that needs ANY speed-up to finish inside its
@@ -410,6 +412,7 @@ def _score_group(
         "shortfall_ms": shortfall_ms,
         "shortfall_pct": round(shortfall_pct, 2),
         "tail_pad_ms": tail_pad,
+        "allowed_silence_ms": allowed_silence,
         "free_gap_ms": int(item.get("free_gap_ms") or 0),
         "rush_pct": round(rush_pct, 2),
         "variant": variant,
@@ -467,7 +470,10 @@ def _turn_rollup(groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         shortfall = max(0, window - measured) if any(m["shortfall_ms"] for m in members) else 0
         ordered = sorted(members, key=lambda m: m["start_ms"])
         last = max(members, key=lambda m: m["end_ms"])
-        padding = plan_turn_padding(ordered, shortfall_ms=shortfall, last_free_gap_ms=int(last.get("free_gap_ms") or 0))
+        padding = dict(plan_turn_padding(ordered, shortfall_ms=shortfall, last_free_gap_ms=int(last.get("free_gap_ms") or 0)))
+        speaker_room = min(int(padding["residual_ms"]), sum(int(m.get("allowed_silence_ms") or 0) for m in members))          # the speaker's own held pauses in the turn: room the dub may leave
+        padding["speaker_pauses_ms"] = speaker_room
+        padding["residual_ms"] = int(padding["residual_ms"]) - speaker_room
         rollup.append({
             "turn_id": turn_id,
             "group_ids": [m["group_id"] for m in members],
@@ -560,6 +566,7 @@ def score_items(
     turn_window_total = sum(t["window_ms"] for t in turns)
     padded_total = sum(t["padding"]["padded_ms"] for t in turns)
     residual_total = sum(t["padding"]["residual_ms"] for t in turns)
+    speaker_pauses_total = sum(t["padding"].get("speaker_pauses_ms", 0) for t in turns)
     shortfall_total = sum(t["shortfall_ms"] for t in turns)
     usage = usage or {}
     headline = {
@@ -574,6 +581,7 @@ def score_items(
         "turn_shortfall_pct": round(shortfall_total / turn_window_total * 100.0, 2) if turn_window_total else 0.0,
         "silence_padded_pct": round(padded_total / turn_window_total * 100.0, 2) if turn_window_total else 0.0,
         "residual_dead_air_pct": round(residual_total / turn_window_total * 100.0, 2) if turn_window_total else 0.0,
+        "speaker_pauses_pct": round(speaker_pauses_total / turn_window_total * 100.0, 2) if turn_window_total else 0.0,          # silence the dub may leave because the speaker left it too
         "mean_rush_pct": round(sum(g["rush_pct"] for g in groups) / len(groups), 2) if groups else 0.0,
         "worst_rush_pct": max((g["rush_pct"] for g in groups), default=0.0),
         "groups_rushed": sum(1 for g in groups if "rushed" in g["flags"] or "overrun" in g["flags"]),

@@ -56,9 +56,13 @@ class YouTubeDownload:
     extractor: str | None
     downloaded_at: str
     captions: tuple[Path, ...] = ()           # YouTube's own caption files (json3) fetched with the video; may be empty
+    description: str | None = None            # what the uploader wrote under the video: often names the speakers, the event and the places
+    tags: tuple[str, ...] = ()
+    chapters: tuple[str, ...] = ()            # chapter titles, in order
 
     def manifest(self) -> dict[str, Any]:
         return {
+            **upload_text(self.description, self.tags, self.chapters),
             "schema_version": "youtube-source-v1",
             "requested_url": self.requested_url,
             "webpage_url": self.webpage_url,
@@ -74,6 +78,36 @@ class YouTubeDownload:
             "maximum_height": 1080,
             "caption_files": [caption.name for caption in self.captions],
         }
+
+
+DESCRIPTION_MAX = 5000
+
+
+def upload_text(description: Any, tags: Any = (), chapters: Any = ()) -> dict[str, Any]:
+    """The uploader's own words about the video, as stored in ``youtube_source.json``: the description (cut at DESCRIPTION_MAX), the tags and the chapter titles.  Keys with nothing in them are left out."""
+    out: dict[str, Any] = {}
+    text = "\n".join(line.rstrip() for line in str(description or "").strip().splitlines())
+    if text:
+        out["description"] = text[:DESCRIPTION_MAX]
+    tag_list = [str(t).strip() for t in (tags or ()) if str(t).strip()][:40]
+    if tag_list:
+        out["tags"] = tag_list
+    chapter_list = [str(c.get("title") if isinstance(c, dict) else c).strip() for c in (chapters or ()) if (c.get("title") if isinstance(c, dict) else c)][:40]
+    if chapter_list:
+        out["chapters"] = chapter_list
+    return out
+
+
+def refresh_upload_text(job_root: Path, *, cookies_file: str | Path | None = None) -> dict[str, Any]:
+    """Fetch the title/description/tags/chapters again for a job downloaded before they were kept, and add them to its ``input/youtube_source.json`` (metadata only, no download).
+    Returns what was added."""
+    path = Path(job_root) / "input" / "youtube_source.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    metadata = _read_metadata(str(record["webpage_url"]), cookies_file=_resolve_cookies_file(cookies_file))
+    added = upload_text(metadata.get("description"), metadata.get("tags"), metadata.get("chapters"))
+    if added:
+        _atomic_write_json(path, {**record, **added})
+    return added
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -436,4 +470,7 @@ def download_youtube_video(
                 metadata.get("extractor_key") or metadata.get("extractor")
             ),
             downloaded_at=datetime.now(timezone.utc).isoformat(),
+            description=_optional_text(metadata.get("description")),
+            tags=tuple(str(t) for t in metadata.get("tags") or ()),
+            chapters=tuple(str(c.get("title") or "") for c in metadata.get("chapters") or () if isinstance(c, dict)),
         )

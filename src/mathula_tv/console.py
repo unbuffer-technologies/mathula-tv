@@ -37,10 +37,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlsplit
 
-from . import ear_clips, language_questions as language, pronunciation_book as book, youtube_captions, zulu_rules as rules
+from . import draws, ear_clips, language_questions as language, pronunciation_book as book, room_tone, youtube_captions, zulu_rules as rules
 from .job_pronunciations import VOICES, Prepared, refresh_lexicons, spell, with_committed_words
 
-SESSION_SECONDS = 12 * 3600
+SESSION_SECONDS = 365 * 24 * 3600          # a sign-in lasts twelve months (the cookie's Max-Age is 31,536,000 s, under the 400 days browsers allow)
 LOGIN_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 600
 MAX_BODY = 64 * 1024
@@ -68,7 +68,7 @@ def _clean_word(value: Any) -> str:
 class Console:
     def __init__(self, work_dir: Path, *, synthesize: Callable[..., Path] | None = None, clock: Callable[[], float] = time.time, max_audio_per_day: int = MAX_AUDIO_PER_DAY,
                  analyse: Callable[[dict[str, Any]], dict[str, Any]] | None = None, cut: Callable[[Path, float, float, Path], None] | None = None,
-                 recognise: Callable[[Path], dict[str, str]] | None = None) -> None:
+                 recognise: Callable[[Path], dict[str, str]] | None = None, omni: Callable[[], Any] | None = None, llm: Callable[[], Any] | None = None) -> None:
         self.work_dir = Path(work_dir)
         self.dir = self.work_dir / "console"
         self.audio_dir = self.dir / "audio"
@@ -83,6 +83,15 @@ class Console:
         self._analyse = analyse
         self._cut = cut or self._ffmpeg_cut
         self._recognise = recognise or self._recognise_local
+        self._omni_factory = omni
+        self._llm_factory = llm
+        self._llm_client: Any = None
+        self._omni_backend: Any = None
+        self._draw_running: set[str] = set()
+        self._studio_running: set[str] = set()
+        self._studio_queue: list[tuple[Any, ...]] = []
+        self._studio_worker_on = False
+        self._draw_errors: dict[str, str] = {}
         self._recognisers: tuple[Any, Any] | None = None
         self._unload_timer: threading.Timer | None = None
         self._recognise_lock = threading.Lock()
@@ -510,8 +519,24 @@ class Console:
             index = next((n for n, i in enumerate(items) if s["id"] in (i.get("source_segment_ids") or [])), None)
             own = {k: s[k] for k in ("start_ms", "end_ms", "caption", "track")}          # the stretch's own window and caption, not the whole dub item's
             s.update({**hear(index), **own, "dub": str(items[index].get("zulu_text") or "")[:self.RAW_TEXT_MAX] if index is not None else ""})
-        return {"words": rows, "answered": done, "resolved": settled, "stretches": stretches, "known": {k: e["language"] for k, e in answered.items() if e.get("language")},
-                "open": len(rows) + sum(1 for s in stretches if not s["answer"]), "languages": list(language.LANGUAGES)}
+        evidence = self._evidence(job_root, run, items, reader, track, voices)
+        return {"words": rows, "answered": done, "resolved": settled, "stretches": stretches, "evidence": evidence, "known": {k: e["language"] for k, e in answered.items() if e.get("language")},
+                "open": len(rows) + sum(1 for s in stretches if not s["answer"]) + sum(1 for e in evidence if not e["answer"]), "languages": list(language.LANGUAGES)}
+
+    def _evidence(self, job_root: Path, run: str, items: list[dict[str, Any]], reader: Any, track: str, voices: Mapping[str, str]) -> list[dict[str, Any]]:
+        """The agent's own missing-evidence notes for this run, as questions (see language_questions.evidence_questions): the source audio window, the recogniser's words and YouTube's caption there."""
+        from .comma_check import load_words
+
+        run_dir = self.work_dir / "experience" / "runs" / run / job_root.name[:8] / "r1"
+        try:
+            rows = language.evidence_questions(job_root, run_dir, items, load_words(job_root))
+        except Exception:                                             # noqa: BLE001 - a question list must never break the console
+            return []
+        for row in rows:
+            if row.get("start_ms") is not None and reader:
+                row["caption"], row["track"] = reader(row["start_ms"] / 1000, row["end_ms"] / 1000)[:600], track
+            row["item"] = None                                          # the unit is far longer than the stretch asked about: no raw-dub button
+        return rows
 
     RAW_TEXT_MAX = 600                 # characters of a dub item read raw: the first part of a long one
 
@@ -533,6 +558,384 @@ class Console:
         self._ensure(name, self.work_dir / "jobs" / self.SMITH_JOB, "SPEAKER_00", voice, text)          # a job root with nothing in it: no lexicon
         return {"url": f"/audio/{name}", "text": text, "voice": voice}
 
+    # -- draws: which draw of a sentence the listener approves --------------------------------------------------------------------------------
+    DRAWS_PER_DAY = 80                  # new draws a day: each is a real synthesis of up to three sentences on the GPU
+
+    def _run_voice(self, job: str, run: str) -> dict[str, Any] | None:
+        """The voice settings a run asks for (``experience/runs/<run>/<clip>/voice.json``): {"generation": {"position_temperature": 1.0}} for the model's decoding settings and/or
+        {"span_sentences": 2} (or "fill") for how many sentences one generation speaks; None for the defaults.  An experiment is a run of the same text with one setting changed, so that the Studio can play it
+        beside the others."""
+        try:
+            data = json.loads((self.work_dir / "experience" / "runs" / run / job[:8] / "voice.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        voice: dict[str, Any] = {}
+        knobs = {str(k): float(v) for k, v in (data.get("generation") or {}).items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        if knobs:
+            voice["generation"] = knobs
+        per_span = data.get("span_sentences")
+        if isinstance(per_span, int) and not isinstance(per_span, bool) and 2 <= per_span <= 4:
+            voice["span_sentences"] = per_span
+        elif per_span == "fill":
+            voice["span_sentences"] = 99          # omnivoice_tts.FILL_SENTENCES: as many sentences as fit the time budget
+        if data.get("follow_word") is False:
+            voice["follow_word"] = False
+        return voice or None
+
+    def _omni_with(self, voice: dict[str, Any] | None) -> Any:
+        """The voice backend that makes a run's audio: the shared one, or its own copy carrying the run's voice settings."""
+        base = self._omni()
+        if not voice:
+            return base
+        key = json.dumps(voice, sort_keys=True)
+        copies = self.__dict__.setdefault("_omni_copies", {})
+        if key not in copies:
+            if self._omni_factory is not None:
+                copy = self._omni_factory()
+            else:
+                from .omnivoice_tts import OmniVoiceTTSBackend
+
+                copy = OmniVoiceTTSBackend.from_environment()
+                copy.sentence_gaps = lambda group, job_root: None
+            copy.generation = dict(voice["generation"]) if voice.get("generation") else None          # on top of the client's own defaults (64 steps)
+            copy.span_sentences = int(voice.get("span_sentences") or 1)
+            copy.follow_word = voice.get("follow_word") is not False
+            copies[key] = copy
+        return copies[key]
+
+    def _omni(self) -> Any:
+        if self._omni_backend is None:
+            if self._omni_factory is not None:
+                self._omni_backend = self._omni_factory()
+            else:
+                from .omnivoice_tts import OmniVoiceTTSBackend
+
+                try:        # copies of the voice left held by a run that died are put back (omnivoice_scale); nothing happens when a live run holds them
+                    from . import omnivoice_scale
+
+                    omnivoice_scale.release_if_stale(self.work_dir, progress=lambda _m: None)
+                except Exception:        # noqa: BLE001 - never stops the studio
+                    pass
+                backend = OmniVoiceTTSBackend.from_environment()
+                backend.sentence_gaps = lambda group, job_root: None          # the sentence is what is judged here, not the silence between sentences; the aligner that sets those is heavy
+                self._omni_backend = backend
+        return self._omni_backend
+
+    def _draw_unit(self, job: str, run: str, unit: Any) -> tuple[Path, dict[str, Any], list[str], list[int], Any]:
+        """(the job's corpus folder, the group, its sentences as the voice is given them, the gaps, the reference clip) of one dub text: what the render of it works from."""
+        _, items = self._items(job, run)
+        if not isinstance(unit, int) or isinstance(unit, bool) or not 0 <= unit < len(items):
+            raise ConsoleError(400, "no such dub text")
+        item = items[unit]
+        store = self._store()
+        corpus = Path(store.root) / "corpus" / job[:8]
+        backend = self._omni_with(self._run_voice(job, run))
+        try:
+            from .dub_pronunciation import register_clip_pronunciation
+
+            register_clip_pronunciation(store, job[:8])          # the research of this job's names, as the render registers it
+        except Exception:
+            pass
+        try:
+            assignments = json.loads((corpus / "voice_resolution.json").read_text(encoding="utf-8")).get("assignments") or {}
+        except (OSError, ValueError):
+            assignments = {}
+        speaker = str(item.get("speaker_id") or "SPEAKER_00")
+        voice = {"selected_voice": (assignments.get(speaker) or {}).get("selected_voice") or backend.default_voice}
+        start_ms = int(item.get("start_ms") or 0)
+        end_ms = int(item.get("end_ms") or start_ms)
+        group = {"group_id": str(item.get("item_id") or unit), "speaker_id": speaker, "start_ms": start_ms, "source_end_ms": end_ms,
+                 "source_span_ms": end_ms - start_ms, "parts": [{"type": "text", "segment_id": "s", "text": str(item.get("zulu_text") or "")}]}
+        spans, gaps = backend.plan(group, voice, corpus)
+        return corpus, group, list(spans), list(gaps), backend.reference_for(group, corpus)
+
+    def draws_view(self, job: str, run: str) -> dict[str, Any]:
+        _, items = self._items(job, run)
+        units = []
+        for index, item in enumerate(items):
+            corpus, group, spans, _gaps, ref = self._draw_unit(job, run, index)
+            store = draws.load(corpus)
+            rows = []
+            for k, text in enumerate(spans):
+                stale = draws.is_stale(store, text, ref.start_s, ref.end_s)
+                marked = draws.span_key(text) in store["marks"] and not stale
+                rows.append({"index": k, "text": text, "retake": draws.retake_for(store, text, ref.start_s, ref.end_s), "marked": marked, "stale": stale})
+            units.append({"index": index, "id": group["group_id"], "speaker": group["speaker_id"], "start_ms": group["start_ms"], "spans": rows})
+        return {"units": units, "per_day": self.DRAWS_PER_DAY}
+
+    @staticmethod
+    def _retake(value: Any) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= draws.MAX_RETAKE:
+            raise ConsoleError(400, f"a draw is a whole number from 0 to {draws.MAX_RETAKE}")
+        return value
+
+    def draw_hear(self, job: str, run: str, unit: Any, span: Any, retake: Any) -> dict[str, Any]:
+        """One draw of one sentence, made by the same call the render makes (with the sentence before it and the first word after it, so it is the same generation).  A draw takes a minute, so the
+        answer is {"pending": true} until it exists and the page asks again; a draw heard before is answered at once."""
+        retake = self._retake(retake)
+        corpus, group, spans, gaps, ref = self._draw_unit(job, run, unit)
+        if not isinstance(span, int) or isinstance(span, bool) or not 0 <= span < len(spans):
+            raise ConsoleError(400, "no such sentence")
+        name = hashlib.sha256(f"draw|{job}|{unit}|{spans[span]}|{retake}|{ref.start_s:.2f}-{ref.end_s:.2f}".encode("utf-8")).hexdigest()[:32] + ".wav"
+        target = self.audio_dir / name
+        if target.is_file():
+            return {"ready": True, "url": f"/audio/{name}", "text": spans[span], "retake": retake}
+        with self._lock:
+            error = self._draw_errors.pop(name, None)
+            if error:
+                raise ConsoleError(502, error)
+            if name in self._draw_running:
+                return {"pending": True}
+            path, state = self._budget()
+            if int(state.get("draws") or 0) >= self.DRAWS_PER_DAY:
+                raise ConsoleError(429, f"today's limit of {self.DRAWS_PER_DAY} new draws is used; a draw heard before is free")
+            state["draws"] = int(state.get("draws") or 0) + 1
+            path.write_text(json.dumps(state), encoding="utf-8")
+            self._draw_running.add(name)
+        threading.Thread(target=self._draw_make, args=(name, target, corpus, group, spans, gaps, span, retake), daemon=True).start()
+        return {"pending": True}
+
+    def _draw_make(self, name: str, target: Path, corpus: Path, group: dict[str, Any], spans: list[str], gaps: list[int], span: int, retake: int) -> None:
+        try:
+            lo, hi = max(0, span - 1), min(len(spans), span + 2)
+            audio, rate, answer, _report, _ref = self._omni().speak(group, spans[lo:hi], gaps[lo:hi - 1], corpus, retakes={span - lo: retake})
+            starts = answer.get("span_starts_s") or []
+            k = span - lo
+            a = int(float(starts[k]) * rate) if k < len(starts) else 0
+            z = int(float(starts[k + 1]) * rate) if k + 1 < len(starts) else len(audio)
+            import soundfile as sf
+
+            sf.write(str(target), audio[a:z], rate)
+        except Exception as exc:                                          # noqa: BLE001 - the page is told, the server goes on
+            sys.stderr.write(f"console draw error: {type(exc).__name__}: {exc}\n")
+            with self._lock:
+                self._draw_errors[name] = f"the voice could not make that draw ({type(exc).__name__}); try again in a moment"
+        finally:
+            with self._lock:
+                self._draw_running.discard(name)
+
+    def _studio_worker(self) -> None:
+        """The units of the studio are made one after another: the voice is one GPU, and one unit at a time is what it answers fastest."""
+        while True:
+            with self._lock:
+                if not self._studio_queue:
+                    self._studio_worker_on = False
+                    return
+                job = self._studio_queue.pop(0)
+            self._studio_make(*job)
+
+    def studio_run(self, job: str, run: str, *, make: bool = True) -> dict[str, Any]:
+        """The whole dub of a run as ONE audio on its real timeline, with every word's time, so the listener can work through it from start to finish.  Each unit is made (or found, when its text, draws
+        and reference clip are unchanged) and the units are laid at their start like the render does.  {"pending": true, "ready": n, "total": N} until all of them exist."""
+        _, items = self._items(job, run)
+        prepared = []
+        for index in range(len(items)):
+            corpus, group, spans, gaps, ref = self._draw_unit(job, run, index)
+            store = draws.load(corpus)
+            retakes = [draws.retake_for(store, text, ref.start_s, ref.end_s) for text in spans]
+            pins = [draws.take_for(store, text, ref.start_s, ref.end_s) for text in spans]
+            generation = self._run_voice(job, run)
+            steps = json.dumps(getattr(getattr(self._omni(), "client", None), "default_generation", None), sort_keys=True)
+            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
+            prepared.append((name, corpus, group, spans, gaps, pins, store, ref, generation))
+        missing = [p for p in prepared if not ((self.audio_dir / f"{p[0]}.wav").is_file() and (self.audio_dir / f"{p[0]}.json").is_file())]
+        if missing and not make:                      # only reading: nothing is queued and no GPU is spent
+            return {"pending": True, "made": len(prepared) - len(missing), "total": len(prepared)}
+        if missing:
+            with self._lock:
+                for name, corpus, group, spans, gaps, _retakes, _store, _ref, generation in missing:
+                    error = self._draw_errors.pop(name, None)
+                    if error:
+                        raise ConsoleError(502, error)
+                    if name in self._studio_running:
+                        continue
+                    path, state = self._budget()
+                    if int(state.get("draws") or 0) >= self.DRAWS_PER_DAY:
+                        raise ConsoleError(429, f"today's limit of {self.DRAWS_PER_DAY} new draws is used; units made before are free")
+                    state["draws"] = int(state.get("draws") or 0) + 1
+                    path.write_text(json.dumps(state), encoding="utf-8")
+                    self._studio_running.add(name)
+                    self._studio_queue.append((name, self.audio_dir / f"{name}.wav", self.audio_dir / f"{name}.json", corpus, group, spans, gaps, generation))
+                if not self._studio_worker_on:
+                    self._studio_worker_on = True
+                    threading.Thread(target=self._studio_worker, daemon=True).start()
+            return {"pending": True, "made": len(prepared) - len(missing), "total": len(prepared)}
+        import numpy as np
+        import soundfile as sf
+
+        pieces, sentences, units, rate = [], [], [], 24000
+        for index, (name, _corpus, group, spans, _gaps, pins, store, ref, _generation) in enumerate(prepared):
+            data = json.loads((self.audio_dir / f"{name}.json").read_text(encoding="utf-8"))
+            audio, rate = sf.read(str(self.audio_dir / f"{name}.wav"), dtype="float32")
+            audio = audio.mean(axis=1) if audio.ndim > 1 else audio
+            offset = int(group["start_ms"]) / 1000.0
+            pieces.append((int(offset * rate), audio))
+            units.append({"index": index, "id": group["group_id"], "start_s": round(offset, 2), "end_s": round(offset + len(audio) / rate, 2)})
+            by_span: dict[int, list[dict[str, Any]]] = {}
+            for word in data["words"]:
+                by_span.setdefault(int(word["span"]), []).append({"text": word["text"], "start": round(offset + word["start_s"], 2), "end": round(offset + word["end_s"], 2)})
+            for k, text in enumerate(spans):
+                words = by_span.get(k, [])
+                sentences.append({"unit": index, "index": k, "text": text, "words": words, "flagged": [f["word"] for f in self._flags(job, run) if f.get("unit_id") == group["group_id"] and f.get("span") == k], "committed": pins[k], "picked": (data.get("picked") or [0] * len(spans))[k],
+                                  "draws": [f"/audio/{f}" for f in (data.get("takes") or {}).get(str(k), [])],
+                                  "primed": [[{"url": f"/audio/{x['file']}", "text": x["text"]} for x in ((data.get("primed") or {}).get(str(k)) or {}).get(str(t), [])] for t in range(3)],
+                                  "marked": pins[k] is not None,
+                                  "start": words[0]["start"] if words else offset, "end": words[-1]["end"] if words else offset})
+        key = hashlib.sha256("|".join(p[0] for p in prepared).encode("utf-8")).hexdigest()[:32]
+        target = self.audio_dir / f"{key}.wav"
+        if not target.is_file():
+            track = np.zeros(max(at + len(a) for at, a in pieces), dtype=np.float32)
+            for at, a in pieces:
+                track[at:at + len(a)] += a
+            sf.write(str(target), (track / (float(np.abs(track).max()) or 1.0) * 0.9).astype(np.float32), rate, subtype="PCM_16")
+        return {"ready": True, "url": f"/audio/{key}.wav", "seconds": round(sf.info(str(target)).duration, 2), "units": units, "sentences": sentences}
+
+    def _studio_make(self, name: str, wav: Path, meta: Path, corpus: Path, group: dict[str, Any], spans: list[str], gaps: list[int], generation: dict[str, Any] | None = None) -> None:
+        try:
+            takes_out: list[Any] = []
+            raw_out: list[dict[str, Any]] = []
+            audio, rate, _answer, report, _ref = self._omni_with(generation).speak(group, spans, gaps, corpus, takes_out=takes_out, all_takes=True, raw_out=raw_out)
+            import soundfile as sf
+
+            files: dict[str, list[str]] = {}
+            for k, takes in enumerate(takes_out):                          # the three draws of every sentence, kept so that they can be played at once
+                files[str(k)] = []
+                for t, core in enumerate(takes):
+                    fname = hashlib.sha256(f"{name}|{k}|{t}".encode("utf-8")).hexdigest()[:32] + ".wav"
+                    sf.write(str(self.audio_dir / fname), core, rate)
+                    files[str(k)].append(fname)
+            primed: dict[str, dict[str, list[dict[str, str]]]] = {}          # per sentence and draw: the primed sentences its names were cut from, as the voice made them
+            for k, note in enumerate(raw_out):
+                fname = hashlib.sha256(f"{name}|primed|{k}".encode("utf-8")).hexdigest()[:32] + ".wav"
+                sf.write(str(self.audio_dir / fname), note["audio"], int(note["rate"]))
+                primed.setdefault(str(note["span"]), {}).setdefault(str(note["take"]), []).append({"file": fname, "text": str(note["text"]), "names": note.get("names") or [], "source": note.get("source") or []})
+            sf.write(str(wav), audio, rate)
+            meta.write_text(json.dumps({"seconds": round(len(audio) / rate, 2), "words": report.get("words") or [], "takes": files, "picked": report.get("picked"), "primed": primed}), encoding="utf-8")
+        except Exception as exc:                                          # noqa: BLE001 - the page is told, the server goes on
+            sys.stderr.write(f"console studio error: {type(exc).__name__}: {exc}\n")
+            with self._lock:
+                self._draw_errors[name] = f"the voice could not make that unit ({type(exc).__name__}); try again in a moment"
+        finally:
+            with self._lock:
+                self._studio_running.discard(name)
+
+    FLAGS_FILE = "ear_flags.json"
+
+    def _flags(self, job: str, run: str) -> list[dict[str, Any]]:
+        """The words the listener has flagged by ear as rushed or clipped in this run (ear_flags.json in the work directory)."""
+        try:
+            data = json.loads((self.work_dir / self.FLAGS_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [f for f in data.get("flags") or [] if f.get("job") == job and f.get("run") == run]
+
+    def studio_flag(self, job: str, run: str, unit: Any, span: Any, word: Any, flagged: Any, note: str = "") -> dict[str, Any]:
+        """Record what the listener's ear says: this word is rushed or clipped (or take the flag back).  Nothing is inferred and no model is asked: the flag keeps the sentence, the next one, the word and the draw
+        that was in the audio, exactly as heard.  The flags are the labelled set the voice is studied with: what the cases that fail have in common is what a writing principle can be built on."""
+        data = self.studio_run(job, run, make=False)
+        if not data.get("ready"):
+            raise ConsoleError(409, "the studio of this run is not made yet: open it first")
+        rows = data["sentences"]
+        at = next((i for i, r in enumerate(rows) if r["unit"] == unit and r["index"] == span), None)
+        if at is None or not isinstance(word, str) or not any(w["text"] == word for w in rows[at]["words"]) or not isinstance(flagged, bool):
+            raise ConsoleError(400, "no such sentence or word")
+        row, after = rows[at], rows[at + 1] if at + 1 < len(rows) else None
+        unit_id = data["units"][row["unit"]]["id"]
+        path = self.work_dir / self.FLAGS_FILE
+        try:
+            store = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            store = {}
+        flags = [f for f in store.get("flags") or [] if not (f.get("job") == job and f.get("run") == run and f.get("unit_id") == unit_id and f.get("span") == span and f.get("word") == word)]
+        if flagged:
+            hit = next(w for w in row["words"] if w["text"] == word)
+            flags.append({"at": datetime.fromtimestamp(self.clock(), timezone.utc).isoformat(timespec="seconds"), "job": job, "run": run, "unit_id": unit_id, "span": span, "word": word,
+                          "sentence": row["text"], "next_sentence": after["text"] if after else "", "in_audio_draw": row["picked"], "committed_draw": row["committed"],
+                          "word_start_s": hit["start"], "word_end_s": hit["end"], "note": str(note)[:300]})
+        store = {"schema": "mathula-ear-flags-v1", "flags": flags}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(store, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(path)
+        return {"ok": True, "flagged": flagged, "flags_in_this_run": len([f for f in flags if f.get("job") == job and f.get("run") == run])}
+
+    def _llm(self) -> Any:
+        if self._llm_client is None:
+            if self._llm_factory is not None:
+                self._llm_client = self._llm_factory()
+            else:
+                from .dub_agent import native_client_config, new_chat_client
+
+                self._llm_client = new_chat_client(native_client_config())
+        return self._llm_client
+
+    def studio_investigate(self, job: str, run: str, unit: Any, span: Any, word: Any) -> dict[str, Any]:
+        """Repair, for the word the listener pressed: send its span and the next one to a model to say why the voice rushes or clips it.  An opinion the listener asked for: nothing is kept, nothing is made, and
+        nothing here changes a text.  What the ear decides is recorded with studio_flag."""
+        import re
+
+        import numpy as np
+
+        from . import ear_lessons, rush_lessons
+
+        data = self.studio_run(job, run, make=False)
+        if not data.get("ready"):
+            raise ConsoleError(409, "the studio of this run is not made yet: open it first")
+        rows = data["sentences"]
+        at = next((i for i, r in enumerate(rows) if r["unit"] == unit and r["index"] == span), None)
+        if at is None or not isinstance(word, str) or not word.strip():
+            raise ConsoleError(400, "no such sentence or word")
+        row = rows[at]
+        after = rows[at + 1] if at + 1 < len(rows) else None
+        words = row["words"]
+        hit = next((i for i, w in enumerate(words) if w["text"] == word), None)
+        if hit is None:
+            raise ConsoleError(400, "that word is not in the sentence")
+        phrase = " ".join(w["text"] for w in words[max(0, hit - 4):hit + 3])
+        clean = word.strip(".,;:?!")
+        finding = rush_lessons.investigate(self._llm(), sentence=row["text"], next_sentence=after["text"] if after else "", word=clean, phrase=phrase)
+        clip = self._word_clip(data["url"], words[hit])                        # the word alone, to be played: the ear is the instrument
+        return {**finding, "word": word, "sentence": row["text"], "next_sentence": after["text"] if after else "", **clip}
+
+    def _word_clip(self, studio_url: str, word: Mapping[str, Any]) -> dict[str, Any]:
+        """The pressed word cut out of the studio audio (a little before and after it), so that it can be played alone.  A recogniser's reading of it was tried and dropped: an English-trained model gave 3 vowel
+        sounds for the 2 syllables of "kahle", 6 for the 4 of "nentatheli" and 4 for the 5 of "ngemisebenzi" (which the listener called fine), so counting syllables with it only misleads."""
+        import soundfile as sf
+
+        try:
+            source = self.audio_dir / studio_url.rsplit("/", 1)[-1]
+            info = sf.info(str(source))
+            lo, hi = max(0.0, float(word["start"]) - 0.08), float(word["end"]) + 0.08
+            audio, rate = sf.read(str(source), start=int(lo * info.samplerate), stop=int(hi * info.samplerate), dtype="float32")
+            name = hashlib.sha256(f"word|{source.name}|{lo:.2f}|{hi:.2f}".encode("utf-8")).hexdigest()[:32] + ".wav"
+            if not (self.audio_dir / name).is_file():
+                sf.write(str(self.audio_dir / name), audio, rate)
+        except Exception:                                                   # noqa: BLE001 - the clip is help for the ear: the investigation does not depend on it
+            return {}
+        return {"word_clip_url": f"/audio/{name}"}
+
+    def studio_commit(self, job: str, run: str, unit: Any, span: Any, take: Any, note: str = "") -> dict[str, Any]:
+        """Keep draw ``take`` (0, 1 or 2) of a sentence: the render uses that take of the sentence from now on, for this exact text and reference clip."""
+        if not isinstance(take, int) or isinstance(take, bool) or not 0 <= take <= 2:
+            raise ConsoleError(400, "a draw is 0, 1 or 2")
+        corpus, group, spans, _gaps, ref = self._draw_unit(job, run, unit)
+        if not isinstance(span, int) or isinstance(span, bool) or not 0 <= span < len(spans):
+            raise ConsoleError(400, "no such sentence")
+        return {"ok": True, "mark": draws.commit(corpus, spans[span], ref.start_s, ref.end_s, 0, unit=group["group_id"], note=note, take=take)}
+
+    def draw_commit(self, job: str, run: str, unit: Any, span: Any, retake: Any, note: str = "") -> dict[str, Any]:
+        retake = self._retake(retake)
+        corpus, group, spans, _gaps, ref = self._draw_unit(job, run, unit)
+        if not isinstance(span, int) or isinstance(span, bool) or not 0 <= span < len(spans):
+            raise ConsoleError(400, "no such sentence")
+        mark = draws.commit(corpus, spans[span], ref.start_s, ref.end_s, retake, unit=group["group_id"], note=note)
+        return {"ok": True, "mark": mark}
+
+    def draw_revoke(self, job: str, run: str, unit: Any, span: Any) -> dict[str, Any]:
+        corpus, _group, spans, _gaps, _ref = self._draw_unit(job, run, unit)
+        if not isinstance(span, int) or isinstance(span, bool) or not 0 <= span < len(spans):
+            raise ConsoleError(400, "no such sentence")
+        return {"revoked": draws.revoke(corpus, spans[span])}
+
     def _refresh_lessons(self) -> None:
         for prepared in self._prepared.values():
             prepared.refresh_lessons()
@@ -540,7 +943,7 @@ class Console:
     def answer(self, job: str, run: str, data: Mapping[str, Any]) -> dict[str, Any]:
         """Keep the listener's answer: a word's language (``kind`` "word", ``word``, ``language``) or which reading of a stretch was right (``kind`` "stretch", ``id``,
         ``choice`` model / transcript / typed, ``text``).  Both are lessons for every later job."""
-        job_root, _ = self._items(job, run)
+        job_root, items = self._items(job, run)
         kind = str(data.get("kind") or "")
         try:
             if kind == "word":
@@ -549,13 +952,20 @@ class Console:
                 known = next((u for u in [*prepared.unsure, *prepared.resolved] if language.key_of(u["word"]) == language.key_of(word)), None)
                 sig = (known or {}).get("signature") or (prepared.lessons["words"].get(language.key_of(word)) or {}).get("signature") or ""          # a word clicked anywhere else is answered but teaches no pattern
                 stored = language.answer_word(self.work_dir, word, str(data.get("language") or ""), sig, str(data["comment"]) if "comment" in data else None)
+            elif kind == "evidence":
+                key = str(data.get("id") or "")
+                row = next((e for e in self._evidence(job_root, run, items, None, "", {}) if e["id"] == key), None)
+                if row is None:
+                    raise ConsoleError(400, "no such question")
+                stored = language.answer_evidence(job_root, self.work_dir, key, wanted=row["wanted"], unit=row["unit"], text=str(data.get("text") or ""),
+                                                  comment=str(data["comment"]) if "comment" in data else None)
             elif kind == "stretch":
                 segment_id = str(data.get("id") or "")
                 if not SEGMENT_ID.match(segment_id):
                     raise ConsoleError(400, "no such stretch")
                 stored = language.answer_stretch(job_root, self.work_dir, segment_id, str(data.get("choice") or ""), str(data.get("text") or ""), str(data["comment"]) if "comment" in data else None)
             else:
-                raise ConsoleError(400, "kind is word or stretch")
+                raise ConsoleError(400, "kind is word, stretch or evidence")
         except ValueError as exc:
             raise ConsoleError(400, str(exc))
         self._refresh_lessons()
@@ -966,6 +1376,22 @@ class Console:
                 return reply(200, self.raw_audio(str(data.get("job")), str(data.get("run")), data.get("item")))
             if method == "POST" and path == "/api/learn":
                 return reply(200, self.learn())
+            if method == "GET" and path == "/api/draws":
+                return reply(200, self.draws_view(query.get("job", ""), query.get("run", "")))
+            if method == "POST" and path == "/api/studio-flag":
+                return reply(200, self.studio_flag(str(data.get("job")), str(data.get("run")), data.get("unit"), data.get("span"), data.get("word"), data.get("flagged"), str(data.get("note") or "")))
+            if method == "POST" and path == "/api/studio-investigate":
+                return reply(200, self.studio_investigate(str(data.get("job")), str(data.get("run")), data.get("unit"), data.get("span"), data.get("word")))
+            if method == "POST" and path == "/api/studio-commit":
+                return reply(200, self.studio_commit(str(data.get("job")), str(data.get("run")), data.get("unit"), data.get("span"), data.get("take"), str(data.get("note") or "")[:300]))
+            if method == "POST" and path == "/api/studio-run":
+                return reply(200, self.studio_run(str(data.get("job")), str(data.get("run"))))
+            if method == "POST" and path == "/api/draw-hear":
+                return reply(200, self.draw_hear(str(data.get("job")), str(data.get("run")), data.get("unit"), data.get("span"), data.get("retake")))
+            if method == "POST" and path == "/api/draw-commit":
+                return reply(200, self.draw_commit(str(data.get("job")), str(data.get("run")), data.get("unit"), data.get("span"), data.get("retake"), str(data.get("note") or "")[:300]))
+            if method == "POST" and path == "/api/draw-revoke":
+                return reply(200, self.draw_revoke(str(data.get("job")), str(data.get("run")), data.get("unit"), data.get("span")))
             if method == "GET" and path == "/api/book":
                 return reply(200, self.book_view())
             if method == "POST" and path == "/api/book/revoke":
@@ -1029,10 +1455,24 @@ def main(argv: list[str] | None = None) -> int:
     from .config import load_settings
 
     parser = argparse.ArgumentParser(prog="mathula_tv.console")
-    parser.add_argument("command", choices=["serve", "set-password"])
+    parser.add_argument("command", choices=["serve", "set-password", "studio"])
     parser.add_argument("--port", type=int, default=int(os.environ.get("MATHULA_TV_CONSOLE_PORT", "8765")))
+    parser.add_argument("--job", help="studio: the job id")
+    parser.add_argument("--run", help="studio: the run, for example prod-130")
     args = parser.parse_args(argv)
     console = Console(Path(load_settings().work_dir))
+    if args.command == "studio":
+        # The last step of a final run: the whole dub with the three draws of every sentence, made now so that the studio opens at once.
+        if not args.job or not args.run:
+            parser.error("studio needs --job and --run")
+        started = time.time()
+        while True:
+            answer = console.studio_run(args.job, args.run)
+            if answer.get("ready"):
+                print(f"studio ready: {answer['seconds']} s, {len(answer['sentences'])} sentences, three draws each, in {time.time() - started:.0f} s")
+                return 0
+            print(f"{time.time() - started:5.0f} s: {answer.get('made')} of {answer.get('total')} units made", flush=True)
+            time.sleep(10)
     if args.command == "set-password":
         first = getpass.getpass("New console password (at least 10 characters): ")
         if first != getpass.getpass("Again: "):

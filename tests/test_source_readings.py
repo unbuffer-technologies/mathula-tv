@@ -69,13 +69,13 @@ def test_the_workbench_reads_the_job_files_for_the_tool(tmp_path):
     assert seg["segment_id"] == "seg-2" and "youtube_caption (en-orig)" in seg and seg["words_the_recogniser_was_unsure_of"]
 
 
-def test_the_agent_is_given_the_tool_and_the_pause_limit_follows_the_speakers_held_pauses():
+def test_the_agent_is_given_the_source_readings_tool_and_no_pause_imitation_rules():
     from mathula_tv.dub_agent import SYSTEM_PROMPT, TOOL_SPECS
 
     assert any(spec["function"]["name"] == "source_readings" for spec in TOOL_SPECS)
     flat = " ".join(SYSTEM_PROMPT.split())
     assert "call source_readings before you decide what it meant" in flat
-    assert "at most two per unit, and one more for each held pause of 0.8 s or more that the held-pause points name for that unit" in flat and "at most two per unit. After" not in flat
+    assert "~pause" not in flat and "held pause" not in flat and "pauses_inside" not in flat          # the voice clones the speaker: the agent is not asked to imitate pauses
 
 
 def test_a_phrase_narrows_the_answer_to_a_window_round_it_in_the_english_the_confidences_and_the_caption():

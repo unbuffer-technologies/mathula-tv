@@ -31,6 +31,7 @@ MAX_GAP_S = 2.0               # ... nor longer than this
 MAX_CHANGE_S = 0.9            # a boundary moves by at most this much
 MAX_MATCH_FRACTION = 0.08     # a Zulu sentence is matched to a source sentence only when they sit this close (share of the turn's speech)
 MAX_ONSET_ERROR_S = 2.5       # ... and only when its start is within this many seconds of the source's: a larger gap is far more likely a different sentence than real drift, and is left alone
+DIAGNOSE_ONSET_ERROR_S = 8.0     # the wider guard of a diagnosis whose sentences are paired in order
 MIN_SHIFT_S = 0.08            # nothing is rewritten for less than this
 _STOPS = (".", "?", "!")
 
@@ -162,9 +163,11 @@ def _solve(onsets: np.ndarray, gaps: np.ndarray, targets: Sequence[float | None]
     return delta
 
 
-def retime(source_path: Path, output_path: Path, words: Sequence[Mapping[str, Any]], start_ms: int, end_ms: int, extra_ms: int = 0) -> dict[str, Any]:
+def retime(source_path: Path, output_path: Path, words: Sequence[Mapping[str, Any]], start_ms: int, end_ms: int, extra_ms: int = 0, *, diagnose: bool = False) -> dict[str, Any]:
     """Write ``output_path``: the unit's audio with its sentence gaps moved toward the source speaker's sentence onsets.  Returns a report; ``applied`` is False (and nothing is
-    written) when there is nothing to do or the sentences cannot be matched with confidence."""
+    written) when there is nothing to do or the sentences cannot be matched with confidence.  ``diagnose`` is for the report only (sentence_timing shows it to the agent): when the unit has as
+    many sentence boundaries as the speaker's, the sentences are paired in order and the onset guard is wider, so a Zulu sentence much longer than the English one is still measured against
+    its own English sentence instead of being left unmatched; the renderer does not use it."""
     with wave.open(str(source_path), "rb") as src:
         params = src.getparams()
         frames = src.readframes(params.nframes)
@@ -191,8 +194,10 @@ def retime(source_path: Path, output_path: Path, words: Sequence[Mapping[str, An
         spoken += (a - previous_end) / sr
         previous_end = b
         speech_before.append(spoken / total_speech)
-    matches = _match(speech_before, fractions)
-    targets = [english[j] if j is not None and abs(english[j] - onsets[k]) <= MAX_ONSET_ERROR_S else None for k, j in enumerate(matches)]
+    paired = diagnose and len(onsets) == len(english)
+    matches = list(range(len(onsets))) if paired else _match(speech_before, fractions)
+    guard = DIAGNOSE_ONSET_ERROR_S if paired else MAX_ONSET_ERROR_S
+    targets = [english[j] if j is not None and abs(english[j] - onsets[k]) <= guard else None for k, j in enumerate(matches)]
     report["matched"] = sum(1 for t in targets if t is not None)
     if not report["matched"]:
         report["why"] = "no Zulu sentence sits near a source sentence"
@@ -203,9 +208,6 @@ def retime(source_path: Path, output_path: Path, words: Sequence[Mapping[str, An
     ceiling = np.array([min(MAX_GAP_S, max(float(gaps[k]), float(spoken_gaps[j]) if j is not None and targets[k] is not None and j < len(spoken_gaps) else 0.0))
                         for k, j in enumerate(matches)])
     delta = _solve(onsets, gaps, targets, extra_ms / 1000.0, ceiling)
-    if float(np.abs(delta).max()) < MIN_SHIFT_S:
-        report["why"] = "already where the source speaker's sentences begin"
-        return report
     shifts = np.cumsum(delta)
     new_onsets = onsets + shifts
     wanted = [(k, t) for k, t in enumerate(targets) if t is not None]
@@ -213,7 +215,10 @@ def retime(source_path: Path, output_path: Path, words: Sequence[Mapping[str, An
                                "after": round(float(np.sqrt(np.mean([(new_onsets[k] - t) ** 2 for k, t in wanted]))), 2)}
     report["gap_changes_s"] = [round(float(d), 2) for d in delta]
     report["sentences"] = [{"zulu_starts_s": round(float(onsets[k]), 2), "source_starts_s": None if targets[k] is None else round(float(targets[k]), 2),
-                            "zulu_starts_after_s": round(float(new_onsets[k]), 2)} for k in range(len(onsets))]
+                            "zulu_starts_after_s": round(float(new_onsets[k]), 2)} for k in range(len(onsets))]          # also when nothing moves: the residual is what the agent is shown (sentence_timing)
+    if float(np.abs(delta).max()) < MIN_SHIFT_S:
+        report["why"] = "already where the source speaker's sentences begin"
+        return report
     if report["onset_error_s"]["after"] >= report["onset_error_s"]["before"]:
         report["why"] = "the move would not bring the sentences nearer"
         return report

@@ -39,6 +39,8 @@ def refresh(voice_resolution_path: Path, sheet: Mapping[str, Any]) -> dict[str, 
     assignments = data.get("assignments")
     if not isinstance(assignments, dict) or len(assignments) < 2:
         return None                                   # one speaker needs no separation
+    if all(isinstance(a, Mapping) and a.get("resolution_status") == "cloned_from_reference" for a in assignments.values()):
+        return None                                   # each speaker is cloned from their own reference clip: no shared Azure voice to tell apart by pitch
     filled = False
     prepared: dict[str, dict[str, Any]] = {}
     for speaker, assignment in assignments.items():

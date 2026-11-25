@@ -155,3 +155,25 @@ def test_the_source_check_reads_the_captions_and_runs_no_recogniser(tmp_path):
 
     source = inspect.getsource(source_suspects)
     assert "LocalGop" not in source and "speech_backend" not in source and "heard_word" not in source
+
+
+def test_a_segment_whose_restored_opening_was_spoken_before_the_first_recognised_word_starts_there(tmp_path):
+    import wave
+
+    import numpy as np
+
+    from mathula_tv.source_suspects import extend_start_to_speech, prepends_words
+
+    assert prepends_words("There, giving us the latest.", "Samkele Maseko there, giving us the latest.") and not prepends_words("There, giving us", "There, giving us the latest")
+    rate = 16000
+    tone = lambda seconds: (3000 * np.sin(2 * np.pi * 200 * np.arange(int(seconds * rate)) / rate)).astype(np.int16)
+    quiet = lambda seconds: np.zeros(int(seconds * rate), dtype=np.int16)
+    audio = np.concatenate([tone(2.0), quiet(2.0), tone(1.3), tone(3.0)])          # speech to 2 s, silence to 4 s, the skipped name 4.0-5.3, the recognised words from 5.3
+    path = tmp_path / "a.wav"
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(1), out.setsampwidth(2), out.setframerate(rate), out.writeframes(audio.tobytes())
+    segment = {"start_ms": 5300, "end_ms": 8300, "source_text": "There, giving us the latest.", "restored_text": "Samkele Maseko there, giving us the latest."}
+    moved = extend_start_to_speech(segment, 2000, path)
+    assert moved is not None and 3900 <= moved <= 4100 and segment["start_ms"] == moved
+    same = {"start_ms": 5300, "end_ms": 8300, "source_text": "There, giving us", "restored_text": "There, giving us"}
+    assert extend_start_to_speech(same, 2000, path) is None and same["start_ms"] == 5300

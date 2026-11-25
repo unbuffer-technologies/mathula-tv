@@ -144,8 +144,9 @@ def score_submission_dir(
     voices: Mapping[str, Mapping[str, Any]] | None = None,
     pronunciation_root: Path | None = None,
     source_explains: Any = None,
+    speaker_pauses: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    """Re-measure and score an agent submission against the frozen clip inputs.
+    """Re-measure and score an agent submission against the frozen clip inputs.  ``speaker_pauses``: segment id -> milliseconds the source speaker held in pauses inside it (delivery sheet).
 
     ``segments`` restricts coverage to a subset (one speaker turn handled by a worker) and
     ``next_start_after_ms`` is when the next speech after that subset starts, so the last
@@ -216,6 +217,7 @@ def score_submission_dir(
             "fits_naturally": fit["fits_naturally"],
             "free_gap_ms": fit["free_gap_after_ms"],
             "tail_pad_ms": fit["tail_pad_ms"],
+            "allowed_silence_ms": sum(int((speaker_pauses or {}).get(str(sid), 0)) for sid in item.get("source_segment_ids") or []),
             "variant_id": "agent",
             "candidate_id": str(item["item_id"]),
             "requires_review": bool(item.get("needs_review")),
@@ -224,6 +226,7 @@ def score_submission_dir(
         items, glossary=glossary, ledger=ledger, labels=labels, usage=usage,
         approach="agent_submission", speed_policy=speed_policy, source_explains=source_explains,
     )
+    card["audio_paths"] = {str(item["item_id"]): str(fit["audio_path"]) for (item, _next, _text), fit in zip(jobs, fits) if fit.get("audio_path")}          # the audio each unit was measured on (sentence_timing reads it)
     card["submission"] = {
         "approach_notes": str(submission.get("approach_notes") or ""),
         "warnings": warnings,

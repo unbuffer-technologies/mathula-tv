@@ -67,6 +67,23 @@ without any prefix the sentence adds ("sayensi" is not it: give "isayensi"). Giv
 Reply with JSON only: {"items":[{"id":"...","words":[{"written":"...","english":"...","kind":"word|name","zulu":"..."}]}]} with one entry per input id.
 """
 
+GRAMMAR_PROMPT = """\
+You are an editor of isiZulu that will be SPOKEN in a news broadcast by a synthetic voice that reads it with Zulu letter rules. For each item you get the English the Zulu translates ("english")
+and the Zulu text ("zulu"). Find the phrases a Zulu listener would stumble on, and only those:
+- "grammar": ungrammatical or unnatural isiZulu: a wrong or missing concord, a locative or noun that does not belong to anything ("bobabili ekolishi, u-Brigitte Mabandla Justice College" for "both from
+  Brigitte Mabandla Justice College": the college is named twice and nothing says they come from it), a list of names with nothing joining them, a calque of the English that no one would say.
+- "fused": a stretch that is hard to say in one breath and gets rushed: a run of names followed directly by a conjunction or another noun, heavy consonant clusters stacked together
+  ("u-Ayanda Nyathi nentatheli ephezulu": two names and "na-" run into one phrase), a long chain of words with no place to breathe, above all a long verb-noun followed by an adverb and an
+  adjective in one phrase ("ukungaziphathi kahle okubucayi": the voice takes the chain for one long compound and clips the syllables in its middle, so "kahle" is lost). A comma, a different order,
+  splitting the chain into two phrases or a relative clause fixes it.
+The reader is a synthetic voice and the audience is general listeners, not an expert Zulu speaker: also flag dense constructions the voice cannot improvise (a long nominalisation with an adverb and an
+  adjective stacked on it, three or more long words in a row) and give a plain rewrite in two simple phrases, even if it costs a few words.
+For each, give "phrase" exactly as it is written in the text (a few words, never the whole sentence), "kind" ("grammar" or "fused"), "problem" (one short sentence) and "fix": the same phrase
+rewritten in natural isiZulu with the same meaning. Every name, number and date must stay exactly as written, and a fix must not add facts or drop any. Report only real problems, at most four per
+item, and nothing for a text that reads well. You are an opinion for the writer, who decides.
+Reply with JSON only: {"items":[{"id":"...","issues":[{"phrase":"...","kind":"grammar|fused","problem":"...","fix":"..."}]}]} with one entry per input id.
+"""
+
 CONFIRM_PROMPT = """A reviewer flagged each item below as losing material meaning. Check that claim strictly; flags are often wrong,
 especially on long units, where a dub that follows the source clause by clause gets described as "adding"
 things that the source already says.
@@ -114,6 +131,23 @@ def _call(client: Any, system: str, payload: Sequence[Mapping[str, Any]], usage:
         usage[key] = usage.get(key, 0) + int((response.get("usage") or {}).get(key) or 0)
     message = (response.get("choices") or [{}])[0].get("message") or {}
     return _parse_items(message.get("content") or "")
+
+
+def grammar_issues(client: Any, items: Sequence[Mapping[str, str]], usage: dict[str, int], *, chunk: int = CHUNK) -> dict[str, list[dict[str, str]]]:
+    """The phrases a model finds hard to say or ungrammatical in each (english, zulu) item: {id: [{phrase, kind, problem, fix}]}.  Text only."""
+    found: dict[str, list[dict[str, str]]] = {}
+    for start in range(0, len(items), chunk):
+        part = [{"id": str(item["id"]), "english": str(item.get("english") or ""), "zulu": strip_pauses(str(item.get("zulu") or "")),
+                 } for item in items[start:start + chunk]]
+        answers = _call(client, GRAMMAR_PROMPT, part, usage)
+        for item in part:
+            issues = []
+            for issue in (answers.get(item["id"]) or {}).get("issues") or []:
+                if isinstance(issue, dict) and str(issue.get("phrase") or "").strip() and str(issue.get("fix") or "").strip():
+                    kind = "fused" if str(issue.get("kind") or "").strip().lower() == "fused" else "grammar"
+                    issues.append({"phrase": str(issue["phrase"]).strip()[:120], "kind": kind, "problem": str(issue.get("problem") or "").strip()[:200], "fix": str(issue["fix"]).strip()[:200]})
+            found[item["id"]] = issues[:4]
+    return found
 
 
 def _clean_issues(raw: Any) -> list[dict[str, str]]:
@@ -219,6 +253,16 @@ class UnitJudge:
     def _key(unit: Mapping[str, str]) -> str:
         return hashlib.sha1(f"{unit['source']}\x00{unit['dub']}".encode("utf-8")).hexdigest()
 
+    def grammar(self, units: Sequence[Mapping[str, str]]) -> dict[str, list[dict[str, str]]]:
+        """The phrases to polish in each (id, english, zulu) unit: one model call per ten new units, and a unit keeps its answer until its text changes (a sampled model would otherwise move the target)."""
+        cache = self.__dict__.setdefault("_grammar", {})
+        keyed = {str(u["id"]): hashlib.sha1(f"{u.get('english')}\x00{u.get('zulu')}".encode("utf-8")).hexdigest() for u in units}
+        fresh = [u for u in units if keyed[str(u["id"])] not in cache]
+        if fresh:
+            for key, issues in zip([keyed[str(u["id"])] for u in fresh], [grammar_issues(self.client, [u], self.usage, chunk=1).get(str(u["id"]), []) for u in fresh]):
+                cache[key] = issues
+        return {str(u["id"]): cache.get(keyed[str(u["id"])], []) for u in units}
+
     def foreign_words(self, texts: Sequence[str]) -> list[dict[str, str]]:
         """English words kept in the Zulu texts. One model call per ten new texts; a text keeps its answer until it changes."""
         cache = self.__dict__.setdefault("_foreign", {})
@@ -289,12 +333,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     from .config import load_settings
-    from .dub_agent import ChatClient
+    from .dub_agent import native_client_config, new_chat_client
     from .experience_store import ExperienceStore
-    from .foundry_grok import native_gpt_config_from_environment
 
     store = ExperienceStore(load_settings().work_dir)
-    client = ChatClient(native_gpt_config_from_environment(dict(os.environ)))
+    client = new_chat_client(native_client_config())
     for repeat in args.repeats:
         run_dir = store.repeat_dir(args.run, args.clip, repeat)
         if not (run_dir / "scorecard.json").is_file():

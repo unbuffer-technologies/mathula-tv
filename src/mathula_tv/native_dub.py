@@ -1128,6 +1128,11 @@ repetition, hesitation, uncertainty, numbers, attribution, allegations or intent
 move content between segment IDs. Manual overrides are human-reviewed and authoritative.
 No web search or tools.
 
+THE VIDEO'S OWN TITLE AND DESCRIPTION. "video" holds the title, channel and (when there is one) the description and chapter titles the uploader wrote, a human-written source that spells the names of the story correctly. The recogniser and YouTube's automatic
+captions both garble names ("Moussimane" for the title's "Mosimane", "Yamatuk" and "Hamachuke" for a name said once). Where a garbled name in the transcript is plainly a name the title
+spells (it sounds like it and the sentence fits the person: a coach, a team, a place), write it as the title does, and complete a person's name only when the title and the sentence make it
+certain. Never take a name from the title into a place where the speaker said something else.
+
 LANGUAGE SWITCHES. The speaker may move between English, isiZulu, Sepedi, Sesotho or Afrikaans
 in the same breath, and the English recogniser writes the other languages as nonsense English
 ("Siyipatala through tax"). Some segments carry "yt": YouTube's own automatic caption text for
@@ -2721,6 +2726,11 @@ def run_native_pass1(
         "segments": _compact_wire_segments(segments, text_key="source_text"),
         "manual_overrides": _compact_manual_overrides(overrides),
     }
+    from .youtube_captions import video_context
+
+    video = video_context(Path(job_root))          # the uploader's own title: not part of the input hash, so finished jobs keep their pass 1; run with --force to apply it to one
+    if video:
+        payload["video"] = video
     if youtube:
         payload["youtube_track"] = youtube["track"]
         for row in payload["segments"]:
@@ -2805,6 +2815,14 @@ def run_native_pass1(
                 "artifact), not a real day-of-month reference. Not auto-corrected (the missing "
                 "digits can't be recovered from text alone); review before this reaches translation.",
             )
+        if item["changed"] and restored_segments is not None:          # words the recogniser skipped at the opening of this segment were spoken before its window starts
+            from .source_suspects import extend_start_to_speech
+
+            before = int(item["start_ms"])
+            floor = int(restored_segments[-1]["end_ms"]) if restored_segments else 0
+            moved = extend_start_to_speech(item, floor, Path(job_root) / "audio" / "analysis_mono.wav")
+            if moved is not None:
+                _emit_progress(progress, f"[native pass 1] {segment['segment_id']}: its restored opening was spoken {(before - moved) / 1000:.1f} s before the first recognised word; the window now starts there")
         restored_segments.append(item)
     apply_to_segments(Path(job_root), restored_segments)          # the listener's answers for this job outrank the model
 
@@ -3806,6 +3824,7 @@ def _split_pass1_segment_into_sentences(
     """
     segment_id = str(segment["segment_id"])
     speaker_id = str(segment["speaker_id"])
+    members = [str(value) for value in segment.get("segment_ids") or [segment_id]]          # every raw segment glued into this one: a sentence belongs to a dub unit that lists ANY of them
     restored_text = str(segment.get("restored_text") or segment.get("source_text") or "").strip()
     islands: list[dict[str, Any]] | None = None
     if restored_text:
@@ -3816,6 +3835,7 @@ def _split_pass1_segment_into_sentences(
         return [{
             "segment_id": f"{segment_id}__s00",
             "parent_segment_id": segment_id,
+            "parent_segment_ids": members,
             "speaker_id": speaker_id,
             "start_ms": int(segment["start_ms"]),
             "end_ms": int(segment["end_ms"]),
@@ -3826,6 +3846,7 @@ def _split_pass1_segment_into_sentences(
         {
             "segment_id": f"{segment_id}__s{int(island['index']):02d}",
             "parent_segment_id": segment_id,
+            "parent_segment_ids": members,
             "speaker_id": speaker_id,
             "start_ms": int(island["start_ms"]),
             "end_ms": int(island["end_ms"]),
@@ -7199,6 +7220,14 @@ def render_native_hook_publication(
             (int(item["end_ms"]) for item in segments), default=0
         ) / 1000.0
 
+    settled_terms: list[dict[str, Any]] = []
+    try:        # the terms this run settled (submit_dub decisions, saved beside the render folder): the footer hook spells them as the dub does
+        saved_decisions = Path(job_root).parent / "decisions.json"
+        if saved_decisions.is_file():
+            settled_terms = [{"english": str(e.get("english") or ""), "zulu": str(e.get("zulu") or "")}
+                             for e in (read_json(saved_decisions).get("decisions") or []) if isinstance(e, Mapping) and str(e.get("zulu") or "").strip()]
+    except (OSError, ValueError):
+        settled_terms = []
     checkpoint_reuse_expected = (not force and paths.editorial_response_checkpoint.is_file())
     _emit_progress(
         progress,
@@ -7220,7 +7249,17 @@ def render_native_hook_publication(
         response_checkpoint_path=(
             None if force else paths.editorial_response_checkpoint
         ),
+        settled_terms=settled_terms,
     )
+    from .hook_spelling import correct as correct_hook_spelling
+
+    corrected_hook, spelling_fixes = correct_hook_spelling(str(selection.get("hook_text") or ""), translations.values(), settled_terms)
+    if spelling_fixes:        # the dub is the authority on how its words are spelled (hook_spelling): the footer says them the dub's way, and the manifest says what was changed
+        selection = dict(selection)
+        selection["hook_text_before_spelling"] = selection.get("hook_text")
+        selection["hook_text"] = corrected_hook
+        selection["hook_spelling_fixes"] = spelling_fixes
+        _emit_progress(progress, "[native dub] Footer hook spelled as the dub spells it: " + ", ".join(f"{f['hook']} -> {f['dub']}" for f in spelling_fixes))
     _emit_progress(progress, "[native dub] Editorial package ready; writing publication metadata...")
     atomic_write_json(
         paths.publication_selection,
@@ -9072,6 +9111,9 @@ def _synthesize_group(
     force: bool,
     job_root: Path | None = None,
 ) -> AzureTTSResult:
+    custom = getattr(tts, "synthesize_group", None)          # a backend that speaks a whole group itself (no SSML), e.g. omnivoice_tts.OmniVoiceTTSBackend
+    if custom is not None:
+        return custom(group=group, voice_info=voice_info, output_path=output_path, preferred_ms=preferred_ms, maximum_ms=maximum_ms, force=force, job_root=job_root)
     selected_voice = str(voice_info["selected_voice"])
     typed_parts = []
     plain_text: list[str] = []
@@ -12146,7 +12188,9 @@ def _ensure_native_pronunciation_research(
     status = "completed"
     provider = None
     try:
-        provider = AzureResponsesWebResearchProvider.from_environment()
+        from .gemini_web_research import create_web_research_provider
+
+        provider = create_web_research_provider()          # Gemini with Google Search when MATHULA_AI_PROVIDER=gemini, else Azure's web_search
     except Exception as exc:  # noqa: BLE001 - research must degrade, never fail the job
         status = "degraded"
         _emit_red_warning(

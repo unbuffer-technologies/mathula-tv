@@ -1,0 +1,5 @@
+omnivoice @ git+https://github.com/k2-fsa/OmniVoice.git
+torch==2.8.0
+torchaudio==2.8.0
+peft>=0.20.0
+soundfile

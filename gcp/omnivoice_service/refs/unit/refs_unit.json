@@ -1,0 +1,176 @@
+{
+ "u01": {
+  "text": "As soon as he is ready to speak to us, we are definitely going to cross.",
+  "from": "u01",
+  "start_s": 20.35,
+  "end_s": 25.51,
+  "f0": 119.4,
+  "speaker": "SPEAKER_00"
+ },
+ "u04": {
+  "text": "I think as a society, you know, we As South Africans from all walks of life, we need to find common ground, immaterial of how the discussions go, immaterial of how the",
+  "from": "u04",
+  "start_s": 56.78,
+  "end_s": 65.59,
+  "f0": 93.0,
+  "speaker": "SPEAKER_01"
+ },
+ "u05": {
+  "text": "What are some of the discussion points around those critical areas that they themselves would love to control, and you are the leading party in those municipalities.",
+  "from": "u05",
+  "start_s": 98.51,
+  "end_s": 106.23,
+  "f0": 173.9,
+  "speaker": "SPEAKER_00"
+ },
+ "u06": {
+  "text": "What we're saying is we want the smaller towns to get to a position where they rival the bigger metros.",
+  "from": "u06",
+  "start_s": 129.36,
+  "end_s": 134.2,
+  "f0": 94.7,
+  "speaker": "SPEAKER_01"
+ },
+ "u07": {
+  "text": "I know that at 4 o'clock you've got another engagement in Sandton with another political party that these gentlemen used to belong to, some of them.",
+  "from": "u07",
+  "start_s": 198.11,
+  "end_s": 205.31,
+  "f0": 166.7,
+  "speaker": "SPEAKER_00"
+ },
+ "u08": {
+  "text": "So people that are within that same standpoint as ourselves, that's the angle that we're taking.",
+  "from": "u08",
+  "start_s": 224.06,
+  "end_s": 229.34,
+  "f0": 96.4,
+  "speaker": "SPEAKER_01"
+ },
+ "u09": {
+  "text": "clubbed you all up to having 20% and you need that other 30% that is on the other side at Sawyer Street in Johannesburg.",
+  "from": "u09",
+  "start_s": 290.84,
+  "end_s": 297.44,
+  "f0": 179.8,
+  "speaker": "SPEAKER_00"
+ },
+ "u10": {
+  "text": "we want to work with everybody and we want everyone to work with us that's as simple as it is including the DA",
+  "from": "u10",
+  "start_s": 314.84,
+  "end_s": 319.36,
+  "f0": 110.3,
+  "speaker": "SPEAKER_01"
+ },
+ "u11": {
+  "text": "But in overall, I mean, imagine from this meeting, are you",
+  "from": "u11",
+  "start_s": 326.12,
+  "end_s": 329.48,
+  "f0": 110.3,
+  "speaker": "SPEAKER_00"
+ },
+ "u12": {
+  "text": "We want to pull everyone to a point where we're pushing in the same direction and we're building this country.",
+  "from": "u12",
+  "start_s": 372.24,
+  "end_s": 376.92,
+  "f0": 91.7,
+  "speaker": "SPEAKER_01"
+ },
+ "u13": {
+  "text": "But it has its own significance because, as you correctly say, Sam Keller, they said they would never talk to us and we're talking now.",
+  "from": "u13",
+  "start_s": 436.94,
+  "end_s": 443.58,
+  "f0": 142.9,
+  "speaker": "SPEAKER_02"
+ },
+ "u15": {
+  "text": "A real deal for the rank and file membership and, of course, the people of South Africa.",
+  "from": "u15",
+  "start_s": 507.58,
+  "end_s": 511.06,
+  "f0": 115.1,
+  "speaker": "SPEAKER_02"
+ },
+ "u16": {
+  "text": "We wish that we can take government very, very soon so that we can deliver clean water, clean streets to our people.",
+  "from": "u16",
+  "start_s": 550.63,
+  "end_s": 557.19,
+  "f0": 111.1,
+  "speaker": "SPEAKER_03"
+ },
+ "u17": {
+  "text": "around key policy principles so that when you get into that government, we know exactly",
+  "from": "u17",
+  "start_s": 654.67,
+  "end_s": 660.47,
+  "f0": 104.6,
+  "speaker": "SPEAKER_04"
+ },
+ "u18": {
+  "text": "And this time you are sitting across the table with the very same people that you accused the ANC of selling out the country to.",
+  "from": "u18",
+  "start_s": 700.67,
+  "end_s": 708.35,
+  "f0": 186.0,
+  "speaker": "SPEAKER_00"
+ },
+ "u19": {
+  "text": "In other words, they're saying, you guys together sit down and talk and sort out our problems.",
+  "from": "u19",
+  "start_s": 736.37,
+  "end_s": 743.41,
+  "f0": 100.0,
+  "speaker": "SPEAKER_04"
+ },
+ "u20": {
+  "text": "The one pertinent point we need to remember is that our president is still an active member of the ANC and",
+  "from": "u20",
+  "start_s": 773.06,
+  "end_s": 778.38,
+  "f0": 94.7,
+  "speaker": "SPEAKER_01"
+ },
+ "u21": {
+  "text": "and that they are ultimately here because South Africans decided that they should be no outright winner in the local government elections and that everyone must",
+  "from": "u21",
+  "start_s": 920.03,
+  "end_s": 928.35,
+  "f0": 200.0,
+  "speaker": "SPEAKER_00"
+ },
+ "u02": {
+  "text": "we want to work with everybody and we want everyone to work with us that's as simple as it is including the DA",
+  "from": "u10",
+  "start_s": 314.84,
+  "end_s": 319.36,
+  "f0": 110.3,
+  "speaker": "SPEAKER_01",
+  "borrowed": true,
+  "own_f0": 106.7
+ },
+ "u03": {
+  "text": "and that they are ultimately here because South Africans decided that they should be no outright winner in the local government elections and that everyone must",
+  "from": "u21",
+  "start_s": 920.03,
+  "end_s": 928.35,
+  "f0": 200.0,
+  "speaker": "SPEAKER_00",
+  "borrowed": true,
+  "own_f0": 262.3
+ },
+ "u14": {
+  "text": "We wish that we can take government very, very soon so that we can deliver clean water, clean streets to our people.",
+  "from": "u16",
+  "start_s": 550.63,
+  "end_s": 557.19,
+  "f0": 111.1,
+  "speaker": "SPEAKER_03",
+  "borrowed": true,
+  "own_f0": 128.0
+ }
+}

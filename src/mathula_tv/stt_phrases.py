@@ -196,6 +196,12 @@ def configure_source_stt_backend(backend: Any) -> STTPhraseBundle | None:
     fast = getattr(backend, "fast", backend)
     if not hasattr(fast, "phrase_list"):
         return None
+    if str(getattr(fast, "provider", "")).startswith("whisper"):
+        # Whisper takes the list as text it may continue, not as a bias on its vocabulary: the first 450 phrases of the registry (another job's names) were echoed as the opening words of an
+        # unrelated clip (a Mbalula briefing began "South African Narcotics Enforcement Bureau, Chief Provincial Inspector Samuel Mashaba"), and the speech they replaced was lost.  Names are
+        # settled after the transcript, from this job's own captions, glossary and name research (pass 1), so Whisper hears the audio and nothing else.
+        object.__setattr__(fast, "phrase_list", ())
+        return None
 
     bundle = load_stt_phrase_bundle()
     object.__setattr__(fast, "phrase_list", bundle.phrases)

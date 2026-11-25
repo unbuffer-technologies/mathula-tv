@@ -27,7 +27,7 @@ def test_native_numerals_follow_the_class_concords():
     assert _native_amount_words(4, 5) == "izinkulungwane ezine nesihlanu"
     assert _native_amount_words(4, 10) == "izinkulungwane ezine neshumi"
     assert _native_amount_words(4, 250) == "izinkulungwane ezine namakhulu amabili namashumi amahlanu"
-    assert _native_amount_words(150, 0) is None                       # six-figure amounts keep the English reading
+    assert _native_amount_words(150, 0) == "izinkulungwane eziyikhulu namashumi amahlanu"            # six figures are native too (the listener, 2026-11-14); above 999,999 there is no form yet
 
 
 def test_a_grouped_number_that_is_not_money_is_native_too_and_a_count_keeps_its_concord():
@@ -36,7 +36,7 @@ def test_a_grouped_number_that_is_not_money_is_native_too_and_a_count_keeps_its_
     assert read("izinto ezingu-12 000") == "izinto eziyizinkulungwane eziyishumi nambili"
     assert read("amaRandi ayi-10 000") == "amaRandi ayizinkulungwane eziyishumi"                  # was "10 thousand" (code-switched)
     assert "zamaRandi" not in read("kwafika abantu abangu-4,500")                                 # a head count is not rand
-    assert read("u-R150,000 ngenyanga") == "u-one hundred and fifty thousand rand ngenyanga"      # six figures: English, as before
+    assert read("u-R150,000 ngenyanga") == "izinkulungwane eziyikhulu namashumi amahlanu zamaRandi ngenyanga"      # six figures: native, as the listener asked
 
 
 def test_a_plain_three_digit_quantity_is_native_but_an_identifier_stays_digit_by_digit():
@@ -215,3 +215,14 @@ def test_a_tens_word_spelled_by_ear_applies_to_every_figure_in_that_ten_and_is_l
     thirty = base.with_job_overrides("job-1", [{"display_text": "thirty", "spoken_text": "thirty", "tts_text": "thethy", "kind": "english_code_switch"}])
     assert base.apply("ku-35").tts_text == "ku-thethi-fayiv" and thirty.apply("ku-35").tts_text == "ku-thethy-fayiv" and thirty.apply("ku-31").tts_text == "ku-thethi-waan"          # 30 and 31 keep their own chosen table
     assert ear.apply("ku-79%, ngo-2006").tts_text.startswith("ku-seventi-nayn")
+
+
+def test_six_figure_amounts_are_read_natively_because_money_is_where_the_viewer_listens_hardest():
+    assert _native_amount_words(100, 0) == "izinkulungwane eziyikhulu"
+    assert _native_amount_words(300, 0) == "izinkulungwane ezingamakhulu amathathu"
+    assert _native_amount_words(250, 0) == "izinkulungwane ezingamakhulu amabili namashumi amahlanu"
+    assert _native_amount_words(105, 500) == "izinkulungwane eziyikhulu nesihlanu namakhulu amahlanu"
+    assert _native_amount_words(1000, 0) is None and _native_amount_words(0, 500) is None
+    assert read("uMatlala akhokha u-300,000 komunye umuntu") == "uMatlala akhokha izinkulungwane ezingamakhulu amathathu zamaRandi komunye umuntu"        # the listener's choice, job 33294c3d
+    assert read("yena kwakufanele athole u-100,000 kuphela") == "yena kwakufanele athole izinkulungwane eziyikhulu zamaRandi kuphela"                      # "athole" is a money verb too
+    assert read("u-300,000~en") == "u-three hundred thousand"                                                                                           # ~en still asks for the short English reading

@@ -175,3 +175,20 @@ def test_the_ratchet_can_be_turned_off(tmp_path, monkeypatch):
     wb.timing_ratchet = False
     monkeypatch.setattr(dub_workbench, "score_submission_dir", fake)
     assert wb.submit_dub(ITEMS)["accepted"] and wb.submit_dub(ITEMS)["accepted"]
+
+
+def test_silence_the_speaker_took_themselves_is_not_dead_air_but_only_up_to_a_quarter_of_the_window():
+    def item(allowed):
+        return {"group_id": "a", "turn_id": "t", "speaker_id": "S1", "start_ms": 0, "end_ms": 60000, "measured_ms": 54000, "source_text": "x", "spoken_text": "y",
+                "direction": "expand", "required_speed_percent": 0.0, "variant_id": "agent", "free_gap_ms": 0, "tail_pad_ms": 0, "allowed_silence_ms": allowed}
+
+    def card(allowed):
+        return score_items([item(allowed)], glossary={}, ledger={}, speed_policy="natural")
+
+    none, some, much = card(0), card(4000), card(40000)
+    assert none["headline"]["residual_dead_air_pct"] == 10.0 and none["headline"]["speaker_pauses_pct"] == 0.0           # 6 s short of 60 s, no allowance
+    assert some["headline"]["residual_dead_air_pct"] == 3.33 and some["headline"]["speaker_pauses_pct"] == 6.67         # the speaker held 4 s of pauses: 2 s are left over
+    assert much["headline"]["residual_dead_air_pct"] == 0.0 and much["groups"][0]["allowed_silence_ms"] == 6000          # never more than the shortfall itself
+    capped = score_items([{**item(40000), "measured_ms": 30000}], glossary={}, ledger={}, speed_policy="natural")
+    assert capped["groups"][0]["allowed_silence_ms"] == 15000                                                              # nor more than a quarter of the window
+    assert "dead_air" in none["groups"][0]["flags"] and "dead_air" not in much["groups"][0]["flags"]                     # the unit flag follows the same rule

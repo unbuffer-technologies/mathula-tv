@@ -146,3 +146,10 @@ def test_one_silence_cannot_answer_two_pauses_the_speaker_held():
     assert cc.comma_check(one, words, 0, end)                                                    # one silence for two pauses: one is still missing
     two = _at(_at(LONG_ZULU, 0.77, "~pause1200"), 0.9, "~pause1200")
     assert cc.comma_check(two, words, 0, end) is None
+
+
+def test_a_comma_between_a_name_of_address_and_the_next_name_is_never_called_unspoken():
+    # job 33294c3d: the anchor ran "Kenny, Vusimuzi Matlala" together, check_text said "no pause", the agent dropped the comma and the dub read "Kenny uVusimuzi" as one person
+    words = _words(("Kenny,", 3.5, 3.9), ("Vusimuzi", 3.9, 4.6), ("Matlala", 4.6, 5.2), ("testifying", 5.2, 5.9))
+    assert cc.comma_check("Kheni, uVusimuzi Matlala ufakaza", words, 3000, 6000) is None
+    assert cc.comma_check("Siyabonga Kenny, ufakaza namuhla", words, 3000, 6000)                 # a comma after a name before a plain word is still checked

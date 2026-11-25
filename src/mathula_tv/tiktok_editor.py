@@ -2611,8 +2611,11 @@ def select_tiktok_hook(
     context: Mapping[str, Any] | None = None,
     publication_title_authority: Mapping[str, Any] | None = None,
     response_checkpoint_path: Path | None = None,
+    settled_terms: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Generate SEO, hook candidates, and the opening in one editorial call."""
+    """Generate SEO, hook candidates, and the opening in one editorial call.
+
+    ``settled_terms`` are the isiZulu terms the dub settled ({english, zulu}); the footer hook is told to spell them, and every other word of the approved dub, exactly as the dub does."""
     if not blocks:
         raise ValueError("TikTok hook selection requires rendered speech blocks")
     maximum_cut = (
@@ -2742,6 +2745,10 @@ def select_tiktok_hook(
             thinking_type=editorial_thinking,
             max_output_tokens=editorial_max_tokens,
         )
+    settled = [{"english": str(t.get("english") or ""), "zulu": str(t.get("zulu") or "")} for t in (settled_terms or []) if str(t.get("zulu") or "").strip()]
+    if settled:          # only when there are terms: a request without them keeps the hash (and the saved response) it always had
+        editorial_request.payload["settled_dub_terms"] = settled
+        editorial_request.payload["requirements"]["write_hook_words_exactly_as_spelled_in_the_approved_dub_text_and_settled_terms"] = True
     response_request_sha256 = _canonical_json_sha256(
         {
             "operation": editorial_request.operation,

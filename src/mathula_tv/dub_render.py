@@ -50,8 +50,9 @@ def assign_sentences(
     owned: dict[str, list[str]] = {str(u["item_id"]): [] for u in ordered}
     for sentence in sentences:
         parent = str(sentence.get("parent_segment_id") or str(sentence["segment_id"]).split("__s")[0])
+        members = {parent} | {str(x) for x in sentence.get("parent_segment_ids") or []}          # pass 1 glues ASR fragments ("We" + "know ...") into one parent: the agent sees and lists the raw segments
         s_start, s_end = int(sentence["start_ms"]), int(sentence["end_ms"])
-        listed = [u for u in ordered if parent in {str(x) for x in u.get("source_segment_ids") or []}]
+        listed = [u for u in ordered if members & {str(x) for x in u.get("source_segment_ids") or []}]
         pool = listed or ordered
         best = max(pool, key=lambda u: (_overlap(s_start, s_end, int(u["start_ms"]), int(u["end_ms"])),
                                         -abs((s_start + s_end) / 2 - (int(u["start_ms"]) + int(u["end_ms"])) / 2)))

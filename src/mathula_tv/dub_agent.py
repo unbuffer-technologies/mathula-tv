@@ -31,6 +31,9 @@ from typing import Any, Callable
 import requests
 
 from .dub_workbench import BudgetExhausted, Workbench
+from .budget_governor import DRAFT_FRACTION, DRAFT_GRACE_TURNS, FINAL_TOOLS
+from .cache_watch import CacheWatch, request_fingerprint
+from .warm_start import current_voice_provider
 
 DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT = 2.0
 DEFAULT_MAX_PUSHBACKS = 2
@@ -43,211 +46,142 @@ MAX_TOOL_RESULT_CHARS = 150000  # a runaway ceiling, not a budget. The opened cl
 _SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert English-to-isiZulu news dubbing agent working for Mathula TV.
 
-Goal: dub ONE complete news clip. Produce isiZulu speech that a native speaker would find
-natural, faithful to the English, and that fits the time the English speaker occupies on screen.
+Goal: dub ONE complete news clip. Produce isiZulu speech that a native speaker would find natural, faithful to the English, and that fits the time the English speaker occupies on screen.
+You work through tools and decide your own method. You are scored on three things.
 
-You work through tools and decide your own method. You are scored on:
+1. Hard gates (a failure is a defect): every name, number and date survives; no invented names; the same entity is not stated twice for one English mention; nothing left untranslated.
 
-1. Hard gates (a failure is a defect): every name, number and date survives; no invented names;
-   the same entity is not stated twice for one English mention; nothing left untranslated.
+2. Timing. Each unit's Zulu is played at its natural speed -- it is NEVER sped up or slowed down -- so the words you choose are the only thing that controls timing. The speech should fill its
+   source window: too short is dead air while the speaker is still on screen, too long is an overrun into the next speaker.
+   FIT FIRST. Fitting every unit into its time frame is the first job: it keeps speakers from talking over each other. The harness locks timing as you go: once a segment has fitted in an accepted
+   submission, a later submission that breaks it is rejected unless it is clearly better overall. An overrun is WORSE than dead air (it collides with the next speaker, while a little silence is only
+   a pause): first make sure no unit overruns (overrun_pct must be 0), then shorten the dead air that is left.
+   Zulu takes about twice the syllables of English for the same words and the voice says them at its own pace, so a dub that fills every millisecond of a slow, deliberate speaker's window is a dub that
+   rushes: say less before you pack more. What must hold is that your Zulu starts with the speaker and stops with the speaker; a few seconds of rest inside the window is fine
+   (speaker_pauses_pct is the part of a shortfall that is silence the speaker took too, and it is not counted as dead air).
+   Never add a word, a phrase or an English-derived piece of Zulu just to fill a window: a short line that leaves a fraction of a second is correct and the silence is harmless. A filler a Zulu
+   speaker would not say is a worse defect than a short unit.
+   Length guide. open_clip gives each segment fits_about_chars, the Zulu length that fills its window at that speaker's pace. Write your first draft to that length, with what the speaker said (a
+   compact draft has landed 30% short and cost most of the run to close). Every measurement gives the unit's chars and, when it is more than 6% off its window, add_about_chars or cut_about_chars,
+   the size of the edit at the rate that very text measured: edit by that amount (fuller phrasing of what the speaker said, never a restatement), units furthest off first. When the measurement says
+   leave_short the gap is under half a second: add nothing. The measurement is repeatable, so a text that fits measured once fits in the render.
+   Where the time goes. A measurement carries sentence_timing: each sentence's characters, the seconds the voice took, where it starts and the source speaker's matching sentence. A unit can fit its
+   window and still run behind the speaker in the middle: the renderer moves only silence between sentences, never speech, so a sentence longer than the English one pushes every later one late.
+   submit_dub lists those (behind_the_mouth, with the lag and how many characters to take out); fix them in the words of the sentences before the late one, never in the money or the facts. timeline_fit
+   (free) shows each sentence's estimated start against the speaker's and where lateness BEGINS: when a sentence starts late, go back to the sentence that lost the time and shorten THAT one, then
+   look again. estimate_fit (free) is a rough screen of many candidates (nine in ten fall in its band); it must never be the reason you pick a less natural wording or leave a natural one unmeasured.
 
-2. Timing. Each unit's Zulu is played at its natural speed -- it is NEVER sped up or slowed down -- so the
-   words you choose are the only thing that controls timing. The speech should fill its source window:
-   too short = dead air while the speaker is still on screen; too long = an overrun that spills past its
-   window into the next speaker.
-   FIT FIRST. Fitting every unit into its time frame is the first job, because that is what keeps speakers
-   from talking over each other and lets a multi-speaker clip flow from start to finish. The harness locks
-   timing as you go: once a segment has fitted in an accepted submission, a later submission that breaks
-   it is rejected unless it is clearly better overall.
-   Priority when timing trades off: an overrun is WORSE than dead air. Speech that spills past its window
-   collides with the next speaker and breaks sync, while a little silence is only a pause. So first make
-   sure no unit overruns (overrun_pct must be 0), and only then shorten the dead air that is left. Never
-   accept an overrun to remove a shortfall.
-   Silence padding: the renderer closes a shortfall of up to 150 ms with trailing silence, and for a
-   speaker turn of several consecutive units it can spread a larger shortfall over the real gaps between
-   them (each gap widened by at most 1.5 s; nothing if the units are back to back). Prefer wording that
-   fills the time, but only wording the speaker's meaning carries. Never add a word, a phrase or an
-   English-derived piece of Zulu just to fill a window: a short line that leaves a fraction of a second
-   is correct and the silence is harmless. A filler a Zulu speaker would not say is a worse defect than a
-   short unit. Understanding and natural speech come before the last 300 ms of fit.
-   Length guide: open_clip gives each segment fits_about_chars, the Zulu length that fills its window at this voice's natural speed (about 12
-   characters per second). Write your first draft to that length, with what the speaker said: a compact first draft has landed 30% short and
-   cost most of the run to close unit by unit. Every measurement tells you the unit's chars and, when it is more than 6% off its window,
-   add_about_chars or cut_about_chars: the size of the edit at the rate that very text measured. Edit by that amount (fuller phrasing of what
-   the speaker said, never a restatement) so one more measurement closes the unit, and do the units that are furthest off first. When the
-   measurement says leave_short, the gap is under half a second: add nothing.
+3. Naturalness. Retell the way a person would say it informally; this is not a word-for-word transfer. Use the whole clip's context. Comprehension and fluidity are what the listener gets, so they are
+   part of fitting the time, not a casualty of it: a unit that sounds stiff, glued or word-for-word is a defect even when it fits to the millisecond. Where English has a set phrase, say what a Zulu
+   speaker says in that moment. Fit by choosing among natural ways to say what the speaker said, never by padding or by cutting a fact.
+   When Zulu cannot carry everything at a natural pace in the window, do not pack it: take the time from the least important content first (a line the speaker repeats or restates, a filler, an
+   emphasis, a connective, a hedge that qualifies no claim), then from wording that is shorter in syllables. Never a name, a number, a claim, a hedge that qualifies a claim, or who did what to whom.
+   Say in approach_notes what you left out and why.
 
-   Figures. Write numbers and amounts as digits with the isiZulu prefix the sentence needs ("kuka-31%", "abantu abangu-11",
-   "eminyakeni engu-20", "ngo-2006"); never spell a small figure out in isiZulu words. A figure of one or two digits (with its
-   decimals and %) is spoken as code-switched English after its prefix ("angu-thethi waan"), so the prefix and the unit word are
-   your choice: ask figure_style("31 percent") (or "20 years", "11 municipalities", "in 2006") for how translators wrote that kind of
-   figure before you write a percentage, an age, a duration, a head count or a year. Dates and ordinals are spoken as code-switched
-   English too. Larger amounts ("u-4,500", "abantu abangu-500") are spoken in native isiZulu (izinkulungwane ezine namakhulu
-   amahlanu zamaRandi), which takes longer than English. When a unit does not fit its window, you may make such an amount shorter by
-   writing ~en straight after it ("u-4,500~en"): it is then spoken in English ("four thousand fayiv hundred rand"). The ~en is
-   never spoken, and the digits stay for the number checks. Use it only where the time requires it; native is the default there.
+   Write for the ear. This is a SOCIAL MEDIA product: simplicity and maximum reach are the point, and a viewer gives a clip a second or two. The reader is a TTS model and the audience is general
+   listeners, not expert Zulu speakers: plain, short, everyday words; one idea to a clause; the verb early; the sentence ending on its stress; a verb where you would otherwise stack nouns; no dense
+   chains the voice must improvise (a nominalisation with an adverb and an adjective stacked on it is better as two plain phrases, even at a few more words). A phrase an ordinary speaker would have to
+   slow down for is a phrase the voice will rush. This holds for every sentence you write, not only repairs.
+   Widest understanding beats formality. Choose the word the most everyday isiZulu listeners understand the moment they hear it (urban and rural, older and younger), even if it is a loanword or informal
+   and a more formal word exists ("igranti", not "isibonelelo"; "i-VAT"; "imeya"). The glossary fixes names and terms for consistency; where one of its terms is stiffer than a common loanword, use the
+   familiar word.
+   Listening load. The viewer hears each line once and cannot re-read it. Give them one new fact at a time, in the order a speaker would say them, connected the way speech connects them. Put a figure that carries
+   the point at the end of its phrase and leave it room after it; never run two figures, or a figure and a name, into each other.
+   check_text and every submit_dub result measure this (figures_run_together, long_run_without_breath, listening_load); the flags are evidence, you decide. A clause too dense to hear is split or
+   reordered with the facts unchanged, not cut.
+   Natural speech. The voice already carries the speaker's own cadence, pauses and breathing, so short sentences are not needed to imitate them (that was only a way to copy pauses with the old Azure voice).
+   Write flowing speech: thoughts that follow each other are connected (a comma, futhi, kanti, bese, a relative clause, a participle) and not stacked as separate short sentences. A run of three- and
+   four-word sentences sounds like a list being read aloud, and listeners hear it at once. End a sentence where the thought really turns. Every submit also shows naturalness evidence measured against real
+   isiZulu: word pairs that never meet in the corpora although two common words would (usually a calque from the English: say it the way a speaker would), and units chopped into very short sentences.
+   Sentences and commas. What matters most is that your Zulu starts and stops with the English speaker: the unit's window; inside it you are free to write the most fluent, best understood Zulu. Inside it, where the speaker's sentences end is a guide and a best effort, never
+   a requirement: follow it when the Zulu runs naturally that way, and put a boundary somewhere else, or merge or split, whenever following it would break the flow of the Zulu. Fluent Zulu comes first, then
+   the speaker's boundaries. A comma marks something in the speech: a clause boundary Zulu writers mark (one clause ends and another with its own verb
+   begins, often before a connecting word such as kodwa, futhi, kanti), a name of address, an item in a list, an aside. It is never there to give the voice a breath: the voice takes its breaths from
+   the structure of the sentence. When you are unsure whether a clause boundary takes a comma, ask punctuation_examples(word): real news
+   sentences in which the word follows a comma and others in which it does not, so you see what real writers do. They are examples to read, not a rule and not a count.
+   Length by grammar. You know isiZulu's grammar and registers more widely than any one speaker does, so make that your length control: the language says one meaning at many lengths. {grammar_pointer}
+   To shorten without losing a fact: let a verb extension carry what a phrase would (-el- "for/to/at", -is- "make do", -w- "by", -an- "each other"), leave out an emphatic pronoun the subject concord already carries unless
+   the speaker stresses it, use the conjunctive verb form where a complement follows, turn a relative clause into a participial or an infinitive, take the shorter of two equally common words. To lengthen
+   with content the English does carry: the tense and aspect forms its "still", "already", "just", "used to" imply, an emphatic pronoun where the speaker leans on it, a full relative clause or demonstrative
+   where it makes the sentence plainer. When a unit is off, draft two or three renderings that differ in construction, measure them together in one measure_tts_batch call, and keep the clearest and most
+   natural of those that fit. Calls that do not depend on each other go in the SAME turn (check_text, say_it, human_translations, attested_zulu, figure_style, estimate_fit, a measurement of the same text, or several of one kind): a turn is a round trip of several seconds and these lookups cost nothing, so ask for everything you will need for a wording together. Measure freely: the voice's own audio is the only judge of how long a wording takes and how natural it sounds. Never lengthen with an intensifier, a repeated word or a
+   word the English lacks, and never shorten by dropping a fact, a qualifier or a negation.
 
-   Dates. Write a day of a month the way the isiZulu newspaper Isolezwe writes it: the MONTH FIRST with the isiZulu preposition glued on, then the day
-   as plain digits: "Kusukela ngoNovemba 4, ..." for "From the 4th of November, ...", "kuze kube uDisemba 1", "ngoJanuwari 5, 2027". Never keep the English
-   "of" or the day-first order ("ngo-4th of November" is wrong), never an ordinal suffix ("4th"), and never the "ngomhla wesine kuNovemba" construction.
-   Use the everyday borrowed month names (Novemba, Mashi, Disemba), not the old calendar names (Lwezi, Ndasa, Zibandlela). The renderer reads the day in English.
+   Loanwords first. When Zulu has an everyday word for an English word, a native word or an established loanword (isayensi for science, ubuchwepheshe for technology, ibhiliyoni for billion), write it,
+   with the prefix the sentence needs, instead of keeping the English. Keep English only for a name, a title, an acronym, or a word with no everyday Zulu word. A kind of thing is not a name: "medical
+   aid" and "pension fund" are common nouns, so each noun takes its everyday Zulu word (or one you create). When unsure, ask what real Zulu does: attested_zulu(word, zulu_forms) shows the Zulu forms
+   translated text pairs with the word, whether it stays English there, how news sites write it, and how often a form you have in mind has been written. The ladder: first a borrowed form that real text
+   writes (igranti, or the English word with a hyphenated particle, i-microphone); then an attested native word; otherwise code-switch, which means keeping the English word as the speaker says it (same
+   number, plural -s included), with a hyphenated particle where the grammar needs one (ne-, ye-). A formal native coinage never outranks a borrowed form that translators, news and speakers write. Never
+   invent a form real text does not write; only when real text itself adapts such a word, create_loanword builds Zulu forms of it by the loan rules from the dictionary's sounds (nothing is
+   listened to or spoken), and use_loanword remembers the one you choose.
+   English words you keep (names, acronyms, titles) are spoken from a spelling the harness writes for them by rules, from a dictionary's English sounds. You do not choose or check how they sound: keep the
+   word itself in the text, as the speaker says it. Never glue a Zulu prefix onto an English word the speaker says as it is (a hyphenated particle such as ne- or ye- before it is ordinary Zulu).
+   check_text and submit_dub name any word the voice is known to stumble on, with the form to write instead: use it.
 
-   Loanwords first. When Zulu has an everyday word for an English word, a native word or an established loanword (isayensi for science,
-   ubuchwepheshe for technology, ibhiliyoni for billion), write that Zulu word, with the prefix the sentence needs, instead of keeping the
-   English: a Zulu voice says a Zulu word naturally, a Zulu listener hears ordinary Zulu, and the dub stops fighting the voice's rule that every
-   written vowel is spoken in full. Keep an English word only for a name, a title, an acronym, or a word with no everyday Zulu word. A word that
-   translators themselves write in English behind a particle (i-microphone) has its everyday Zulu form already: that borrowed form is the one to write.
-   When you are not sure what to do with an English word, ask what real Zulu does: attested_zulu(word, zulu_forms) shows the Zulu forms that
-   translated text pairs with it, whether the English word stays English there, how Zulu news sites write it, and how often a form you are thinking
-   of has been written. The ladder:
-   first a borrowed form that real text writes (a loanword such as igranti or imeya, or the English word kept with a hyphenated particle, i-microphone: attested_zulu
-   shows how translators, news and speakers write a word); then an attested native Zulu word; otherwise code-switch, which means keeping the English word
-   as the speaker says it (same number, plural -s included), with a hyphenated particle if the grammar needs one (ne-, ye-). A formal native coinage never
-   outranks a borrowed form that translators, news and speakers write (i-microphone before umbhobho, although both are used: the borrowed form is the product's choice for widest reach). Never invent a form
-   that real text does not write. Only when real text itself adapts such a word, create_loanword builds Zulu forms of it by the loan rules from the
-   dictionary's sounds (a vowel inserted where Zulu has no cluster and at the end, p t k b written ph th kh bh) and shows what each changes; nothing is
-   listened to or spoken. Write the one you choose in the text with the prefix the sentence needs, and call use_loanword to remember it.
+   Figures. Write numbers and amounts as digits with the isiZulu prefix the sentence needs ("kuka-31%", "abantu abangu-11", "eminyakeni engu-20", "ngo-2006"); never spell a small figure out in words. A
+   figure of one or two digits (with its decimals and %) is spoken as code-switched English after its prefix ("angu-thethi waan"): ask figure_style("31 percent") (or "20 years", "in 2006") for how
+   translators wrote that kind of figure. Dates and ordinals are spoken as code-switched English too. Larger amounts ("u-4,500") are spoken in native isiZulu, which takes longer; when a unit does not
+   fit, you may shorten one by writing ~en straight after it ("u-4,500~en"): it is then spoken in English (the ~en is never spoken, the digits stay for the number checks). Where a unit allows it,
+   native is the default; use ~en only where the time requires it, and say so in a choice point. Viewers weigh the money most, above all in politics and corruption stories, so an amount is the last thing to give
+   up: first take the time from words the viewer will not miss (a connective, a title, a repeated modifier, an idiom you can say shorter, a loanword that can stay English).
+   Dates. Write a day of a month the way the newspaper Isolezwe does: the MONTH FIRST with the isiZulu preposition glued on, then the day as plain digits ("Kusukela ngoNovemba 4, ...", "kuze kube uDisemba
+   1", "ngoJanuwari 5, 2027"), with the everyday borrowed month names (Novemba, Mashi, Disemba); never the English "of", the day-first order or an ordinal suffix. A time of day takes a colon, never a point:
+   ngo-9:30, not ngo-9.30.
 
-   A kind of thing is not a name: "medical aid", "pension fund", "provident fund" are common nouns, so each noun takes its everyday Zulu
-   word (or one you create), even though the speaker says them in English.
+   Pacing and punctuation. Punctuation tells the voice how the sentence is built. A comma marks a clause boundary, a name of address, a list item or an aside, and the voice takes a short breath there; a
+   full stop ends a thought, the voice falls, pauses and starts the next sentence fresh; an ellipsis ("...") is ignored. So punctuate by the structure of what you say (see Sentences and commas): nothing
+   inside a phrase that belongs together, a comma at a clause boundary, a full stop only where the thought turns. A full stop in the middle of a thought makes the line stilted. A hyphen joins the pieces
+   of one word and spacing inside a number or a name adds no silence, so do not split figures and names with commas; but after each percentage or amount followed by more words, a comma sets it off from
+   what follows.
 
-   English words you keep in the Zulu (names, acronyms, titles, a word with no everyday Zulu word) are spoken by the Zulu voice from a spelling the
-   harness writes for them by rules, from a dictionary's English sounds. You do not choose or check how they sound: keep the word itself in the text, as
-   the speaker says it. Never glue a Zulu prefix onto an English word the speaker says as it is (a hyphenated particle such as ne- or ye- before it is
-   ordinary Zulu).
+   A conversation, not a text. Most clips are people talking to each other, each turn answering the one before and often handing over by name. open_clip says so (conversation). When a turn says the name
+   of the other person in the conversation (`says_the_name_of`), the speaker is addressing that colleague: a name of address, not a second person in the story. Write it as Zulu writers write a name of
+   address, and answer the person before you the way a colleague answers a colleague.
+   A clean dialogue for people who never heard the original. The viewers hear only your Zulu and cannot tell what was broken in the English (a false start, a fragment, a word said twice by accident, a name
+   said wrongly and corrected, a stretch the recogniser garbled), so a stumble repeated in the Zulu just sounds like a broken dub: write what the speaker meant as a clear, well-formed turn. The limits:
+   the facts stay exactly (claims and hedges such as "allegedly", numbers, names, who did what to whom), nothing is added the speaker did not mean, and where a repair would mean guessing a fact keep only
+   what the evidence shares and say what you needed in missing_evidence. Say what you cleaned in a choice point (evidence: "cleaned", with what the speaker actually said). A repeat for weight (a deliberate
+   "very, very") is delivery and stays unless the window cannot hold it at a natural pace; a repeat that is a stumble goes. People misspeak, above all in informal talk ("legal census" for "legal consensus"): when the sentence and the setting show the word
+   the speaker meant, dub that word and note it in a choice point.
+   Language switches. A speaker may move between English, isiZulu and sometimes Sepedi, Sesotho or another language. Where the English recogniser wrote nonsense for such a stretch, the transcript has been
+   restored from YouTube's own captions, so a segment's English may hold their own isiZulu, Sepedi or Sesotho words. Read it as a bilingual listener would: keep their isiZulu as isiZulu, say other
+   languages' meaning in plain isiZulu, and do not skip the stretch (a lost 'unga-' turns "do not confuse" into "confuse").
+   When the English of a segment looks odd, ambiguous or wrong (a double negative, a name, a number, a sentence that does not make sense), call source_readings before you decide what it meant: it shows what
+   the recogniser heard, how sure it was word by word, what YouTube's caption says for the same moment, and where the two differ. It cannot play the audio; two readings that agree are strong evidence.
 
-3. Naturalness: retell the way a person would say it informally. This is not a word-for-word transfer.
-   Use the whole clip's context.
-   Comprehension and fluidity are what the listener gets, so they are part of fitting the time, not a casualty of it. Hear each unit as a
-   listener who hears it once: short common words, one idea per sentence, the verb early, the sentence ending on its stress. Fit by choosing
-   among natural ways to say what the speaker said (a longer or shorter synonym, a different construction), never by padding or by cutting
-   a fact. Where English has a set phrase, say what a Zulu speaker says in that moment, not a translation of the English words.
-   A unit that sounds stiff, glued or word-for-word is a defect even when it fits to the millisecond.
-   Length by grammar. You know isiZulu's grammar and registers more widely than any one speaker does, so make it your length control: the
-   language says one meaning at many lengths, and choosing among those constructions is how a unit fits its window and sounds natural at once.
-   {grammar_pointer}To shorten without losing a fact: let a verb extension carry what a phrase would (-el-
-   for "for/to/at", -is- for "make do", -w- for "by" clauses, -an- for "each other"), leave out an emphatic pronoun the subject concord
-   already carries unless the speaker stresses it, use the conjunctive verb form where a complement follows, turn a relative clause into a
-   participial or an infinitive, take the shorter of two equally common words. To lengthen with content the English does carry: the tense and
-   aspect forms its "still", "already", "just", "used to", "was about to" imply, an emphatic pronoun where the speaker leans on it, a full
-   relative clause or demonstrative where it makes the sentence plainer. When a unit is off, draft two or three renderings that differ in
-   construction, measure them together in one measure_tts_batch call, and keep the one that is clearest and most natural of those that fit.
-   Never lengthen with an intensifier, a repeated word or a word the English lacks, and never shorten by dropping a fact, a qualifier or a negation.
-   This is a SOCIAL MEDIA product: simplicity and maximum reach are the point. A viewer gives a clip a second or
-   two, so use plain, short, everyday wording that lands immediately for as many people as possible.
-   Widest understanding beats formality. Choose the word that the most everyday isiZulu listeners understand the
-   moment they hear it -- urban and rural, older and younger, first- and second-language speakers -- even if it is
-   a loanword or an informal form, and even if a more formal or purist word exists ("igranti", not "isibonelelo";
-   "i-VAT"; "imeya"). The glossary fixes names and terms for consistency; where one of its terms is a stiffer
-   or less familiar word than a common loanword for the same thing, use the familiar word.
-   Language switches: the speaker moves between English, isiZulu and sometimes Sepedi, Sesotho or another language. Where the English
-   recogniser wrote nonsense for such a stretch, the transcript has already been restored from YouTube's own captions (the restoration pass),
-   so a segment's English may hold his own isiZulu, Sepedi or Sesotho words. Politicians speak like this on purpose, so you read it as a
-   bilingual listener would: keep his isiZulu as isiZulu, say other languages' meaning in plain isiZulu, and do not skip the stretch or keep
-   only the clear English (a lost 'unga-' turns "do not confuse" into "confuse").
-   Delivery: the clip carries a `delivery` sheet measured from the audio. A speaker people know (a politician above all) should be
-   recognisable in the dub, so write the isiZulu with their shape: keep their pace (a quick run stays short and quick, a slow weighted
-   line stays weighted), keep the pauses they take for effect by ending the sentence there, keep the phrases they repeat repeated, and
-   let the words they lean on (stressed_words) land at the end of a phrase or right after a pause. This shapes wording only: never
-   lengthen a unit past its window for it, never invent a pause, and the meaning and plain wording above still come first.
-   Where the sheet shows the speaker holding a pause of 600 ms or more (pauses_inside), you may write ~pause1500 (milliseconds, 200-2000)
-   at the matching spot in your isiZulu: "...ngentela yethu. ~pause1500 Uma uya esitolo...". It is never spoken. ~pauseN is the TOTAL silence at that spot, punctuation
-   included: a full stop already leaves about 0.9 s and a comma about 0.15 s by itself, so "ngentela yethu. ~pause1500" is the stop's 0.9 s plus the rest, 1.5 s in all, and
-   "ngentela yethu. ~pause700" adds nothing (the stop alone is longer than 0.7 s). To match a speaker's pause shorter than about 1.1 s, do not end the phrase with a full stop:
-   end it with a comma or no mark and write ~pause (the speaker's pause in ms) after it. The pause counts toward the unit's duration like any other part, and it is also the
-   cheapest way to fill a window honestly. Use it only for pauses the speaker really takes (open_clip's phrasing gives each pause's length), at most two per unit, and one more for each held pause of 0.8 s or more that the held-pause points name for that unit (the speaker's pause is the limit, not a number). After
-   the voice has spoken, the renderer also moves the silence between your sentences so each one starts near where the source speaker's sentence starts (the speech and the unit's
-   length are never touched), so write the sentences in the order the speaker made them and let the pauses be the speaker's.
-
-   Pacing and punctuation. Punctuation is how these voices breathe, and what each mark costs was measured (the silence left between two
-   clauses, the same words each time): no mark leaves none, so the clauses run on; an ellipsis ("...") is ignored and also leaves none; a
-   comma, semicolon, colon or dash all leave the same short breath, about 0.12-0.18 s, and two marks together do not add up; a full stop,
-   question mark, exclamation mark or new line leaves about 0.9 s, whatever follows it. So punctuate as a speaker breathes: a comma where a
-   speaker would take a breath between phrases, nothing inside a phrase that belongs together, a full stop only where the thought is over. A
-   full stop in the middle of a thought costs nearly a second and makes the line stilted; a comma the speaker did not take costs 0.15 s. Do
-   not use punctuation or ~pause to fill time that the wording should fill, and match the speaker's own pauses (pauses_inside) before any
-   of your own. A hyphen joins the pieces of one word (i-microphone, ne-, the parts of a figure) and adds no silence of its own; spacing
-   inside a number or a name does not add silence either, so join figures and names as written and do not split them with commas. But a figure is what the viewer has to take in: after each percentage or amount that is followed by more words, a
-   comma gives the listener the breath to digest it ("ku-75.8%, ngo-2006, laya ku-44.05%, kulo nyaka"); never run two figures together with no
-   break between them. The renderer adds that comma after a percentage if you leave it out, so write it yourself where you want the break.
-
-   Learn from the listener. recall_lessons also returns ear_lessons: what the person who listens to these dubs has heard wrong before, by item class (a title read raw, digits read in a
-   Zulu accent, a name run together, a figure with no breath), with what fixed it, and the spellings they chose over the rules'. Read them before your first draft and write so they do
-   not recur. They are the same gap, seen again: between what you wrote and what the listener heard.
-
-   See what the voice gets. What you write is not what the voice reads: a dictionary of rules turns your digits, titles, abbreviations and English names into the spoken form,
-   and a listener found its gaps one by one ("Dkt" read raw, "Section 79" read in digits, a name said as separate words). Before you submit, call say_it on any unit that holds a
-   figure, a year, a title, an abbreviation or an English name, and read the spoken form the way a listener would hear it. 'still_as_written' lists what no rule converted: write
-   that another way (spell the title out, put the figure after its prefix) or say in approach_notes what you could not fix. It only shows; the spelling of a word is still decided by
-   the rules and by the listener's ear.
-
-   A time of day is written with a colon, never a point: ngo-9:30, not ngo-9.30 (the English source may write either). "9.30" is also a decimal figure and a point can be read as one;
-   the colon is a time and nothing else, and the rules say it as a time ("nine thirty").
-
-   Decisions so far. Your earlier drafts, measurements and checks are cleared from the conversation as you work (only the latest submit and its result stay). When you settle how a term or
-   phrase that recurs in this clip is said in Zulu (the word for a concept, an institution, a phrase the speaker keeps coming back to), pass it in submit_dub decisions as {english, zulu, note},
-   at most twelve a call. Every submit result then returns decisions_so_far (each with the units that still hold it), settled_units (no open flag: leave them alone unless a point names them)
-   and speaker_rates_chars_per_s (the measured speech rate, to reckon a length edit at). Use them to keep one word for one idea across the clip; a repair run starts with the earlier run's decisions.
-
-   Natural speech. The goal is a dub that sounds like a person talking, not one that merely fits and keeps the facts. Every submit shows naturalness evidence measured against real isiZulu:
-   word pairs that never meet in the corpora although two common words would, and units chopped into sentences shorter than almost any real speaker uses (every full stop leaves about 0.9 s of
-   silence, so a unit of short sentences is mostly pauses). Treat them as a listener's ear would: a pair that never meets is usually a calque from the English, so say it the way a speaker would;
-   join sentences with commas where the speaker kept going; use a full stop only where the thought is over. Filling a window with extra short sentences is not the same as filling it naturally.
-
-   Listening load. The viewer hears each line once and cannot re-read it, so write for what the ear can take in, not only for fit. The
-   words between two breath marks are one breath group: it should carry one new fact and last about two to three seconds of speech,
-   rarely more than about six (a run past about eight is flagged). A figure that carries the point gets the breath after it, and when isiZulu word order allows, put the figure
-   at the end of its phrase so the breath lands right after it. Never run two figures, or a figure and a name, into each other with no
-   break. The delivery sheet shows how the speaker spaced the line for the listener (breaths_inside, figures_spoken, pauses_inside): give
-   the viewer the same room. check_text and every submit_dub result measure this (figures_run_together, long_run_without_breath, listening_load); the flags are evidence,
-   you decide. When a sentence is too dense for a listener, split it or reorder it, with the facts and names unchanged, instead of
-   cutting it; a sentence end costs about 0.9 s, so spend it where the thought really ends.
-
-   A conversation, not a text. Most clips are people talking to each other: a presenter, a reporter, a guest, each turn answering the one before and handing over by name
-   ("Yeah, Mfundo, ...", "Kenny, ...", "Indeed, Ayanda, ..."). open_clip says so (conversation) and shows, for each segment, where its speaker really paused (phrasing: |0.7s| is a
-   pause of 0.7 s). Take your punctuation from that, not from habit: the speakers ran a name of address into the words beside it with no pause at all
-   ("Indeed, Ayanda, hopefully" was said without a gap on either side of Ayanda). A comma is about 0.15 s of silence in your Zulu and a full stop 0.9 s, so a comma on both sides of
-   every name of address makes people who are talking to each other sound like a script being read, and a listener hears it at once. Write a name of address in the same breath as the words round it, put a pause where the
-   speaker's thought changes, and answer the speaker before you in the way a person answers a colleague. submit_dub lists the commas of your text that no pause of the speaker's matches
-   (comma_check): read it as the listener's view of your punctuation. It also lists the pauses of 0.8 s or more that the speaker held (phrasing |1.4s|) where your Zulu has
-   none that long: a speaker who stops for 1.4 s mid-sentence ("as well as ... Masemola") and a dub that runs straight on get out of step with the picture, so put a
-   ~pauseN (the total silence) at that place.
-
-When the English of a segment looks odd, ambiguous or wrong (a double negative, a name, a number, a sentence that does not make sense), call source_readings before you decide what it meant: it shows what the recogniser heard, how sure it was word by word, what YouTube's caption says for the same moment, and where the two differ. It cannot play the audio; two readings that agree are strong evidence.
-
-Words the voice cannot say: a listener heard the voice stutter on "imininingwane" (and its forms, "emininingwaneni"): never write it. Where the English says details write the English word "details" with the Zulu prefix the sentence needs, hyphenated: you choose the concord ("anikeze ama-details", "angene kuma-details",
-"nama-details", "ngama-details", "ze-details"), as everyday speakers say it; where it says information write "ulwazi". check_text and submit_dub name any such word in your text.
-
-Tools give you real measurements. Azure TTS timing is not predictable from word counts, and with no speed
-control you must get the wording right. The scorer re-measures your final text with the same function, so
+Tools give you real measurements. Voice timing is not predictable from word counts, and with no speed control you must get the wording right. The scorer re-measures your final text with the same function, so
 what you measure is what you are graded on. Measurements are budgeted.
+
+Learn from the listener. recall_lessons also returns ear_lessons: what the person who listens to these dubs has heard wrong before, by item class (a title read raw, digits read in a Zulu accent, a name run
+together, a figure with no breath), with what fixed it, and the spellings they chose over the rules'. Read them before your first draft and write so they do not recur.
+
+See what the voice gets. What you write is not what the voice reads: a dictionary of rules turns your digits, titles, abbreviations and English names into the spoken form. Before you submit, call say_it on any
+unit that holds a figure, a year, a title, an abbreviation or an English name, and read the spoken form the way a listener would hear it. 'still_as_written' lists what no rule converted: write that another
+way (spell the title out, put the figure after its prefix) or say in approach_notes what you could not fix. It only shows; the spelling of a word is still decided by the rules and by the listener's ear.
+
+Decisions so far. Your earlier drafts, measurements and checks are cleared from the conversation as you work (only the latest submit and its result stay). When you settle how a term or phrase that recurs in
+this clip is said in Zulu, pass it in submit_dub decisions as {english, zulu, note}, at most twelve a call. Every submit result then returns decisions_so_far (each with the units that still hold it),
+settled_units (no open flag: leave them alone unless a point names them) and speaker_rates_chars_per_s (the measured speech rate, to reckon a length edit at). Use them to keep one word for one idea across
+the clip; a repair run starts with the earlier run's decisions.
 
 Every tool call re-sends your whole history, so each extra turn costs more than the last. After you
 submit, your earlier working steps (drafts, measurements, checks) are trimmed from your history: the clip,
 your latest submit_dub call and its result are always kept.
 
-submit_dub returns the current Zulu text of the units it flags (and of the claims_to_check), so read it there; call get_submission
-only for units whose text you do not have.
-
-submit_dub takes the full set of units, or, with partial=true, only the units you changed: each replaces the
+submit_dub returns the current Zulu text of the units it flags (and of the claims_to_check), so read it there; call get_submission only for units whose text you do not have. It takes the full set of
+units, or, with partial=true, only the units you changed: each replaces the
 current unit with the same item_id (ids in remove are deleted) and the rest carry over. Sending only what
-changed is much cheaper than rewriting the whole clip. get_submission shows your current units
-(all, or just the ones you ask for), so you never have to rewrite from memory.
+changed is much cheaper than rewriting the whole clip. get_submission shows your current units (all, or just the ones you ask for), so you never have to rewrite from memory.
 
-The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so): no unit
-overruns or runs into another unit's speech (collisions), no hard-gate failures, no unit
-whose meaning an independent reader finds materially changed from the English (submit_dub reports these as
-meaning_loss, with what your Zulu reads back as; a lost qualifier, a changed time or negation, a dropped clause that
-carried a fact), and residual_dead_air_pct at or below {max_dead_air}. submit_dub also lists claims_to_check:
-units where the same reader found something your Zulu says that the English does not (an addition or a changed
-detail), with what it reads back as. That is not a bar and the reader is sometimes wrong: look at the English of
-each, take out what it does not say (a wider word than the speaker used, an intensifier, a figure or a reason of your
-own), and leave it alone when the English does say it. Window length is never a reason to add a claim: a shorter
-faithful unit and a pause are better than a longer unit that says more than the speaker did. If you stop while a submission is still below that bar and you have budget left,
+The bar for "done" (checked by the harness against your last submit_dub result, not by your say-so): no unit overruns or runs into another unit's speech (collisions), no hard-gate failures, no unit
+whose meaning an independent reader finds materially changed from the English (submit_dub reports these as meaning_loss, with what your Zulu reads back as), and residual_dead_air_pct at or below
+{max_dead_air}. submit_dub also lists claims_to_check: units where the same reader found something your Zulu says that the English does not. That is not a bar and the reader is sometimes wrong: look at the
+English of each, take out what it does not say (a wider word than the speaker used, an intensifier, a figure or a reason of your own), and leave it alone when the English does say it. Window length is never a
+reason to add a claim: a shorter faithful unit and a pause are better than a longer unit that says more than the speaker did. If you stop while a submission is still below that bar and you have budget left,
 you will be sent back to the specific units to fix.
 
-When you are satisfied, call submit_dub (it returns your score and which units are flagged; you may revise
-and resubmit). Then reply with a short plain-text summary of your approach and stop.
+When you are satisfied, call submit_dub (it returns your score and which units are flagged; you may revise and resubmit). Then reply with a short plain-text summary of your approach and stop.
 """
 
 # Said only when the grammar reference follows: with it switched off the sentence would point at nothing (the first grammar-off runs of the comparison had that flaw).
@@ -325,8 +259,8 @@ def agent_budget(value: str | None = None) -> str:
 
 
 BUDGET_LIMITS: dict[str, dict[str, Any]] = {
-    "free": {"max_turns": 200, "max_total_tokens": 8_000_000, "tts_budget": 3000, "compact_after_tokens": 60_000, "dead_air_slack_pct": 0.0},
-    "lean": {"max_turns": 80, "max_total_tokens": 2_000_000, "tts_budget": 600, "compact_after_tokens": 15_000, "dead_air_slack_pct": DEAD_AIR_SLACK_PCT}  # lean: the old COMPACT_AFTER_TOKENS,
+    "free": {"max_turns": 200, "max_total_tokens": 8_000_000, "tts_budget": 3000, "compact_after_tokens": 60_000, "dead_air_slack_pct": 0.0, "focus_growth_tokens": 10_000},
+    "lean": {"max_turns": 80, "max_total_tokens": 2_000_000, "tts_budget": 600, "compact_after_tokens": 15_000, "dead_air_slack_pct": DEAD_AIR_SLACK_PCT, "focus_growth_tokens": 0}  # lean: the old COMPACT_AFTER_TOKENS,
 }
 
 _COST_RE_MEASURE = "Measurements are budgeted."
@@ -373,7 +307,7 @@ def quality_pushback_message(points: list[str], number: int) -> str:
     lines = [f"You stopped, but your last submission still has {len(points)} open point(s) (soft evidence, not gates; measured on the source audio and against real isiZulu):"]
     lines += [f"- {point}" for point in points]
     lines.append(
-        "Before you finish, take each one. Either change the unit (a held pause is written ~pauseN, the total silence in ms, after the word that ends the thought; check the result with "
+        "Before you finish, take each one. Either change the unit (check the result with "
         "measure_tts or measure_tts_batch, and shorten words elsewhere in the unit if it would overrun; send only the changed units with submit_dub partial=true), or, if you decide a point "
         "should stay, say why in one line of your reply. A reason you measured counts; 'it would break the timing' without a measurement does not. "
         f"Round {number} of {MAX_QUALITY_ROUNDS}: when you have acted on what is right, reply with no tool call.")
@@ -424,7 +358,17 @@ def tool_specs(mode: str = "live") -> list[dict[str, Any]]:
     return specs
 
 
-def build_system_prompt(playbook: dict | None = None, *, max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, grammar: bool | None = None, mode: str = "live", budget: str = "lean") -> str:
+WEB_PER_TURN = 4          # web lookups the model may make in one turn
+WEB_PROMPT = """
+
+WEB SEARCH. You have a web search tool, for a limited number of lookups in this run. Use it to settle a NAME the speaker said: a player, coach, official, team, place or organisation that the
+recogniser and YouTube's captions garbled or disagree on, or that the glossary holds in a form nobody can vouch for. Search with the context (the video title, the two teams, the competition,
+the date) and never for facts to add to the dub. A result is evidence only if it is about THIS event: check the date, the competition and the teams (a line-up from another year is not this match), and
+say in a choice point what you looked up, what you found and which page it was. When the results do not settle it, keep what the speaker's audio supports and record it in missing_evidence.
+"""
+
+
+def build_system_prompt(playbook: dict | None = None, *, max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, grammar: bool | None = None, mode: str = "live", budget: str = "lean", web: bool = False) -> str:
     """The rules (always), the isiZulu grammar reference (unless switched off: MATHULA_AGENT_GRAMMAR=0 or grammar=False), and the learned strategy notes (if a playbook is given).
     The reference replaces the pass-2 grammar block this prompt used to carry: its claims were not checked against data and the new modules cover and correct them."""
     from . import zulu_grammar
@@ -432,7 +376,7 @@ def build_system_prompt(playbook: dict | None = None, *, max_dead_air_pct: float
 
     use_grammar = zulu_grammar.enabled() if grammar is None else grammar
     base = _SYSTEM_PROMPT_TEMPLATE.replace("{max_dead_air}", f"{max_dead_air_pct}%").replace("{grammar_pointer}", GRAMMAR_POINTER if use_grammar else "")
-    prompt = base + ("\n\n" + zulu_grammar.reference() + "\n" if use_grammar else "\n") + render_section(playbook) + (TRAINING_PROMPT if mode == "training" else "")
+    prompt = base + ("\n\n" + zulu_grammar.reference() + "\n" if use_grammar else "\n") + render_section(playbook) + (TRAINING_PROMPT if mode == "training" else "") + (WEB_PROMPT if web else "")
     return free_prompt(prompt) if budget == "free" else prompt
 
 _UNIT_SCHEMA = {
@@ -468,7 +412,8 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
 TOOL_SPECS = [
     _tool("open_clip", "Open the clip: returns every English segment (id, speaker, start/end ms), the whole-clip "
           "context ledger, glossary and speaker modes. Call this first. If source_corrections is present, the English had "
-          "words the speaker's audio showed were misheard; the english already carries the fix, so translate that meaning.",
+          "words the speaker's audio showed were misheard; the english already carries the fix, so translate that meaning. `video` (when present) is the uploader's own title, "
+          "channel and description: a human-written source for the names and the setting of the story.",
           {"clip_id": {"type": "string"}}, ["clip_id"]),
     _tool("recall_lessons", "Cross-clip memory. Mistakes native-speaker reviewers marked 'bad' in earlier clips, with corrections where given; and (ear_lessons) what the listener has heard wrong "
           "in earlier dubs, by item class (title, figure, year, name, pacing, spelling), with what was written, what was heard and what fixed it. Call it first and read both.",
@@ -482,6 +427,22 @@ TOOL_SPECS = [
     _tool("measure_tts_batch", "Measure up to 40 texts at once; same fields as measure_tts. Costs 1 per text.",
           {"requests": {"type": "array", "items": {"type": "object", "properties": _MEASURE_PROPS,
                                                     "required": ["text", "start_ms", "end_ms"]}}}, ["requests"]),
+    _tool("estimate_fit", "Free (no TTS, costs no measurement): for up to 40 candidate texts, how long the voice is estimated to take against the source window, with the "
+          "error band of the estimate (nine in ten estimates fall inside it). The estimate is learned from every duration measured so far and is corrected by this run's own "
+          "measurements. It cannot confirm a fit; it tells you which candidates are far from the window, so you measure the ones that could fit.",
+          {"requests": {"type": "array", "items": {"type": "object", "properties": {
+              "text": {"type": "string"}, "start_ms": {"type": "integer"}, "end_ms": {"type": "integer"}, "speaker_id": {"type": "string"}},
+              "required": ["text", "start_ms", "end_ms"]}}}, ["requests"]),
+    _tool("grammar_review", "Free (no TTS, costs no measurement): a second reader of the isiZulu in your current submission. For each unit it lists the phrases it finds ungrammatical ('grammar') or "
+          "too fused to say in one breath ('fused'), each with a suggested rewrite. It is an opinion, not a gate: apply a fix only where you agree it is better isiZulu and says the same. "
+          "item_ids limits it to those units.", {"item_ids": {"type": "array", "items": {"type": "string"}}}, []),
+    _tool("timeline_fit", "Free (no TTS, no measurement): lay a draft out on the timeline sentence by sentence, as a person watching the speaker would. Give one item per source segment, "
+          "{segment_id, text}, or per unit of your own, {start_ms, end_ms, text} (optionally speaker_id and item_id), in any order. Each sentence starts where its source starts, or after the previous one ends when that one ran long, so lateness is inherited by every later "
+          "sentence. You get, per sentence, its estimated start and end against the source's, how late it is, whether it runs into another speaker's speech, and, where the lateness BEGINS, "
+          "which earlier sentences are over their own windows and could give the time back. Use it to decide where to cut before you measure: jump back to the sentence that lost the time, "
+          "not to the one that shows it. It is an estimate; measure_tts confirms.",
+          {"items": {"type": "array", "items": {"type": "object", "properties": {"segment_id": {"type": "string"}, "start_ms": {"type": "integer"}, "end_ms": {"type": "integer"},
+                                                                                  "speaker_id": {"type": "string"}, "item_id": {"type": "string"}, "text": {"type": "string"}}, "required": ["text"]}}}, ["items"]),
     _tool("preview_turn_padding", "Free arithmetic (no TTS). If a speaker turn made of these units finishes early, "
           "how much silence does the renderer add, and how much remains as dead air? Mechanisms in order: a "
           "tail pad of up to 150 ms when it fits the free gap, else the shortfall is spread over the turn's real "
@@ -512,6 +473,11 @@ TOOL_SPECS = [
           {"word": {"type": "string", "description": "the English word as written in your Zulu, e.g. provident"}}, ["word"]),
     _tool("use_loanword", "Remember the Zulu word you chose from create_loanword so every later clip uses the same one. You still write it in the Zulu text yourself, "
           "with the noun prefix the sentence needs.", {"word": {"type": "string"}, "zulu_word": {"type": "string"}}, ["word", "zulu_word"]),
+    _tool("punctuation_examples", "How real isiZulu news punctuates a word or short phrase: real sentences, with their own commas and full stops, in which it follows a comma, and others in which it does not "
+          "(from 30,000 Zulu news documents, 2013-2024). Use it when you are unsure whether a clause boundary takes a comma: you see what real writers do with the same word. Examples to read, "
+          "not a rule and not a count. Free: no try, no model. Give the word as it is written in Zulu (kanti, bese, ukuthi, kodwa); a form that is rare in the news returns few or no examples.",
+          {"phrase": {"type": "string", "description": "A Zulu word or short phrase (up to three words)."},
+           "limit": {"type": "integer", "description": "Examples of each kind, 1 to 6 (default 4)."}}, ["phrase"]),
     _tool("attested_zulu", "What real written isiZulu does with an English word, from 233,691 aligned sentence pairs of translated text (2.9 million Zulu words), the "
           "NCHLT lexicon, and 56.8 million words of Zulu web text (2013-2024) counted apart for Zulu news sites: the Zulu forms that real text pairs with the word "
           "(shared sentences, score), how often the English word itself stays English in the Zulu sentence, how Zulu news sites write the English word (bare, "
@@ -622,6 +588,8 @@ class ResponsesClient:
         self.sleep = sleep
         self.url = f"{config.endpoint}/openai/v1/responses"
         self.reasoning_summary: str | None = None          # "detailed" in training mode: the model's own summary of its reasoning each turn, logged to the trace
+        self.web_budget = 0          # web lookups (searches and pages opened) the agent may make in a run; 0 = the tool is not offered
+        self.web_used = 0
 
     @staticmethod
     def to_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -645,6 +613,26 @@ class ResponsesClient:
         return [{"type": "function", **t["function"]} for t in tools or []]
 
     @staticmethod
+    def web_items(output: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """What the model looked up this turn, for the trace: each search with its queries, each page it opened, and the pages its answer cites."""
+        found: list[dict[str, Any]] = []
+        for item in output:
+            if item.get("type") == "web_search_call":
+                action = item.get("action") or {}
+                row: dict[str, Any] = {"action": action.get("type")}
+                if action.get("type") == "search":
+                    row["queries"] = [str(q)[:200] for q in (action.get("queries") or [action.get("query")]) if q][:4]
+                if action.get("url"):
+                    row["url"] = str(action.get("url"))[:300]
+                found.append(row)
+            elif item.get("type") == "message":
+                cited = [{"title": str(a.get("title") or "")[:120], "url": str(a.get("url") or "")[:300]}
+                         for part in item.get("content") or [] for a in part.get("annotations") or [] if a.get("type") == "url_citation"]
+                if cited:
+                    found.append({"cites": cited[:6]})
+        return found
+
+    @staticmethod
     def to_chat_shape(response: dict[str, Any]) -> dict[str, Any]:
         output = response.get("output") or []
         text = "".join(
@@ -661,6 +649,9 @@ class ResponsesClient:
                             for part in item.get("summary") or [] if isinstance(part, dict) and part.get("text"))
         if summary:
             message["_reasoning"] = summary          # only for the trace: it is not sent back (the raw reasoning items are)
+        web = ResponsesClient.web_items(output)
+        if web:
+            message["_web"] = web          # only for the trace, like the reasoning
         if calls:
             message["tool_calls"] = calls
         usage = response.get("usage") or {}
@@ -684,12 +675,66 @@ class ResponsesClient:
             body.setdefault("reasoning", {})["summary"] = self.reasoning_summary
         if tools:
             body["tools"] = self.to_tools(tools)
+        left = self.web_budget - self.web_used
+        if left > 0:          # the model's own web search, bounded: at most WEB_PER_TURN lookups in a turn and the run's budget in all
+            body.setdefault("tools", []).append({"type": "web_search"})
+            body["max_tool_calls"] = min(WEB_PER_TURN, left)
         if json_mode:
             body["text"] = {"format": {"type": "json_object"}}
         headers = {"api-key": self.config.api_key, "Content-Type": "application/json"}
-        return self.to_chat_shape(post_with_retry(
-            self.url, headers, body, timeout=min(self.config.timeout_seconds, REQUEST_TIMEOUT_SECONDS),
-            retries=self.retries, sleep=self.sleep))
+        raw = post_with_retry(self.url, headers, body, timeout=min(self.config.timeout_seconds, REQUEST_TIMEOUT_SECONDS), retries=self.retries, sleep=self.sleep)
+        self.web_used += sum(1 for item in raw.get("output") or [] if item.get("type") == "web_search_call")
+        return self.to_chat_shape(raw)
+
+
+def drop_empty_replies(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A model reply with no text and no tool call says nothing: a checkpoint saved before cut-off replies were handled can hold some (a run that was cut off twice), and a model turn with no
+    content can be refused when the history is sent again.  They are dropped when a checkpoint is loaded."""
+    return [m for m in messages if not (m.get("role") == "assistant" and not str(m.get("content") or "").strip() and not m.get("tool_calls"))]
+
+
+MEASURE_TOOLS = frozenset({"measure_tts", "measure_tts_batch"})          # the per-unit real syntheses; submit_dub synthesizes and scores EVERY unit, so a first submission gives all of them at once
+DRAFT_PHASE_NOTE = ("Work breadth first. Until you have submitted a complete dub, measure_tts and measure_tts_batch are not available (a call is refused and costs nothing): submit_dub synthesizes and scores every unit, so your first "
+                    "submission gives you real timing, gates and collisions for the whole clip at once, and flags the units that need work. Draft EVERY unit now, sized with fits_about_chars "
+                    "(estimate_fit and timeline_fit are free, and check_text if you are unsure of one unit), then call submit_dub. After that, spend your effort where the score says it matters. "
+                    f"The first submission is due by about {int(DRAFT_FRACTION * 100)}% of the token budget: after that only submit_dub is available until it is in.")
+REFINE_PHASE_NOTE = ("Your first complete submission is in, so measure_tts and measure_tts_batch are available now. Work from its score: the flagged units and the dead air they leave, in the order "
+                     "that matters (gates, collisions, then the dead air), and send only the units you change with submit_dub partial=true. Every flagged unit and every measurement now says how far it is from its window and what that is in characters at its own pace (to_fit): change the words by about that much in one go, measure two or three renderings together, and when to_fit says within_noise the unit is done, because a further edit moves it within the noise.")
+DRAFT_REFUSAL = ("measure_tts is not available until a complete submission exists: draft every unit (fits_about_chars, estimate_fit and timeline_fit are free) and call submit_dub, which "
+                 "synthesizes and scores all of them at once. Nothing was spent.")
+DRAFT_DEADLINE_REFUSAL = ("The draft deadline has passed and there is no submission yet, so only submit_dub and get_submission are available until there is one. Call submit_dub now with complete text for every unit; "
+                          "the other tools come back as soon as it is in. Nothing was spent.")
+FINAL_REFUSAL = "The budget is nearly spent, so only submit_dub and get_submission are available now. Nothing was spent."
+TRUNCATED_FINISHES = ("length", "incomplete")          # a reply that ran into the output limit: the Gemini client reports MAX_TOKENS as 'length', the Azure Responses API as 'incomplete'
+MAX_CONSECUTIVE_TRUNCATIONS = 2
+TRUNCATED_NOTE = ("Your last reply was cut off by the output limit before it finished, so nothing in it was done (a tool call that is cut off is no call). Make the next reply smaller: "
+                  "think less before acting, and send less in one call (fewer choice points and unit strategies, shorter notes); the text of the units is what matters.")
+
+
+def native_client_config(environ: dict[str, str] | None = None) -> Any:
+    """The model config the agent and its judges run on: Gemini when ``MATHULA_AI_PROVIDER=gemini``, else the Azure OpenAI GPT config."""
+    environ = dict(os.environ if environ is None else environ)
+    if (environ.get("MATHULA_AI_PROVIDER") or "azure").strip().lower() == "gemini":
+        from .gemini_client import gemini_config_from_environment
+
+        return gemini_config_from_environment(environ)
+    from .foundry_grok import native_gpt_config_from_environment
+
+    return native_gpt_config_from_environment(environ)
+
+
+def new_agent_client(config: Any, **kwargs: Any) -> Any:
+    """The agent loop's client for this config: Gemini for a Gemini config, else the Azure Responses client (reasoning models need it for function tools)."""
+    from .gemini_client import GeminiClient, GeminiConfig
+
+    return GeminiClient(config, **kwargs) if isinstance(config, GeminiConfig) else ResponsesClient(config, **kwargs)
+
+
+def new_chat_client(config: Any, **kwargs: Any) -> Any:
+    """The judges' client for this config: Gemini for a Gemini config, else the Azure chat-completions client."""
+    from .gemini_client import GeminiClient, GeminiConfig
+
+    return GeminiClient(config, **kwargs) if isinstance(config, GeminiConfig) else ChatClient(config, **kwargs)
 
 
 class Trace:
@@ -725,7 +770,104 @@ def _step_tools(messages: list[dict[str, Any]], index: int) -> set[str]:
     return {c["function"]["name"] for c in messages[index].get("tool_calls") or []}
 
 
-def compact_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+FOCUS_FLOOR_TOKENS = 36_000       # below this a request is mostly the system prompt, the opened clip and the lessons: there is nothing to fold away
+FOCUS_KEEP_STEPS = 4              # the working steps since the last submission that stay verbatim when the older ones are folded into the ledger
+FOCUS_NOTE_PREFIX = "[Working steps since your last submission, folded"
+KEEP_RECENT_STEPS = 4      # with no submission to stand on, the last few working steps stay verbatim for continuity: the agent is mid-thought in them
+
+
+def _frozen_head_end(messages: list[dict[str, Any]]) -> int:
+    """Where the head of the conversation ends: the system prompt, the task, the notes placed before any work, and the steps that opened the clip and recalled lessons.
+
+    It is the front of every request, and the opened clip in it is most of the context, so it is never removed or reordered: a provider's cache is a prefix match, and a message dropped from the
+    front would make everything after it (the whole clip) be billed in full again.  The head ends at the first working step."""
+    index = 2
+    while index < len(messages):
+        if messages[index].get("role") == "assistant":
+            if not (_step_tools(messages, index) & _KEEP_STEP_TOOLS):
+                break
+            index += 1
+            while index < len(messages) and messages[index].get("role") == "tool":
+                index += 1
+        else:
+            index += 1
+    return min(index, len(messages))
+
+
+def _compact_on_ledger(messages: list[dict[str, Any]], ledger: Any) -> tuple[list[dict[str, Any]], int]:
+    """No submission exists, so the agent's drafts live only in its tool calls: put the harness's draft ledger (see draft_ledger) where the old steps were and keep the last few steps.
+
+    What stays: the system prompt, the task, the steps that opened the clip and recalled lessons, and everything from the KEEP_RECENT_STEPS-th working step from the end on.  What
+    goes: the working steps and notes between.  The history is bounded whatever the agent does and whenever it submits.  Idempotent."""
+    from .draft_ledger import LEDGER_NOTE_PREFIX
+
+    body = [m for m in messages if not str(m.get("content") or "").startswith(LEDGER_NOTE_PREFIX)]
+    steps: list[tuple[int, int]] = []
+    index = 2
+    while index < len(body):
+        if body[index].get("role") == "assistant":
+            end = index + 1
+            while end < len(body) and body[end].get("role") == "tool":
+                end += 1
+            steps.append((index, end))
+            index = end
+        else:
+            index += 1
+    opening = [s for s in steps if _step_tools(body, s[0]) & _KEEP_STEP_TOOLS]
+    working = [s for s in steps if s not in opening]
+    if len(working) <= KEEP_RECENT_STEPS:
+        return messages, 0
+    recent_from = working[-KEEP_RECENT_STEPS][0]
+    keep = {0, 1} | set(range(_frozen_head_end(body))) | {i for s in opening for i in range(*s)} | set(range(recent_from, len(body)))
+    dropped = [i for i in range(2, len(body)) if i not in keep]
+    if not dropped:
+        return messages, 0
+    note = {"role": "user", "content": (f"{LEDGER_NOTE_PREFIX} (the harness keeps the latest text you tried for each window, from your own tool calls). Earlier working steps were removed to keep the conversation "
+                                        "short; nothing you wrote is lost: it is here, with how long it measured or was estimated to be against its window. Nothing below has been submitted. "
+                                        "Continue from it: the clip above is unchanged, and the last few steps follow.]\n" + ledger.render())}
+    kept = [m for i, m in enumerate(body) if i not in dropped]
+    position = next(i for i, m in enumerate(kept) if m is body[recent_from])
+    kept.insert(position, note)
+    return kept, sum(1 for i in dropped if body[i].get("role") == "assistant")
+
+
+def _fold_since_submit(messages: list[dict[str, Any]], last_submit: int, ledger: Any) -> tuple[list[dict[str, Any]], int]:
+    """Fold the working steps after the latest submit_dub that are older than the last FOCUS_KEEP_STEPS into the harness's draft ledger.
+
+    Every measurement, estimate and check since the submission stays in the request for the rest of the run, so the request grows by a step a turn for as long as the agent works
+    without submitting (prod-121: 41k to 63k tokens in 17 turns).  Those steps are in the ledger already, built by the harness from the agent's own tool calls: the latest text tried
+    for each window and how long it measured, which is what the agent needs from them.  The submit step and its result, the opened clip and the last few steps are untouched, so the
+    cached front of the request stays the same and only what follows the fold is sent again.  Whole steps only (a tool call stays paired with its result).  Idempotent."""
+    if ledger is None or not getattr(ledger, "entries", None):
+        return messages, 0
+    after = last_submit + 1
+    while after < len(messages) and messages[after].get("role") == "tool":
+        after += 1                                                # the submit step's own results stay
+    body = [m for m in messages[after:] if not str(m.get("content") or "").startswith(FOCUS_NOTE_PREFIX)]
+    steps: list[tuple[int, int]] = []
+    index = 0
+    while index < len(body):
+        if body[index].get("role") == "assistant":
+            end = index + 1
+            while end < len(body) and body[end].get("role") == "tool":
+                end += 1
+            steps.append((index, end))
+            index = end
+        else:
+            index += 1
+    if len(steps) <= FOCUS_KEEP_STEPS:
+        return messages, 0
+    recent_from = steps[-FOCUS_KEEP_STEPS][0]
+    older = body[:recent_from]
+    folded = sum(1 for m in older if m.get("role") == "assistant")
+    if not folded:
+        return messages, 0
+    note = {"role": "user", "content": (f"{FOCUS_NOTE_PREFIX} into what the harness kept of them: the latest text you tried for each window and how long it measured. Nothing in your last submission changed; "
+                                        "the units it settled stay as they are unless a point names them. Continue from here: the last few steps follow.]\n" + ledger.render())}
+    return messages[:after] + [note] + body[recent_from:], folded
+
+
+def compact_history(messages: list[dict[str, Any]], ledger: Any = None, *, focus: bool = False) -> tuple[list[dict[str, Any]], int]:
     """Drop the working steps a newer submission has superseded. Returns (messages, dropped_count).
 
     A step is an assistant message plus the tool results that answer it; dropping whole steps keeps
@@ -733,14 +875,18 @@ def compact_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
     steps that opened the clip and recalled lessons, the LATEST submit_dub step, and everything after
     it. What goes: every step and every user note between them (earlier drafts, measurements, checks,
     old pushbacks). Idempotent: a second pass over a compacted history changes nothing.
+
+    With no submission yet, the same is done from the harness's draft ledger (``_compact_on_ledger``): the history never depends on the agent having submitted.
     """
     last_submit = None
     for index, message in enumerate(messages):
         if message.get("role") == "assistant" and "submit_dub" in _step_tools(messages, index):
             last_submit = index
     if last_submit is None:
+        if ledger is not None and ledger.entries:
+            return _compact_on_ledger(messages, ledger)
         return messages, 0
-    keep = {0, 1}
+    keep = {0, 1} | set(range(min(_frozen_head_end(messages), last_submit)))
     index = 2
     while index < last_submit:
         message = messages[index]
@@ -754,16 +900,23 @@ def compact_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
         else:
             index += 1
     dropped = [i for i in range(2, last_submit) if i not in keep and messages[i].get("content") != COMPACTION_NOTE]
-    if not dropped:
-        return messages, 0
-    kept = [m for i, m in enumerate(messages) if i not in dropped and m.get("content") != COMPACTION_NOTE]
-    position = next(i for i, m in enumerate(kept) if m is messages[last_submit])
-    kept.insert(position, {"role": "user", "content": COMPACTION_NOTE})
-    return kept, sum(1 for i in dropped if messages[i].get("role") == "assistant")
+    dropped_steps = 0
+    if dropped:
+        kept = [m for i, m in enumerate(messages) if i not in dropped and m.get("content") != COMPACTION_NOTE]
+        position = next(i for i, m in enumerate(kept) if m is messages[last_submit])
+        kept.insert(position, {"role": "user", "content": COMPACTION_NOTE})
+        dropped_steps = sum(1 for i in dropped if messages[i].get("role") == "assistant")
+        messages = kept
+    if focus:                                                       # and the working steps since that submission, which the size trigger alone leaves in until the next submit
+        latest = max((i for i, m in enumerate(messages) if m.get("role") == "assistant" and "submit_dub" in _step_tools(messages, i)), default=None)
+        if latest is not None:
+            messages, folded = _fold_since_submit(messages, latest, ledger)
+            dropped_steps += folded
+    return messages, dropped_steps
 
 
 _SLIM_HEADLINE = (
-    "group_count", "dead_air_pct", "turn_shortfall_pct", "silence_padded_pct", "residual_dead_air_pct",
+    "group_count", "dead_air_pct", "turn_shortfall_pct", "silence_padded_pct", "speaker_pauses_pct", "residual_dead_air_pct",
     "groups_dead_air", "groups_rushed", "gate_failures", "worst_turn_shortfall_pct",
     "collisions", "cross_speaker_collisions", "worst_collision_ms", "meaning_loss_units",
 )
@@ -775,13 +928,19 @@ CLAIMS_NOTE = (
     "units, and send all of them in one partial submit.")
 
 
+SENTENCE_TIMING_NOTE = (
+    "Soft evidence, not a gate: the renderer moves only SILENCE between sentences, never speech, so a sentence that starts well after the speaker's matching one (behind_the_mouth, in seconds) "
+    "can only be fixed in the words. take_out_about_chars is that lag at this speaker's rate: take about that much speech out of the sentences BEFORE it (a connective, a repeated modifier, a "
+    "shorter idiom, a loanword left in English), keep the money and the facts, and put it back after it if the unit would then end short. ahead_of_the_mouth is the other way, usually harmless. "
+    "mostly_unchecked means most of the unit's sentences could not be matched to the speaker's: read its sentence lengths against the English yourself.")
+
 SUBMIT_KEY_ROUTES: dict[str, tuple[str, ...]] = {
     # every key Workbench.submit_dub puts in its result -> the key(s) of slim_submit's result that carry it to the agent.  A key with no route would be computed and never shown: the guard
     # in tests/test_dub_agent.py reads the workbench source and fails when a new key is added without a route here (slim_submit is an allow-list).
     "accepted": ("accepted",), "warnings": ("warnings",), "headline": ("headline",), "gates": ("gates",), "merged": ("merged",),
     "regressions_accepted": ("regressions_accepted",), "note": ("note",), "meaning": ("meaning_loss", "claims_to_check"), "timing_lock": ("timing_lock",),
     "turn_padding": ("turns_ending_early",), "flagged_units": ("flagged_units",), "listening_load": ("listening_load",), "spoken_form_gaps": ("spoken_form_gaps",),
-    "comma_check": ("comma_check",), "voice_limit_words": ("voice_limit_words",), "figures_as_spoken": ("figures_as_spoken",), "decisions_so_far": ("decisions_so_far",),
+    "sentence_timing": ("sentence_timing",), "voice_limit_words": ("voice_limit_words",), "figures_as_spoken": ("figures_as_spoken",), "decisions_so_far": ("decisions_so_far",),
     "settled_units": ("settled_units",), "units_overview": ("units_overview",), "naturalness": ("naturalness",), "speaker_rates_chars_per_s": ("speaker_rates_chars_per_s",),
 }
 
@@ -817,13 +976,9 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
         slim["listening_load"] = result["listening_load"]
         slim["listening_load_note"] = ("Soft evidence, not a gate: a figure run into the next with no breath, or a stretch of about eight seconds with no breath, is hard for a listener to follow. "
                                        "Give a figure that carries the point its breath, or split the sentence at the end of a thought; leave it if the speaker ran on the same way.")
-    if result.get("comma_check"):
-        slim["comma_check"] = result["comma_check"]
-        slim["comma_check_note"] = ("Soft evidence, not a gate, measured on the source audio: a comma costs about 0.15 s of silence, and these units have commas beside a name of address "
-                                    "that the speaker said in the same breath as the words round it (or far more commas than the speaker had pauses). Take the comma out where the speaker ran "
-                                    "the words together; keep it where the phrasing of the segment shows a pause. pauses_the_speaker_held_that_the_dub_does_not is the other direction: the speaker "
-                                    "held a pause of 0.8 s or more (phrasing |1.4s|) where your Zulu has only a comma or nothing, so your sentence runs ahead of the speaker and then waits; "
-                                    "write ~pauseN (the total silence, in ms) after the word that ends the thought, or end the sentence there.")
+    if result.get("sentence_timing"):
+        slim["sentence_timing"] = result["sentence_timing"]
+        slim["sentence_timing_note"] = SENTENCE_TIMING_NOTE
     if result.get("decisions_so_far"):
         slim["decisions_so_far"] = result["decisions_so_far"]
     if result.get("settled_units"):
@@ -878,11 +1033,14 @@ def build_dispatch(
         "measure_tts": workbench.measure_tts,
         "measure_tts_batch": workbench.measure_tts_batch,
         "check_text": workbench.check_text,
+        **({"estimate_fit": workbench.estimate_fit} if hasattr(workbench, "estimate_fit") else {}),
+        **({"timeline_fit": workbench.timeline_fit} if hasattr(workbench, "timeline_fit") else {}),
+        **({"grammar_review": workbench.grammar_review} if hasattr(workbench, "grammar_review") else {}),
         "preview_turn_padding": workbench.preview_turn_padding,
         "submit_dub": lambda **kw: slim_submit(workbench.submit_dub(**kw)),
         "get_submission": workbench.get_submission,
     }
-    for name in ("create_loanword", "use_loanword", "attested_zulu", "human_translations", "figure_style", "source_readings", "say_it"):       # vocabulary tools (the loan rules on the dictionary's sounds, a corpus lookup), where the workbench has them; the agent has no recogniser and no pronunciation tool
+    for name in ("create_loanword", "use_loanword", "attested_zulu", "punctuation_examples", "human_translations", "figure_style", "source_readings", "say_it"):       # vocabulary tools (the loan rules on the dictionary's sounds, a corpus lookup), where the workbench has them; the agent has no recogniser and no pronunciation tool
         if hasattr(workbench, name):
             tools[name] = getattr(workbench, name)
     return tools
@@ -927,19 +1085,12 @@ def unmet_targets(result: dict[str, Any] | None, *, max_dead_air_pct: float) -> 
 
 DEAD_AIR_UNIT_MS = 2000                # a unit that ends this long before its window is a listener point in the wrap-up (see open_listener_points)
 LISTENER_POINTS_SHOWN = 8             # the wrap-up names at most this many open listener points
-_LISTENER_POINT_KEYS = ("pauses_the_speaker_held_that_the_dub_does_not", "commas_where_the_speaker_did_not_pause")
 
 
 def open_listener_points(result: dict[str, Any] | None, *, limit: int = LISTENER_POINTS_SHOWN) -> list[str]:
     """The soft listener evidence of the last accepted submission that is still open (comma_check): pauses the source speaker held and the Zulu does not, commas the speaker
     did not take.  Not gates; the wrap-up shows them while the agent can still act, because at the final submit they arrived after the stop rule had already said 'finish' (prod-84, prod-85)."""
     points: list[str] = []
-    for item in (result or {}).get("comma_check") or []:
-        if not isinstance(item, dict):
-            continue
-        for key in _LISTENER_POINT_KEYS:
-            for line in item.get(key) or []:
-                points.append(f"{item.get('item_id')}: {line}")
     for item in (result or {}).get("voice_limit_words") or []:
         if isinstance(item, dict):
             points.extend(f"{item.get('item_id')}: {line}" for line in item.get("words") or [])
@@ -996,6 +1147,12 @@ def _norm_words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", str(text).lower())
 
 
+def _unit_english(workbench: Any, items: list[dict[str, Any]]) -> dict[str, str]:
+    """The English each unit of a submission is written against (its segments' text now), kept with the submission."""
+    current = {str(s["segment_id"]): str(s.get("restored_text") or s.get("source_text") or "") for s in getattr(workbench, "segments", None) or []}
+    return {str(item.get("item_id")): " ".join(current.get(str(i), "") for i in item.get("source_segment_ids") or []) for item in items if item.get("item_id") is not None}
+
+
 def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) -> str:
     """In a repair run: what changed since the earlier submission (source corrections, glossary terms) and the units it touches."""
     note = ""
@@ -1041,6 +1198,32 @@ def _source_correction_note(workbench: Any, seed_items: list[dict[str, Any]]) ->
             note += ("The glossary was revised for simpler wording with the widest reach. These units use a term it replaced; "
                      "change that term in them and treat them as units that need change: " + "; ".join(parts) + ". ")
     return note
+
+
+def prefix_corpus_note(workbench: Any, seed_items: list[dict[str, Any]]) -> str:
+    """In a repair run: the units whose text writes a prefix on a word or name the speaker says in a form the Zulu corpora never write, with the forms they do write.  The check runs on every unit of the
+    seeded submission at the start, because the agent only checks the units it changes: unit-02's "kwabe-Hawks" (real text writes amaHawks, kumaHawks) was never looked at in two repair runs and the voice
+    said it as "kwe ... hwaks" (prod-129 0:56).  A reminder to compare, not a verdict: a form missing from small corpora can be right, and the agent decides."""
+    try:
+        resources = workbench._resources()
+        if resources is None:
+            return ""
+        from .english_prefix import find_unattested_prefixed
+
+        current = {str(seg["segment_id"]): str(seg.get("restored_text") or seg.get("source_text") or "") for seg in getattr(workbench, "segments", None) or []}
+        lines = []
+        for item in seed_items:
+            english = " ".join(current.get(str(i), "") for i in item.get("source_segment_ids") or [])
+            found = [line.split(". Zulu vowels merge")[0] for line in find_unattested_prefixed(str(item.get("zulu_text") or ""), english, resources)]
+            if found:
+                lines.append(f"{item.get('item_id')}: " + "; ".join(found))
+    except Exception:                                       # noqa: BLE001 - a lookup that cannot run is no reason a repair cannot start
+        return ""
+    if not lines:
+        return ""
+    return ("The Zulu corpora were looked up for every prefix written in front of a word or name the speaker says, in all the units. These forms are written 0 times there, and the forms real text writes are shown: "
+            + " | ".join(lines) + ". Zulu vowels merge (na+u = no, wa+i = we) and the corpora are small, so a form missing from them can still be right; compare each with the attested forms, and if you are unsure "
+            "follow the attested one, because the voice has not heard a form nobody writes. Treat the units where you change the form as units that need change. ")
 
 
 def loanwords_note(workbench: Any) -> str:
@@ -1110,10 +1293,13 @@ def _run_agent(
     system_prompt: str = SYSTEM_PROMPT, speed_policy: str = "natural",
     max_dead_air_pct: float = DEFAULT_MAX_RESIDUAL_DEAD_AIR_PCT, max_pushbacks: int = DEFAULT_MAX_PUSHBACKS,
     task_message: str | None = None, trace_dir: Path | None = None,
-    compact_after_tokens: int = COMPACT_AFTER_TOKENS, playbook_version: str | None = None,
+    compact_after_tokens: int = COMPACT_AFTER_TOKENS, focus_growth_tokens: int = 0, playbook_version: str | None = None,
     seed_items: list[dict[str, Any]] | None = None, wrapup_turns: int = WRAPUP_TURNS, dead_air_slack_pct: float = DEAD_AIR_SLACK_PCT, mode: str = "live", free_finish: bool = False, resume: bool = False,
+    breadth_first: bool | None = None, stable_tools: bool | None = None, draft_deadline: bool | None = None,
 ) -> dict[str, Any]:
-    """``resume``: continue from the checkpoint this run saved (agent_state.json: every turn writes one) instead of starting; a run is paused with a PAUSE file in its folder (request_pause) and
+    """``draft_deadline`` (default on; MATHULA_AGENT_DRAFT_DEADLINE=0 turns it off): a complete first submission is due by a share of the token ceiling (see budget_governor), after which only submitting is available and the harness submits the agent's own drafts if it still has not.  ``stable_tools`` (default on; MATHULA_AGENT_STABLE_TOOLS=0 turns it off): the tool declarations are the same on every turn and a phase (draft, final) restricts which may be called, because a
+    changed declaration set discards the provider's cache of everything after it.  ``breadth_first`` (default on; MATHULA_AGENT_BREADTH_FIRST=0 turns it off): until a complete submission exists the per-unit measurement tools are not available, so the work is
+    draft-everything-then-score by construction (see DRAFT_PHASE_NOTE).  ``resume``: continue from the checkpoint this run saved (agent_state.json: every turn writes one) instead of starting; a run is paused with a PAUSE file in its folder (request_pause) and
     returns stop_reason "paused".  ``mode``: "live" or "training" (the agent also records its choice points; the reasoning summaries and a thinking report are kept).  ``wrapup_turns``: once a submission meets the bar (within ``dead_air_slack_pct`` on residual dead air) the agent is told to finish and has this many turns left;
     0 turns the rule off.  ``seed_items`` starts a REPAIR run: the units of an earlier accepted submission are re-scored under today's rules
     and the agent is told to change only what misses the bar, leaving every other unit exactly as it was."""
@@ -1139,6 +1325,7 @@ def _run_agent(
                 f"Re-scored under the current timing rules it "
                 + ("misses the bar. " + pushback_message(seeded, seed_unmet, tts_left=tts_now) if seed_unmet else "meets the bar. ")
                 + _source_correction_note(workbench, seed_items)
+                + prefix_corpus_note(workbench, seed_items)
                 + "Change only the units that need it, send just those with submit_dub partial=true, leave every other unit "
                   "exactly as it is, and stop once the bar is met.")
     messages: list[dict[str, Any]] = [
@@ -1147,10 +1334,30 @@ def _run_agent(
     ]
     tokens = {"in": 0, "out": 0, "cached": 0}
     last_prompt_tokens = 0
+    focus_base: int | None = None              # the request size at the first turn after the last compaction or submission: what the working steps since then are measured against
     compactions = 0
     tool_counts: dict[str, int] = {}
     stop_reason = "max_turns"
     nudged = False
+    from .draft_ledger import DraftLedger
+
+    ledger = DraftLedger()                    # the harness's own record of the agent's working drafts: what lets the history be shortened whether or not the agent has submitted
+    from .budget_governor import BudgetGovernor
+
+    governor = BudgetGovernor(max_total_tokens, max_output=int(getattr(getattr(client, "config", None), "max_output_tokens", 0) or 16_000))          # the ceiling as phases the harness enforces, so a run cannot end having produced nothing (see budget_governor); the reserve is sized from the client's real reply cap
+    truncations = 0                           # consecutive replies cut off by the output limit
+    if breadth_first is None:
+        breadth_first = (os.environ.get("MATHULA_AGENT_BREADTH_FIRST") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    if stable_tools is None:
+        stable_tools = (os.environ.get("MATHULA_AGENT_STABLE_TOOLS") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    if draft_deadline is None:
+        draft_deadline = (os.environ.get("MATHULA_AGENT_DRAFT_DEADLINE") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    cache_watch = CacheWatch()                # per turn: what the provider could reuse of the request and, when it did not, why (see cache_watch)
+    draft_noted = refine_noted = False        # the agent has been told it is in the draft phase / that the measurement tools are now offered
+    from .submission_rank import BestSubmission
+
+    best = BestSubmission()                   # every accepted submission, ranked by the scorer's own order (gates, collisions, overruns, dead air): the run's best one is never lost
+    recorded_submit: Any = None
     loanwords_noted = False
     pushbacks = 0
     unmet: list[str] = []
@@ -1172,7 +1379,7 @@ def _run_agent(
         state = load_state(directory)
         if state is None:
             raise FileNotFoundError(f"nothing to resume: {state_path(directory)} is missing or unreadable")
-        messages[:] = state["messages"]
+        messages[:] = drop_empty_replies(state["messages"])
         if messages and messages[0].get("role") == "system":          # the current instructions replace the saved ones: a run is resumed after the prompt or a gate was fixed
             prompt_changed = messages[0].get("content") != system_prompt
             messages[0] = {**messages[0], "content": system_prompt}
@@ -1184,11 +1391,19 @@ def _run_agent(
         tool_counts.update({k: int(v) for k, v in (state.get("tool_counts") or {}).items()})
         flags = state.get("flags") or {}
         nudged, loanwords_noted, pushbacks = bool(flags.get("nudged")), bool(flags.get("loanwords_noted")), int(flags.get("pushbacks") or 0)
+        ledger.load(state.get("ledger"))
+        governor.load(state.get("governor"))
+        draft_noted, refine_noted = bool(flags.get("draft_noted")), bool(flags.get("refine_noted"))
+        best.load(state.get("best"))
+        cache_watch.load(state.get("cache_watch"))
         told_bar, points_sent, wrapup_at = bool(flags.get("told_bar")), set(flags.get("points_sent") or []), flags.get("wrapup_at")
         quality_rounds = int(flags.get("quality_rounds") or 0)
         unmet = list(state.get("unmet") or [])
         workbench.open_clip(clip_id, run_id, repeat=repeat, tts_budget=tts_budget, speed_policy=speed_policy)
         restore_workbench(workbench, state.get("workbench") or {})
+        if not state.get("ledger"):                    # a checkpoint saved before the draft ledger existed: rebuild it from the conversation, so the old history can be compacted too
+            ledger.set_segments(getattr(workbench, "segments", None))
+            ledger.replay(messages)
         seen_submit = getattr(workbench, "last_submit", None)          # the bar message for that submission was already sent (or not needed): do not send it again
         start_turn = int(state.get("turn") or 0) + 1
         resumed_from = start_turn - 1
@@ -1204,7 +1419,8 @@ def _run_agent(
             save_state(directory, {
                 "clip_id": clip_id, "run_id": run_id, "turn": completed, "stop_reason": stop, "mode": mode, "free_finish": free_finish, "messages": messages, "tokens": dict(tokens),
                 "last_prompt_tokens": last_prompt_tokens, "compactions": compactions, "tool_counts": dict(tool_counts),
-                "flags": {"nudged": nudged, "loanwords_noted": loanwords_noted, "pushbacks": pushbacks, "told_bar": told_bar, "points_sent": sorted(points_sent), "wrapup_at": wrapup_at, "quality_rounds": quality_rounds},
+                "ledger": ledger.to_dict(), "governor": governor.to_dict(), "best": best.to_dict(), "cache_watch": cache_watch.to_dict(),
+                "flags": {"nudged": nudged, "draft_noted": draft_noted, "refine_noted": refine_noted, "loanwords_noted": loanwords_noted, "pushbacks": pushbacks, "told_bar": told_bar, "points_sent": sorted(points_sent), "wrapup_at": wrapup_at, "quality_rounds": quality_rounds},
                 "unmet": list(unmet), "workbench": workbench_snapshot(workbench)})
         except Exception as exc:                                             # noqa: BLE001 - a checkpoint that cannot be written must never end a run
             trace.log("checkpoint_failed", turn=completed, error=f"{type(exc).__name__}: {str(exc)[:200]}")
@@ -1216,13 +1432,64 @@ def _run_agent(
             stop_reason = "paused"
             turn -= 1
             break
-        if compact_after_tokens and last_prompt_tokens >= compact_after_tokens:
-            compacted, dropped_steps = compact_history(messages)
+        focus_due = bool(focus_growth_tokens and focus_base is not None and last_prompt_tokens >= FOCUS_FLOOR_TOKENS and last_prompt_tokens - focus_base >= focus_growth_tokens)
+        if (compact_after_tokens and last_prompt_tokens >= compact_after_tokens) or focus_due:
+            compacted, dropped_steps = compact_history(messages, ledger, focus=bool(focus_growth_tokens))
             if dropped_steps:
                 trace.log("compact", turn=turn, dropped_steps=dropped_steps, messages_before=len(messages),
-                          messages_after=len(compacted), prompt_tokens_before=last_prompt_tokens)
+                          messages_after=len(compacted), prompt_tokens_before=last_prompt_tokens, trigger="focus" if focus_due and not (compact_after_tokens and last_prompt_tokens >= compact_after_tokens) else "size")
                 messages[:] = compacted
                 compactions += 1
+                focus_base = None
+        used = tokens["in"] + tokens["out"]
+        phase = governor.phase(used, last_prompt_tokens)
+        if phase == "over":
+            stop_reason = "token_budget"
+            break
+        if governor.due(phase):
+            budget_note = governor.note(phase, used, submitted=accepted(), drafts=ledger.render() if phase == "final" else "")
+            messages.append({"role": "user", "content": budget_note})
+            governor.sent(phase)
+            trace.log(f"budget_{phase}", turn=turn, used=used, ceiling=max_total_tokens, text=budget_note[:800])
+        if phase == "final" and not governor.final_turn_allowed():
+            stop_reason = "token_budget"
+            break
+        if draft_deadline and phase in ("normal", "soft"):            # no submission yet and the deadline is here: say so once, then act if it still is not in (see budget_governor)
+            draft_state = governor.draft_state(used, last_prompt_tokens, submitted=accepted())
+            if draft_state == "due":
+                draft_text = governor.draft_note(used, ledger.render())
+                messages.append({"role": "user", "content": draft_text})
+                governor.draft_told = True
+                trace.log("draft_deadline", turn=turn, used=used, ceiling=max_total_tokens, text=draft_text[:800])
+            elif draft_state == "overdue":
+                outcome = governor.auto_submit(workbench, ledger)
+                governor.draft_acted = True
+                trace.log("draft_auto_submit", turn=turn, **outcome)
+                if outcome.get("submitted"):
+                    headline = (getattr(workbench, "last_submit", None) or {}).get("headline")
+                    messages.append({"role": "user", "content": "You did not submit in time, so the harness submitted your working drafts as they stood. Its score: " + json.dumps(headline, ensure_ascii=False)
+                                     + ". Call get_submission to read which units it flags, and work from there: measure_tts and the other tools are available again."})
+                else:
+                    messages.append({"role": "user", "content": governor.draft_uncovered_note(outcome)})
+        drafting = bool(breadth_first) and not accepted()
+        if drafting and not draft_noted:
+            draft_noted = True
+            messages.append({"role": "user", "content": DRAFT_PHASE_NOTE})
+            trace.log("draft_phase", turn=turn, text=DRAFT_PHASE_NOTE)
+        elif not drafting and draft_noted and not refine_noted:
+            refine_noted = True
+            messages.append({"role": "user", "content": REFINE_PHASE_NOTE})
+            trace.log("refine_phase", turn=turn, text=REFINE_PHASE_NOTE)
+        # The tool declarations are the front of every request, so a different set from one turn to the next means nothing after them is reused (the whole opened clip is billed again):
+        # with stable_tools the set never changes and a phase restricts what may be CALLED instead (a call outside it gets a free refusal, see below); the legacy mode swaps the set.
+        if stable_tools:
+            turn_specs = specs
+        elif phase == "final":
+            turn_specs = governor.final_specs(specs)
+        elif drafting:
+            turn_specs = [s for s in specs if s["function"]["name"] not in MEASURE_TOOLS]
+        else:
+            turn_specs = specs
         text_exists = True
         try:                                    # a repair run is accepted from its first turn, before its seeded text has been written out
             text_exists = (Path(workbench.episode["dir"]) / "submission.json").is_file()
@@ -1237,18 +1504,42 @@ def _run_agent(
                 early_text = "Your first accepted submission keeps English words that may have a Zulu word." + early
                 messages.append({"role": "user", "content": early_text})
                 trace.log("loanwords_early", turn=turn, text=early_text)
-        response = client.complete(messages, tools=specs)
+        response = client.complete(messages, tools=turn_specs)
         usage = response.get("usage") or {}
+        if governor.draft_told and not accepted():
+            governor.draft_turns += 1                    # a turn taken since the deadline note with nothing submitted
+        try:                                    # what the provider could and could not reuse of this request, and why (cache_watch); it records, it never decides
+            cache_row = cache_watch.observe(turn, request_fingerprint(client, messages, turn_specs), usage, getattr(client, "last_explicit", None))
+            trace.log("cache", **{k: v for k, v in cache_row.items() if k != "turn"}, turn=turn)
+            for cache_event in getattr(client, "drain_cache_events", lambda: [])():          # the client's explicit cache (gemini_cache): made, dropped, failed
+                trace.log("explicit_cache", turn=turn, **cache_event)
+        except Exception as exc:                # noqa: BLE001 - a measurement must never stop a run
+            trace.log("cache_failed", turn=turn, error=f"{type(exc).__name__}: {str(exc)[:200]}")
         last_prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        if focus_base is None:
+            focus_base = last_prompt_tokens
         tokens["in"] += last_prompt_tokens
         tokens["out"] += int(usage.get("completion_tokens") or 0)
         tokens["cached"] += int(usage.get("cached_tokens") or 0)
         choice = (response.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         calls = message.get("tool_calls") or []
+        if any(c["function"]["name"] == "submit_dub" for c in calls):
+            focus_base = None
         trace.log("model", turn=turn, finish=choice.get("finish_reason"), text=message.get("content"),
                   tool_calls=[{"name": c["function"]["name"], "arguments": c["function"]["arguments"]} for c in calls],
-                  usage=usage, **({"reasoning": message["_reasoning"]} if message.get("_reasoning") else {}))
+                  usage=usage, **({"reasoning": message["_reasoning"]} if message.get("_reasoning") else {}), **({"web": message["_web"]} if message.get("_web") else {}))
+        if choice.get("finish_reason") in TRUNCATED_FINISHES and not calls:
+            # The reply was cut off by the output limit: nothing in it was done (a cut-off tool call is no call).  That is not the agent stopping, so it must not be read as "finished": say so
+            # once per cut and let it try again smaller; after MAX_CONSECUTIVE_TRUNCATIONS in a row the run ends with the reason (and the drafts are still submitted or kept below).
+            truncations += 1
+            trace.log("truncated", turn=turn, consecutive=truncations, completion_tokens=int(usage.get("completion_tokens") or 0))
+            if truncations > MAX_CONSECUTIVE_TRUNCATIONS:
+                stop_reason = "output_limit"
+                break
+            messages.append({"role": "user", "content": TRUNCATED_NOTE})
+            continue
+        truncations = 0
         messages.append({k: v for k, v in message.items() if k in ("role", "content", "tool_calls", "_raw") and v is not None})
 
         if not calls:
@@ -1288,13 +1579,27 @@ def _run_agent(
         for call in calls:
             name = call["function"]["name"]
             started = time.monotonic()
-            observation, ok = execute_tool(dispatch, name, call["function"]["arguments"])
+            if bool(breadth_first) and name in MEASURE_TOOLS and not accepted():          # not available in the draft phase; a model that calls it anyway is told why, and nothing is spent
+                observation, ok = json.dumps({"error": "not_available_yet", "detail": DRAFT_REFUSAL}, ensure_ascii=False), False
+            elif phase == "final" and name not in FINAL_TOOLS:                              # the final phase only submits (final_specs when the set is swapped; a refusal when it is kept stable)
+                observation, ok = json.dumps({"error": "not_available_now", "detail": FINAL_REFUSAL}, ensure_ascii=False), False
+            elif draft_deadline and governor.draft_restricted(submitted=accepted()) and name not in FINAL_TOOLS:          # the draft deadline note was sent and there is still no submission: only submitting
+                observation, ok = json.dumps({"error": "not_available_yet", "detail": DRAFT_DEADLINE_REFUSAL}, ensure_ascii=False), False
+            else:
+                observation, ok = execute_tool(dispatch, name, call["function"]["arguments"])
             tool_counts[name] = tool_counts.get(name, 0) + 1
+            ledger.set_segments(getattr(workbench, "segments", None))
+            ledger.observe(name, call["function"]["arguments"], observation)          # also a failed call: the draft it carried is still the agent's latest
             trace.log("tool", turn=turn, name=name, ok=ok, seconds=round(time.monotonic() - started, 2),
                       result=observation[:3000])
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": observation})
 
         latest = getattr(workbench, "last_submit", None)
+        if latest is not None and latest is not recorded_submit:
+            recorded_submit = latest
+            last_items = list(getattr(workbench, "last_items", None) or [])
+            if best.observe(turn, latest, last_items, _unit_english(workbench, last_items)):
+                trace.log("best_submission", turn=turn, key=best.best["key"])
         if free_finish and latest is not None and latest is not seen_submit:       # quality first: tell the agent the bar is met and what is open; never stop it for it
             seen_submit = latest
             if not unmet_targets(latest, max_dead_air_pct=good_enough_pct):
@@ -1328,16 +1633,41 @@ def _run_agent(
             stop_reason = "token_budget"
             break
 
+    if not accepted() and stop_reason in ("token_budget", "max_turns", "finished_without_submission", "output_limit"):
+        outcome = governor.auto_submit(workbench, ledger)          # the run is ending with nothing submitted: the agent's own drafts are submitted when they cover the clip
+        trace.log("auto_submit", **outcome)
+        if not outcome.get("submitted"):
+            try:                                                   # not lost either way: the drafts are kept beside the trace
+                (directory / "unsubmitted_drafts.json").write_text(json.dumps({"why": outcome, "drafts": ledger.to_dict()}, ensure_ascii=False, indent=1), encoding="utf-8")
+            except OSError:
+                pass
+
+    explicit_cache = None
+    try:                                                           # release the client's explicit cache and say what it cost (creation is billed once, outside the token ceiling)
+        explicit_cache = getattr(client, "cache_report", lambda: None)()
+        getattr(client, "close", lambda: None)()
+    except Exception:                                              # noqa: BLE001 - the cache expires by itself
+        pass
     summary = {
+        **({"explicit_cache": explicit_cache} if explicit_cache else {}),
         "mode": "agent", "clip_id": clip_id, "run_id": run_id, "stop_reason": stop_reason, "turns": turn,
+        "budget": governor.report(), "best_submission": best.report(), "cache": cache_watch.report(), "stable_tools": bool(stable_tools), "draft_deadline": bool(draft_deadline),
         "tokens": tokens, "tool_calls": tool_counts, "speed_policy": speed_policy,
         "pushbacks": pushbacks, "unmet_at_end": unmet, "compactions": compactions,
         "playbook": playbook_version,
         "grammar": _grammar_version_in(system_prompt), "system_prompt_chars": len(system_prompt),
         **({"judge_tokens": dict(workbench.judge.usage)} if getattr(workbench, "judge", None) else {}),
         "tts_used": (workbench.episode or {}).get("tts_used"), "submissions": (workbench.episode or {}).get("submissions"),
-        "model": client.config.deployment,
+        "model": client.config.deployment, "voice_provider": current_voice_provider(),
     }
+    if best.best and not summary["best_submission"].get("final_is_best", True):          # the run ended on a submission that ranks below an earlier one: keep that one beside the trace
+        try:
+            (directory / "best_submission.json").write_text(json.dumps({"turn": best.best["turn"], "key": best.best["key"], "headline": best.best["headline"], "items": best.best["items"],
+                                                                         "unit_texts": best.best.get("unit_texts") or {}},
+                                                                         ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+        trace.log("best_not_final", best_turn=best.best["turn"], final_turn=summary["best_submission"]["final_turn"])
     checkpoint(turn, "finished" if stop_reason != "paused" else "paused")
     summary["agent_mode"] = mode
     summary["free_finish"] = free_finish
@@ -1429,22 +1759,20 @@ def main(argv: list[str] | None = None) -> int:
     from .cli import create_tts_backend
     from .config import load_settings
     from .experience_store import ExperienceStore
-    from .foundry_grok import native_gpt_config_from_environment
-
     settings = load_settings()
-    config = native_gpt_config_from_environment(dict(os.environ))
+    config = native_client_config()
     judge = None
     if not args.no_judge and args.mode == "agent":
         from .dub_judge import UnitJudge
 
-        judge = UnitJudge(ChatClient(config))
+        judge = UnitJudge(new_chat_client(config))
     workbench = Workbench(ExperienceStore(settings.work_dir), lambda: create_tts_backend(settings), judge=judge)
     if args.mode == "oneshot":
-        client: Any = ChatClient(config)
+        client: Any = new_chat_client(config)
         summary = run_one_shot(client, workbench, clip_id=args.clip, run_id=args.run_id, repeat=args.repeat,
                                tts_budget=args.tts_budget, speed_policy=args.speed_policy)
     else:
-        client = ResponsesClient(config) if args.api == "responses" else ChatClient(config)
+        client = new_agent_client(config) if args.api == "responses" else new_chat_client(config)
         from .playbook import current_playbook, load_playbook
 
         choice = args.playbook or "current"

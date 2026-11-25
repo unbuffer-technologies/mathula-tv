@@ -15,8 +15,9 @@ def test_the_units_with_such_a_word_are_listed_and_reach_the_wrapup_points():
     assert points and points[0].startswith("unit-003: ") and "ama-details" in points[0]
 
 
-def test_the_agent_prompt_names_the_word_and_what_to_write_instead():
-    assert "imininingwane" in dub_agent.SYSTEM_PROMPT and "ama-details" in dub_agent.SYSTEM_PROMPT
+def test_the_agent_prompt_leaves_the_word_and_its_replacement_to_the_check_not_to_a_rule_for_one_word():
+    assert "known to stumble on" in dub_agent.SYSTEM_PROMPT and "check_text" in dub_agent.SYSTEM_PROMPT
+    assert "imininingwane" not in dub_agent.SYSTEM_PROMPT                     # the check names the word and what to write instead (the points above): the prompt keeps the principle, not the instance
 
 
 def test_an_english_word_kept_after_any_plural_or_locative_concord_is_found_for_the_pronunciation_list():

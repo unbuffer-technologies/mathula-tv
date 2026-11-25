@@ -82,6 +82,25 @@ class WebText:
         found = len(re.findall(r"(?<![a-z'])" + re.escape(key) + r"(?![a-z'])", self._news)) if self._news else 0
         return found, 0
 
+    def prefixed_forms(self, word: str) -> dict[str, tuple[int, int]]:
+        """Every form the web text writes ``word`` in with something glued in front of it ("amaHawks", "ama-Hawks", "wamaHawks" for "Hawks"): {the form with its hyphens taken out: (news, other)}, counts of
+        the hyphenated and the glued spelling added.  News is first because the rest holds compounds that merely end in the same letters (tomahawks)."""
+        key = re.sub(r"[^a-z']", "", word.lower())
+        cache = self.__dict__.setdefault("_prefixed_cache", {})          # a scan of every token of the web text is slow and the workbench asks on every check
+        if key in cache:
+            return cache[key]
+        found: dict[str, list[int]] = {}
+        if not key:
+            return {}
+        for token, (news, other) in self.counts.items():
+            plain = token.replace("-", "")
+            if len(plain) > len(key) and plain.endswith(key) and len(plain) - len(key) <= 10 and plain.isalpha():
+                entry = found.setdefault(plain, [0, 0])
+                entry[0] += news
+                entry[1] += other
+        cache[key] = {form: (c[0], c[1]) for form, c in found.items()}
+        return cache[key]
+
     def forms_with(self, english_word: str, top: int = 6) -> list[dict[str, Any]]:
         """How Zulu news sites write an English word: bare, with a Zulu particle (irally), or with a hyphenated one (i-rally, kwi-rally)."""
         word = re.escape(english_word.lower().strip())
@@ -202,6 +221,16 @@ class Attestation:
         if "words" in found:
             return found["corpus_count"] > 0 or web or found["all_words_attested"]
         return found["corpus_count"] > 0 or found["in_lexicon"] or web
+
+    def prefixed_forms(self, word: str, top: int = 6) -> tuple[dict[str, tuple[int, int]], list[tuple[str, int, int]]]:
+        """(all the prefixed forms of ``word`` with their (news, other) counts, the ``top`` of them as (form, news, other)): what real text glues in front of it.  Forms of the news text come first and are the only ones shown when there are any,
+        and elsewhere a form needs three sightings: the rest of the web has compounds that merely end the same way (tomahawks)."""
+        if self.web is None:
+            return {}, []
+        everything = self.web.prefixed_forms(word)
+        in_news = [(form, n, o) for form, (n, o) in everything.items() if n >= 1]
+        ranked = sorted(in_news or [(form, n, o) for form, (n, o) in everything.items() if o >= 3], key=lambda x: (-x[1], -x[2], x[0]))          # elsewhere only when the news never writes it
+        return everything, ranked[:top]
 
     def written_count(self, token: str) -> int:
         """How many times real text writes exactly this form, with this capitalisation (a capital at the start of a sentence proves nothing and is not
@@ -406,6 +435,52 @@ def lookup(attestation: Attestation, english_word: str, zulu_forms: Sequence[str
 
 MIN_FORM_SCORE = 0.02
 _cache: dict[str, Attestation] = {}
+
+
+_NEWS_ORIGINAL: dict[str, str] = {}
+_SENTENCE_BREAKS = (". ", "? ", "! ", "\n")
+
+
+def punctuation_examples(work_dir: Path, phrase: str, limit: int = 4) -> dict[str, Any]:
+    """Real Zulu news sentences, with the commas and full stops their writers gave them, in which ``phrase`` follows a comma and others in which it does not: how real writers punctuate
+    a clause that begins with this word.  Examples to read, no rule and no count (the agent decides what its own sentence needs).  The matches are spread over the whole news text, not taken from its start."""
+    words = str(phrase or "").split()
+    if not words or len(words) > 3 or len(" ".join(words)) > 40:
+        return {"error": "give a Zulu word or a short phrase of up to three words, as it is written"}
+    path = resources_dir(work_dir) / "web" / "web_news.txt"
+    if not path.is_file():
+        return {"error": "the Zulu news text is not installed on this machine; decide the punctuation from the structure of what you say"}
+    text = _NEWS_ORIGINAL.get(str(path))
+    if text is None:
+        text = _NEWS_ORIGINAL[str(path)] = path.read_text(encoding="utf-8")
+    limit = max(1, min(6, int(limit or 4)))
+    pattern = re.compile(r"(?<![\w'’-])" + r"\s+".join(re.escape(w) for w in words) + r"(?![\w'’-])", re.IGNORECASE)
+    positions = [m.start() for m in pattern.finditer(text)]
+    if not positions:
+        return {"phrase": " ".join(words), "after_a_comma": [], "not_after_a_comma": [], "note": "no sentence of the Zulu news text has this word or phrase; try its shorter or plainer form"}
+    step = max(1, len(positions) // 600)
+    after: list[str] = []
+    other: list[str] = []
+    seen: set[str] = set()
+    for start in positions[::step]:
+        left = max(text.rfind(mark, 0, start) for mark in _SENTENCE_BREAKS)
+        left = 0 if left < 0 else left + 1
+        ends = [e for e in (text.find(mark, start) for mark in _SENTENCE_BREAKS) if e >= 0]
+        right = min(ends) + 1 if ends else len(text)
+        sentence = " ".join(text[left:right].split())
+        count = len(sentence.split())
+        if sentence in seen or not 6 <= count <= 35:
+            continue
+        seen.add(sentence)
+        (after if text[max(0, start - 3):start].rstrip().endswith(",") else other).append(sentence)
+
+    def spread(rows: list[str]) -> list[str]:
+        if len(rows) <= limit:
+            return rows
+        return [rows[round(i * (len(rows) - 1) / (limit - 1))] for i in range(limit)] if limit > 1 else rows[:1]
+
+    return {"phrase": " ".join(words), "after_a_comma": spread(after), "not_after_a_comma": spread(other),
+            "note": "Real Zulu news sentences with their own punctuation. They show what writers do with this word, not what you must do: your sentence has its own clauses."}
 
 
 def load(work_dir: Path) -> Attestation | None:

@@ -110,6 +110,51 @@ nav { overflow-x: auto; max-width: 100%; scrollbar-width: none; } nav::-webkit-s
   table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .src { grid-template-columns: 1fr; } .src .btns { flex-wrap: wrap; } .src .btns .btn { flex: 1 1 auto; }
 }
+.studio { max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+.studio .bar { position: sticky; top: 0; z-index: 3; background: var(--bg); padding: 8px 0; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.studio audio { flex: 1 1 320px; min-width: 0; }
+.srow { display: grid; grid-template-columns: 54px 1fr; gap: 4px 10px; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+.srow .t { color: var(--muted); font-size: 12px; font-family: ui-monospace, Consolas, monospace; padding-top: 6px; }
+.srow.now { background: var(--panel); }
+.srow.picked { box-shadow: 0 0 0 1px var(--accent) inset; border-radius: 8px; }
+.word { padding: 3px 7px; margin: 2px 1px; border: 1px solid transparent; border-radius: 6px; background: none; color: inherit; font: inherit; cursor: pointer; line-height: 1.35; }
+.word:hover { border-color: var(--line); }
+.word.now { background: var(--accent); color: var(--bg); }
+.word.sel { outline: 2px solid var(--accent); }
+.srow .tag.done { background: var(--good-bg); color: var(--good); }
+.drawpanel { position: sticky; bottom: 0; z-index: 3; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; box-shadow: 0 -4px 14px rgba(0,0,0,.12); }
+.unitline { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 6px 0; }
+@media (max-width: 700px) { .srow { grid-template-columns: 1fr; } .word { padding: 8px 9px; } }
+.player { position: sticky; top: 0; z-index: 4; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.player .row1 { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.player .time { font-family: ui-monospace, Consolas, monospace; font-size: 15px; min-width: 120px; }
+.seek { width: 100%; height: 44px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.stripbox { position: relative; }
+.stripbox::after { content: ""; position: absolute; left: 50%; top: 6px; bottom: 6px; width: 2px; margin-left: -1px; background: var(--accent); opacity: .55; pointer-events: none; border-radius: 2px; }
+.strip.grabbing { cursor: grabbing; user-select: none; }
+.strip { cursor: grab; scrollbar-width: thin; display: flex; align-items: center; gap: 2px; overflow-x: auto; white-space: nowrap; padding: 14px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); -webkit-overflow-scrolling: touch; }
+.strip .word { flex: 0 0 auto; font-size: 18px; padding: 8px 11px; }
+.strip .unitchip { flex: 0 0 auto; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding: 0 10px 0 16px; border-left: 2px solid var(--line); margin-left: 8px; }
+.strip .stop { flex: 0 0 auto; width: 10px; }
+.strip .pad { flex: 0 0 auto; width: 50vw; }
+.drawpanel2 { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; background: var(--panel); }
+.word.flagged { text-decoration: underline wavy var(--warn); text-underline-offset: 4px; }
+.repairbox { margin-top: 10px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 6px; }
+.unittext { line-height: 1.75; font-size: 17px; max-height: 8.5em; overflow-y: auto; margin: 6px 0 8px; padding-right: 6px; position: relative; }
+.unittext .uw { padding: 1px 0; }
+.unittext .inspan { background: var(--good-bg); color: var(--good); border-radius: 3px; box-shadow: 4px 0 0 var(--good-bg), -1px 0 0 var(--good-bg); }
+.unittext .clicked { font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+.drawpanel2 mark { background: var(--good-bg); color: var(--good); border-radius: 4px; padding: 0 4px; font-weight: 600; }
+.draws3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.draws3 .d { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.draws3 .d[data-live="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.draws3 .btn { width: 100%; }
+@media (max-width: 700px) { .draws3 { grid-template-columns: 1fr; } .strip .word { padding: 12px 12px; } }
+.seek { -webkit-appearance: none; appearance: none; background: transparent; height: 44px; }
+.seek::-webkit-slider-runnable-track { height: 16px; border-radius: 8px; background: var(--line); }
+.seek::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 30px; height: 30px; margin-top: -7px; border-radius: 50%; background: var(--accent); border: 3px solid var(--panel); box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+.seek::-moz-range-track { height: 16px; border-radius: 8px; background: var(--line); }
+.seek::-moz-range-thumb { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); border: 3px solid var(--panel); }
 </style>
 </head>
 <body>
@@ -248,11 +293,11 @@ function login() {
 function header() {
   const tab = (id, label) => h("button", { "aria-current": state.tab === id ? "page" : null, onclick: () => { state.tab = id; state.message = null; loadTab(); } }, label);
   const open = state.questions ? state.questions.open : 0;
-  return h("header", {}, h("h1", {}, "Pronunciation Console"), h("nav", {}, tab("review", "Review"), tab("questions", h("span", {}, "Questions", open ? h("span", { class: "count" }, open) : null)), tab("smith", "Wordsmith"), tab("book", "Book"), tab("rules", "Rules")), h("div", { class: "spacer" }),
+  return h("header", {}, h("h1", {}, "Pronunciation Console"), h("nav", {}, tab("review", "Review"), tab("questions", h("span", {}, "Questions", open ? h("span", { class: "count" }, open) : null)), tab("studio", "Studio"), tab("draws", "Draws"), tab("smith", "Wordsmith"), tab("book", "Book"), tab("rules", "Rules")), h("div", { class: "spacer" }),
     h("button", { class: "btn", onclick: async () => { await api("/api/logout", "POST"); state.signedIn = false; render(); } }, "Sign out"));
 }
 async function loadTab() {
-  try { if (state.tab === "book") state.book = await api("/api/book"); if (state.tab === "rules") state.rules = await api("/api/rules"); if (state.tab === "questions") await loadQuestions(); } catch (e) { say(e.message); }
+  try { if (state.tab === "book") state.book = await api("/api/book"); if (state.tab === "rules") state.rules = await api("/api/rules"); if (state.tab === "questions") await loadQuestions(); if (state.tab === "draws") await loadDraws(); if (state.tab === "studio" && !studio.data && !studio.loading) loadStudio(); } catch (e) { say(e.message); }
   render();
 }
 
@@ -315,6 +360,17 @@ function stretchCard(q) {
     h("div", { class: "chips gap" }, h("button", { class: "btn", onclick: () => pick("model") }, "The model’s text is right"), h("button", { class: "btn", onclick: () => pick("transcript") }, "The transcript is right")),
     box, h("button", { class: "btn primary", onclick: () => pick("typed", box.value) }, "Use my words"), commentBox(q));
 }
+const saidText = {};                    // what is typed as "what was said" for each of the agent's questions, kept while the page redraws
+function evidenceCard(q) {              // something the agent said it needed to know and was not given: the source audio, what the recogniser heard there, and your answer
+  const a = q.answer, box = h("textarea", { rows: 3, placeholder: "What was really said (or what you know about it)", oninput: (e) => { saidText[q.id] = e.target.value; } });
+  box.value = saidText[q.id] != null ? saidText[q.id] : (a ? a.text : "");
+  const save = () => sendAnswer({ kind: "evidence", id: q.id, text: box.value, ...withComment(q) }, "Kept. The agent is shown your answer the next time it works on this video, and it is recorded against its question.");
+  return h("div", { class: "card q" }, h("h2", {}, q.start_ms != null ? `${clock(q.start_ms)} · ${q.unit}` : q.unit),
+    h("div", { class: "small muted" }, a ? "Your answer is kept." : "The agent asked for this and had nothing to go on."),
+    h("div", { class: "qlist" }, line("The agent wanted", q.wanted, true), line("Why", q.why), q.transcript ? line("Recogniser heard", q.transcript) : null, q.caption ? line(`YouTube caption (${q.track})`, q.caption) : null,
+      q.start_ms != null && q.located === false ? line("Note", "The words it named were not found in the source words: this is the start of its unit.") : null),
+    hearRow(q), box, h("button", { class: "btn primary", onclick: save }, "Save my answer"), commentBox(q));
+}
 function questionsTab() {
   const jobSel = h("select", { onchange: async (e) => { state.job = e.target.value; state.run = state.jobs.find((j) => j.job === state.job).runs[0].run; await loadWords(); render(); } },
     state.jobs.map((j) => h("option", { value: j.job, selected: j.job === state.job }, `${short(j.name)} · ${j.created || j.clip}`)));
@@ -325,9 +381,10 @@ function questionsTab() {
   parts.push(h("p", { class: "muted" }, "Where the model and YouTube’s captions disagree, or a word of the Zulu dub was never said in the source, the pipeline asks instead of guessing. Every answer is kept as a lesson: the same word is settled in every later video, words that look like ones you answered are settled the same way, and the model is shown your corrections as examples."));
   if (q.words.length) parts.push(h("h3", {}, "Words nobody said"), ...q.words.map(wordCard));
   if (q.stretches.length) parts.push(h("h3", {}, "Where the readings differ"), ...q.stretches.map(stretchCard));
+  if ((q.evidence || []).length) parts.push(h("h3", {}, "What the agent could not find out"), ...q.evidence.map(evidenceCard));
   if (q.resolved.length) parts.push(h("h3", {}, "Settled by itself from your earlier answers"), ...q.resolved.map(wordCard));
   if (q.answered.length) parts.push(h("h3", {}, "Words you answered"), ...q.answered.map(wordCard));
-  if (!q.words.length && !q.stretches.length && !q.resolved.length && !q.answered.length) parts.push(h("div", { class: "card empty" }, "Nothing to ask about in this dub."));
+  if (!q.words.length && !q.stretches.length && !(q.evidence || []).length && !q.resolved.length && !q.answered.length) parts.push(h("div", { class: "card empty" }, "Nothing to ask about in this dub."));
   return h("div", { class: "qs" }, ...parts);
 }
 
@@ -554,11 +611,253 @@ function rulesTab() {
     h("div", { class: "card" }, h("h2", {}, "History"), r.history.length ? h("table", {}, h("tbody", {}, r.history.map((x) => h("tr", {}, h("td", { class: "muted small" }, x.at.slice(0, 16).replace("T", " ")), h("td", {}, x.rule), h("td", { class: "mono" }, String(x.from) + " → " + String(x.to)), h("td", { class: "muted small" }, x.note))))) : h("div", { class: "empty" }, "No changes yet.")));
 }
 
+
+const drawPick = {};                    // the draw number chosen for each sentence, kept while the page redraws
+async function loadDraws() {
+  state.draws = null;
+  if (!state.job) return;
+  try { state.draws = await api(`/api/draws?job=${state.job}&run=${encodeURIComponent(state.run)}`); } catch (e) { say(e.message); }
+}
+async function drawHear(u, s, btn) {
+  const n = drawPick[u.index + ":" + s.index]; btn.disabled = true; const label = btn.textContent; btn.textContent = "Making it… (up to a minute)";
+  try {
+    for (let i = 0; i < 60; i++) {
+      const r = await api("/api/draw-hear", "POST", { job: state.job, run: state.run, unit: u.index, span: s.index, retake: n });
+      if (r.url) { btn.textContent = label; btn.disabled = false; await playUrl(r.url); return; }
+      await new Promise((ok) => setTimeout(ok, 3000));
+    }
+    say("The voice took too long. Try again in a moment.");
+  } catch (e) { say(e.message); }
+  btn.textContent = label; btn.disabled = false;
+}
+async function drawCommit(u, s) {
+  const n = drawPick[u.index + ":" + s.index];
+  try { await api("/api/draw-commit", "POST", { job: state.job, run: state.run, unit: u.index, span: s.index, retake: n }); await loadDraws(); say(`Committed: draw ${n} of this sentence. The next render of this video uses it.`, true); } catch (e) { say(e.message); }
+}
+async function drawRevoke(u, s) {
+  try { await api("/api/draw-revoke", "POST", { job: state.job, run: state.run, unit: u.index, span: s.index }); drawPick[u.index + ":" + s.index] = 0; await loadDraws(); say("Taken back: this sentence is read with its plain draw again.", true); } catch (e) { say(e.message); }
+}
+function drawRow(u, s) {
+  const id = u.index + ":" + s.index;
+  if (drawPick[id] == null) drawPick[id] = s.retake;
+  const pick = h("select", { onchange: (e) => { drawPick[id] = Number(e.target.value); } }, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => h("option", { value: n, selected: n === drawPick[id] }, "Draw " + n + (s.marked && n === s.retake ? " (committed)" : ""))));
+  const status = s.marked ? `Committed: draw ${s.retake}.` : s.stale ? "A draw was committed with another reference clip, so it no longer applies." : "Not touched: the plain draw (0).";
+  return h("div", { class: "alt" }, h("div", {}, h("div", { class: "sp" }, s.text), h("div", { class: "muted small" }, status)),
+    h("div", { class: "plays" }, pick, h("button", { class: "btn", onclick: (e) => drawHear(u, s, e.currentTarget) }, "▶ Hear"), h("button", { class: "btn primary", onclick: () => drawCommit(u, s) }, "Commit this draw"),
+      s.marked ? h("button", { class: "btn", onclick: () => drawRevoke(u, s) }, "Take back") : null));
+}
+function drawsTab() {
+  const d = state.draws;
+  if (!d) return h("div", { class: "empty" }, "Loading the sentences… (the first time takes a moment)");
+  return h("div", { class: "qs" }, state.message && h("div", { class: "msg" + (state.message.ok ? " ok" : "") }, state.message.text),
+    h("p", { class: "muted" }, "The voice reads each sentence with one fixed draw, and a word it says right in most draws can be wrong in that one. Pick a draw, hear it, and commit the one that sounds right. Only that sentence changes, and nothing is scored. A committed draw belongs to the exact sentence and the reference clip it was heard with."),
+    d.units.map((u) => h("div", { class: "card" }, h("h2", {}, `${u.id} · from ${clock(u.start_ms)}`), u.spans.map((s) => drawRow(u, s)))));
+}
+
+
+const studio = { data: null, loading: false, progress: null, sel: null, follow: true, dirty: false, words: [], last: -1, strip: null, seek: null, time: null, playBtn: null, dragging: false, drawing: null };
+const studioAudio = document.createElement("audio"); studioAudio.preload = "auto";          // the main player has no browser controls: the page has its own, with a big seekbar
+const drawAudio = document.createElement("audio"); drawAudio.preload = "auto";
+const centreOf = (el) => { const strip = studio.strip; return el.getBoundingClientRect().left - strip.getBoundingClientRect().left + strip.scrollLeft - strip.clientWidth / 2 + el.offsetWidth / 2; };          // where the strip must be so that this word is in its middle
+function studioGrab(strip) {          // the strip moves with the mouse: press on it and drag sideways (a button press without a drag is still a click)
+  let down = false, moved = false, startX = 0, startLeft = 0;
+  strip.addEventListener("pointerdown", (e) => { if (e.pointerType === "touch") return; down = true; moved = false; startX = e.clientX; startLeft = strip.scrollLeft; });
+  window.addEventListener("pointermove", (e) => {
+    if (!down) return;
+    const dx = e.clientX - startX;
+    if (!moved && Math.abs(dx) > 5) { moved = true; studio.grabbed = true; strip.classList.add("grabbing"); strip.style.scrollBehavior = "auto"; }
+    if (moved) strip.scrollLeft = startLeft - dx;
+  });
+  window.addEventListener("pointerup", () => { if (!down) return; down = false; strip.classList.remove("grabbing"); strip.style.scrollBehavior = ""; if (moved) setTimeout(() => { studio.grabbed = false; }, 1500); });
+  strip.addEventListener("click", (e) => { if (moved) { e.stopPropagation(); e.preventDefault(); moved = false; } }, true);       // the click that ends a drag is not a press on a word
+  strip.addEventListener("wheel", (e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { strip.scrollLeft += e.deltaY; e.preventDefault(); studio.grabbed = true; setTimeout(() => { studio.grabbed = false; }, 1500); } }, { passive: false });
+}
+const stamp = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
+async function loadStudio() {
+  studio.loading = true; studio.progress = null; render();
+  try {
+    for (let i = 0; i < 600; i++) {
+      const r = await api("/api/studio-run", "POST", { job: state.job, run: state.run });
+      if (r.ready) {
+        const at = studioAudio.currentTime || 0, playing = !studioAudio.paused;
+        studio.data = r; studio.loading = false; studio.progress = null; studio.dirty = false; studio.last = -1;
+        studioAudio.src = r.url;
+        studioAudio.addEventListener("loadedmetadata", () => { studioAudio.currentTime = at; if (playing) studioAudio.play().catch(() => {}); }, { once: true });
+        render(); return;
+      }
+      studio.progress = r; render();
+      await new Promise((ok) => setTimeout(ok, 4000));
+    }
+    say("The voice took too long. Try again.");
+  } catch (e) { say(e.message); }
+  studio.loading = false; render();
+}
+function studioTick() {
+  const t = studioAudio.currentTime;
+  if (studio.seek && !studio.dragging) studio.seek.value = t;
+  if (studio.time) studio.time.textContent = `${stamp(t)} / ${stamp(studioAudio.duration || (studio.data ? studio.data.seconds : 0))}`;
+  let at = -1;
+  for (let i = 0; i < studio.words.length; i++) { if (studio.words[i].start <= t) at = i; else break; }
+  if (at !== studio.last) {
+    if (studio.strip) studio.strip.querySelectorAll(".word.now").forEach((e) => e.classList.remove("now"));          // exactly one word is lit, however the position moved (a seek back used to leave a trail)
+    studio.last = at;
+    if (at >= 0) studio.words[at].el.classList.add("now");
+  }
+  if (studio.follow && studio.strip && !studio.grabbed && at >= 0) {          // the words glide under the centre line: between two words the strip is part of the way from the one to the next
+    const a = studio.words[at], b = studio.words[at + 1];
+    const from = centreOf(a.el), to = b ? centreOf(b.el) : from;
+    const f = b && b.start > a.start ? Math.min(1, Math.max(0, (t - a.start) / (b.start - a.start))) : 0;
+    studio.strip.scrollLeft = from + f * (to - from);
+  }
+}
+let gliding = false;
+function studioGlide() { if (studioAudio.paused) { gliding = false; return; } studioTick(); requestAnimationFrame(studioGlide); }
+studioAudio.addEventListener("timeupdate", studioTick);
+studioAudio.addEventListener("play", () => { if (studio.playBtn) studio.playBtn.textContent = "❚❚ Pause"; if (!gliding) { gliding = true; requestAnimationFrame(studioGlide); } });
+studioAudio.addEventListener("pause", () => { if (studio.playBtn) studio.playBtn.textContent = "▶ Play"; });
+function studioPick(s, w) {            // a word is pressed: the main player stops where the word begins, and the panel opens with the three draws of its sentence
+  studioAudio.pause(); drawAudio.pause(); studioAudio.currentTime = w.start; studio.last = -1;
+  studio.sel = { unit: s.unit, index: s.index, text: s.text, word: w.text, draws: s.draws, primed: s.primed || [], picked: s.picked, committed: s.committed, start: s.start, end: s.end, words: s.words.length, at: s.words.findIndex((x) => x === w) + 1, row: s, wordObj: w };
+  studio.drawing = null; render();
+}
+function playPrimed(t, k) {          // the primed sentence a draw's names were cut from, exactly as the voice made it
+  const s = studio.sel; const item = s && s.primed && s.primed[t] && s.primed[t][k]; if (!item) return;
+  studioAudio.pause(); drawAudio.pause(); drawAudio.src = item.url; drawAudio.currentTime = 0; drawAudio.play().catch(() => {});
+  studio.drawing = null; render();
+}
+function playDraw(t) {
+  const s = studio.sel; if (!s || !s.draws[t]) return;
+  studioAudio.pause(); drawAudio.pause(); drawAudio.src = s.draws[t]; drawAudio.currentTime = 0; drawAudio.play().catch(() => {});
+  studio.drawing = t; render();
+}
+drawAudio.addEventListener("ended", () => { studio.drawing = null; render(); });
+async function studioCommit(t) {
+  const s = studio.sel; if (!s) return;
+  try {
+    await api("/api/studio-commit", "POST", { job: state.job, run: state.run, unit: s.unit, span: s.index, take: t, note: s.word });
+    const row = studio.data.sentences.find((x) => x.unit === s.unit && x.index === s.index);
+    if (row) { row.committed = t; row.marked = true; }
+    s.committed = t; studio.dirty = true;
+    say(`Committed: draw ${t + 1} of this sentence. The seed is saved. When you have committed what you want, press “Regenerate the full audio”.`, true);
+  } catch (e) { say(e.message); }
+}
+async function studioFlag(on) {          // what the ear says: this word is rushed or clipped (or take the flag back). Saved exactly as heard.
+  const s = studio.sel; if (!s) return;
+  try {
+    const r = await api("/api/studio-flag", "POST", { job: state.job, run: state.run, unit: s.unit, span: s.index, word: s.word, flagged: on });
+    const row = studio.data.sentences.find((x) => x.unit === s.unit && x.index === s.index);
+    if (row) row.flagged = on ? [...new Set([...(row.flagged || []), s.word])] : (row.flagged || []).filter((w) => w !== s.word);
+    say(on ? `Flagged “${s.word}” as rushed or clipped (${r.flags_in_this_run} flagged in this run).` : `Took the flag off “${s.word}”.`, true);
+  } catch (e) { say(e.message); }
+}
+async function studioRepair() {         // Repair: the word and its span, with the next one, are sent to be investigated: why is it rushed
+  const s = studio.sel; if (!s) return;
+  studio.repair = { busy: true, key: s.unit + ":" + s.index + ":" + s.word }; render();
+  try {
+    const r = await api("/api/studio-investigate", "POST", { job: state.job, run: state.run, unit: s.unit, span: s.index, word: s.word });
+    studio.repair = { key: s.unit + ":" + s.index + ":" + s.word, result: r };
+  } catch (e) { studio.repair = { key: s.unit + ":" + s.index + ":" + s.word, error: e.message }; }
+  render();
+}
+function repairBox(s) {
+  const r = studio.repair;
+  if (!r || r.key !== s.unit + ":" + s.index + ":" + s.word) return null;
+  if (r.busy) return h("div", { class: "small muted" }, "Investigating this span and the next… (a few seconds)");
+  if (r.error) return h("div", { class: "msg" }, r.error);
+  const f = r.result, unclear = !f.rule && !f.rewrite;
+  return h("div", { class: "repairbox" },
+    f.word_clip_url ? h("div", { class: "plays" }, h("button", { class: "btn", onclick: () => { studioAudio.pause(); drawAudio.pause(); drawAudio.src = f.word_clip_url; drawAudio.currentTime = 0; drawAudio.play().catch(() => {}); } }, `▶ The word “${f.word}” alone`)) : null,
+    h("div", {}, h("b", {}, "Why: "), f.cause || "—"),
+    f.rule ? h("div", {}, h("b", {}, "Rule: "), f.rule) : null,
+    f.rewrite ? h("div", {}, h("b", {}, "A rewrite to try: "), h("span", { class: "sp" }, f.rewrite)) : null,
+    f.next_note ? h("div", {}, h("b", {}, "The next sentence: "), f.next_note) : null,
+    h("div", { class: "small muted" }, unclear ? "The model could not find the cause in the text." : "An opinion, not a fix: hear the rewrite before you use it."));
+}
+async function studioRevoke() {
+  const s = studio.sel; if (!s) return;
+  try {
+    await api("/api/draw-revoke", "POST", { job: state.job, run: state.run, unit: s.unit, span: s.index });
+    const row = studio.data.sentences.find((x) => x.unit === s.unit && x.index === s.index);
+    if (row) { row.committed = null; row.marked = false; }
+    s.committed = null; studio.dirty = true; say("Taken back: the render chooses this sentence's draw again.", true);
+  } catch (e) { say(e.message); }
+}
+function studioSwitchRun(job, run) {          // a different dub: stop the audio, forget this one's strip and let the listener press Load (a run that is not made yet is made only then)
+  studioAudio.pause(); drawAudio.pause();
+  Object.assign(studio, { data: null, sel: null, loading: false, progress: null, dirty: false, last: -1, words: [] });
+  state.job = job; state.run = run; render();
+}
+function studioPicker() {
+  const job = state.jobs.find((j) => j.job === state.job);
+  const jobSel = h("select", { "aria-label": "Job", onchange: (e) => { const j = state.jobs.find((x) => x.job === e.target.value); studioSwitchRun(j.job, j.runs[0].run); } },
+    state.jobs.map((j) => h("option", { value: j.job, selected: j.job === state.job }, `${short(j.name)} · ${j.created || j.clip}`)));
+  const runSel = h("select", { "aria-label": "Run", onchange: (e) => studioSwitchRun(state.job, e.target.value) },
+    (job ? job.runs : []).map((r) => h("option", { value: r.run, selected: r.run === state.run }, `${r.run} · ${r.at}`)));
+  return h("div", { class: "bar" }, jobSel, runSel);
+}
+function studioTab() {
+  const d = studio.data;
+  if (!d) {
+    const p = studio.progress;
+    return h("div", { class: "studio" }, studioPicker(), state.message && h("div", { class: "msg" }, state.message.text),
+      studio.loading ? h("div", { class: "card" }, h("h2", {}, "Making the whole dub…"), h("p", { class: "muted" }, p ? `${p.made} of ${p.total} units are made. The first time takes a few minutes, with the three draws of every sentence; after that only a unit you changed is made again.` : "Starting…"))
+        : h("div", { class: "card" }, h("h2", {}, "Studio"), h("p", { class: "muted" }, "Play the whole dub from start to finish. Under the player every word is a button that follows the audio. Press a word to hear the three draws of its sentence, and commit the one that sounds right."), h("button", { class: "btn primary", onclick: loadStudio }, "Load the whole dub")));
+  }
+  studio.words = [];
+  const strip = h("div", { class: "strip" }, h("span", { class: "pad" }));
+  let unitSeen = -1;
+  for (const s of d.sentences) {
+    if (s.unit !== unitSeen) { unitSeen = s.unit; const u = d.units[s.unit]; strip.append(h("span", { class: "unitchip" }, `${u.id} · ${clock(u.start_s * 1000)}`)); }
+    s.words.forEach((w) => {
+      const picked = studio.sel && studio.sel.unit === s.unit && studio.sel.index === s.index && studio.sel.word === w.text;
+      const el = h("button", { class: "word" + (picked ? " sel" : "") + ((s.flagged || []).includes(w.text) ? " flagged" : ""), title: s.marked ? `draw ${s.committed + 1} committed` : "", onclick: () => studioPick(s, w) }, w.text + (s.marked && w === s.words[0] ? " ●" : ""));
+      studio.words.push({ start: w.start, end: w.end, el }); strip.append(el);
+    });
+    strip.append(h("span", { class: "stop" }));
+  }
+  strip.append(h("span", { class: "pad" }));
+  studio.strip = strip; studioGrab(strip);
+  setTimeout(() => { const w = studio.words[Math.max(0, studio.last)]; if (w && studio.strip) studio.strip.scrollLeft = centreOf(w.el); }, 0);          // a redraw keeps the current word in the middle
+  const seek = h("input", { type: "range", class: "seek", min: 0, max: d.seconds, step: 0.05, value: studioAudio.currentTime || 0, "aria-label": "Position in the dub",
+    oninput: (e) => { studioAudio.currentTime = Number(e.target.value); studio.last = -1; studioTick(); }, onpointerdown: () => { studio.dragging = true; }, onpointerup: () => { studio.dragging = false; } });
+  studio.seek = seek;
+  studio.time = h("span", { class: "time" }, `${stamp(studioAudio.currentTime || 0)} / ${stamp(d.seconds)}`);
+  studio.playBtn = h("button", { class: "btn primary", onclick: () => { drawAudio.pause(); studioAudio.paused ? studioAudio.play().catch(() => {}) : studioAudio.pause(); } }, studioAudio.paused ? "▶ Play" : "❚❚ Pause");
+  const player = h("div", { class: "player" },
+    h("div", { class: "row1" }, studio.playBtn, studio.time, h("label", { class: "opt" }, h("input", { type: "checkbox", checked: studio.follow, onchange: (e) => { studio.follow = e.target.checked; } }), "Follow the audio"),
+      h("button", { class: "btn" + (studio.dirty ? " primary" : ""), disabled: studio.loading, onclick: loadStudio }, studio.dirty ? "Regenerate the full audio with the commits" : "Reload the audio")),
+    seek, studio.loading ? h("div", { class: "small muted" }, studio.progress ? `Making the audio: ${studio.progress.made} of ${studio.progress.total} units…` : "Making the audio…") : null);
+  const s = studio.sel;
+  let panel = h("div", { class: "drawpanel2 muted" }, "Press a word to open its sentence here, with three draws to hear.");
+  if (s) {
+    const inAudio = s.committed != null ? s.committed : s.picked;
+    const unitText = d.sentences.filter((x) => x.unit === s.unit).map((x) => x.words.map((w) => h("span", { class: "uw" + (x.index === s.index ? " inspan" : "") + (w === s.wordObj ? " clicked" : "") }, w.text + " "))).flat();
+    const inUnit = d.sentences.filter((x) => x.unit === s.unit).length, secs = Math.max(0.01, s.end - s.start);
+    const info = `Span ${s.index + 1} of ${inUnit} in ${d.units[s.unit].id} · ${stamp(s.start)}–${stamp(s.end)} (${secs.toFixed(1)} s) · ${s.text.length} characters, ${(s.text.length / secs).toFixed(1)} per second · ${s.words} words, “${s.word}” is word ${s.at}`
+      + ` · in the audio: draw ${inAudio + 1}` + (s.committed != null ? ` · committed: draw ${s.committed + 1}` : "");
+    panel = h("div", { class: "drawpanel2" }, h("div", { class: "small muted" }, `${d.units[s.unit].id} · “${s.word}”`), h("div", { class: "unittext" }, unitText), h("div", { class: "small muted" }, info),
+      h("div", { class: "draws3" }, [0, 1, 2].map((t) => h("div", { class: "d", "data-live": studio.drawing === t ? "true" : "false" },
+        h("button", { class: "btn" + (studio.drawing === t ? " primary" : ""), disabled: !s.draws[t], onclick: () => playDraw(t) }, studio.drawing === t ? `❚❚ Draw ${t + 1}` : `▶ Draw ${t + 1}`),
+        ...((s.primed && s.primed[t]) || []).map((item, k) => h("button", { class: "btn", title: item.text, onclick: () => playPrimed(t, k) }, `▶ Primed sentence${s.primed[t].length > 1 ? " " + (k + 1) : ""} (raw)`)),
+        h("div", { class: "small muted" }, s.committed === t ? "Committed" : s.committed == null && inAudio === t ? "In the audio now" : t === inAudio ? "In the audio now" : " "),
+        h("button", { class: "btn", disabled: !s.draws[t] || s.committed === t, onclick: () => studioCommit(t) }, `Commit draw ${t + 1}`)))),
+      h("div", { class: "decide" },
+        ((studio.data.sentences.find((x) => x.unit === s.unit && x.index === s.index) || {}).flagged || []).includes(s.word)
+          ? h("button", { class: "btn", onclick: () => studioFlag(false) }, "Flagged as rushed or clipped (take the flag back)")
+          : h("button", { class: "btn primary", onclick: () => studioFlag(true) }, "I hear this word rushed or clipped"),
+        h("button", { class: "btn", disabled: !!(studio.repair && studio.repair.busy), onclick: studioRepair }, "Ask why (an opinion)"),
+        s.committed != null ? h("button", { class: "btn", onclick: studioRevoke }, "Take back the committed draw") : null),
+      repairBox(s));
+  }
+  setTimeout(() => { studio.last = -1; studioTick(); const first = document.querySelector(".unittext .inspan"); if (first) { const box = first.parentElement; box.scrollTop = Math.max(0, first.offsetTop - 8); } }, 0);          // a redraw makes new buttons: light the current word again, and show the span inside the unit text
+  return h("div", { class: "studio" }, studioPicker(), state.message && h("div", { class: "msg" + (state.message.ok ? " ok" : "") }, state.message.text), player, h("div", { class: "stripbox" }, strip), panel);
+}
+
 function render() {
   buttons = [];
   app.replaceChildren();
   if (!state.signedIn) { app.append(login()); return; }
-  app.append(header(), h("main", {}, state.tab === "review" ? reviewTab() : state.tab === "questions" ? questionsTab() : state.tab === "smith" ? smithTab() : state.tab === "book" ? bookTab() : rulesTab()));
+  app.append(header(), h("main", {}, state.tab === "review" ? reviewTab() : state.tab === "questions" ? questionsTab() : state.tab === "studio" ? studioTab() : state.tab === "draws" ? drawsTab() : state.tab === "smith" ? smithTab() : state.tab === "book" ? bookTab() : rulesTab()));
   if (state.tab === "review" && state.detail) watchReady();
 }
 start();

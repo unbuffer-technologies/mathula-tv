@@ -31,7 +31,7 @@ import statistics
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Mapping, Sequence
 
-from .dub_agent import ChatClient, build_system_prompt, run_agent
+from .dub_agent import build_system_prompt, new_chat_client, run_agent
 from .dub_judge import UnitJudge, fidelity_summary
 from .dub_reflect import digest_run, reflect
 from .dub_smells import find_smells, render as render_smells
@@ -150,7 +150,7 @@ def run_batch(
     def one(job: tuple[str, int]) -> dict[str, Any]:
         clip, repeat = job
         # each run gets its own judge (its own verdict cache), on the same model deployment as the agent
-        judge = UnitJudge(ChatClient(client.config)) if judge_meaning and hasattr(client, "config") else None
+        judge = UnitJudge(new_chat_client(client.config)) if judge_meaning and hasattr(client, "config") else None
         workbench = Workbench(store, lambda: shared_tts, judge=judge)
         try:
             return run_agent(
@@ -173,17 +173,27 @@ def run_batch(
 
 
 def reflect_on_batch(
-    client: Any, store: Any, baseline_run: str, clip_id: Any, playbook: Mapping[str, Any],
+    client: Any, store: Any, baseline_run: str | Sequence[str], clip_id: Any, playbook: Mapping[str, Any], *, context: str = "",
 ) -> dict[str, Any]:
-    """Digest the baseline batch, list the harness problems in it, ask the reflector, apply its edits."""
+    """Digest the baseline batch, list the harness problems in it, ask the reflector, apply its edits.
+
+    ``baseline_run`` may name several runs (a comma list on the command line): the evidence of successive runs of one job, e.g. as the harness improved between them.  ``context`` is
+    what a human knows about how those runs differ, passed to the reflector as it is."""
     clips = _clips(clip_id if isinstance(clip_id, str) else None, clip_id if not isinstance(clip_id, str) else None)
-    batch = collect_batches(store, baseline_run, clips)
+    run_ids = [baseline_run] if isinstance(baseline_run, str) else list(baseline_run)
+    baseline_run = ", ".join(run_ids)
+    batch = [dict(row, run=run) for run in run_ids for row in collect_batches(store, run, clips)]
     if not batch:
         raise ValueError(f"no finished runs found for {baseline_run!r} on {clips!r}")
     multi = len(clips) > 1
-    digests = {(f"{r['clip']}:r{r['repeat']}" if multi else f"r{r['repeat']}"): digest_run(r["dir"]) for r in batch}
+    several = len(run_ids) > 1
+    digests = {".".join(filter(None, (r["run"] if several else "", r["clip"] if multi else "", f"r{r['repeat']}"))): digest_run(r["dir"]) for r in batch}
     smells = find_smells(batch)
     note = "all runs use the same playbook; the bar is no overruns/collisions, no gate failures, dead air within limit"
+    if several:
+        note += f"; the runs are successive runs of the same job ({baseline_run}), so what differs between them includes the harness"
+    if context:
+        note += "\nWHAT A HUMAN KNOWS ABOUT HOW THE RUNS DIFFER: " + context
     if multi:
         note += f"; runs cover {len(clips)} different clips, so a lesson must hold across clips"
     if smells:
@@ -307,8 +317,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("reflect", "step", "autopilot", "smells"):
         p = sub.add_parser(name)
-        p.add_argument("--baseline", required=True, help="run id of the batch to reflect on")
+        p.add_argument("--baseline", required=True, help="run id of the batch to reflect on (reflect: a comma list of run ids reads successive runs of one job together)")
         p.add_argument("--clip", action="append", required=True, help="repeat for several clips")
+        if name == "reflect":
+            p.add_argument("--context", default="", help="what is known about how the runs differ (passed to the reflector as it is)")
         if name == "step":
             p.add_argument("--trial-run", required=True)
             p.add_argument("--candidate", default=None, help="trial this saved playbook version instead of reflecting anew")
@@ -323,20 +335,19 @@ def main(argv: list[str] | None = None) -> int:
 
     from .cli import create_tts_backend
     from .config import load_settings
-    from .dub_agent import ResponsesClient
+    from .dub_agent import native_client_config, new_agent_client
     from .experience_store import ExperienceStore
-    from .foundry_grok import native_gpt_config_from_environment
 
     settings = load_settings()
     store = ExperienceStore(settings.work_dir)
     if args.command == "smells":
         print(render_smells(find_smells(collect_batches(store, args.baseline, args.clip))))
         return 0
-    client = ResponsesClient(native_gpt_config_from_environment(dict(os.environ)))
+    client = new_agent_client(native_client_config())
     tts_factory = lambda: create_tts_backend(settings)           # noqa: E731
     if args.command == "reflect":
         playbook = current_playbook(store)
-        outcome = reflect_on_batch(client, store, args.baseline, args.clip, playbook)
+        outcome = reflect_on_batch(client, store, [r.strip() for r in args.baseline.split(",") if r.strip()], args.clip, playbook, context=args.context)
         if outcome["applied"]:
             save_playbook(store, outcome["candidate"])
         print(f"current playbook: {playbook['version']}")

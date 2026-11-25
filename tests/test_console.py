@@ -640,3 +640,232 @@ def test_a_pinned_word_is_offered_in_every_jobs_list_before_any_text_holds_it(tm
     assert c._pinned_words() == ["details"]
     (work / "pinned_words.json").write_text("not json", encoding="utf-8")
     assert c._pinned_words() == []
+
+
+class _FakeOmni:
+    """The voice backend as the console meets it: it plans a dub text into sentences, picks a reference clip and speaks sentences."""
+    default_voice = "omnivoice-zu"
+
+    def __init__(self):
+        self.calls = []
+
+    def plan(self, group, voice, corpus):
+        import re
+
+        spans = [s for s in re.split(r"(?<=[.]) ", group["parts"][0]["text"]) if s]
+        return spans, [150] * (len(spans) - 1)
+
+    def reference_for(self, group, corpus):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(start_s=10.0, end_s=18.0)
+
+    def speak(self, group, spans, gaps, corpus, retakes=None, takes_out=None, all_takes=False, raw_out=None):
+        import numpy as np
+
+        self.calls.append((list(spans), dict(retakes or {})))
+        if takes_out is not None:
+            takes_out[:] = [[np.full(2400, 0.1 * (t + 1), dtype=np.float32) for t in range(3)] for _ in spans]
+        words = [{"span": i, "text": f"w{i}", "start_s": i + 0.1, "end_s": i + 0.6} for i in range(len(spans))]
+        return np.zeros(24000 * len(spans), dtype=np.float32), 24000, {"span_starts_s": [float(i) for i in range(len(spans))]}, {"words": words, "picked": [0] * len(spans)}, self.reference_for(group, corpus)
+
+
+@pytest.fixture()
+def drawn(world, tmp_path):
+    omni = _FakeOmni()
+    world._omni_factory = lambda: omni
+    world.omni = omni
+    return world
+
+
+def test_the_draws_tab_lists_each_sentence_with_its_retake_and_a_committed_draw_is_kept_as_a_number(drawn):
+    cookie = signed_in(drawn)
+    status, _, view = call(drawn, "GET", f"/api/draws?job={JOB}&run=prod-1", cookie=cookie)
+    assert status == 200 and [u["id"] for u in view["units"]] == ["u1", "u2"]
+    assert [s["text"] for s in view["units"][0]["spans"]] == ["Sawubona Heidi.", "UJacob Zuma ukhulumile ne-SABC namuhla."] and all(s["retake"] == 0 and not s["marked"] for u in view["units"] for s in u["spans"])
+    status, _, done = call(drawn, "POST", "/api/draw-commit", {"job": JOB, "run": "prod-1", "unit": 0, "span": 1, "retake": 2, "note": "Jacob"}, cookie=cookie)
+    assert status == 200 and done["mark"]["retake"] == 2 and done["mark"]["ref"] == [10.0, 18.0]
+    _, _, view = call(drawn, "GET", f"/api/draws?job={JOB}&run=prod-1", cookie=cookie)
+    second = view["units"][0]["spans"][1]
+    assert second["marked"] and second["retake"] == 2 and not view["units"][0]["spans"][0]["marked"]
+    saved = json.loads((drawn.work_dir / "experience" / "corpus" / CLIP / "retakes.json").read_text(encoding="utf-8"))
+    assert len(saved["marks"]) == 1 and "ref" in next(iter(saved["marks"].values()))             # a number and a reference clip, no audio
+    _, _, back = call(drawn, "POST", "/api/draw-revoke", {"job": JOB, "run": "prod-1", "unit": 0, "span": 1}, cookie=cookie)
+    assert back["revoked"] is True
+    _, _, view = call(drawn, "GET", f"/api/draws?job={JOB}&run=prod-1", cookie=cookie)
+    assert not view["units"][0]["spans"][1]["marked"]
+
+
+def test_hearing_a_draw_makes_that_sentence_with_that_retake_once_and_a_draw_heard_before_is_free(drawn):
+    import time
+
+    cookie = signed_in(drawn)
+    body = {"job": JOB, "run": "prod-1", "unit": 0, "span": 1, "retake": 3}
+    for _ in range(100):
+        status, _, answer = call(drawn, "POST", "/api/draw-hear", body, cookie=cookie)
+        assert status == 200
+        if answer.get("url"):
+            break
+        time.sleep(0.05)
+    assert answer["url"].startswith("/audio/") and answer["retake"] == 3 and (drawn.audio_dir / answer["url"].split("/")[-1]).is_file()
+    spans, retakes = drawn.omni.calls[0]
+    assert spans == ["Sawubona Heidi.", "UJacob Zuma ukhulumile ne-SABC namuhla."] and retakes == {1: 3}          # the sentence before it comes along; only the heard one is retaken
+    call(drawn, "POST", "/api/draw-hear", body, cookie=cookie)
+    assert len(drawn.omni.calls) == 1                                                            # the same draw again costs nothing
+
+
+def test_a_draw_must_be_a_small_whole_number_of_a_sentence_that_exists(drawn):
+    cookie = signed_in(drawn)
+    for body in ({"unit": 0, "span": 1, "retake": 10}, {"unit": 0, "span": 9, "retake": 1}, {"unit": 7, "span": 0, "retake": 1}, {"unit": 0, "span": 0, "retake": "1"}):
+        status, _, _ = call(drawn, "POST", "/api/draw-commit", {"job": JOB, "run": "prod-1", **body}, cookie=cookie)
+        assert status == 400
+    status, _, _ = call(drawn, "GET", f"/api/draws?job={JOB}&run=prod-1")
+    assert status == 401                                                                          # signed in only
+
+
+def test_the_studio_makes_every_unit_once_and_lays_them_on_one_timeline_with_the_time_of_every_word(drawn):
+    import time
+
+    path = drawn.work_dir / "experience" / "runs" / "prod-1" / CLIP / "r1" / "submission.json"
+    items = json.loads(path.read_text(encoding="utf-8"))["items"]
+    items[0].update(start_ms=0, end_ms=4000)
+    items[1].update(start_ms=10000, end_ms=12000)
+    path.write_text(json.dumps({"items": items}), encoding="utf-8")
+    cookie = signed_in(drawn)
+    answer = {}
+    for _ in range(200):
+        status, _, answer = call(drawn, "POST", "/api/studio-run", {"job": JOB, "run": "prod-1"}, cookie=cookie)
+        assert status == 200
+        if answer.get("ready"):
+            break
+        assert answer["pending"] and answer["total"] == 2
+        time.sleep(0.05)
+    assert answer.get("ready"), answer
+    assert answer["url"].startswith("/audio/") and [u["start_s"] for u in answer["units"]] == [0.0, 10.0] and answer["seconds"] >= 11.0
+    second = [s for s in answer["sentences"] if s["unit"] == 1]
+    assert second and second[0]["words"][0]["start"] == pytest.approx(10.1)                  # the unit's words are shifted to where the unit is laid
+    assert len(drawn.omni.calls) == 2                                                          # one synthesis per unit
+    call(drawn, "POST", "/api/studio-run", {"job": JOB, "run": "prod-1"}, cookie=cookie)
+    assert len(drawn.omni.calls) == 2                                                          # asked again: nothing is made again
+    first = answer["sentences"][0]
+    assert len(first["draws"]) == 3 and first["committed"] is None and first["picked"] == 0                  # three draws of every sentence, ready to play
+    status, _, done = call(drawn, "POST", "/api/studio-commit", {"job": JOB, "run": "prod-1", "unit": 1, "span": 0, "take": 2, "note": "kamuva"}, cookie=cookie)
+    assert status == 200 and done["mark"]["take"] == 2
+    for _ in range(200):
+        _, _, answer = call(drawn, "POST", "/api/studio-run", {"job": JOB, "run": "prod-1"}, cookie=cookie)
+        if answer.get("ready"):
+            break
+        time.sleep(0.05)
+    assert len(drawn.omni.calls) == 3 and next(s for s in answer["sentences"] if s["unit"] == 1 and s["index"] == 0)["committed"] == 2       # a committed draw remakes only that unit
+    for body in ({"take": 3}, {"take": "1"}, {"take": 1, "span": 9}):
+        status, _, _ = call(drawn, "POST", "/api/studio-commit", {"job": JOB, "run": "prod-1", "unit": 0, "span": 0, **body}, cookie=cookie)
+        assert status == 400
+
+
+class _LlmClient:
+    def __init__(self, answer):
+        self.answer, self.sent = answer, []
+
+    def complete(self, messages, **_):
+        self.sent.append(json.loads(messages[1]["content"]))
+        body = {"items": [{"id": x["id"], **self.answer} for x in self.sent[-1]]}
+        return {"choices": [{"message": {"content": json.dumps(body)}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+def _studio_ready(console, cookie):
+    import time
+
+    for _ in range(200):
+        _, _, answer = call(console, "POST", "/api/studio-run", {"job": JOB, "run": "prod-1"}, cookie=cookie)
+        if answer.get("ready"):
+            return answer
+        time.sleep(0.05)
+    raise AssertionError("the studio was not made")
+
+
+def test_repair_sends_the_word_its_span_and_the_next_one_for_investigation_and_keeps_nothing(drawn):
+    from mathula_tv import ear_lessons
+
+    cookie = signed_in(drawn)
+    _studio_ready(drawn, cookie)
+    llm = _LlmClient({"cause": "a run of names fused into a conjunction", "rule": "When names run straight into a conjunction, give them room.", "rewrite": "Sawubona, Heidi.", "next_note": "start the next sentence with a short word"})
+    drawn._llm_factory = lambda: llm
+    status, _, found = call(drawn, "POST", "/api/studio-investigate", {"job": JOB, "run": "prod-1", "unit": 0, "span": 0, "word": "w0"}, cookie=cookie)
+    assert status == 200 and found["cause"].startswith("a run of names") and found["rewrite"] == "Sawubona, Heidi." and "kept_as_lesson" not in found
+    sent = llm.sent[0][0]
+    assert sent["sentence"] == "Sawubona Heidi." and sent["next_sentence"] == "UJacob Zuma ukhulumile ne-SABC namuhla." and sent["word"] == "w0"          # the span and the next one go together
+    assert "x_median" not in sent and "syllables_per_second" not in sent                              # pace is not what the model is told: it gave false flags
+    assert found["word_clip_url"].startswith("/audio/") and "heard_phones" not in found                 # the word alone to play; no recogniser reading (it counted syllables wrongly)
+    assert (drawn.audio_dir / found["word_clip_url"].split("/")[-1]).is_file()
+    assert not any("give them room" in c["fix"] for c in ear_lessons.for_agent(drawn.work_dir)["concepts"])                  # a model's guess is not stored as a lesson: the ear decides
+
+
+def test_repair_needs_the_studio_and_refuses_bad_requests(drawn):
+    cookie = signed_in(drawn)
+    status, _, _ = call(drawn, "POST", "/api/studio-investigate", {"job": JOB, "run": "prod-1", "unit": 0, "span": 0, "word": "w0"}, cookie=cookie)
+    assert status == 409                                                                  # the studio of the run is not made yet
+    _studio_ready(drawn, cookie)
+    drawn._llm_factory = lambda: _LlmClient({"cause": "unclear", "rule": "", "rewrite": "", "next_note": ""})
+    status, _, found = call(drawn, "POST", "/api/studio-investigate", {"job": JOB, "run": "prod-1", "unit": 0, "span": 0, "word": "w0"}, cookie=cookie)
+    assert status == 200 and found["cause"] == "unclear"
+    for body in ({"unit": 0, "span": 9, "word": "w0"}, {"unit": 0, "span": 0, "word": "nope"}, {"unit": 0, "span": 0, "word": ""}):
+        assert call(drawn, "POST", "/api/studio-investigate", {"job": JOB, "run": "prod-1", **body}, cookie=cookie)[0] == 400
+
+
+def test_a_word_the_ear_flags_is_recorded_as_heard_and_shows_in_the_studio_and_can_be_taken_back(drawn):
+    cookie = signed_in(drawn)
+    _studio_ready(drawn, cookie)
+    body = {"job": JOB, "run": "prod-1", "unit": 0, "span": 0, "word": "w0"}
+    status, _, done = call(drawn, "POST", "/api/studio-flag", {**body, "flagged": True, "note": "clipped"}, cookie=cookie)
+    assert status == 200 and done["flagged"] is True and done["flags_in_this_run"] == 1
+    saved = json.loads((drawn.work_dir / "ear_flags.json").read_text(encoding="utf-8"))["flags"]
+    assert len(saved) == 1 and saved[0]["word"] == "w0" and saved[0]["sentence"] == "Sawubona Heidi." and saved[0]["next_sentence"].startswith("UJacob") and saved[0]["note"] == "clipped"
+    assert set(saved[0]) >= {"in_audio_draw", "committed_draw", "word_start_s", "word_end_s", "at"} and "pace" not in json.dumps(saved)          # what was heard and where, nothing counted
+    again = _studio_ready(drawn, cookie)
+    assert next(s for s in again["sentences"] if s["unit"] == 0 and s["index"] == 0)["flagged"] == ["w0"] and next(s for s in again["sentences"] if s["unit"] == 0 and s["index"] == 1)["flagged"] == []
+    call(drawn, "POST", "/api/studio-flag", {**body, "flagged": True}, cookie=cookie)
+    assert len(json.loads((drawn.work_dir / "ear_flags.json").read_text(encoding="utf-8"))["flags"]) == 1                    # the same word is flagged once
+    status, _, undone = call(drawn, "POST", "/api/studio-flag", {**body, "flagged": False}, cookie=cookie)
+    assert status == 200 and undone["flags_in_this_run"] == 0 and json.loads((drawn.work_dir / "ear_flags.json").read_text(encoding="utf-8"))["flags"] == []
+    for bad in ({"word": "nope", "flagged": True}, {"span": 9, "flagged": True}, {"flagged": "yes"}):
+        assert call(drawn, "POST", "/api/studio-flag", {**body, **bad}, cookie=cookie)[0] == 400
+
+
+def test_a_sign_in_lasts_twelve_months_and_still_expires_after_them(world):
+    from mathula_tv import console as c
+
+    assert c.SESSION_SECONDS == 365 * 24 * 3600                                          # 31,536,000 s: the cookie's Max-Age, under the 400 days browsers allow
+    cookie = signed_in(world)
+    issued = world.clock()
+    world.clock = lambda: issued + 364 * 24 * 3600
+    assert call(world, "GET", "/api/session", cookie=cookie)[0] == 200                  # still in, almost a year later
+    world.clock = lambda: issued + 366 * 24 * 3600
+    assert call(world, "GET", "/api/session", cookie=cookie)[0] == 401                  # and out after the twelve months
+
+
+def test_a_run_can_ask_for_its_own_decoding_settings_and_its_studio_is_a_different_audio(drawn):
+    runs = drawn.work_dir / "experience" / "runs"
+    (runs / "prod-1-pt1" / CLIP / "r1").mkdir(parents=True)
+    (runs / "prod-1-pt1" / CLIP / "r1" / "submission.json").write_text((runs / "prod-1" / CLIP / "r1" / "submission.json").read_text(encoding="utf-8"), encoding="utf-8")
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"generation": {"position_temperature": 1, "bogus": "x"}}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1") is None and drawn._run_voice(JOB, "prod-1-pt1") == {"generation": {"position_temperature": 1.0}}          # only numbers are kept
+    drawn._omni_backend = None
+    drawn._omni_factory = lambda: _FakeOmni()                                                                                                    # a copy is a second backend, not the shared one
+    base = drawn._omni_with(None)
+    other = drawn._omni_with({"generation": {"position_temperature": 1.0}, "span_sentences": 2})
+    assert base is drawn._omni() and other is not base and other.generation == {"position_temperature": 1.0} and other.span_sentences == 2
+    assert drawn._omni_with({"generation": {"position_temperature": 1.0}, "span_sentences": 2}) is other
+    first = drawn.studio_run(JOB, "prod-1", make=False)
+    second = drawn.studio_run(JOB, "prod-1-pt1", make=False)
+    assert first["pending"] and second["pending"]                                                                                               # nothing made, nothing spent, only read
+
+
+def test_no_function_of_the_console_page_is_defined_twice():
+    """A second ``function name(`` silently replaces the first in JavaScript: the Studio's run picker once took the name of the function that opens a word's draws, and pressing any word loaded nothing."""
+    import re
+    from collections import Counter
+
+    from mathula_tv import console_ui
+
+    names = Counter(re.findall(r"^(?:async )?function (\w+)\(", console_ui.PAGE, flags=re.M))
+    assert [n for n, c in names.items() if c > 1] == []

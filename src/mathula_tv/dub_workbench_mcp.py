@@ -99,6 +99,20 @@ def preview_turn_padding(members: list[dict[str, Any]], last_free_gap_ms: int = 
 
 
 @server.tool()
+def estimate_fit(requests: list[dict[str, Any]]) -> dict[str, Any]:
+    """Free (no Azure call, no measurement spent): for up to 40 candidate texts, the voice's estimated duration against the source window, with the error band of the estimate.
+    requests: {text, start_ms, end_ms, speaker_id}. An estimate cannot confirm a fit; it shows which candidates are far from the window, so only the rest are measured."""
+    return _workbench().estimate_fit(requests)
+
+
+@server.tool()
+def timeline_fit(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Free (no Azure call): lay a draft out on the timeline sentence by sentence. items: {segment_id, text}, one per source segment. Returns each sentence's estimated start and end
+    against its source's, how late it is, what it runs into, and where lateness begins with the earlier sentences that are over their windows and could give the time back."""
+    return _workbench().timeline_fit(items)
+
+
+@server.tool()
 def check_text(zulu_text: str, source_text: str) -> dict[str, Any]:
     """Free, deterministic isiZulu checks on one unit (no Azure call): required literals, the same
     reference restated twice, names not in the source/glossary/ledger, unsupported doubled words,

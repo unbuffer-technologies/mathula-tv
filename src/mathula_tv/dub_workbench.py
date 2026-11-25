@@ -275,12 +275,82 @@ class Workbench:
         atomic_write_json(Path(episode["dir"]) / "episode.json", dict(episode))
         return budget - episode["tts_used"]
 
+    SENTENCE_TIMING_NOTE = ("per sentence of this unit: its characters, the seconds the voice took (dub_s), where it starts in the unit (at_s), and the source speaker's matching sentence "
+                            "(source_s, source_at_s: matched by share of the speech, so only a guide). Where a unit is over or short, the sentences with the most seconds for their characters "
+                            "or that run past where the source speaker's sentence was are where the time is.")
+
+    @staticmethod
+    def _measured_sentences(audio_path: Any) -> dict[str, Any] | None:
+        """The sentences of a measured unit with their seconds, from the manifest the voice wrote beside the audio (OmniVoice: where each sentence falls, from the service's word times)."""
+        try:
+            manifest = Path(str(audio_path)).with_suffix(".omnivoice.json")
+            natural = json.loads(manifest.read_text(encoding="utf-8")).get("natural") or {}
+            sentences = natural.get("sentences")
+        except Exception:  # noqa: BLE001 - another voice, a cached file without it: no sentence timing, never a failed measurement
+            return None
+        if not sentences:
+            return None
+        rows = [{"n": x["n"], "chars": x["chars"], "dub_s": x["dub_s"], "at_s": x["start_s"], "source_s": x.get("source_s"), "source_at_s": x.get("source_start_s"), "starts": x["text"][:28]} for x in sentences]
+        return {"sentences": rows, "note": Workbench.SENTENCE_TIMING_NOTE}
+
+    FIT_NOISE_PCT = 1.0          # a unit this close to its window cannot be told from a fit by ear: the same unit's length moves by about 2% between wordings of nearly the same size
+    FIT_NOTE = ("to_window_ms is the window minus the measured length (negative: it runs past the window); chars_to_change is that gap at this unit's own measured pace (ms_per_char): positive, add about that many "
+                "characters; negative, take about that many out, anywhere in the unit's speech. The voice's length is not linear in characters at this size: this clip's unit measured 0.3% short at 864 characters and 2.5% short at "
+                "868 after a different wording, so when within_noise is true the unit fits as far as anyone can hear, and a further edit is as likely to move it away from the window as nearer.")
+
+    @staticmethod
+    def _fit_hint(window_ms: Any, measured_ms: Any, chars: Any) -> dict[str, Any] | None:
+        """The gap between a unit's measured length and its window, and what that is in characters at the unit's own measured pace.  Arithmetic from the measurement; the agent chooses where the words change."""
+        try:
+            window, measured, count = int(window_ms), int(measured_ms), int(chars)
+        except (TypeError, ValueError):
+            return None
+        if window <= 0 or measured <= 0 or count <= 0:
+            return None
+        per_char = measured / count
+        gap = window - measured
+        return {"to_window_ms": gap, "ms_per_char": round(per_char, 1), "chars_to_change": int(round(gap / per_char)), "within_noise": abs(gap) <= Workbench.FIT_NOISE_PCT / 100.0 * window}
+
+    @staticmethod
+    def _verdict(result: dict[str, Any]) -> str | None:
+        """What a measurement means, in one sentence, from the numbers it carries.  The agent spent turns 9-13 of prod-114 working out why a unit that ended 340 ms past its window reported
+        fits_naturally true and overrun_pct 0 (the free silence before the next speech is what is allowed); the answer was in the fields, which were not shown together."""
+        measured, window = result.get("measured_ms"), result.get("window_ms")
+        if not measured or not window:
+            return None
+        over = int(measured) - int(window)
+        gap, tolerance = result.get("free_gap_after_ms"), result.get("late_tolerance_ms")
+        if result.get("direction") == "expand":
+            left = result.get("residual_shortfall_pct", result.get("shortfall_pct"))
+            return f"ends {-over} ms before its window ends" + (f"; {left}% of the window is left as dead air after the renderer's own padding" if left else "")
+        if over <= 0:
+            return f"fits: ends {-over} ms inside its window"
+        allowed = int(tolerance if tolerance is not None else (gap or 0))
+        if float(result.get("required_speed_percent") or result.get("overrun_pct") or 0.0) == 0.0:
+            return (f"runs {over} ms past its window end into the {gap if gap is not None else allowed} ms of free silence before the next speech: allowed, it collides with nothing")
+        return f"runs {over} ms past its window end; only {allowed} ms of that is allowed (the free silence before the next speech), so it overruns by {over - allowed} ms and would collide"
+
     def _present(self, result: dict[str, Any]) -> dict[str, Any]:
         """Show timing the way this episode's speed policy sees it.
 
         Under "natural" there is no speed-up to lean on, so the agent is shown an overrun,
         not a "required speed", and none of the speed-rescue bookkeeping."""
-        result.pop("audio_path", None)
+        timing = self._measured_sentences(result.pop("audio_path", None))
+        if timing:
+            if self.__dict__.get("_sentence_note_given"):
+                timing.pop("note", None)                                  # said once: the agent has it, and every measurement result is re-read on every later turn
+            else:
+                self.__dict__["_sentence_note_given"] = True
+            result["sentence_timing"] = timing
+        verdict = self._verdict(result)
+        if verdict:
+            result["verdict"] = verdict
+        hint = self._fit_hint(result.get("window_ms"), result.get("measured_ms"), result.get("chars"))
+        if hint:
+            if not self.__dict__.get("_fit_note_given"):
+                self.__dict__["_fit_note_given"] = True                    # said once: every measurement result is re-read on every later turn
+                hint["note"] = self.FIT_NOTE
+            result["to_fit"] = hint
         if self._episode().get("speed_policy") == "natural":
             result["overrun_pct"] = result.pop("required_speed_percent", 0.0)
             # The pipeline's fit flag forgives a speed-up of up to ~10%. Here nothing is forgiven:
@@ -362,11 +432,15 @@ class Workbench:
         self.glossary_changes = (glossary_changes(read_json(previous_path), glossary_doc)
                                  if previous_path.is_file() else [])
         guide = length_guide(list(pass1["segments"]), self.voices)
+        omni_guide = self._omnivoice_guide(list(pass1["segments"]))
+        if omni_guide:                                                # OmniVoice: the length that fills a window at the pace of THAT segment's reference clip, not an Azure voice's 12.4 characters a second
+            guide = omni_guide
+        clip_ms = max([int(s["end_ms"]) for s in pass1["segments"]] or [1])
         opened = {
             "clip_id": clip_id,
             "segments": [
                 {"segment_id": s["segment_id"], "speaker_id": s.get("speaker_id"), "start_ms": s["start_ms"],
-                 "end_ms": s["end_ms"], "english": s.get("restored_text") or s.get("source_text"),
+                 "end_ms": s["end_ms"], "share_of_clip_pct": round((int(s["end_ms"]) - int(s["start_ms"])) / clip_ms * 100.0, 2), "english": s.get("restored_text") or s.get("source_text"),
                  **({"fits_about_chars": guide[str(s["segment_id"])]} if str(s["segment_id"]) in guide else {}),
                  **({"murmur_in_the_english": murmurs(s.get("restored_text") or s.get("source_text"))} if murmurs(s.get("restored_text") or s.get("source_text")) else {}),
                  **({"yours": s["segment_id"] in mine} if mine is not None else {})}
@@ -379,6 +453,8 @@ class Workbench:
             # Measurements use each speaker's assigned voice, the one the renderer will use.
             "voices": {sid: v.get("selected_voice") for sid, v in self.voices.items()},
         }
+        opened["share_note"] = ("share_of_clip_pct is a segment's window as a share of the whole clip. The bar counts dead air over the whole clip, so a short segment can cost the bar little "
+                                "however far it is off: weigh your effort by it.")
         if any(s.get("murmur_in_the_english") for s in opened["segments"]):
             opened["murmur_note"] = MURMUR_NOTE
         if guide:
@@ -389,6 +465,10 @@ class Workbench:
                 "with what the speaker said (padding with additions fails the restatement and fabrication gates). Each measurement then gives the unit's "
                 "chars and add_about_chars or cut_about_chars, the edit that closes the gap at the rate that text measured. A unit "
                 "that leaves under half a second stays as it is: leave_short means add nothing.")
+            if omni_guide:
+                opened["length_guide"] = opened["length_guide"].replace(
+                    "this voice's natural speed, about 12 characters per second", "the pace of the reference clip cut from the source speaker's own audio in that window (the voice is cloned from "
+                    "it, and its pace sets how fast the voice speaks, so the length differs from one segment to the next)")
         if os.environ.get("MATHULA_AGENT_HINTS", "0").strip().lower() in {"1", "on", "true", "yes"}:
             hints = self._pairs_db().hints([(str(s["segment_id"]), str(s["english"] or "")) for s in opened["segments"] if s.get("yours", True)])
             if hints:
@@ -404,11 +484,8 @@ class Workbench:
             )
         self._add_phrasing(opened, clip_id)
         self._add_dialogue(opened, clip_id, ledger_doc.get("context_ledger", ledger_doc))
-        sheet = self._delivery_sheet(clip_id)
-        if sheet:
-            from .delivery import for_agent
-
-            opened["delivery"] = for_agent(sheet, sorted(mine) if mine is not None else None)
+        self._add_listener_answers(opened, clip_id)
+        self._add_video(opened, clip_id)
         if self.source_corrections:
             opened["source_corrections"] = {
                 "note": ("The English below was corrected against the speaker's audio: the transcript had misheard these "
@@ -429,6 +506,38 @@ class Workbench:
             self._source_words = load_words(Path(self.store.root).parent / "jobs" / str(entry["job_id"]))
         return self._source_words
 
+    VIDEO_NOTE = ("What the uploader wrote about this video: its title, channel and description (and chapter titles when it has them). A human wrote it, so it spells the names of the story "
+                  "(people, parties, places, events) and says what the report is about; the transcript and the captions are machine readings. Use it to settle a garbled name or a doubtful "
+                  "word, and to know the setting, never as a source of facts the speaker did not say, and never to put a name where the speaker said something else.")
+
+    def _add_video(self, opened: dict[str, Any], clip_id: str) -> None:
+        """The video's own title, channel and description, from ``input/youtube_source.json``; nothing for a job that did not come from YouTube."""
+        from .youtube_captions import video_context
+
+        try:
+            entry = self.store.load_corpus()["clips"][clip_id]
+            video = video_context(Path(self.store.root).parent / "jobs" / str(entry["job_id"]))
+        except Exception:                                             # noqa: BLE001 - context for the agent must never stop a run
+            return
+        if video:
+            opened["video"] = {**video, "note": self.VIDEO_NOTE}
+
+    def _add_listener_answers(self, opened: dict[str, Any], clip_id: str) -> None:
+        """What the listener answered to this video's earlier missing-evidence questions (console, "What the agent could not find out"): the words that were really said where the
+        transcript and the captions were both garbled.  Tied to what the agent asked for, not to a unit id, because the units are cut afresh in every run.  Opened with the clip, so
+        compaction keeps it."""
+        from .language_questions import notes_for_agent
+
+        try:
+            entry = self.store.load_corpus()["clips"][clip_id]
+            answers = notes_for_agent(Path(self.store.root).parent / "jobs" / str(entry["job_id"]))
+        except Exception:                                             # noqa: BLE001 - an advisory view must never fail opening a clip
+            return
+        if answers:
+            opened["listener_answers"] = answers
+            opened["listener_answers_note"] = ("The listener heard the source audio and answered what you said you needed (missing_evidence) in an earlier run on this video. Where an answer "
+                                               "covers a stretch of your English, it replaces both machine readings of that stretch: translate it, and say so in a choice point.")
+
     def _add_dialogue(self, opened: dict[str, Any], clip_id: str, ledger: dict[str, Any]) -> None:
         """The clip as a conversation (see dialogue_view): turns in order, the question each answers, and the murmurs of other people inside a turn, from the segments and YouTube's speaker
         marks.  Opened with the clip, so compaction keeps it.  Evidence, never a gate; a clip with one speaker has none."""
@@ -447,7 +556,9 @@ class Workbench:
             for role in ledger.get("speaker_roles") or []:
                 if isinstance(role, dict) and role.get("speaker_id"):
                     roles[str(role["speaker_id"])] = str(role.get("name") or role.get("identified_name") or role.get("role") or "")[:60]
-            turns = build(opened["segments"], lines, roles)
+            from .dialogue_view import people_from_ledger
+
+            turns = build(opened["segments"], lines, roles, people_from_ledger(ledger))
             if turns:
                 opened["dialogue"] = turns
                 opened["dialogue_note"] = NOTE
@@ -455,31 +566,24 @@ class Workbench:
             return
 
     def _add_phrasing(self, opened: dict[str, Any], clip_id: str) -> None:
-        """How the people in the clip really talk, from the source audio: each segment's English with the speakers' real pauses marked, and who talks to whom in what order.
-        The agent writes commas from habit; this puts the speakers' own breathing in front of it before it writes a word.  Evidence, never a gate."""
-        from .comma_check import conversation, phrased
+        """Who talks to whom, in what order (see comma_check.conversation).  The speakers' own pauses are not put in front of the agent any more: the voice clones the speaker, so the Zulu is
+        written for fluency and for being understood, not to imitate the speaker's breathing.  Evidence, never a gate."""
+        from .comma_check import conversation
 
         try:
-            words = self._source_word_timings(clip_id)
             talk = conversation(opened["segments"])
             if talk:
                 opened["conversation"] = talk
-            if not words:
-                return
-            marked = 0
-            for segment in opened["segments"]:
-                text = phrased(str(segment.get("english") or ""), words, int(segment["start_ms"]), int(segment["end_ms"]))
-                if text and text != str(segment.get("english") or "").strip():
-                    segment["phrasing"] = text
-                    marked += 1
-            if marked:
-                opened["phrasing_note"] = (
-                    "phrasing is each segment's English with the pauses its speaker really took: |0.7s| is a pause of 0.7 s (a quarter second or more is shown). A comma of the written "
-                    "English with no mark after it was not a pause in speech: a name of address, an 'Indeed,' or a 'Yeah,' is often run into the words round it. "
-                    "In your Zulu a comma is about 0.15 s of silence and a full stop about 0.9 s, so put them where the speaker took a breath and nowhere else. "
-                    "Every submit_dub result lists the commas of your text that no pause of the speaker's matches (comma_check).")
         except Exception:                                             # noqa: BLE001 - an advisory view must never stop a clip from opening
             return
+
+    def _speaker_pauses(self, clip_id: str) -> dict[str, int]:
+        """segment id -> milliseconds of held pauses (0.3 s or more) the source speaker took inside it, from the delivery sheet: the silence a dub of that segment may leave without it being dead air."""
+        try:
+            sheet = self._delivery_sheet(clip_id) or {}
+        except Exception:  # noqa: BLE001 - no sheet just means no allowance
+            return {}
+        return {str(sid): sum(int(p.get("ms") or 0) for p in (row.get("pauses") or [])) for sid, row in (sheet.get("segments") or {}).items()}
 
     def _delivery_sheet(self, clip_id: str) -> dict[str, Any] | None:
         """How the clip's speakers deliver (see delivery): read from the job, where prepare_agent_inputs writes it."""
@@ -744,6 +848,12 @@ class Workbench:
             answer["spoken"] = spoken.lookup(word, [str(f) for f in zulu_forms or []])
         return answer
 
+    def punctuation_examples(self, phrase: str, limit: int = 4) -> dict[str, Any]:
+        """Real Zulu news sentences in which a word follows a comma and others in which it does not (see attestation.punctuation_examples).  Free, no model."""
+        from . import attestation
+
+        return attestation.punctuation_examples(Path(self.store.root).parent, phrase, limit)
+
     def _spoken_zulu(self):
         from . import spoken_zulu
 
@@ -783,6 +893,28 @@ class Workbench:
         except Exception:
             has_zulu = set()
         return [{k: v for k, v in item.items() if k != "_stem"} for item in found.values() if item["_stem"] not in has_zulu]
+
+    def grammar_review(self, item_ids: list[str] | None = None) -> dict[str, Any]:
+        """A second reader of the current Zulu: per unit, the phrases a model finds ungrammatical or too fused to say in one breath, each with a suggested rewrite.  It is an opinion, not a gate: an English-speaking
+        model cannot judge all of isiZulu, so the writer decides; it costs no TTS measurement."""
+        if self.judge is None or not hasattr(self.judge, "grammar"):
+            return {"error": "no reviewer is configured for this run; read your own text for phrases that run together or do not parse, and use check_text"}
+        submission = Path(self._episode()["dir"]) / "submission.json"
+        if not submission.is_file():
+            raise ValueError("submit a dub first: there is no Zulu text to review yet")
+        items = read_json(submission).get("items", [])
+        current = {str(s["segment_id"]): str(s.get("restored_text") or s.get("source_text") or "") for s in getattr(self, "segments", None) or []}
+        wanted = {str(i) for i in item_ids} if item_ids else None
+        units = [{"id": str(i.get("item_id")), "english": " ".join(current.get(str(x), "") for x in i.get("source_segment_ids") or []), "zulu": str(i.get("zulu_text") or "")}
+                 for i in items if wanted is None or str(i.get("item_id")) in wanted]
+        try:
+            issues = self.judge.grammar(units)
+        except Exception as exc:                                              # noqa: BLE001 - an outage of the reviewer never stops the run
+            return {"error": f"the reviewer could not be reached ({type(exc).__name__}); read your own text instead"}
+        return {"units": [{"item_id": u["id"], "issues": issues.get(u["id"], [])} for u in units if issues.get(u["id"])],
+                "reviewed": [u["id"] for u in units],
+                "note": "Phrases a model found ungrammatical (grammar) or too fused to say in one breath (fused), with a suggested fix. Apply a fix only where you agree it is better isiZulu and says the same; keep every "
+                        "name, number and date as written; then check_text and re-measure the unit. A unit not listed had nothing to polish."}
 
     def list_foreign_words(self) -> dict[str, Any]:
         """English words that the current Zulu keeps and that the speaker says in the source audio: the ones worth checking."""
@@ -1020,7 +1152,256 @@ class Workbench:
         result = self._present(result)
         result.update(length_gap(text, result))
         result["tts_budget_remaining"] = remaining
+        self._learn_duration(text, pick_voice_info(self.voices, speaker_id, start_ms, end_ms, self.segments), result)
+        self._show_omnivoice_estimate(text, speaker_id, start_ms, end_ms, result)
         return result
+
+    # -- the duration model: a free estimate of how long the voice takes, learned from every measurement -----------------------------------------------------------
+    ESTIMATE_NOTE = ("an estimate from the text alone (for the OmniVoice voice: the text's weight at the pace of the unit's own reference clip; otherwise per voice, learned from every duration "
+                     "measured so far): it is not a measurement and it cannot confirm a fit (the bar is tighter than its error). Use it to leave out the candidates that are far from their window "
+                     "and to send the rest to measure_tts_batch.")
+    ESTIMATE_MAX = 40
+    RUN_CORRECTION_MIN_SAMPLES = 3         # measurements of one voice in this run before its estimates are corrected by how this run's measurements compare
+
+    def _duration_state(self) -> dict[str, Any]:
+        if "_duration" not in self.__dict__:
+            from . import duration_model
+
+            work = Path(self.store.root).parent
+            try:
+                model = duration_model.load(work)
+            except Exception:  # noqa: BLE001 - a missing or unreadable model means no estimates, never a failed run
+                model = {}
+            self.__dict__["_duration"] = {"work": work, "model": model, "ratios": {}, "seen": 0}
+        return self.__dict__["_duration"]
+
+    def _voice_of(self, voice_info: Any) -> tuple[str, float]:
+        from . import duration_model
+
+        voice = str((voice_info or {}).get("selected_voice") or getattr(self.tts, "default_voice", "") or "")
+        return voice, duration_model.rate_of(voice_info)
+
+    def _estimate_ms(self, voice_info: Any, text: str) -> dict[str, Any] | None:
+        """The model's estimate for a text, corrected by this run's own measurements of the voice once there are RUN_CORRECTION_MIN_SAMPLES of them."""
+        from . import duration_model
+
+        state = self._duration_state()
+        voice, rate = self._voice_of(voice_info)
+        if not state["model"] or not voice:
+            return None
+        found = duration_model.predict(state["model"], voice=voice, text=text, rate_pct=rate)
+        if not found:
+            return None
+        ratios = sorted(state["ratios"].get(voice, []))
+        if len(ratios) >= self.RUN_CORRECTION_MIN_SAMPLES:
+            factor = min(1.25, max(0.8, ratios[len(ratios) // 2]))
+            found["run_correction"] = round(factor, 3)
+            found["predicted_ms"] = int(round(found["predicted_ms"] * factor))
+        return found
+
+    OMNIVOICE_BAND_PCT = 10.0          # the PRIOR for the estimate's error band, used until OMNIVOICE_BAND_MIN_PAIRS real pairs exist; after that the band is learned (see _omnivoice_band_pct)
+    OMNIVOICE_BAND_MIN_PAIRS = 20
+    OMNIVOICE_BAND_WINDOW = 300        # the most recent pairs the band is read from, so it follows the estimator as the reference clips and the model change
+    OMNIVOICE_BAND_FLOOR_PCT = 3.0
+    OMNIVOICE_PAIRS = "omnivoice_estimates.jsonl"
+
+    def _omnivoice_guide(self, segments: list[dict[str, Any]]) -> dict[str, int]:
+        """segment_id -> the Zulu length (characters, to the nearest 5) that fills the segment's window at the pace of its own reference clip; empty when the voice is not OmniVoice."""
+        try:
+            backend = self.tts
+        except Exception:  # noqa: BLE001 - a voice that cannot be built yet (no credentials) just means no OmniVoice guide: open_clip must not fail on it
+            return {}
+        if not hasattr(backend, "reference_for"):
+            return {}
+        from . import omnivoice_duration as od
+
+        guide: dict[str, int] = {}
+        for s in segments:
+            try:
+                reference = backend.reference_for({"speaker_id": s.get("speaker_id"), "start_ms": s["start_ms"], "source_end_ms": s["end_ms"]}, self.pronunciation_root)
+                seconds = (int(s["end_ms"]) - int(s["start_ms"])) / 1000
+                guide[str(s["segment_id"])] = max(5, int(round(od.chars_to_fill(seconds, reference.text, reference.seconds, backend.speed) / 5)) * 5)
+            except Exception:  # noqa: BLE001 - a segment with no usable reference just gets no guide
+                continue
+        return guide
+
+    def _omnivoice_pairs_path(self) -> Path:
+        return Path(self.store.root).parent / self.OMNIVOICE_PAIRS
+
+    def _record_estimate_pair(self, estimated_ms: int, measured_ms: int) -> None:
+        """One real measurement beside the free estimate that was made for the same text: the data the error band is learned from.  Best effort, never a failed measurement."""
+        try:
+            path = self._omnivoice_pairs_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"estimated_ms": int(estimated_ms), "measured_ms": int(measured_ms)}) + "\n")
+        except Exception:  # noqa: BLE001
+            return
+
+    def _omnivoice_band_pct(self) -> float:
+        """The band nine in ten free estimates fall inside, learned from the recorded pairs (the 90th percentile of the absolute error over the latest OMNIVOICE_BAND_WINDOW);
+        the prior until there are OMNIVOICE_BAND_MIN_PAIRS pairs."""
+        try:
+            lines = self._omnivoice_pairs_path().read_text(encoding="utf-8").splitlines()[-self.OMNIVOICE_BAND_WINDOW:]
+            errors = sorted(abs(p["estimated_ms"] - p["measured_ms"]) / p["measured_ms"] * 100.0 for p in (json.loads(x) for x in lines) if p.get("measured_ms"))
+        except Exception:  # noqa: BLE001
+            return self.OMNIVOICE_BAND_PCT
+        if len(errors) < self.OMNIVOICE_BAND_MIN_PAIRS:
+            return self.OMNIVOICE_BAND_PCT
+        return round(max(self.OMNIVOICE_BAND_FLOOR_PCT, errors[min(len(errors) - 1, int(0.9 * len(errors)))]), 1)
+
+    def _omnivoice_ms(self, text: str, speaker_id: str, start_ms: int, end_ms: int) -> int | None:
+        """OmniVoice's free estimate of this text's natural length, from the pace of its reference clip (see omnivoice_duration); None when the voice is not OmniVoice."""
+        estimator = getattr(self.tts, "estimate_seconds", None)
+        if estimator is None:
+            return None
+        from .dub_fit import _group
+
+        group = _group(item_id="estimate", speaker_id=speaker_id, start_ms=start_ms, end_ms=end_ms, source_text="")
+        group["parts"] = [{"type": "text", "segment_id": "estimate_seg", "text": text}]
+        info = pick_voice_info(self.voices, speaker_id, start_ms, end_ms, self.segments) or {"selected_voice": getattr(self.tts, "default_voice", "")}
+        try:
+            return int(round(estimator(group, info, self.pronunciation_root) * 1000))
+        except Exception:  # noqa: BLE001 - no reference clip or an unreadable corpus means no estimate, never a failed measurement
+            return None
+
+    def _show_omnivoice_estimate(self, text: str, speaker_id: str, start_ms: int, end_ms: int, result: dict[str, Any]) -> None:
+        """Beside a real OmniVoice measurement, what the free estimate said, so the agent sees how far to trust it."""
+        estimated = self._omnivoice_ms(text, speaker_id, start_ms, end_ms)
+        measured = int(result.get("measured_ms") or 0)
+        if estimated and measured > 0:
+            result["estimated_ms"] = estimated
+            result["estimate_off_pct"] = round((estimated - measured) / measured * 100.0, 1)
+            self._record_estimate_pair(estimated, measured)
+
+    def _learn_duration(self, text: str, voice_info: Any, result: dict[str, Any]) -> None:
+        """A real measurement: show the agent how its estimate did, keep it in the ledger for the next fit, and let this run's estimates lean on it."""
+        from . import duration_model
+
+        if hasattr(self.tts, "estimate_seconds"):          # OmniVoice: its estimate is a formula of the reference's pace, not a model fitted to Azure measurements
+            return
+        try:
+            measured = int(result.get("measured_ms") or 0)
+            voice, rate = self._voice_of(voice_info)
+            if measured <= 0 or not voice:
+                return
+            state = self._duration_state()
+            raw = duration_model.predict(state["model"], voice=voice, text=text, rate_pct=rate) if state["model"] else None
+            if raw and raw["predicted_ms"] > 0:
+                state["ratios"].setdefault(voice, []).append(measured / raw["predicted_ms"])
+                result["estimated_ms"] = raw["predicted_ms"]
+                result["estimate_off_pct"] = round((raw["predicted_ms"] - measured) / measured * 100.0, 1)
+            duration_model.record(state["work"], voice=voice, text=text, measured_ms=measured, rate_pct=rate, source="measure")
+        except Exception:  # noqa: BLE001 - learning must never fail a measurement
+            return
+
+    def estimate_fit(self, requests: list[dict[str, Any]]) -> dict[str, Any]:
+        """Free (no TTS, no budget): for up to 40 candidate texts, the voice's estimated duration against the source window, with the error band of the estimate."""
+        if not 1 <= len(requests) <= self.ESTIMATE_MAX:
+            raise ValueError(f"send between 1 and {self.ESTIMATE_MAX} requests (you sent {len(requests)})")
+        results = []
+        for request in requests:
+            start, end = int(request["start_ms"]), int(request["end_ms"])
+            if end <= start:
+                raise ValueError("end_ms must be greater than start_ms")
+            omni = self._omnivoice_ms(str(request.get("text") or ""), str(request.get("speaker_id") or "SPEAKER_00"), start, end)
+            if omni is not None:                          # OmniVoice: the formula from the reference clip's pace, with the band it showed on a whole job
+                window = end - start
+                gap = (omni - window) / window * 100.0
+                band = self._omnivoice_band_pct()
+                results.append({"estimated_ms": omni, "window_ms": window, "estimated_gap_pct": round(gap, 1), "band_pct": band,
+                                "reading": ("inside the estimate's error band: worth a measurement" if abs(gap) <= band
+                                            else f"probably {'over' if gap > 0 else 'short of'} the window by more than the band")})
+                continue
+            info = pick_voice_info(self.voices, request.get("speaker_id"), start, end, self.segments)
+            found = self._estimate_ms(info, str(request.get("text") or ""))
+            if not found:
+                results.append({"available": False, "note": "no duration model is fitted yet for this voice: measure it"})
+                continue
+            window = end - start
+            gap = (found["predicted_ms"] - window) / window * 100.0
+            band = float(found["band_pct"])
+            reading = ("inside the estimate's error band: worth a measurement" if abs(gap) <= band
+                       else f"probably {'over' if gap > 0 else 'short of'} the window by more than the band")
+            results.append({"estimated_ms": found["predicted_ms"], "window_ms": window, "estimated_gap_pct": round(gap, 1), "band_pct": band,
+                            "reading": reading, **({"run_correction": found["run_correction"]} if "run_correction" in found else {})})
+        return {"results": results, "typical_error_pct": next((r.get("band_pct") for r in results if r.get("band_pct")), None), "note": self.ESTIMATE_NOTE}
+
+    TIMELINE_MAX = 60
+    TIMELINE_MIN_GAP_MS = 300          # the least silence between two units that run into each other (as the renderer keeps)
+    TIMELINE_LATE_MS = 400             # a sentence starting this much after its source onset is late enough to matter
+
+    def _text_ms(self, text: str, speaker_id: str, start_ms: int, end_ms: int) -> tuple[int | None, float | None]:
+        """The free estimate of a text's length and its error band: OmniVoice's formula when that is the voice, else the Azure duration model; (None, None) when there is none."""
+        omni = self._omnivoice_ms(text, speaker_id, start_ms, end_ms)
+        if omni is not None:
+            return omni, self._omnivoice_band_pct()
+        found = self._estimate_ms(pick_voice_info(self.voices, speaker_id, start_ms, end_ms, self.segments), text)
+        return (found["predicted_ms"], float(found["band_pct"])) if found else (None, None)
+
+    def timeline_fit(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        """Free: a draft laid out on the timeline the way a person would watch it, sentence by sentence.  Each item is one source segment and the Zulu you would say for it.
+        A sentence starts where its source starts, or after the previous one ends (plus the least gap) when that one ran long; the lateness it carries is what every later sentence
+        inherits.  Returns, per sentence, its estimated start and end against its source's, how late it is, what it would overrun into, and, where lateness begins, which earlier
+        sentences of the run are over their windows and could give the time back."""
+        if not 1 <= len(items) <= self.TIMELINE_MAX:
+            raise ValueError(f"send between 1 and {self.TIMELINE_MAX} items (you sent {len(items)})")
+        ordered = sorted(self.segments, key=lambda s: (int(s["start_ms"]), str(s["segment_id"])))
+        index = {str(s["segment_id"]): i for i, s in enumerate(ordered)}
+        windows: list[dict[str, Any]] = []
+        for item in items:                                        # an item is one source segment (segment_id) or one of the agent's own units (start_ms and end_ms, which may span several segments)
+            if item.get("segment_id") is not None and (item.get("start_ms") is None or item.get("end_ms") is None):
+                sid = str(item["segment_id"])
+                if sid not in index:
+                    raise ValueError(f"unknown segment_id {sid!r}: use the ids from open_clip")
+                segment = ordered[index[sid]]
+                windows.append({"label": sid, "start": int(segment["start_ms"]), "end": int(segment["end_ms"]), "speaker": str(segment.get("speaker_id") or "SPEAKER_00"), "text": item.get("text")})
+            elif item.get("start_ms") is not None and item.get("end_ms") is not None:
+                start, end = int(item["start_ms"]), int(item["end_ms"])
+                if end <= start:
+                    raise ValueError("end_ms must be greater than start_ms")
+                covering = next((s for s in ordered if int(s["start_ms"]) <= start < int(s["end_ms"])), None)
+                windows.append({"label": str(item.get("item_id") or f"{start}-{end}"), "start": start, "end": end,
+                                "speaker": str(item.get("speaker_id") or (covering or {}).get("speaker_id") or "SPEAKER_00"), "text": item.get("text")})
+            else:
+                raise ValueError("each item needs a segment_id, or a start_ms and an end_ms")
+        rows: list[dict[str, Any]] = []
+        previous_end: int | None = None
+        for window in sorted(windows, key=lambda w: (w["start"], w["end"])):
+            sid, start, end, speaker = window["label"], window["start"], window["end"], window["speaker"]
+            estimated, band = self._text_ms(str(window.get("text") or ""), speaker, start, end)
+            if estimated is None:
+                rows.append({"segment_id": sid, "available": False, "note": "no estimate for this voice yet: measure it"})
+                previous_end = None
+                continue
+            placed = start if previous_end is None else max(start, previous_end + self.TIMELINE_MIN_GAP_MS)
+            placed_end = placed + estimated
+            following = next((s for s in ordered if int(s["start_ms"]) >= end - 50 and int(s["start_ms"]) > start), None)          # the first speech that starts after this window
+            next_start = int(following["start_ms"]) if following else None
+            other = bool(following and str(following.get("speaker_id") or "") != str(speaker))
+            rows.append({
+                "segment_id": sid, "speaker_id": speaker, "source_start_ms": start, "source_end_ms": end, "window_ms": end - start, "estimated_ms": estimated,
+                "starts_ms": placed, "ends_ms": placed_end, "late_by_ms": placed - start, "over_window_by_ms": placed_end - end,
+                "free_gap_after_ms": (next_start - end) if next_start is not None else None,
+                "runs_into_next_speaker_ms": max(0, placed_end - next_start) if (other and next_start is not None) else 0,
+                "band_pct": band})
+            previous_end = placed_end
+        usable = [r for r in rows if r.get("available", True)]
+        late = [r for r in usable if r["late_by_ms"] > self.TIMELINE_LATE_MS]
+        hints: list[dict[str, Any]] = []
+        for position, row in enumerate(usable):
+            if row["late_by_ms"] <= self.TIMELINE_LATE_MS or (position and usable[position - 1]["late_by_ms"] > self.TIMELINE_LATE_MS):
+                continue                                              # only where lateness BEGINS: the rows after it only inherit it
+            chain_start = position
+            while chain_start > 0 and usable[chain_start - 1]["ends_ms"] + self.TIMELINE_MIN_GAP_MS >= usable[chain_start]["source_start_ms"] and usable[chain_start - 1]["over_window_by_ms"] > 0:
+                chain_start -= 1
+            givers = [r for r in usable[chain_start:position + 1] if r["over_window_by_ms"] > 0]
+            hints.append({"late_from": row["segment_id"], "late_by_ms": row["late_by_ms"],
+                          "shorten_these": [{"segment_id": r["segment_id"], "over_window_by_ms": r["over_window_by_ms"]} for r in sorted(givers, key=lambda r: -r["over_window_by_ms"])[:4]],
+                          "reading": "the time is lost in the sentences listed (they run past their own windows): shortening one of them brings this sentence, and every one after it, back"})
+        return {"sentences": rows, "late_sentences": [r["segment_id"] for r in late], "lateness_at_end_ms": usable[-1]["late_by_ms"] if usable else 0,
+                "runs_into_another_speaker": [r["segment_id"] for r in usable if r["runs_into_next_speaker_ms"] > 0], "where_to_look": hints,
+                "note": "an estimate, not a measurement: lateness here is how far each sentence would start after the speaker's, so the earlier a sentence is over its window the more it costs the ones after it."}
 
     def measure_tts_batch(self, requests: list[dict[str, Any]]) -> dict[str, Any]:
         if not 1 <= len(requests) <= MAX_MEASURE_BATCH:
@@ -1044,6 +1425,8 @@ class Workbench:
             results = [self._present(r) for r in pool.map(_one, requests)]
         for request, result in zip(requests, results):
             result.update(length_gap(request["text"], result))
+            self._learn_duration(request["text"], pick_voice_info(self.voices, request.get("speaker_id"), request["start_ms"], request["end_ms"], self.segments), result)
+            self._show_omnivoice_estimate(request["text"], str(request.get("speaker_id") or "SPEAKER_00"), request["start_ms"], request["end_ms"], result)
         return {"results": results, "tts_budget_remaining": remaining}
 
     def preview_turn_padding(
@@ -1109,6 +1492,11 @@ class Workbench:
         soft_prefixed = find_soft_prefixed_english(zulu_text, source_text)
         if soft_prefixed:
             problems.append({"flag": "english_word_with_noun_prefix", "evidence": soft_prefixed})
+        from .english_prefix import find_unattested_prefixed
+
+        unattested = find_unattested_prefixed(zulu_text, source_text, self._resources())
+        if unattested:
+            problems.append({"flag": "prefix_forms_to_compare_with_the_corpus", "evidence": unattested})
         doubled = find_unsupported_doubling(zulu_text, source_text)
         if doubled:
             problems.append({"flag": "unsupported_doubling", "evidence": doubled})
@@ -1127,16 +1515,6 @@ class Workbench:
         runs = long_runs(zulu_text)
         if runs:
             problems.append({"flag": "long_run_without_breath", "evidence": runs})
-        from .comma_check import draft_check
-
-        try:
-            commas = draft_check(zulu_text, source_text, self._source_word_timings(self._episode()["clip_id"]))
-        except Exception:                                             # noqa: BLE001 - an advisory view must never fail a check
-            commas = []
-        if commas:
-            problems.append({"flag": "commas_the_speaker_did_not_take", "evidence": commas,
-                             "note": ("a comma is about 0.15 s of silence; the speaker said a name of address in the same breath as the words round it. A line that says the speaker "
-                                      "held a pause is the opposite: the speaker stopped there for that long and your Zulu does not (write ~pauseN, the total silence, after the word that ends the thought)")})
         from .voice_limits import find as voice_limit_lines
 
         limits = voice_limit_lines(zulu_text)
@@ -1270,6 +1648,7 @@ class Workbench:
             segments=segments if self.scope else None,
             next_start_after_ms=self.scope.get("next_start_ms") if self.scope else None,
             voices=self.voices, pronunciation_root=self.pronunciation_root, source_explains=self._source_explains(),
+            speaker_pauses=self._speaker_pauses(episode["clip_id"]),
         )
         status = segment_timing_status(card, items)
         regressions = ratchet_regressions(self.locked_segments, status) if self.timing_ratchet else []
@@ -1316,7 +1695,7 @@ class Workbench:
             "flagged_units": self._with_texts([self._flagged_entry(g) for g in card["groups"] if g["flags"] or any(v["failed"] for v in g["gates"].values())], items),
             "listening_load": self._listening_load(items),
             "spoken_form_gaps": self._spoken_form_gaps(items),
-            "comma_check": self._comma_check(items),
+            "sentence_timing": self._sentence_timing(items, card),
             "voice_limit_words": self._voice_limit_words(items),
             "figures_as_spoken": self._figures_as_spoken(items),
             "decisions_so_far": self._decisions_view(items),
@@ -1441,7 +1820,7 @@ class Workbench:
         """One flagged unit as the agent sees it in a submit result: the gates that failed WITH their evidence (which required literal, which name), not only that a gate failed.  prod-98: after a
         hard-gate failure on u08 the agent got the unit id and had to infer which literal ("I inferred it was the source's three officers")."""
         failed = {n: v for n, v in g["gates"].items() if v["failed"]}
-        entry: dict[str, Any] = {"item_id": g["group_id"], "gates": list(failed), "flags": g["flags"]}
+        entry: dict[str, Any] = {"item_id": g["group_id"], "gates": list(failed), "flags": g["flags"], "window_ms": g.get("window_ms"), "measured_ms": g.get("measured_ms")}
         evidence = {n: [str(e)[:GATE_EVIDENCE_CHARS] for e in (v.get("evidence") or [])[:3]] for n, v in failed.items() if v.get("evidence")}
         if evidence:
             entry["gate_evidence"] = evidence
@@ -1459,12 +1838,13 @@ class Workbench:
         except Exception:                                             # noqa: BLE001 - an advisory view must never fail a submission
             return []
 
-    def _comma_check(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Commas the source speaker did not take (see comma_check), measured on the source audio's word timings: shown on every submit, free, never a gate."""
-        from .comma_check import comma_checks
+    def _sentence_timing(self, items: list[dict[str, Any]], card: dict[str, Any]) -> list[dict[str, Any]]:
+        """Where each unit's sentences will land against the source speaker's once the renderer has moved the silence between them (see sentence_timing): the sentences that would still
+        start well after the speaker's, and the units whose sentences mostly could not be matched.  On every submit, free, never a gate."""
+        from .sentence_timing import check
 
         try:
-            return comma_checks(items, self._source_word_timings(self._episode()["clip_id"]), self._word_aligner())[:UNIT_TEXTS_SHOWN]
+            return check(items, card, self._source_word_timings(self._episode()["clip_id"]), speaker_rates(card), self._word_aligner())
         except Exception:                                             # noqa: BLE001 - an advisory view must never fail a submission
             return []
 
@@ -1529,6 +1909,10 @@ class Workbench:
         """The first UNIT_TEXTS_SHOWN entries carry the unit's current Zulu text.  In lenfix-2, 14 of 75 turns were get_submission calls made right after a
         submit only to read the text of the units it flagged; each such turn re-sends the whole 22,000-token context."""
         texts = {str(i["item_id"]): str(i.get("zulu_text") or "") for i in items}
+        for entry in entries:                                          # the gap to the window, in characters at the unit's own measured pace (to_fit, as in a measurement)
+            hint = Workbench._fit_hint(entry.pop("window_ms", None), entry.pop("measured_ms", None), len(texts.get(str(entry["item_id"]), "")))
+            if hint:
+                entry["to_fit"] = hint
         for entry in entries[:UNIT_TEXTS_SHOWN]:
             text = texts.get(str(entry["item_id"]), "")
             entry["zulu_text"] = text if len(text) <= UNIT_TEXT_CHARS else text[:UNIT_TEXT_CHARS] + "…"

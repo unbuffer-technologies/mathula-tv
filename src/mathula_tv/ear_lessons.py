@@ -29,6 +29,12 @@ HARD_TEXT = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "hard_t
 SOURCES = ("listener", "measured", "inferred")
 
 SEED: list[dict[str, str]] = [
+    {"id": "seed-fused-name-run", "source": "listener", "item_class": "speakability", "written": "u-Ayanda Nyathi nentatheli ephezulu u-Canny Maphanga", "heard": "the names and 'na-' fused into one rushed phrase; nentatheli rushed",
+     "fix": "a run of names followed directly by a conjunction and another noun is said in one breath and rushed: give it room (a comma after the names, a different order, or a clause that carries the title)"},
+    {"id": "seed-modifier-chain", "source": "listener", "item_class": "speakability", "written": "ukungaziphathi kahle okubucayi kwamaphoyisa", "heard": "the voice took the chain for one long compound and clipped its middle: kahle lost",
+     "fix": "we are not writing for an expert Zulu speaker: the reader is a TTS model and the audience is general listeners, so write plain speakable Zulu, one idea to a clause. Do not stack a long verb-noun, an adverb and an adjective in one phrase: split it into two plain phrases or move the adverb; the listener hears the clipped word although nothing counted on the audio shows it, so only reading the construction catches it"},
+    {"id": "seed-stacked-nouns", "source": "listener", "item_class": "grammar", "written": "bobabili ekolishi, u-Brigitte Mabandla Justice College", "heard": "terrible grammar: the college named twice and nothing saying they come from it",
+     "fix": "say how the things relate with a verb or a relative clause (they come from, they work at) instead of stacking nouns and names, and name a place once for one mention; read the text for this"},
     {"id": "seed-title-raw", "source": "listener", "item_class": "title", "written": "sinoDkt Arthur Shopola", "heard": "the raw abbreviation, 'section what'",
      "fix": "write a title in full (uDokotela, Mnumzane) or with its full stop; the renderer now expands Mnu/Nkk/Nksz/Dkt with or without the stop, but a title it does not know is read raw"},
     {"id": "seed-digits-accent", "source": "listener", "item_class": "figure", "written": "31%, 'eSection 79', 'kuka-31'", "heard": "Zulu-accented English: 'titty one', 'seventhy nine'",
@@ -131,6 +137,18 @@ def spelling_decisions(book_entries: dict[str, Any], limit: int = 25) -> list[di
     return [row for _, row in rows[:limit]]
 
 
+def _experience(work_dir: Path) -> dict[str, Any]:
+    """Lessons compacted from the agent's own earlier runs (``experience_compact``): hypotheses from several videos, never rules."""
+    try:
+        from . import experience_compact
+
+        found = experience_compact.for_agent(work_dir)
+    except Exception:                                                  # noqa: BLE001 - lessons are advice: they must not break the first call of a run
+        return {}
+    return {"experience_lessons": found, "experience_note": ("What your own earlier runs showed across several videos (compacted from your recorded choices, strategies and missing-evidence notes). "
+                                                              "They are hypotheses: use them where the situation matches, and a counter-example in this clip outweighs one.")} if found else {}
+
+
 def for_agent(work_dir: Path, book_path: Path | None = None, *, limit_decisions: int = 25) -> dict[str, Any]:
     """Everything the agent should know before it writes: the concept lessons (seed + added) and the listener's latest respellings."""
     from .pronunciation_book import load as load_book
@@ -154,6 +172,7 @@ def for_agent(work_dir: Path, book_path: Path | None = None, *, limit_decisions:
         "concepts": [{k: v for k, v in lesson.items() if k in ("item_class", "source", "written", "heard", "fix")} for lesson in concepts],
         "listener_respellings": decisions,
         **({"listener_notes": notes} if notes else {}),          # the listener's own words on a spelling, newest first
+        **_experience(work_dir),
     }
 
 

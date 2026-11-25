@@ -5,8 +5,17 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from mathula_tv.dub_agent import TOOL_SPECS, build_dispatch, execute_tool, run_agent
 from mathula_tv.dub_workbench import BudgetExhausted
+
+
+@pytest.fixture(autouse=True)
+def _legacy_workflow(monkeypatch):
+    """These tests script the older measure-first flow: the breadth-first phase is switched off here, and the tests of that phase turn it on explicitly (breadth_first=True)."""
+    monkeypatch.setenv("MATHULA_AGENT_BREADTH_FIRST", "0")
+    monkeypatch.setenv("MATHULA_AGENT_DRAFT_DEADLINE", "0")          # the draft deadline has its own tests (draft_deadline=True)
 
 
 class StubStore:
@@ -45,6 +54,9 @@ class StubWorkbench:
     def attested_zulu(self, word, zulu_forms=None):
         return {"english": word, "forms": []}
 
+    def punctuation_examples(self, phrase, limit=4):
+        return {"phrase": phrase, "after_a_comma": [], "not_after_a_comma": []}
+
     def human_translations(self, phrase, limit=5):
         return {"phrase": phrase, "pairs_in_all": 0, "pairs": []}
 
@@ -75,6 +87,15 @@ class StubWorkbench:
     def measure_tts_batch(self, requests):
         return {}
 
+    def grammar_review(self, item_ids=None):
+        return {"units": [], "reviewed": []}
+
+    def estimate_fit(self, requests):
+        return {"results": [], "note": "stub"}
+
+    def timeline_fit(self, items):
+        return {"sentences": [], "note": "stub"}
+
     def preview_turn_padding(self, members, last_free_gap_ms=0):
         return {"mechanism": "none"}
 
@@ -87,8 +108,9 @@ class StubWorkbench:
     def recall_lessons(self, limit=25):
         return {"count": 0}
 
-    def submit_dub(self, items, approach_notes=""):
+    def submit_dub(self, items, approach_notes="", partial=False, remove=None):
         self.episode["submissions"] += 1
+        self.submitted_items = list(items)
         return {"accepted": True}
 
 
@@ -109,9 +131,11 @@ class ScriptedClient:
         self.config = SimpleNamespace(deployment="scripted")
         self.replies = list(replies)
         self.seen: list[list[dict]] = []
+        self.tools_seen: list[list[dict] | None] = []
 
-    def complete(self, messages, **_):
+    def complete(self, messages, **kwargs):
         self.seen.append([dict(m) for m in messages])
+        self.tools_seen.append(kwargs.get("tools"))
         return self.replies.pop(0)
 
 
@@ -176,6 +200,226 @@ def test_agent_that_stops_without_submitting_is_nudged_once(tmp_path):
     ])
     assert summary["stop_reason"] == "agent_finished"
     assert any("not submitted" in str(m.get("content")) for m in client.seen[1] if m["role"] == "user")
+
+
+def test_with_no_submission_the_history_stays_bounded_and_no_draft_is_lost(tmp_path):
+    """The history must not depend on the agent having submitted: 14 working steps and no submit_dub, with the compaction threshold crossed every turn."""
+    from mathula_tv.draft_ledger import LEDGER_NOTE_PREFIX
+    from mathula_tv.dub_agent import KEEP_RECENT_STEPS
+
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})])]
+    script += [_reply(calls=[_call(f"m{i}", "measure_tts", {"text": f"draft number {i}", "start_ms": i * 1000, "end_ms": i * 1000 + 900})]) for i in range(14)]
+    script += [_reply(content="done"), _reply(content="still done")]
+    summary, client, _ = _run(tmp_path, script, compact_after_tokens=50)
+    assert summary["stop_reason"] == "finished_without_submission" and summary["compactions"] > 0
+    last = client.seen[-1]
+    notes = [m["content"] for m in last if str(m.get("content") or "").startswith(LEDGER_NOTE_PREFIX)]
+    assert len(notes) == 1                                                       # one ledger, not one per compaction
+    assert "draft number 0" in notes[0]                                         # the earliest draft, dropped from the history long ago, is in the ledger
+    visible = json.dumps(last, ensure_ascii=False)
+    assert all(f"draft number {i}" in visible for i in range(14))               # every draft is somewhere the model can read: in the ledger, or verbatim in the last steps
+    assert sum(1 for m in last if m["role"] == "assistant") <= KEEP_RECENT_STEPS + 4         # bounded by construction: the opening step, the last few steps and the closing replies
+    assert len(client.seen[-1]) < len(client.seen[10]) + 4                      # and not growing turn after turn
+
+
+def _names(tools):
+    return {t["function"]["name"] for t in tools or []}
+
+
+def test_with_the_tool_set_swapped_the_measurement_tools_are_not_offered_until_a_complete_submission_exists(tmp_path):
+    from mathula_tv.dub_agent import DRAFT_PHASE_NOTE, MEASURE_TOOLS, REFINE_PHASE_NOTE
+
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("e", "estimate_fit", {"requests": []})]), _reply(calls=[_call("s", "submit_dub", {"items": []})]),
+              _reply(calls=[_call("m", "measure_tts", {"text": "x", "start_ms": 0, "end_ms": 1000})]), _reply(content="done")]
+    summary, client, workbench = _run(tmp_path, script, breadth_first=True, stable_tools=False)          # the legacy mode: the declarations themselves change
+    offered = [_names(t) for t in client.tools_seen]
+    assert not (offered[0] & MEASURE_TOOLS) and not (offered[1] & MEASURE_TOOLS) and not (offered[2] & MEASURE_TOOLS)       # the draft phase: turns 1-3, before any submission
+    assert MEASURE_TOOLS <= offered[3] and MEASURE_TOOLS <= offered[4]                                                      # the refine phase: offered from the turn after the first accepted submission
+    assert {"open_clip", "estimate_fit", "timeline_fit", "check_text", "submit_dub", "say_it"} <= offered[0]                # everything else stays: the free tools are exactly what the draft needs
+    saw = lambda turn, note: any(m.get("content") == note for m in client.seen[turn - 1] if m["role"] == "user")           # noqa: E731
+    assert saw(1, DRAFT_PHASE_NOTE) and not saw(4, REFINE_PHASE_NOTE) is False and saw(4, REFINE_PHASE_NOTE)               # told on turn 1; told again that they are offered on turn 4
+    assert summary["stop_reason"] == "agent_finished" and workbench.episode["submissions"] == 1
+    trace = (tmp_path / "r" / "c1" / "r1" / "trace.jsonl").read_text(encoding="utf-8")
+    assert trace.count('"kind": "draft_phase"') == 1 and trace.count('"kind": "refine_phase"') == 1                         # each announced once
+
+
+def test_the_tool_declarations_are_the_same_on_every_turn_and_the_phases_restrict_calls_instead(tmp_path):
+    from mathula_tv.dub_agent import DRAFT_REFUSAL, MEASURE_TOOLS
+
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("m", "measure_tts", {"text": "x", "start_ms": 0, "end_ms": 1000})]),
+              _reply(calls=[_call("s", "submit_dub", {"items": []})]), _reply(calls=[_call("m2", "measure_tts", {"text": "y", "start_ms": 0, "end_ms": 1000})]), _reply(content="done")]
+    summary, client, workbench = _run(tmp_path, script, breadth_first=True)
+    offered = [json.dumps(t, sort_keys=True) for t in client.tools_seen]
+    assert len(set(offered)) == 1 and MEASURE_TOOLS <= _names(client.tools_seen[0])         # one declaration set for the whole run, measurement tools included
+    refused = [m for m in client.seen[2] if m["role"] == "tool" and "not_available_yet" in m["content"]]
+    assert refused and json.loads(refused[0]["content"])["detail"] == DRAFT_REFUSAL         # a draft-phase call is refused, free
+    assert not any("not_available_yet" in m["content"] for m in client.seen[4] if m["role"] == "tool" and m["tool_call_id"] == "m2")      # after the first submission the same tool answers
+    cache = summary["cache"]
+    assert summary["stable_tools"] is True and cache["turns"] == 5 and "tools_changed" not in cache["misses_by_cause"] and len(cache["header_hashes"]) == 1
+
+
+def test_a_call_outside_the_final_phase_is_refused_while_the_declarations_stay_put(tmp_path):
+    from mathula_tv.dub_agent import FINAL_REFUSAL
+
+    script = [_heavy(_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]))]
+    script += [_heavy(_reply(calls=[_call(f"m{i}", "measure_tts", {"text": f"draft {i}", "start_ms": 0, "end_ms": 1000})])) for i in range(17)]          # turn 18 is the first of the final phase
+    script += [_heavy(_reply(calls=[_call("s", "submit_dub", {"items": []})])), _heavy(_reply(content="done"))]
+    summary, client, workbench = _run(tmp_path, script, max_total_tokens=1_000_000)
+    assert len({json.dumps(t, sort_keys=True) for t in client.tools_seen}) == 1                 # every turn, the final one included, declares the same tools
+    refused = [m for m in client.seen[18] if m["role"] == "tool" and "not_available_now" in m["content"]]
+    assert refused and json.loads(refused[-1]["content"])["detail"] == FINAL_REFUSAL
+    assert workbench.episode["submissions"] == 1 and summary["budget"]["phase_reached"] == "final"
+
+
+def test_a_measurement_called_in_the_draft_phase_anyway_is_refused_for_free_and_its_draft_is_kept(tmp_path):
+    from mathula_tv.dub_agent import DRAFT_REFUSAL
+
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("m", "measure_tts", {"text": "a draft I wanted measured", "start_ms": 0, "end_ms": 1000})]),
+              _reply(content="done"), _reply(content="still done")]                        # no submission: a full one would (rightly) replace the drafts as the record
+    summary, client, workbench = _run(tmp_path, script, breadth_first=True)
+    answer = json.loads(next(m["content"] for m in client.seen[2] if m["role"] == "tool" and "not_available_yet" in m["content"]))
+    assert answer["error"] == "not_available_yet" and answer["detail"] == DRAFT_REFUSAL
+    assert workbench.episode["tts_used"] == 0                                              # nothing was spent on the refused call
+    state = json.loads((tmp_path / "r" / "c1" / "r1" / "agent_state.json").read_text(encoding="utf-8"))
+    assert "a draft I wanted measured" in json.dumps(state["ledger"], ensure_ascii=False)  # the draft it carried is still recorded
+
+
+def test_a_repair_run_and_the_opt_out_have_no_draft_phase(tmp_path):
+    from mathula_tv.dub_agent import MEASURE_TOOLS
+
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(content="done"), _reply(content="still done")]
+    _, off, _ = _run(tmp_path / "a", script, breadth_first=False)
+    assert MEASURE_TOOLS <= _names(off.tools_seen[0])                                      # the opt-out: the old flow, every tool from turn 1
+    seeded = ScriptedClient([_reply(content="done")])
+    workbench = StubWorkbench(tmp_path / "b")
+    workbench.open_clip("c1", "r")                                                         # a repair run starts accepted: its seed was scored already
+    workbench.episode["submissions"] = 1
+    run_agent(seeded, workbench, clip_id="c1", run_id="r", breadth_first=True, seed_items=None)
+    assert MEASURE_TOOLS <= _names(seeded.tools_seen[0])
+
+
+def test_the_environment_switches_the_phase_off_and_an_explicit_choice_wins(tmp_path, monkeypatch):
+    from mathula_tv.dub_agent import MEASURE_TOOLS
+
+    monkeypatch.delenv("MATHULA_AGENT_BREADTH_FIRST", raising=False)
+    _, default, _ = _run(tmp_path / "a", [_reply(content="done"), _reply(content="done")], stable_tools=False)
+    assert not (MEASURE_TOOLS & _names(default.tools_seen[0]))                             # the default is on
+    monkeypatch.setenv("MATHULA_AGENT_BREADTH_FIRST", "0")
+    _, off, _ = _run(tmp_path / "b", [_reply(content="done"), _reply(content="done")])
+    assert MEASURE_TOOLS <= _names(off.tools_seen[0])
+    _, forced, _ = _run(tmp_path / "c", [_reply(content="done"), _reply(content="done")], breadth_first=True, stable_tools=False)
+    assert not (MEASURE_TOOLS & _names(forced.tools_seen[0]))
+
+
+def _heavy(reply, prompt=50_000):
+    """A reply that reports a large prompt, so a modest ceiling is crossed in a few turns."""
+    return {**reply, "usage": {"prompt_tokens": prompt, "completion_tokens": 10}}
+
+
+def _segments(workbench, windows):
+    workbench.segments = [{"segment_id": f"s{i + 1}", "start_ms": a, "end_ms": b, "speaker_id": "SPEAKER_00"} for i, (a, b) in enumerate(windows)]
+
+
+def test_empty_replies_saved_in_a_checkpoint_are_dropped_when_it_is_loaded_and_real_ones_are_kept():
+    from mathula_tv.dub_agent import drop_empty_replies
+
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "go"},
+                {"role": "assistant", "content": None, "_raw": [{"thoughtSignature": "x"}]},                      # a cut-off reply: nothing said, nothing called
+                {"role": "assistant", "content": "  "},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "a", "type": "function", "function": {"name": "t", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "a", "content": "r"}, {"role": "assistant", "content": "a real answer"}]
+    kept = drop_empty_replies(messages)
+    assert [m["role"] for m in kept] == ["system", "user", "assistant", "tool", "assistant"] and kept[2].get("tool_calls") and kept[-1]["content"] == "a real answer"
+
+
+def _cut_off():
+    """A reply that ran into the output limit: no text, no tool call, finish 'length' (what prod-114 got twice when it tried to submit the whole clip)."""
+    return {"choices": [{"message": {"role": "assistant", "content": None}, "finish_reason": "length"}], "usage": {"prompt_tokens": 100, "completion_tokens": 16000}}
+
+
+def test_a_reply_cut_off_by_the_output_limit_is_not_the_agent_finishing_and_it_may_try_again(tmp_path):
+    from mathula_tv.dub_agent import TRUNCATED_NOTE
+
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _cut_off(), _reply(calls=[_call("s", "submit_dub", {"items": []})]), _reply(content="done")]
+    summary, client, workbench = _run(tmp_path, script)
+    assert summary["stop_reason"] == "agent_finished" and workbench.episode["submissions"] == 1
+    retry = client.seen[2]                                                                    # what the model saw on the turn after the cut-off
+    assert any(m.get("content") == TRUNCATED_NOTE for m in retry) and not any("not submitted a dub yet" in str(m.get("content")) for m in retry)     # told it was cut off, not nudged as if it had stopped
+    assert not any(m["role"] == "assistant" and not m.get("tool_calls") and m.get("content") is None for m in retry)                                # the empty cut-off reply is not kept in the history
+    assert '"kind": "truncated"' in (tmp_path / "r" / "c1" / "r1" / "trace.jsonl").read_text(encoding="utf-8")
+
+
+def test_replies_cut_off_again_and_again_end_the_run_with_that_reason_and_the_drafts_are_still_submitted(tmp_path):
+    from mathula_tv.dub_agent import MAX_CONSECUTIVE_TRUNCATIONS
+
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("m", "measure_tts", {"text": "a draft", "start_ms": 0, "end_ms": 1000})])]
+    script += [_cut_off() for _ in range(MAX_CONSECUTIVE_TRUNCATIONS + 1)]
+    client = ScriptedClient(script)
+    workbench = StubWorkbench(tmp_path)
+    _segments(workbench, [(0, 1000)])
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r")
+    assert summary["stop_reason"] == "output_limit"
+    assert summary["budget"]["auto_submit"]["submitted"] is True and workbench.submitted_items[0]["zulu_text"] == "a draft"
+
+
+def test_a_cut_off_that_is_followed_by_real_work_does_not_count_against_the_next_one(tmp_path):
+    from mathula_tv.dub_agent import MAX_CONSECUTIVE_TRUNCATIONS
+
+    work = lambda i: _reply(calls=[_call(f"m{i}", "measure_tts", {"text": f"draft {i}", "start_ms": 0, "end_ms": 1000})])           # noqa: E731
+    script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})])]
+    for i in range(MAX_CONSECUTIVE_TRUNCATIONS + 1):
+        script += [_cut_off(), work(i)]                                                      # more cut-offs than the limit in all, but never that many in a row
+    script += [_reply(calls=[_call("s", "submit_dub", {"items": []})]), _reply(content="done")]
+    summary, _, _ = _run(tmp_path, script)
+    assert summary["stop_reason"] == "agent_finished"
+
+
+def test_the_budget_has_phases_the_agent_is_warned_and_the_last_turns_can_only_submit(tmp_path):
+    """An agent that behaves: it is told at the soft line, the final turns offer only submitting, and it submits inside the protected reserve."""
+    from mathula_tv.budget_governor import FINAL_TOOLS
+
+    script = [_heavy(_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]))]
+    script += [_heavy(_reply(calls=[_call(f"m{i}", "measure_tts", {"text": f"draft {i}", "start_ms": 0, "end_ms": 1000})])) for i in range(16)]
+    script += [_heavy(_reply(calls=[_call("s", "submit_dub", {"items": []})])), _heavy(_reply(content="done"))]
+    summary, client, workbench = _run(tmp_path, script, max_total_tokens=1_000_000, stable_tools=False)          # the legacy mode swaps the declared set for the final phase
+    names = [{t["function"]["name"] for t in tools or []} for tools in client.tools_seen]
+    assert names[0] > FINAL_TOOLS and names[16] > FINAL_TOOLS                           # the work: every tool
+    assert names[17] == FINAL_TOOLS                                                     # the final phase: submitting only
+    def announced(turn, prefix):                                                       # was the note in the messages the model saw on this turn (1-based)?
+        return any(m["role"] == "user" and str(m.get("content")).startswith(prefix) for m in client.seen[turn - 1])
+
+    assert not announced(14, "Budget:") and announced(15, "Budget:")                   # the soft line is crossed at 70% of the ceiling
+    assert not announced(17, "FINAL PHASE") and announced(18, "FINAL PHASE")           # and the final phase opens before the reserve is touched
+    assert workbench.episode["submissions"] == 1 and summary["budget"]["phase_reached"] == "final" and "auto_submit" not in summary["budget"]
+    trace = (tmp_path / "r" / "c1" / "r1" / "trace.jsonl").read_text(encoding="utf-8")
+    assert trace.count('"kind": "budget_soft"') == 1 and trace.count('"kind": "budget_final"') == 1          # each phase announced once
+
+
+def test_a_run_that_ends_with_nothing_submitted_has_its_own_drafts_submitted_when_they_cover_the_clip(tmp_path):
+    """An agent that ignores the final phase: the harness submits the drafts it recorded, because they cover every segment."""
+    script = [_heavy(_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]))]
+    script += [_heavy(_reply(calls=[_call(f"m{i}", "measure_tts", {"text": "the only draft", "start_ms": 0, "end_ms": 1000})])) for i in range(40)]
+    client = ScriptedClient(script)
+    workbench = StubWorkbench(tmp_path)
+    _segments(workbench, [(0, 1000)])
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", max_total_tokens=1_000_000)
+    assert summary["stop_reason"] == "token_budget"
+    assert workbench.episode["submissions"] == 1 and workbench.submitted_items[0]["zulu_text"] == "the only draft" and workbench.submitted_items[0]["source_segment_ids"] == ["s1"]
+    assert summary["budget"]["auto_submit"]["submitted"] is True and summary["budget"]["final_turns"] == 3          # the final phase was bounded: 3 turns, then the harness acted
+    assert not (tmp_path / "r" / "c1" / "r1" / "unsubmitted_drafts.json").exists()
+
+
+def test_drafts_that_do_not_cover_the_clip_are_not_submitted_but_are_kept(tmp_path):
+    script = [_heavy(_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]))]
+    script += [_heavy(_reply(calls=[_call(f"m{i}", "measure_tts", {"text": "half of it", "start_ms": 0, "end_ms": 1000})])) for i in range(40)]
+    client = ScriptedClient(script)
+    workbench = StubWorkbench(tmp_path)
+    _segments(workbench, [(0, 1000), (1500, 2500)])                                      # the agent never drafted the second segment
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", max_total_tokens=1_000_000)
+    outcome = summary["budget"]["auto_submit"]
+    assert outcome["submitted"] is False and outcome["uncovered"] == ["s2"] and not workbench.episode["submissions"]
+    kept = json.loads((tmp_path / "r" / "c1" / "r1" / "unsubmitted_drafts.json").read_text(encoding="utf-8"))
+    assert "half of it" in json.dumps(kept["drafts"], ensure_ascii=False) and kept["why"]["uncovered"] == ["s2"]
 
 
 def test_agent_that_ignores_the_nudge_ends_without_submission(tmp_path):
@@ -790,16 +1034,15 @@ def test_the_stated_bar_has_half_a_point_of_slack_and_the_wrapup_can_be_turned_o
 def test_a_run_that_has_met_the_bar_is_shown_the_listener_points_still_open_and_given_one_round_to_act_on_them(tmp_path):
     from mathula_tv import dub_agent
 
-    held = "after “as well as” the speaker held 1.2 s; near “kakhulu, kanye noFannie” your Zulu leaves 0.15 s (~pause1200 after the word that ends the thought would match)"
-    first = {**_score(1.9), "comma_check": [{"item_id": "unit-002", "commas": 12, "pauses_the_speaker_held_that_the_dub_does_not": [held],
-                                             "commas_where_the_speaker_did_not_pause": ["“Impela, Ayanda” (the speaker said Ayanda with no pause before it: 0.00 s)"]}]}
+    chopped = "6 Zulu sentences for 2 English, 3.0 words each: said aloud it is mostly full stops"
+    first = {**_score(1.9), "naturalness": [{"item_id": "unit-002", "cadence": chopped}]}
     script = [_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s0", "submit_dub", {"items": []})]), _reply(content="done")]
     client = ScriptedClient(script)
     summary = run_agent(client, ScoringWorkbench(tmp_path, [first]), clip_id="c1", run_id="r", tts_budget=50, max_turns=20)
     told = [m["content"] for m in client.seen[-1] if m["role"] == "user" and "meets the bar" in str(m.get("content"))]
-    assert told and "open points" in told[0] and "unit-002" in told[0] and "~pause1200" in told[0] and "partial=true" in told[0] and "Finish now" not in told[0]
+    assert told and "open points" in told[0] and "unit-002" in told[0] and "full stops" in told[0] and "partial=true" in told[0] and "Finish now" not in told[0]
     assert summary["stop_reason"] in ("agent_finished", "bar_met")
-    assert dub_agent.open_listener_points({"comma_check": [{"item_id": f"u{i}", "pauses_the_speaker_held_that_the_dub_does_not": ["x"]} for i in range(20)]}) \
+    assert dub_agent.open_listener_points({"naturalness": [{"item_id": f"u{i}", "cadence": "x"} for i in range(20)]}) \
         == [f"u{i}: x" for i in range(dub_agent.LISTENER_POINTS_SHOWN)]
 
 
@@ -912,9 +1155,9 @@ def test_every_key_the_workbench_puts_in_a_submit_result_has_a_route_to_the_agen
     assert not keys - set(SUBMIT_KEY_ROUTES), f"computed by the workbench but never shown to the agent: {sorted(keys - set(SUBMIT_KEY_ROUTES))}"
     full = {"accepted": True, "warnings": ["w"], "headline": {"group_count": 3, "gate_failures": 0}, "gates": {"a": {"failed": False, "n": 1}}, "merged": {"sent": 1}, "regressions_accepted": [1],
             "note": "n", "meaning": {"loss": [{"u": 1}], "claims": [{"u": 2}]}, "timing_lock": {"fitting_segments": 1}, "turn_padding": [{"turn_id": "t", "residual_ms": 500, "units": ["u1"]}],
-            "flagged_units": [{"item_id": "u1", "gates": [], "flags": ["x"]}], "listening_load": [{"item_id": "u1"}], "spoken_form_gaps": [{"item_id": "u1"}], "comma_check": [{"item_id": "u1"}],
+            "flagged_units": [{"item_id": "u1", "gates": [], "flags": ["x"]}], "listening_load": [{"item_id": "u1"}], "spoken_form_gaps": [{"item_id": "u1"}],
             "voice_limit_words": [{"item_id": "u1"}], "figures_as_spoken": [{"item_id": "u1"}], "decisions_so_far": [{"english": "a"}], "settled_units": ["u2"], "units_overview": ["u1 1ch 0"],
-            "naturalness": [{"item_id": "u1"}], "speaker_rates_chars_per_s": {"A": 12.0}}
+            "naturalness": [{"item_id": "u1"}], "speaker_rates_chars_per_s": {"A": 12.0}, "sentence_timing": [{"unit": "u1", "behind_the_mouth": [{"sentence": 2}]}]}
     assert set(full) == set(SUBMIT_KEY_ROUTES)
     slim = slim_submit(full)
     for key, targets in SUBMIT_KEY_ROUTES.items():
@@ -1067,3 +1310,173 @@ def test_an_agent_that_answers_the_push_back_without_changing_anything_is_not_as
     lean = ScriptedClient([_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s1", "submit_dub", {"items": []})]), _reply(content="done")])
     done = run_agent(lean, ScoringWorkbench(tmp_path / "lean", [_points_result(_score(1.9), ["u5"])]), clip_id="c1", run_id="r", tts_budget=50, max_turns=40)
     assert done["stop_reason"] in ("agent_finished", "bar_met") and not [m for m in lean.seen[-1] if "You stopped, but your last submission" in str(m.get("content"))]          # lean runs are unchanged
+
+
+# ---- the draft deadline -----------------------------------------------------------------------------------------------------
+
+def _drafting_script(measures):
+    script = [_heavy(_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]))]
+    script += [_heavy(_reply(calls=[_call(f"m{i}", "measure_tts", {"text": "the only draft", "start_ms": 0, "end_ms": 1000})])) for i in range(measures)]
+    return script
+
+
+def test_an_agent_that_keeps_researching_is_told_at_the_deadline_refused_every_other_tool_and_then_its_drafts_are_submitted_for_it(tmp_path):
+    from mathula_tv.budget_governor import DRAFT_GRACE_TURNS
+    from mathula_tv.dub_agent import DRAFT_DEADLINE_REFUSAL
+
+    script = _drafting_script(11) + [_heavy(_reply(content="done")), _heavy(_reply(content="still done"))]
+    client = ScriptedClient(script)
+    workbench = StubWorkbench(tmp_path)
+    _segments(workbench, [(0, 1000)])
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", max_total_tokens=1_000_000, draft_deadline=True)
+    trace = (tmp_path / "r" / "c1" / "r1" / "trace.jsonl").read_text(encoding="utf-8")
+    assert trace.count('"kind": "draft_deadline"') == 1 and trace.count('"kind": "draft_auto_submit"') == 1                  # told once, acted once
+    seen = [m for turn in client.seen for m in turn if m["role"] == "user" and str(m.get("content")).startswith("DRAFT DEADLINE")]
+    assert seen and "the only draft" in seen[0]["content"]                                                                     # the note carries the agent's own drafts
+    refused = [m for m in client.seen[-1] if m["role"] == "tool" and DRAFT_DEADLINE_REFUSAL in m["content"]]
+    assert len(refused) == DRAFT_GRACE_TURNS                                                                                    # every call in the grace turns was refused for free
+    assert workbench.episode["submissions"] == 1 and workbench.submitted_items[0]["zulu_text"] == "the only draft"
+    assert summary["budget"]["draft_deadline"] == {"turns_after_note": DRAFT_GRACE_TURNS, "harness_submitted": True} and summary["draft_deadline"] is True
+    assert any("did not submit in time" in str(m.get("content")) for m in client.seen[-1] if m["role"] == "user")             # and it is told what happened and that the tools are back
+
+
+def test_a_submission_inside_the_grace_turns_lifts_the_restriction_and_the_harness_does_nothing(tmp_path):
+    script = _drafting_script(9) + [_heavy(_reply(calls=[_call("s", "submit_dub", {"items": []})])), _heavy(_reply(calls=[_call("m", "measure_tts", {"text": "after", "start_ms": 0, "end_ms": 1000})])),
+                                    _heavy(_reply(content="done")), _heavy(_reply(content="done"))]
+    client = ScriptedClient(script)
+    workbench = StubWorkbench(tmp_path)
+    _segments(workbench, [(0, 1000)])
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", max_total_tokens=1_000_000, draft_deadline=True)
+    trace = (tmp_path / "r" / "c1" / "r1" / "trace.jsonl").read_text(encoding="utf-8")
+    assert '"kind": "draft_deadline"' in trace and '"kind": "draft_auto_submit"' not in trace
+    assert workbench.episode["submissions"] == 1 and workbench.submitted_items == []                                         # the agent's own submit_dub, not the harness's
+    after = [m for m in client.seen[-1] if m["role"] == "tool" and m["tool_call_id"] == "m"]
+    assert after and "not_available_yet" not in after[0]["content"]                                                         # the measurement after the submission was allowed
+    assert summary["budget"]["draft_deadline"]["harness_submitted"] is False
+
+
+def test_the_deadline_is_off_when_switched_off_and_does_not_apply_once_a_submission_exists(tmp_path):
+    script = _drafting_script(11) + [_heavy(_reply(content="done")), _heavy(_reply(content="done"))]
+    client = ScriptedClient(script)
+    workbench = StubWorkbench(tmp_path)
+    run_agent(client, workbench, clip_id="c1", run_id="r", max_total_tokens=1_000_000, draft_deadline=False)
+    assert not any(str(m.get("content")).startswith("DRAFT DEADLINE") for turn in client.seen for m in turn if m["role"] == "user")
+    seeded = ScriptedClient(_drafting_script(11)[1:] + [_heavy(_reply(content="done")) for _ in range(5)])          # no open_clip: a repair run starts with its seed already scored
+    accepted_bench = StubWorkbench(tmp_path / "b")
+    accepted_bench.open_clip("c1", "r")
+    accepted_bench.episode["submissions"] = 1                                                  # a repair run starts accepted
+    run_agent(seeded, accepted_bench, clip_id="c1", run_id="r", max_total_tokens=1_000_000, draft_deadline=True)
+    assert not any(str(m.get("content")).startswith("DRAFT DEADLINE") for turn in seeded.seen for m in turn if m["role"] == "user")
+
+
+def test_drafts_that_do_not_cover_the_clip_are_not_submitted_and_the_agent_is_told_which_units_have_no_text(tmp_path):
+    script = _drafting_script(11) + [_heavy(_reply(content="done")), _heavy(_reply(content="done"))]
+    client = ScriptedClient(script)
+    workbench = StubWorkbench(tmp_path)
+    _segments(workbench, [(0, 1000), (1000, 2000)])                                            # the agent only ever drafted the first window
+    summary = run_agent(client, workbench, clip_id="c1", run_id="r", max_total_tokens=1_000_000, draft_deadline=True)
+    assert workbench.episode["submissions"] == 0
+    told = [m["content"] for m in client.seen[-1] if m["role"] == "user" and "could not submit your working drafts" in str(m.get("content"))]
+    assert told and "s2" in told[0]
+    assert summary["budget"]["draft_deadline"]["harness_submitted"] is True                  # it tried once, and does not try again every turn
+
+
+def _focus_history(steps_after_submit: int = 8):
+    messages = [
+        {"role": "system", "content": "sys"}, {"role": "user", "content": "task"},
+        _assistant("o", "open_clip"), _tool("o", "THE CLIP"),
+        _assistant("l", "recall_lessons"), _tool("l", "LESSONS"),
+        _assistant("s1", "submit_dub"), _tool("s1", "SCORE 1"),
+    ]
+    for n in range(steps_after_submit):
+        messages += [_assistant(f"w{n}", "measure_tts_batch"), _tool(f"w{n}", f"measurement {n}")]
+    return messages
+
+
+def _ledger_with(text="the latest text of unit 1"):
+    from mathula_tv.draft_ledger import DraftLedger
+
+    ledger = DraftLedger()
+    ledger.set_segments([{"segment_id": "s1", "start_ms": 0, "end_ms": 10000}])
+    ledger.observe("measure_tts", json.dumps({"text": text, "start_ms": 0, "end_ms": 10000}), json.dumps({"measured_ms": 9000, "window_ms": 10000, "fits_naturally": False}))
+    return ledger
+
+
+def test_focus_folds_the_working_steps_since_the_last_submission_into_the_ledger_and_keeps_the_last_few():
+    from mathula_tv.dub_agent import FOCUS_KEEP_STEPS, FOCUS_NOTE_PREFIX, compact_history
+
+    messages = _focus_history(8)
+    plain, dropped_plain = compact_history(messages, _ledger_with())
+    assert dropped_plain == 0 and plain == messages                                           # without the focus step nothing after the last submission is touched, as before
+    folded, dropped = compact_history(messages, _ledger_with(), focus=True)
+    texts = [m.get("content") for m in folded]
+    assert dropped == 8 - FOCUS_KEEP_STEPS
+    assert folded[:8] == messages[:8]                                                         # the head, the clip and the submission with its result: byte for byte the same, so their cache stays valid
+    assert not any(f"measurement {n}" in texts for n in range(8 - FOCUS_KEEP_STEPS))
+    assert all(f"measurement {n}" in texts for n in range(8 - FOCUS_KEEP_STEPS, 8))          # the last steps verbatim
+    note = next(t for t in texts if str(t).startswith(FOCUS_NOTE_PREFIX))
+    assert "the latest text of unit 1" in note and "measured 9.0s" in note
+    called = {c["id"] for m in folded if m["role"] == "assistant" for c in m.get("tool_calls") or []}
+    assert called == {m["tool_call_id"] for m in folded if m["role"] == "tool"}               # every call still has its result
+
+
+def test_focus_is_idempotent_and_leaves_a_short_tail_and_an_empty_ledger_alone():
+    from mathula_tv.dub_agent import compact_history
+    from mathula_tv.draft_ledger import DraftLedger
+
+    once, _ = compact_history(_focus_history(8), _ledger_with(), focus=True)
+    twice, dropped = compact_history(once, _ledger_with(), focus=True)
+    assert dropped == 0 and twice == once
+    short = _focus_history(3)
+    assert compact_history(short, _ledger_with(), focus=True) == (short, 0)                  # three steps are all recent
+    assert compact_history(_focus_history(8), DraftLedger(), focus=True)[1] == 0              # nothing in the ledger to stand in for them: nothing is dropped
+
+
+def test_the_focus_trigger_waits_for_growth_and_a_real_size_and_is_off_for_the_lean_budget():
+    from mathula_tv.dub_agent import BUDGET_LIMITS, FOCUS_FLOOR_TOKENS
+
+    assert BUDGET_LIMITS["free"]["focus_growth_tokens"] >= 5_000 and BUDGET_LIMITS["lean"]["focus_growth_tokens"] == 0
+    assert FOCUS_FLOOR_TOKENS > 30_000                                                       # the opened clip, the system prompt and the lessons alone are about 26k
+
+
+
+def test_a_repair_run_is_told_at_the_start_which_units_write_a_prefix_real_zulu_text_does_not():
+    from types import SimpleNamespace
+
+    from mathula_tv.attestation import Attestation, WebText
+    from mathula_tv.dub_agent import prefix_corpus_note
+
+    attestation = Attestation(["x"], ["y"], [], WebText({"ama-hawks": (6, 8), "amahawks": (5, 2), "hawks": (18, 41)}))
+    workbench = SimpleNamespace(_resources=lambda: attestation, segments=[{"segment_id": "s1", "source_text": "He worked under the Hawks."}, {"segment_id": "s2", "source_text": "The police said so."}])
+    items = [{"item_id": "unit-01", "source_segment_ids": ["s2"], "zulu_text": "Amaphoyisa athe kunjalo."},
+             {"item_id": "unit-02", "source_segment_ids": ["s1"], "zulu_text": "Wayengaphansi kwabe-Hawks, owanikwa umsebenzi."}]
+    note = prefix_corpus_note(workbench, items)
+    assert "unit-02: Hawks: you wrote kwabe-Hawks" in note and "ama-Hawks" in note and "unit-01" not in note
+    assert "can still be right" in note                                   # said once, as a reminder
+    assert prefix_corpus_note(SimpleNamespace(_resources=lambda: None, segments=[]), items) == ""            # no corpus installed: nothing to say
+    assert prefix_corpus_note(SimpleNamespace(_resources=lambda: attestation, segments=[]), [{"item_id": "u", "zulu_text": "Sawubona.", "source_segment_ids": []}]) == ""
+
+
+def test_the_reviewer_reports_phrases_per_unit_and_keeps_its_answer_until_the_text_changes():
+    from mathula_tv.dub_judge import UnitJudge
+
+    class Client:
+        calls = 0
+
+        def complete(self, messages, **_):
+            Client.calls += 1
+            import json
+
+            ids = [x["id"] for x in json.loads(messages[1]["content"])]
+            body = {"items": [{"id": i, "issues": [{"phrase": "u-Ayanda Nyathi nentatheli", "kind": "fused", "problem": "runs together", "fix": "u-Ayanda Nyathi, nentatheli"},
+                                                    {"phrase": "", "kind": "grammar", "problem": "empty", "fix": ""}] if i == "unit-01" else []} for i in ids]}
+            return {"choices": [{"message": {"content": json.dumps(body)}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+    judge = UnitJudge(Client())
+    units = [{"id": "unit-01", "english": "Ayanda Nyathi and journalist", "zulu": "u-Ayanda Nyathi nentatheli"}, {"id": "unit-02", "english": "Hello", "zulu": "Sawubona."}]
+    first = judge.grammar(units)
+    assert first["unit-01"] == [{"phrase": "u-Ayanda Nyathi nentatheli", "kind": "fused", "problem": "runs together", "fix": "u-Ayanda Nyathi, nentatheli"}] and first["unit-02"] == []          # the empty issue is dropped
+    calls = Client.calls
+    assert judge.grammar(units) == first and Client.calls == calls                                    # nothing is asked again for an unchanged text
+    changed = judge.grammar([{**units[0], "zulu": "u-Ayanda Nyathi, nentatheli"}, units[1]])
+    assert Client.calls == calls + 1 and "unit-01" in changed                                          # a changed text is asked again, the unchanged one is not

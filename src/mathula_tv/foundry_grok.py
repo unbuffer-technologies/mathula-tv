@@ -63,7 +63,7 @@ Preserve attribution, allegation/uncertainty, names, numbers and evidential limi
 invent guilt, corruption, lying, motives, admissions or facts. Prefer a named actor plus a
 verified contradiction, document, consequence, decision, or unanswered question over
 generic newsroom framing. Each candidate's hook_text and accessible_hook_text are isiZulu;
-caption and search_keywords are English. Do not rewrite approved dubbed speech. Do not use
+caption and search_keywords are English. The caption is written for viewers: say what the video reports, never mention the evidence, the material you were given or what it does not contain (no "supplied evidence", "not reported", "according to the transcript"), and end on a complete sentence. Do not rewrite approved dubbed speech. Do not use
 tools or web search. Return JSON only."""
 
 
@@ -800,7 +800,12 @@ def create_native_gpt_provider(
     progress: Callable[[str], None] | None = None,
     heartbeat_seconds: float = 15.0,
 ) -> FoundryGrokProvider:
-    """GPT-backed provider for every native-* command (translate, qa, dub)."""
+    """GPT-backed provider for every native-* command (translate, qa, dub); Gemini-backed when MATHULA_AI_PROVIDER=gemini (see gemini_native)."""
+    env = environ if environ is not None else os.environ
+    if (env.get("MATHULA_AI_PROVIDER") or "azure").strip().lower() == "gemini":
+        from .gemini_native import create_gemini_native_provider
+
+        return create_gemini_native_provider(env, progress=progress, heartbeat_seconds=heartbeat_seconds)
     return FoundryGrokProvider(
         native_gpt_config_from_environment(environ, deployment=deployment),
         session=session,

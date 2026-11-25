@@ -66,6 +66,26 @@ def queue_lessons(store: Any, *, run_id: str, clip_id: str, playbook: Mapping[st
     return entries
 
 
+CLONED_VOICE = "omnivoice-zu"
+
+
+def reference_voice_assignments(job_root: Path, job_id: str, segments: Any, *, progress: Any = print) -> Path:
+    """The voices of a job whose voice is cloned from the speaker's own reference clip: each speaker is heard as themselves, so there is nothing to resolve.
+    No voice-family classifier, no model asked, no voice map: every speaker of Pass 1 gets the one cloned-voice id (the key the duration estimator learns under) and the file the
+    rest of the pipeline reads (``direct_dub/voice_resolution.json``).  A job that already has the file keeps it, so its frozen clip and its estimates stay as they were."""
+    path = Path(job_root) / "direct_dub" / "voice_resolution.json"
+    if path.is_file():
+        return path
+    speakers = sorted({str(s.get("speaker_id")) for s in segments if s.get("speaker_id")})
+    rows = [{"speaker_id": sp, "selected_voice": CLONED_VOICE, "status": "resolved", "resolution_status": "cloned_from_reference", "voice_family": None,
+             "base_prosody": {"rate_percent": 0, "pitch_percent": 0, "volume_percent": 0}} for sp in speakers]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, {"schema_version": "mathula-cloned-voice-resolution-v1", "job_id": job_id, "assignments": {r["speaker_id"]: r for r in rows}, "speakers": rows,
+                             "unresolved_speakers": [], "completed_at": datetime.now(timezone.utc).isoformat()})
+    progress(f"[prepare] voices: {len(rows)} speaker(s) cloned from their own reference clips (no voice resolution)")
+    return path
+
+
 def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -> dict[str, Any]:
     """Produce the inputs the agent and the renderer need that Pass 1 does not: glossary, pronunciation research,
     speaker prosody modes and the per-speaker voices.
@@ -78,9 +98,8 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
     from .cli import create_native_gpt_backend
     from .native_dub import (
         _ensure_native_pronunciation_research, _ensure_speaker_seriousness_modes, _ensure_zulu_glossary,
-        _load_existing_context_ledger, ensure_native_voice_assignments, native_dub_paths,
+        _load_existing_context_ledger, native_dub_paths,
     )
-    from .orchestrator import Orchestrator
 
     job_root = Path(settings.work_dir) / "jobs" / job_id
     paths = native_dub_paths(job_root)
@@ -102,9 +121,7 @@ def prepare_agent_inputs(settings: Any, job_id: str, *, progress: Any = print) -
         stt_backend=None, skip_round_trip_verification=True, grok_provider=None,
         pass1_corrections=pass1.get("corrections") or ())
     _ensure_speaker_seriousness_modes(job_root=job_root, provider=provider, segments=segments, progress=progress)
-    job = Orchestrator(settings).jobs.load(job_id)
-    voices = ensure_native_voice_assignments(job=job, job_root=job_root, segments=segments, context_ledger=ledger,
-                                             provider=provider, progress=progress)
+    voices = reference_voice_assignments(job_root, job_id, segments, progress=progress)
     try:        # words the English transcript got wrong, checked against YouTube's captions of the same moment (see source_suspects): no recogniser runs here
         from .source_suspects import run as check_source
 
@@ -232,9 +249,11 @@ def run_production(
     playbook_version: str | None = None, render: bool = True, reflect_after: bool = True, judge_meaning: bool = True,
     max_turns: int | None = None, max_total_tokens: int | None = None, tts_budget: int | None = None, repair_from: str | None = None,
     hook: bool = False, audio_only: bool = False, mode: str | None = None, compact: bool = True, budget: str | None = None, resume: bool = False,
+    fresh: bool = False,
 ) -> dict[str, Any]:
+    """``fresh``: ignore earlier runs of the job and draft from nothing; by default a job that has been dubbed before starts from its best earlier submission (see warm_start)."""
     from .cli import create_tts_backend
-    from .dub_agent import BUDGET_LIMITS, ChatClient, agent_budget, agent_mode, build_system_prompt, run_agent
+    from .dub_agent import BUDGET_LIMITS, agent_budget, agent_mode, build_system_prompt, new_chat_client, run_agent
     from .dub_judge import UnitJudge
     from .dub_workbench import Workbench
     from .experience_store import ExperienceStore
@@ -254,11 +273,21 @@ def run_production(
     frozen = ensure_frozen(store, job_root, clip_id)
     playbook = load_playbook(store, playbook_version) if playbook_version else current_playbook(store)
 
+    from . import warm_start as ws
+
     seed_items = None
+    start: Any = None
     if resume:
         print(f"[resume] continuing run {run_id} from its checkpoint")
-    elif repair_from:
-        seed_items = json.loads((store.repeat_dir(repair_from, clip_id, 1) / "submission.json").read_text(encoding="utf-8"))["items"]
+    if repair_from:
+        start = ws.from_run(store, repair_from, clip_id)
+    elif not resume and not fresh:        # a job already dubbed starts from the best submission any earlier run made, not from nothing (--fresh turns it off)
+        start = ws.choose(store, clip_id, exclude=(run_id,))
+        print(f"[warm start] {'from ' + start.describe() if start else 'no earlier run of this job: a fresh start'}")
+    if start is not None:
+        repair_from = start.run_id
+    if start is not None and not resume:
+        seed_items = start.load_items()
         try:        # an earlier run may have typed a chosen spelling into a unit's text: the word goes back, the render respells it
             from .pronunciation_memory import load as load_memory, memory_path, restore_written_words
 
@@ -274,26 +303,34 @@ def run_production(
         print(f"[stems] ZulMorph {'reached ' + str(reached['via']) if reached['available'] else 'NOT reachable: settled terms are compared by plain form only'}")
     except Exception as exc:        # noqa: BLE001 - never stops a run
         print(f"[stems] analyser check failed: {type(exc).__name__}")
-    judge = UnitJudge(ChatClient(client.config)) if judge_meaning and hasattr(client, "config") else None
+    try:        # the copies of the voice this clip's length needs, running before the first measurement (a copy takes a minute or more to load; nothing is lost by waiting for it)
+        from .omnivoice_tts import warm_voice
+
+        warm_voice(float(frozen.get("duration_s") or 0.0))
+    except Exception as exc:        # noqa: BLE001 - warming is an optimisation, never a reason a run cannot start
+        print(f"[voice] warm-up skipped: {type(exc).__name__}")
+    judge = UnitJudge(new_chat_client(client.config)) if judge_meaning and hasattr(client, "config") else None
     workbench = Workbench(store, lambda: create_tts_backend(settings), judge=judge)
-    if repair_from:        # the English each unit of the earlier submission was written against
-        try:
-            seed_dir = store.repeat_dir(repair_from, clip_id, 1)
-            workbench.seed_unit_texts = {str(g["group_id"]): str(g.get("source_text") or "")
-                                         for g in json.loads((seed_dir / "scorecard.json").read_text(encoding="utf-8")).get("groups") or []}
-        except (OSError, ValueError, KeyError):
-            workbench.seed_unit_texts = None
+    if start is not None:        # the English each unit of the earlier submission was written against
+        workbench.seed_unit_texts = start.unit_texts()
         try:        # the terms the earlier run settled (submit_dub decisions), so a repair does not word them again
-            saved = store.repeat_dir(repair_from, clip_id, 1) / "decisions.json"
+            saved = start.directory / "decisions.json"
             if saved.is_file():
                 workbench.seed_decisions = {str(e["english"]).casefold(): e for e in json.loads(saved.read_text(encoding="utf-8")).get("decisions") or [] if isinstance(e, dict) and e.get("english")}
         except (OSError, ValueError):
             pass
     summary = run_agent(
         client, workbench, clip_id=clip_id, run_id=run_id, repeat=1, max_turns=max_turns,
-        max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=build_system_prompt(playbook, mode=mode, budget=budget),
+        max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=build_system_prompt(playbook, mode=mode, budget=budget, web=bool(getattr(client, "web_budget", 0))),
         playbook_version=playbook["version"], seed_items=seed_items, mode=mode, free_finish=(budget == "free"), resume=resume,
-        dead_air_slack_pct=limits["dead_air_slack_pct"], compact_after_tokens=limits["compact_after_tokens"] if compact else 0)
+        dead_air_slack_pct=limits["dead_air_slack_pct"], compact_after_tokens=limits["compact_after_tokens"] if compact else 0,
+        focus_growth_tokens=limits.get("focus_growth_tokens", 0) if compact else 0)
+    try:        # the agent has stopped measuring: the copies of the voice held for it are given back now (they cost for as long as they are held; the process exit gives them back too)
+        from .omnivoice_tts import release_voice
+
+        release_voice()
+    except Exception as exc:        # noqa: BLE001 - never loses a run
+        print(f"[voice] release skipped: {type(exc).__name__}")
     run_dir = store.repeat_dir(run_id, clip_id, 1)
     print(f"[mem] agent finished: {rss_mb()} MB resident")
     met_bar = summary.get("stop_reason") in ("agent_finished", "bar_met")
@@ -302,6 +339,8 @@ def run_production(
         "stop_reason": summary.get("stop_reason"), "met_bar": met_bar, "unmet_at_end": summary.get("unmet_at_end"),
         "turns": summary.get("turns"), "tokens": summary.get("tokens"), "judge_tokens": summary.get("judge_tokens"),
         "clip": {k: frozen.get(k) for k in ("duration_s", "segment_count")},
+        "voice_provider": ws.current_voice_provider(),
+        **({"warm_start": {"from_run": start.run_id, "from_best": start.from_best, "voice_provider": start.voice_provider, "same_voice": start.same_voice, "key": list(start.key)}} if start is not None and not resume else {}),
         "headline": _headline(run_dir),
     }
 
@@ -332,6 +371,14 @@ def run_production(
         except Exception as exc:
             report["reflection_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
 
+    if mode == "training":        # what the agent recorded about its own decisions goes into the shared ledger (experience_ledger), so later jobs can learn from it
+        try:
+            from .experience_ledger import ingest_run
+
+            report["experience_ledger"] = ingest_run(Path(settings.work_dir), job_id=job_id, run_id=run_id, clip_id=clip_id)
+            print(f"[ledger] {report['experience_ledger']}")
+        except Exception as exc:        # noqa: BLE001 - the ledger must never lose a run
+            report["experience_ledger_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
     atomic_write_json(run_dir / "production_report.json", report)
     return report
 
@@ -355,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-only", action="store_true",
                         help="make the glossary, pronunciation research, prosody modes and voices, then stop")
     parser.add_argument("--repair-from", default=None, help="run id whose accepted submission to repair instead of dubbing again")
+    parser.add_argument("--fresh", action="store_true", help="do not start from the job's best earlier submission: draft the whole clip from nothing (the default for a job never dubbed before)")
     parser.add_argument("--hook", action="store_true",
                         help="render the hook edit and footer overlay and write the job-ID-named handoff files for posting")
     parser.add_argument("--no-render", action="store_true")
@@ -369,12 +417,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="live (default, or MATHULA_AGENT_MODE): token-lean, what runs in production. training: the agent also records its choice points and unit strategies, the model's reasoning summaries are kept, and thinking_report.md is written beside the trace")
     parser.add_argument("--resume", action="store_true", help="continue the run --run-id from its checkpoint (every turn saves one): nothing is redone, the conversation is restored whole")
     parser.add_argument("--pause", action="store_true", help="ask the running --run-id to stop at the end of its current turn and save its checkpoint; resume it with --resume")
+    parser.add_argument("--web-search", type=int, default=None, help="web lookups (searches and pages opened) the agent may make to settle a name; default 6 in training mode, 0 in live mode (or MATHULA_AGENT_WEB)")
     parser.add_argument("--no-compact", action="store_true", help="keep the whole conversation in context (no compaction): costs many more input tokens; for training runs")
     args = parser.parse_args(argv)
 
     from .config import load_settings
-    from .dub_agent import ResponsesClient, request_pause
-    from .foundry_grok import native_gpt_config_from_environment
+    from .dub_agent import native_client_config, new_agent_client, request_pause
 
     settings = load_settings()
     if args.pause or args.resume:
@@ -390,12 +438,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.prepare_only:
         print(json.dumps(prepared, indent=2))
         return 0
-    client = ResponsesClient(native_gpt_config_from_environment(dict(os.environ)))
+    client = new_agent_client(native_client_config())
+    from .dub_agent import agent_mode
+
+    web = args.web_search if args.web_search is not None else int(os.environ.get("MATHULA_AGENT_WEB") or (6 if agent_mode(args.mode) == "training" else 0))
+    client.web_budget = max(0, web)
+    if client.web_budget:
+        print(f"[web] the agent may make up to {client.web_budget} web lookups to settle a name")
     report = run_production(
         settings, client, job_id=args.job, clip_id=args.clip, run_id=args.run_id, playbook_version=args.playbook,
         render=not args.no_render, reflect_after=not args.no_reflect, judge_meaning=not args.no_judge,
         max_total_tokens=args.max_tokens, repair_from=args.repair_from, hook=args.hook, audio_only=args.audio_only,
-        mode=args.mode, compact=not args.no_compact, budget=args.budget, resume=args.resume)
+        mode=args.mode, compact=not args.no_compact, budget=args.budget, resume=args.resume, fresh=args.fresh)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     return 0 if report["met_bar"] else 2
 

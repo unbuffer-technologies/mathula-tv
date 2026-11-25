@@ -3188,7 +3188,9 @@ def run_name_research_autocorrection(
         if is_manual_ai_provider(os.getenv("MATHULA_TV_AI_PROVIDER")):
             research_provider = create_production_ai_provider()
         else:
-            azure_provider = AzureResponsesWebResearchProvider.from_environment()
+            from .gemini_web_research import create_web_research_provider
+
+            azure_provider = create_web_research_provider()          # Gemini with Google Search when MATHULA_AI_PROVIDER=gemini, else Azure's web_search
 
     for batch_index, batch in enumerate(batches, start=1):
         batch_payload = _build_batch_payload(

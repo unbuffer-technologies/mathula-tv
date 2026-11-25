@@ -1004,7 +1004,7 @@ _ZU_CLASS10_UNITS = {
     8: "eziyisishiyagalombili", 9: "eziyisishiyagalolunye",
 }
 _ZU_MONEY_WORDS = re.compile(
-    r"(khokh|hlawul|mholo|mali\b|marandi|rand|nikez|thola|phakela|inkokhelo|izindleko|ibhajethi|isabelomali|mkhokho|ntela|nyuswa)",
+    r"(khokh|hlawul|mholo|mali\b|marandi|rand|nikez|thol[ae]|phakela|inkokhelo|izindleko|ibhajethi|isabelomali|mkhokho|ntela|nyuswa)",
     re.IGNORECASE,
 )
 _ZU_COPULA = re.compile(r"(?<![A-Za-z])(?:ngu|u)-$", re.IGNORECASE)
@@ -1068,9 +1068,26 @@ def _unit_and_tens_words(value: int, joiner: str) -> str:
 
 
 def _native_amount_words(lead: int, tail: int) -> str | None:
-    """4,500 -> "izinkulungwane ezine namakhulu amahlanu". None when this reading does not cover the amount."""
-    if not 1 <= lead <= 99:
+    """4,500 -> "izinkulungwane ezine namakhulu amahlanu"; 300,000 -> "izinkulungwane ezingamakhulu amathathu"; 250,000 -> "izinkulungwane ezingamakhulu amabili namashumi amahlanu".  None when
+    this reading does not cover the amount (more than 999,999).  Money is where a viewer listens hardest, so it is read natively wherever there is a form: the listener judged
+    100,000 and 300,000 better said natively than in English (job 33294c3d, 2026-11-14).  The six-figure forms follow the reviewed ones for 20--99 thousand ("ezingamashumi ...")
+    with "ezingamakhulu ..." for the hundreds; a speaker judges them by ear."""
+    if not 1 <= lead <= 999:
         return None
+    if lead >= 100:
+        hundreds, rest = divmod(lead, 100)
+        thousands = "izinkulungwane eziyikhulu" if hundreds == 1 else f"izinkulungwane ezingamakhulu {_ZU_CARDINAL_TENS[hundreds]}"
+        if rest:
+            thousands += " " + _unit_and_tens_words(rest, "na")
+        words = [thousands]
+        h, r = divmod(tail, 100)
+        if h == 1:
+            words.append("nekhulu")
+        elif h:
+            words.append(f"namakhulu {_ZU_CARDINAL_TENS[h]}")
+        if r:
+            words.append(_unit_and_tens_words(r, "na"))
+        return " ".join(words)
     if lead == 1:
         thousands = "inkulungwane"
     elif lead < 10:
@@ -2487,11 +2504,20 @@ class PronunciationDictionary:
         return PronunciationResult(
             spoken_text=text,
             # a marker no rule used (after a small number, say) is dropped here: it is never spoken
-            tts_text=re.sub(re.escape(ZU_ENGLISH_MARKER), "", "".join(output), flags=re.IGNORECASE),
+            tts_text=_without_quote_marks(re.sub(re.escape(ZU_ENGLISH_MARKER), "", "".join(output), flags=re.IGNORECASE)),
             substitutions=tuple(substitutions),
             dictionary_version=self.dictionary_version,
             dictionary_sha256=self.sha256,
         )
+
+
+_QUOTE_MARKS = re.compile("[“”„‟«»\"]")
+
+
+def _without_quote_marks(text: str) -> str:
+    """Double quote marks are never spoken and the Zulu voice does not ignore them: it said an extra "d" after a nickname written between them (Kheni uVusimuzi “Khethi” Matlala was heard as
+    "Katie de Matlala" by a recogniser, and as "cat d matlala" by the listener; without the marks the "d" was gone, 2026-11-14).  Apostrophes and single quotes stay: they are part of words."""
+    return _QUOTE_MARKS.sub("", text)
 
 
 def apply_pronunciation_dictionary(

@@ -90,6 +90,39 @@ def find_soft_prefixed_english(spoken_zulu: str, source_english: str) -> list[st
             for item in prefixed_words(spoken_zulu, source_english) if not item["hard"]]
 
 
+_ANY_PREFIX = re.compile(r"(?<![A-Za-z'])((?:[a-z]+-)*[a-z]+-?)([A-Z][A-Za-z']{3,})(?![A-Za-z'])")
+
+
+def find_unattested_prefixed(spoken_zulu: str, source_english: str, attestation: Any) -> list[str]:
+    """A reminder to look, for each word or name the speaker says that the Zulu text writes with a prefix (or a chain of them) real Zulu text does not write on it: one line per word, with the forms it does write.
+
+    "kwabe-Hawks" has no sighting in the corpora; they write the Hawks as ama-Hawks / amaHawks and glue the genitive to that (wamaHawks, kumaHawks).  The voice has never heard the invented form, reads it as
+    another word, and says it (prod-128 0:56).  The lookup was there all along; nothing made the agent use it.  This is not a verdict: Zulu vowels merge (na + u = no, wa + i = we), the corpora are small, and
+    a form missing from them can be right, so the line says so and the agent weighs it.  A word the corpora never write with a prefix at all gives nothing to compare with and is left alone."""
+    if attestation is None:
+        return []
+    forms = _english_forms(source_english)
+    mine: dict[str, list[str]] = {}
+    for match in _ANY_PREFIX.finditer(spoken_zulu):
+        token, root = match.group(0), match.group(2)
+        if _stem(root) not in forms or token in mine.get(root, []):
+            continue
+        everything, top = attestation.prefixed_forms(root)
+        if not top:
+            continue
+        seen = everything.get((match.group(1).replace("-", "") + root).lower().replace("'", ""))
+        if seen and sum(seen) > 0:
+            continue
+        mine.setdefault(root, []).append(token)
+    out: list[str] = []
+    for root, tokens in mine.items():
+        top = attestation.prefixed_forms(root)[1]
+        shown = ", ".join(f"{form[:-len(root)]}-{root} ({n} news, {o} other)" for form, n, o in top[:4])
+        out.append(f"{root}: you wrote {', '.join(tokens)}, which the Zulu text we hold never writes; it writes {root} as {shown}. Zulu vowels merge (na+u = no, wa+i = we) and the corpora are small, "
+                   f"so a form missing from them can still be right: compare, and if you are unsure follow the attested one (the voice has not heard a form nobody writes)")
+    return out
+
+
 def _replace_everywhere(value: Any, old: str, new: str) -> Any:
     if isinstance(value, str):
         return value.replace(old, new).replace(old[:1].swapcase() + old[1:], new)

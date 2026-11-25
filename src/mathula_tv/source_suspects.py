@@ -141,6 +141,83 @@ def _extend_window(segment: dict[str, Any], segments: Sequence[Mapping[str, Any]
             segment["end"] = target / 1000.0
 
 
+START_LOOKBACK_MS = 4000          # how far before a segment's first recognised word its restored opening words may have been spoken
+START_QUIET_MS = 300              # a silence this long ends the stretch of speech that leads into the segment
+
+
+def prepends_words(source_text: str, restored_text: str) -> bool:
+    """True when the restored text opens with words the recogniser never heard (a name it skipped: "Samkele Maseko there, giving us ...")."""
+    words = lambda t: re.findall(r"[a-z0-9']+", str(t).lower())
+    source, restored = words(source_text), words(restored_text)
+    if not source or len(restored) <= len(source) or restored[0] == source[0]:
+        return False
+    return source[0] in restored[1:4]
+
+
+def speech_onset_before(samples: Any, rate: int, start_ms: int, floor_ms: int) -> int | None:
+    """Where the speech that runs into ``start_ms`` began, looking back no further than ``floor_ms`` (the end of the segment before) and ``START_LOOKBACK_MS``: walk back
+    from the start while the audio is speech, stop at a silence of START_QUIET_MS.  None when there is no earlier speech joined to the start."""
+    import numpy as np
+
+    x = np.asarray(samples, dtype=float)
+    window = max(1, int(0.02 * rate))
+    count = len(x) // window
+    if count < 2:
+        return None
+    energy = np.sqrt((x[: count * window].reshape(count, window) ** 2).mean(axis=1))
+    first = max(0, int(max(floor_ms, start_ms - START_LOOKBACK_MS) / 1000 * rate) // window)
+    last = min(count - 1, int(start_ms / 1000 * rate) // window)
+    if last <= first:
+        return None
+    span = energy[first:last + 1]
+    voiced = span[span > 150.0]
+    loud = span > max(150.0, 0.08 * float(np.median(voiced))) if len(voiced) else np.zeros(len(span), dtype=bool)
+    quiet_windows = max(1, int(START_QUIET_MS / 1000 * rate) // window)
+    onset: int | None = None
+    silent = 0
+    for k in range(len(loud) - 1, -1, -1):
+        if loud[k]:
+            onset, silent = k, 0
+        else:
+            silent += 1
+            if silent >= quiet_windows:
+                break
+    if onset is None or (onset + first) * window / rate * 1000 >= start_ms - 150:
+        return None
+    return int((onset + first) * window / rate * 1000)
+
+
+def extend_start_to_speech(segment: dict[str, Any], previous_end_ms: int, audio_path: Path) -> int | None:
+    """A segment whose restored text opens with words the recogniser skipped starts where those words were spoken, not at its first recognised word: its window grows back to
+    the speech onset (never into the segment before).  Returns the new start, or None when nothing changed."""
+    if not prepends_words(str(segment.get("source_text") or ""), str(segment.get("restored_text") or "")) or not Path(audio_path).is_file():
+        return None
+    import wave
+
+    import numpy as np
+
+    with wave.open(str(audio_path), "rb") as src:
+        rate, channels, width = src.getframerate(), src.getnchannels(), src.getsampwidth()
+        if width != 2:
+            return None
+        begin = max(0, int((int(segment["start_ms"]) - START_LOOKBACK_MS - 200) / 1000 * rate))
+        src.setpos(min(begin, src.getnframes()))
+        raw = src.readframes(int((int(segment["start_ms"]) / 1000 * rate)) - begin + int(0.1 * rate))
+    samples = np.frombuffer(raw, dtype=np.int16).reshape(-1, channels)[:, 0]
+    offset_ms = begin / rate * 1000
+    onset = speech_onset_before(samples, rate, int(int(segment["start_ms"]) - offset_ms), max(0, int(previous_end_ms + 50 - offset_ms)))
+    if onset is None:
+        return None
+    new_start = int(onset + offset_ms)
+    if new_start >= int(segment["start_ms"]):
+        return None
+    segment["start_ms"] = new_start
+    if "start" in segment:
+        segment["start"] = new_start / 1000.0
+    segment["window_extended_back_to_speech"] = True
+    return new_start
+
+
 def apply_to_frozen(pass1_path: Path, corrections_path: Path) -> list[dict[str, Any]]:
     """Apply a job's source corrections to the frozen copy of Pass 1 (called when a clip is frozen)."""
     corrections_path = Path(corrections_path)

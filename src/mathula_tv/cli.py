@@ -76,6 +76,10 @@ _POST_AUTOCORRECT_STAGES = {
 
 
 def create_speech_backend(settings):
+    if (os.getenv("MATHULA_STT_PROVIDER") or "azure").strip().lower() in ("whisper", "cloud"):          # Whisper + pyannote on Google Cloud Run (see cloud_stt); Azure's answer shape, so nothing downstream changes
+        from .cloud_stt import CloudSTTBackend
+
+        return CloudSTTBackend.from_environment(max_speakers=settings.azure_speech_max_speakers)
     key = os.getenv("AZURE_SPEECH_KEY", "")
     if not key:
         raise ValueError("AZURE_SPEECH_KEY is missing")
@@ -149,6 +153,10 @@ def _print_referent_audit_summary(summary: Mapping[str, Any] | None) -> None:
 
 
 def create_tts_backend(settings) -> AzureTTSBackend:
+    if (os.getenv("MATHULA_TTS_PROVIDER") or "azure").strip().lower() == "omnivoice":          # the Zulu fine-tune on Google Cloud Run (see omnivoice_tts)
+        from .omnivoice_tts import OmniVoiceTTSBackend
+
+        return OmniVoiceTTSBackend.from_environment()
     key = os.getenv("AZURE_SPEECH_KEY", "")
     if not key:
         raise ValueError("AZURE_SPEECH_KEY is missing")

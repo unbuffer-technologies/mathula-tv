@@ -95,7 +95,8 @@ def answers_path(job_root: Path) -> Path:
 
 def load_answers(job_root: Path) -> dict[str, Any]:
     data = _read(answers_path(job_root))
-    return {"stretches": data.get("stretches") if isinstance(data.get("stretches"), dict) else {}}
+    return {"stretches": data.get("stretches") if isinstance(data.get("stretches"), dict) else {},
+            "evidence": data.get("evidence") if isinstance(data.get("evidence"), dict) else {}}
 
 
 # -- words --------------------------------------------------------------------------------------------------------------------------------------
@@ -287,6 +288,95 @@ def examples(work_dir: Path) -> list[dict[str, str]]:
              "listener_decided": _clip(r.get("final")), "winner": {"model": "the model's text", "transcript": "the transcript", "typed": "the listener's own words"}.get(str(r.get("choice")), ""),
              **({"listener_comment": _clip(r["comment"], COMMENT_MAX)} if r.get("comment") else {})}
             for r in rows]
+
+
+# -- what the agent said it needed and was not given --------------------------------------------------------------------------------------------------
+EVIDENCE_BEFORE_S = 1.0        # seconds of the source played before the words the agent asked about
+EVIDENCE_WINDOW_S = 9.0        # and after them
+EVIDENCE_FALLBACK_S = 20.0     # the first seconds of the unit, when what the agent asked about cannot be found in the source words
+_QUOTED = re.compile(r"""['‘’"“”]([^'‘’"“”]{3,80})['‘’"“”]""")
+
+
+def _letters_of(text: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
+
+
+def locate_in_source(wanted: str, words: Sequence[Mapping[str, Any]], start_s: float, end_s: float) -> tuple[float, float, str] | None:
+    """Where in the source audio the words an evidence note names are said: the first quoted phrase of ``wanted`` (``the garbled words immediately after 'third party'``) found in the
+    source words inside the unit, as (from_s, to_s, the words heard there).  The window starts just before the phrase and runs past it, because the agent asks about what comes next to it."""
+    inside = [w for w in words if float(w["start"]) >= start_s - 0.05 and float(w["end"]) <= end_s + 0.05]
+    heard = [_letters_of(w.get("text")) for w in inside]
+    for quoted in _QUOTED.findall(str(wanted or "")):
+        phrase = [t for t in (_letters_of(p) for p in quoted.split()) if t]
+        if not phrase:
+            continue
+        for i in range(len(heard) - len(phrase) + 1):
+            if heard[i:i + len(phrase)] == phrase:
+                begin = max(start_s, float(inside[i]["start"]) - EVIDENCE_BEFORE_S)
+                finish = min(end_s, float(inside[i]["start"]) + EVIDENCE_WINDOW_S)
+                said = " ".join(str(w.get("text") or "") for w in inside if begin <= float(w["start"]) <= finish)
+                return begin, finish, said
+    return None
+
+
+def evidence_questions(job_root: Path, run_dir: Path, items: Sequence[Mapping[str, Any]], words: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The listener's questions from the agent's own ``missing_evidence`` notes in this run: what it wanted and why, the stretch of the source to hear (found from the words it quoted, else the
+    start of the unit), what the recogniser heard there, and the answer if there is one.  One question per note, kept across runs of the job by ``experience_ledger.evidence_key``."""
+    from . import experience_ledger, thinking_report
+
+    job_root = Path(job_root)
+    answers = load_answers(job_root)["evidence"]
+    by_unit = {str(i.get("item_id")): (n, i) for n, i in enumerate(items)}
+    rows = []
+    for m in thinking_report.load(Path(run_dir)).get("missing") or []:
+        unit, wanted = str(m.get("unit") or ""), str(m.get("wanted") or "")
+        key = experience_ledger.evidence_key(job_root.name, unit, wanted)
+        index, item = by_unit.get(unit, (None, None))
+        row: dict[str, Any] = {"kind": "evidence", "id": key, "unit": unit, "wanted": wanted, "why": str(m.get("why") or ""), "item": index, "transcript": "",
+                               "answer": None, "comment": str((answers.get(key) or {}).get("comment") or "")}
+        if item is not None and isinstance(item.get("start_ms"), (int, float)) and isinstance(item.get("end_ms"), (int, float)):
+            start_s, end_s = float(item["start_ms"]) / 1000, float(item["end_ms"]) / 1000
+            found = locate_in_source(wanted, words, start_s, end_s)
+            begin, finish, said = found if found else (start_s, min(end_s, start_s + EVIDENCE_FALLBACK_S), "")
+            row.update({"start_ms": int(begin * 1000), "end_ms": int(finish * 1000), "transcript": said, "located": found is not None})
+        answer = answers.get(key)
+        if isinstance(answer, Mapping) and answer.get("text"):
+            row["answer"] = {"text": str(answer["text"]), "at": str(answer.get("at") or "")}
+        rows.append(row)
+    return rows
+
+
+def answer_evidence(job_root: Path, work_dir: Path, key: str, *, wanted: str = "", unit: str = "", text: str = "", comment: str | None = None) -> dict[str, Any]:
+    """Keep the listener's answer to one of the agent's missing-evidence questions: what was really said (``text``) and/or a comment.  The next run on this video is shown it
+    (``notes_for_agent``), and the experience ledger marks the note ``answered``."""
+    from . import experience_ledger
+
+    if not re.fullmatch(r"[0-9a-f]{16}", str(key or "")):
+        raise ValueError("no such question")
+    text = " ".join(str(text or "").split())[:TEXT_MAX]
+    note = None if comment is None else _comment(comment)
+    answers = load_answers(job_root)
+    old = answers["evidence"].get(key) or {}
+    if not text and not old.get("text") and not (note if note is not None else old.get("comment")):
+        raise ValueError("write what was said or a comment")
+    kept = {"wanted": str(wanted or old.get("wanted") or "")[:300], "unit": str(unit or old.get("unit") or "")[:20], "text": text or old.get("text", ""),
+            "comment": old.get("comment", "") if note is None else note, "at": _now()}
+    answers["evidence"][key] = kept
+    _write(answers_path(job_root), answers)
+    if kept["text"]:
+        experience_ledger.mark_answered(work_dir, job_id=Path(job_root).name, key=key, text=kept["text"])
+    return kept
+
+
+def notes_for_agent(job_root: Path) -> list[dict[str, str]]:
+    """What the listener said to the agent's missing-evidence questions on this video, for ``open_clip``: ``you_asked_for`` (what it wanted), ``listener_says`` and any comment.  The units may be cut
+    differently next time, so the answer is tied to what was wanted, not to a unit id."""
+    out = []
+    for e in load_answers(job_root)["evidence"].values():
+        if isinstance(e, Mapping) and (e.get("text") or e.get("comment")):
+            out.append({"you_asked_for": _clip(e.get("wanted"), 300), **({"listener_says": _clip(e["text"], TEXT_MAX)} if e.get("text") else {}),
+                        **({"listener_comment": _clip(e["comment"], COMMENT_MAX)} if e.get("comment") else {})})
+    return out
 
 
 def notes(job_root: Path) -> list[dict[str, str]]:

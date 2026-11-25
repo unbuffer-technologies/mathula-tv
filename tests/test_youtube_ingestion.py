@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,9 @@ def test_record_submission_refreshes_gcs_manifest(tmp_path: Path) -> None:
         duration=60.0,
         extractor="Youtube",
         downloaded_at="2026-07-25T00:00:00+00:00",
+        description="Advocate Mpofu on the talks.",
+        tags=("coalition", "MK Party"),
+        chapters=("Intro", "The talks"),
     )
     job = FakeJob()
 
@@ -145,6 +149,8 @@ def test_record_submission_refreshes_gcs_manifest(tmp_path: Path) -> None:
 
     source_manifest = tmp_path / "jobs/job-1/input/youtube_source.json"
     assert source_manifest.is_file()
+    saved = json.loads(source_manifest.read_text(encoding="utf-8"))
+    assert saved["description"] == "Advocate Mpofu on the talks." and saved["tags"] == ["coalition", "MK Party"] and saved["chapters"] == ["Intro", "The talks"]
     assert job.providers["source_download"] == "yt-dlp"
     assert job.objects["youtube_source"].endswith("/input/youtube_source.json")
     uploaded_relatives = [relative for _, relative, _ in FakeOrchestrator.gcs.uploads]

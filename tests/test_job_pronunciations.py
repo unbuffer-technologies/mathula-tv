@@ -99,6 +99,13 @@ def test_a_day_written_after_its_month_gets_the_spelling_of_its_ordinal():
 
 
 
+def test_a_renderer_marker_is_not_a_word_the_listener_is_asked_about():
+    unsure: list = []
+    jp.candidates(["Uthi nakuba uMatlala akhokha u-300,000~en komunye umuntu, ~pause800 imali u-100,000~en.", "~EN"], researched={}, dictionary=lambda w: w == "en", zulu_count=lambda w: 0,
+                  unsure=unsure)
+    assert unsure == []                                        # "en" is an English dictionary word, so it was asked about once for every ~en in the dub
+
+
 def test_a_lowercase_word_the_listener_asked_for_is_listed_as_written():
     from types import SimpleNamespace
 
@@ -106,3 +113,11 @@ def test_a_lowercase_word_the_listener_asked_for_is_listed_as_written():
                                sounds=SimpleNamespace(word=lambda w: False), interpreter=SimpleNamespace(rules_spelling=lambda w: None))
     spelled = jp.spell(prepared, ["Abavoti bakhulumile ngevoti, banquma ukunganiki muntu iningi."], progress=lambda m: None)
     assert [(s["word"], s["spelling"], s["reading"]) for s in spelled] == [("ngevoti", "ngevoti", "as written")]
+
+
+def test_a_brand_written_as_two_words_run_together_is_listed_and_read_part_by_part():
+    english = lambda w: w in {"action", "phone", "ngithe"}
+    assert jp.camel_parts("ActionSA", english) == ["Action", "SA"] and jp.camel_parts("iPhone", english) == [] and jp.camel_parts("eThekwini", english) == []
+    assert jp.camel_parts("BOSA", english) == [] and jp.camel_parts("Johannesburg", english) == []
+    found = jp.candidates(["Ihlangana ne-ActionSA, ne-IFP. eThekwini kuhle."], researched={}, dictionary=english, zulu_count=lambda w: 0)
+    assert "ActionSA" in found and "eThekwini" not in found

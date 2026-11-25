@@ -145,6 +145,23 @@ def test_speakers_who_share_a_voice_are_separated_by_their_measured_pitch_the_lo
     assert refresh(solo, sheet) is None
 
 
+def test_a_job_whose_voices_are_cloned_needs_no_voice_resolution_and_no_persona_separation(tmp_path):
+    import json
+
+    from mathula_tv.dub_production import CLONED_VOICE, reference_voice_assignments
+    from mathula_tv.native_dub import load_native_voice_assignments
+    from mathula_tv.voice_personas import refresh
+
+    segments = [{"speaker_id": "SPEAKER_01"}, {"speaker_id": "SPEAKER_00"}, {"speaker_id": "SPEAKER_01"}]
+    path = reference_voice_assignments(tmp_path, "job1", segments, progress=lambda *_: None)
+    voices = load_native_voice_assignments(tmp_path, required_speakers={"SPEAKER_00", "SPEAKER_01"}, explicit_path=path)    # the file the rest of the pipeline reads
+    assert set(voices) == {"SPEAKER_00", "SPEAKER_01"} and all(v["selected_voice"] == CLONED_VOICE for v in voices.values())
+    sheet = {"speakers": {"SPEAKER_00": {"pitch_hz_usual": 120.0}, "SPEAKER_01": {"pitch_hz_usual": 200.0}}}
+    assert refresh(path, sheet) is None                                                                                      # no shared Azure voice to tell apart by pitch
+    before = path.read_text(encoding="utf-8")
+    assert reference_voice_assignments(tmp_path, "job1", [{"speaker_id": "SPEAKER_09"}], progress=lambda *_: None) == path and path.read_text(encoding="utf-8") == before   # a job that has the file keeps it
+
+
 def test_the_preparation_releases_its_models_and_reports_the_memory(tmp_path):
     from mathula_tv import dub_production, voice_family_classifier
 

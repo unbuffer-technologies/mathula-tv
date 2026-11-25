@@ -25,6 +25,7 @@ ZULU_NAME_KEPT = 0.25          # ...and the Zulu side keeps its spelling in at l
 _ONSET = r"[mn]?(?:tsh|ts|sh|hl|dl|tl|ny|ng|[gn]?[cqx]|[bcdfghjklmnprstvwyz]h?)[wy]?"          # what may open a Zulu syllable: Mkhwanazi, Ngcobo, Ntshangase, Cele, Khumalo; not the fr of Africa, the ntr of Centre or the hns of Johnson
 _ZULU_NAME_SHAPE = re.compile(rf"(?:(?:{_ONSET})?[aeiou]{{1,2}})+(?:ng|m|n)?")          # open syllables, with the clicks c, q, x that Zulu writes and English words only borrow
 _GLUED_INITIALISM = re.compile(r"^([a-z]{1,3})([A-Z]{2,5})$")
+_CAMEL_PARTS = re.compile(r"[A-Z][a-z]+|[A-Z]+(?![a-z])|[a-z]+")          # ActionSA -> Action, SA; WhatsApp -> Whats, App
 
 
 def zulu_name_by_usage(word: str, count: int, kept: Callable[[str], float] | None = None) -> bool:
@@ -35,6 +36,15 @@ def zulu_name_by_usage(word: str, count: int, kept: Callable[[str], float] | Non
     return kept is None or kept(word.casefold()) >= ZULU_NAME_KEPT
 _SHORT_PREFIX = 4           # "i-", "ne-", "ngo-", "ama-": a short piece before a hyphen is Zulu grammar, not the word
 _PLURAL_CONCORD = re.compile(r"[a-z]{0,5}ma")          # ngama-, kwama-, nezama-, ngoma-: the plural (ama-) with a longer front, still grammar before a kept English word (ngama-details)
+
+
+def camel_parts(word: str, dictionary: Callable[[str], bool]) -> list[str]:
+    """The parts of a brand written as several words run together (``ActionSA``: Action, SA), each an English dictionary word or an initialism; empty for anything else
+    (a capital only at the start, all capitals, or a Zulu form with a glued prefix: eThekwini, kwaZulu)."""
+    parts = _CAMEL_PARTS.findall(word)
+    if len(parts) < 2 or "".join(parts) != word or word.isupper():
+        return []
+    return parts if all(len(p) >= 2 and (p.isupper() or dictionary(p.casefold())) for p in parts) else []
 
 
 def core(token: str) -> str:
@@ -66,7 +76,7 @@ def candidates(texts: Iterable[str], *, researched: Mapping[str, Any], dictionar
     also = {w.casefold() for w in (also_list or ())}
     seen: dict[str, str] = {}
     for text in texts:
-        text = re.sub(r"~pause\d+", " ", text)
+        text = re.sub(r"~[a-z]+\d*", " ", text, flags=re.IGNORECASE)          # the renderer's markers (~pause800, and the ~en after a figure) are not words: "~en" had the console ask three times which language "en" is
         for match in _TOKEN.finditer(text):
             word = core(match.group(0)).strip("-")
             word = without_prefix(word, written_prefix(word))          # "uJacob": the u is grammar
@@ -86,6 +96,8 @@ def candidates(texts: Iterable[str], *, researched: Mapping[str, Any], dictionar
                 continue
             if (word.isupper() and word.isalpha()) or plural_initialism(word) or (key in researched and not zulu_name):
                 seen[key] = word
+            elif camel_parts(word, dictionary) and not zulu_name and not dictionary(key):
+                seen[key] = word          # a brand written as two words run together (ActionSA, WhatsApp): English as spoken, each part read by its own sounds
             elif key in also:
                 seen[key] = word          # a word the listener asked to have listed (a Setswana name such as Diremelo is Zulu-shaped, so it is left alone unless asked for)
             elif dictionary(key) and not zulu_name and (zulu_count(key) < ZULU_COMMON or inside):
@@ -293,6 +305,14 @@ def spell(prepared: Prepared, texts: Iterable[str], *, progress: Callable[[str],
         progress(f"  {year} -> {said}  [number]")
     for word in words:
         found = interpreter.rules_spelling(word)
+        parts = camel_parts(word, lambda w: bool(prepared.sounds.word(w))) if found is None else []
+        if parts:          # each part by its own sounds, said one after the other
+            readings = [interpreter.rules_spelling(part) for part in parts]
+            if all(readings):
+                spelled.append({"word": word, "spelling": "-".join(r["spelling"] for r in readings), "reading": "compound", "english": [w for r in readings for w in r["english"]],
+                                "derivation": [f"{word} is {' + '.join(parts)}, written as one word: each part is read by its own English sounds", *readings[0]["derivation"]]})
+                progress(f"  {word} -> {spelled[-1]['spelling']}  [compound]")
+                continue
         if found is None:
             asked_for = word.casefold() in {w.casefold() for w in prepared.also_list}          # a word the listener asked to have listed (a Zulu loanword the voice mangles: ngevoti)
             if (word[:1].isupper() and not word.isupper()) or asked_for:          # a name the English sounds do not know: listed as written, the listener's ear decides

@@ -71,14 +71,7 @@ def plan_turns(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return plan
 
 
-def score_key(result: dict[str, Any] | None) -> tuple[float, float, float]:
-    """Lower is better: hard gates first, then overruns, then dead air that is left."""
-    headline = (result or {}).get("headline") or {}
-    return (
-        float(headline.get("gate_failures", 1e9)), float(headline.get("cross_speaker_collisions", 0)),
-        float(headline.get("collisions", 0)), float(headline.get("groups_rushed", 1e9)),
-        float(headline.get("residual_dead_air_pct", 1e9)),
-    )
+from .submission_rank import score_key  # noqa: E402,F401 - one definition of "better": gates, then cross-speaker collisions, collisions, overruns, dead air left
 
 
 def _task_message(turn: dict[str, Any], draft: dict[str, Any] | None) -> str:
@@ -244,13 +237,12 @@ def main(argv: list[str] | None = None) -> int:
 
     from .cli import create_tts_backend
     from .config import load_settings
-    from .dub_agent import ResponsesClient
+    from .dub_agent import native_client_config, new_agent_client
     from .experience_store import ExperienceStore
-    from .foundry_grok import native_gpt_config_from_environment
 
     settings = load_settings()
     parent = Workbench(ExperienceStore(settings.work_dir), lambda: create_tts_backend(settings))
-    client = ResponsesClient(native_gpt_config_from_environment(dict(os.environ)))
+    client = new_agent_client(native_client_config())
     summary = run_workflow(
         client, parent, clip_id=args.clip, run_id=args.run_id, repeat=args.repeat, tts_budget=args.tts_budget,
         per_worker_tts=args.per_worker_tts, max_workers=args.max_workers, max_rounds=args.max_rounds,

@@ -17,6 +17,12 @@ def test_the_agent_sees_the_spoken_form_change_by_change():
     assert "~pause" not in out["spoken"]                                                        # a pause marker is not speech
 
 
+def test_double_quote_marks_are_not_sent_to_the_voice_because_it_adds_a_sound_after_the_word_inside_them():
+    out = say_it(_dictionary(), "Kenny uVusimuzi “Cat” Matlala ufakaza, uthe \"yebo\" kodwa sasingaphumeleli, i-Simaya’s «phezulu».")
+    assert "“" not in out["spoken"] and "”" not in out["spoken"] and '"' not in out["spoken"] and "«" not in out["spoken"]
+    assert out["spoken"].startswith("Kenny uVusimuzi Cat Matlala ufakaza, uthe yebo kodwa") and "Simaya’s phezulu." in out["spoken"]          # the word stays, the apostrophe of a word stays
+
+
 def test_what_no_rule_converted_is_listed_so_the_agent_can_write_it_another_way():
     out = say_it(_dictionary(), "Ikhodi 12 yafakwa ngoMnu. Adams, Th. Smith, eSABC kanye ne-IEC ngo-14:30 kanye 2/3 ne-ABC123")
     assert not any("14:30" in line for line in out["still_as_written"])                           # a time is read by the time rule now (2026-11-12)

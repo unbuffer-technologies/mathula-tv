@@ -64,3 +64,27 @@ def test_the_workbench_puts_the_dialogue_in_the_opened_clip_with_roles_and_the_m
     solo = {"segments": [{"segment_id": "s", "speaker_id": "A", "start_ms": 0, "end_ms": 1000, "english": "Hello."}]}
     Bench()._add_dialogue(solo, "c1", ledger)
     assert "dialogue" not in solo                                                              # a monologue has no conversation to show
+
+
+LEDGER = {"speaker_roles": [{"role": "Studio anchor", "speaker_id": "A"}, {"role": "Live reporter", "speaker_id": "B"}],
+          "entities": [{"name": "Vusimuzi “Cat” Matlala", "role": "Commission witness"}, {"name": "Kenny Maphanga", "role": "Live reporter"},
+                       {"name": "Nati", "role": "Studio anchor addressed by the reporter"}]}
+
+
+def test_the_ledger_says_who_each_speaker_is_by_the_role_it_gives_the_people_of_the_story():
+    from mathula_tv.dialogue_view import people_from_ledger
+
+    assert people_from_ledger(LEDGER) == {"A": {"name": "Nati", "role": "Studio anchor"}, "B": {"name": "Kenny Maphanga", "role": "Live reporter"}}
+    assert people_from_ledger({"speaker_roles": [{"role": "Judge", "speaker_id": "A"}], "entities": [{"name": "X Y", "role": "witness"}]}) == {}
+
+
+def test_a_turn_that_says_the_name_of_the_other_speaker_is_marked_as_talking_to_that_colleague():
+    from mathula_tv.dialogue_view import people_from_ledger
+
+    segments = [seg(1, "A", 0, 12, "Kenny Maphanga joins us live. Kenny, Vusimuzi “Cat” Matlala testifying for a second day."), seg(2, "B", 13, 40, "Good afternoon to you, Nati, and to the viewers."),
+                seg(3, "B", 40, 50, "Matlala says nothing about Kennedy.")]
+    turns = build(segments, None, {"A": "Studio anchor", "B": "Live reporter"}, people_from_ledger(LEDGER))
+    assert turns[0]["says_the_name_of"] == [{"name": "Kenny / Maphanga", "is": "Kenny Maphanga, the live reporter", "speaks_in_turn": [2]}]
+    assert turns[1]["says_the_name_of"][0]["name"] == "Nati" and "Matlala" not in str(turns[1]["says_the_name_of"])              # a name of the story is not the colleague; Kennedy is not Kenny
+    assert "says_the_name_of" not in build(segments, None, {})[0]                                                                    # without the ledger nothing is claimed
+    assert "name of address" in NOTE and "comma" in NOTE

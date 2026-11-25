@@ -61,8 +61,8 @@ def test_a_figure_is_compared_only_with_figures_of_its_size(tmp_path):
     assert twenties_up == {"abangama-<figure>", "abangu-<figure>"}
 
 
-def test_the_agent_prompt_carries_the_measured_cost_of_each_punctuation_mark():
-    # measured on both zu-ZA voices (2026-11-11, working/punctuation_calibration.json): none / ellipsis 0, comma-class 0.12-0.18 s, sentence end ~0.9 s, ~pauseN = N + ~0.1 s
-    assert "Pacing and punctuation" in SYSTEM_PROMPT
-    assert "0.12-0.18 s" in SYSTEM_PROMPT and "about 0.9 s" in SYSTEM_PROMPT and "ellipsis" in SYSTEM_PROMPT
+def test_the_agent_prompt_says_what_each_punctuation_mark_does_and_no_longer_carries_the_azure_era_costs():
+    # the 0.12-0.18 s comma and 0.9 s full stop were measured on the Azure voices (2026-11-11); the cloned voice joins sentences in about 0.35-0.5 s and the prompt must not frighten the agent off full stops
+    assert "Pacing and punctuation" in SYSTEM_PROMPT and "ellipsis" in SYSTEM_PROMPT and "a comma marks a clause boundary" in " ".join(SYSTEM_PROMPT.split()).replace("A comma", "a comma")
+    assert "0.12-0.18 s" not in SYSTEM_PROMPT and "about 0.9 s" not in SYSTEM_PROMPT
     assert "half a second after a sentence" not in SYSTEM_PROMPT

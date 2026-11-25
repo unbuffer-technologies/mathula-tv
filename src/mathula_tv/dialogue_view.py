@@ -56,8 +56,40 @@ def murmur_lines(lines: Sequence[tuple[float, float, str]]) -> list[dict[str, An
     return found
 
 
-def build(segments: Sequence[Mapping[str, Any]], lines: Sequence[tuple[float, float, str]] | None = None, roles: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
-    """The turns of the clip, one dict each (see the module docstring).  ``lines`` are the YouTube caption lines (youtube_captions.events); ``roles`` maps a speaker id to a name."""
+_NAME_STOP = {"the", "and", "van", "der", "den", "von", "mr", "mrs", "ms", "dr", "prof", "adv", "general", "sergeant", "advocate", "minister"}
+
+
+def people_from_ledger(ledger: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    """Who each speaker is, from the context ledger: ``{speaker id: {"name": "Kenny Maphanga", "role": "Live reporter"}}``.  The ledger lists the speakers by role (``speaker_roles``) and the people
+    of the story with a role each (``entities``); a person whose role holds a speaker's role ("Studio anchor addressed by the reporter" holds "Studio anchor") is that speaker."""
+    people: dict[str, dict[str, str]] = {}
+    entities = [e for e in ledger.get("entities") or [] if isinstance(e, Mapping) and e.get("name") and e.get("role")]
+    for role in ledger.get("speaker_roles") or []:
+        if not isinstance(role, Mapping) or not role.get("speaker_id") or not role.get("role"):
+            continue
+        wanted = str(role["role"]).casefold()
+        match = next((e for e in entities if wanted in str(e["role"]).casefold()), None)
+        if match:
+            people[str(role["speaker_id"])] = {"name": str(match["name"]), "role": str(role["role"])}
+    return people
+
+
+def _said_names(text: str, person: Mapping[str, str]) -> list[str]:
+    """The parts of a person's name (first name, surname) that a turn says, capitalised as a name, in the order they first appear."""
+    found: list[tuple[int, str]] = []
+    for part in re.findall(r"[A-Za-z][A-Za-z’'-]+", str(person.get("name") or "")):
+        if len(part) < 3 or part.casefold() in _NAME_STOP:
+            continue
+        hit = re.search(rf"(?<![A-Za-z]){re.escape(part)}(?![A-Za-z])", text)
+        if hit:
+            found.append((hit.start(), part))
+    return [part for _at, part in sorted(found)]
+
+
+def build(segments: Sequence[Mapping[str, Any]], lines: Sequence[tuple[float, float, str]] | None = None, roles: Mapping[str, str] | None = None,
+          people: Mapping[str, Mapping[str, str]] | None = None) -> list[dict[str, Any]]:
+    """The turns of the clip, one dict each (see the module docstring).  ``lines`` are the YouTube caption lines (youtube_captions.events); ``roles`` maps a speaker id to a name; ``people``
+    (``people_from_ledger``) says who each speaker is, so a turn can show which of the other speakers' names it says."""
     groups: list[list[Mapping[str, Any]]] = []
     for segment in segments:
         if groups and str(groups[-1][0].get("speaker_id") or "") == str(segment.get("speaker_id") or ""):
@@ -72,6 +104,11 @@ def build(segments: Sequence[Mapping[str, Any]], lines: Sequence[tuple[float, fl
         text = " ".join(_text(s) for s in group)
         item: dict[str, Any] = {"turn": number, "speaker": (roles or {}).get(speaker) or speaker, "segments": [str(s.get("segment_id")) for s in group],
                                 "from_s": round(start, 1), "to_s": round(end, 1)}
+        for other, person in (people or {}).items():
+            if other != speaker:
+                said = _said_names(text, person)
+                if said:          # colleagues: the name of the person spoken to is an address, not another person in the story
+                    item.setdefault("says_the_name_of", []).append({"name": " / ".join(said), "is": f"{person.get('name')}, the {str(person.get('role') or '').lower()}", "speaks_in_turn": [n for n, g in enumerate(groups, 1) if str(g[0].get("speaker_id") or "") == other][:3]})
         if number > 1:
             before = _last_sentence(" ".join(_text(s) for s in groups[number - 2]))
             if before.endswith("?"):
@@ -91,4 +128,7 @@ def build(segments: Sequence[Mapping[str, Any]], lines: Sequence[tuple[float, fl
 
 NOTE = ("The clip as a conversation. Each turn is one speaker's run of segments; 'answers' is the question the speaker before just asked, 'asks' the question this turn ends on. "
         "A murmur of another speaker inside a turn (Mm-hmm, Mhm, Uh-huh) is that person listening, a sound and not speech: leave it out of the Zulu, or write Yebo / Cha when it is plainly an answer. "
-        "A turn that opens with the speaker's own murmur does not need it either. Write each turn as the reply it is, not as a monologue.")
+        "A turn that opens with the speaker's own murmur does not need it either. Write each turn as the reply it is, not as a monologue. "
+        "'says_the_name_of' lists a name in this turn that belongs to the other person in the conversation: the speaker is talking to that colleague, so it is a name of address, not a "
+        "second person in the story. Speech-to-text cannot show the intonation that tells a listener 'Kenny, Vusimuzi Matlala…' is two people; the Zulu has to, so put a comma after the name of address "
+        "whether or not the speaker paused.")

@@ -99,6 +99,21 @@ def test_known_harness_problems_reach_the_reflector_with_a_do_not_write_lessons_
     assert outcome["smells"]
 
 
+def test_successive_runs_of_one_job_are_reflected_on_together_with_what_a_human_knows(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_reflect(client, playbook, digests, clip_note=""):
+        captured.update(digests=digests, note=clip_note)
+        return {"edits": [], "diagnosis": [], "contrast": "", "usage": {}}
+
+    monkeypatch.setattr(dub_improve, "reflect", fake_reflect)
+    monkeypatch.setattr(dub_improve, "collect_batches", lambda store, run, clips: [_run(tmp_path, f"d-{run}", repeat=1)])
+    monkeypatch.setattr(dub_improve, "digest_run", lambda d: "digest of " + d.name)
+    dub_improve.reflect_on_batch(None, None, ["prod-114", "prod-115"], ["c"], seed_playbook(), context="115 had clearer measurements")
+    assert sorted(captured["digests"]) == ["prod-114.r1", "prod-115.r1"]
+    assert "successive runs of the same job (prod-114, prod-115)" in captured["note"] and "115 had clearer measurements" in captured["note"]
+
+
 # ---- several clips ---------------------------------------------------------------------------------------------
 
 def test_a_trial_runs_every_repeat_on_every_clip_with_the_candidate_playbook(tmp_path, monkeypatch):

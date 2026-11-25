@@ -90,3 +90,54 @@ def test_the_captions_for_a_stretch_the_transcript_has_no_segment_for_are_offere
     assert [(g["after"], g["start_ms"], g["end_ms"]) for g in found] == [("seg-1", 3000, 7800)]
     assert found[0]["yt"] == "nale yabantwana siyayinyusa"
     assert yc.gaps(tmp_path / "other", segments) == []                                    # no captions: nothing
+
+
+def test_the_uploaders_title_and_channel_are_read_from_the_downloaded_source_and_missing_ones_are_empty(tmp_path):
+    from mathula_tv.youtube_captions import video_context
+
+    assert video_context(tmp_path) == {}
+    (tmp_path / "input").mkdir()
+    (tmp_path / "input" / "youtube_source.json").write_text(json.dumps({"title": "Kenya end  Mosimane's winning streak after Bafana draw", "channel": "SABC News", "duration": 101.0}), encoding="utf-8")
+    assert video_context(tmp_path) == {"title": "Kenya end Mosimane's winning streak after Bafana draw", "channel": "SABC News"}
+    (tmp_path / "input" / "youtube_source.json").write_text("not json", encoding="utf-8")
+    assert video_context(tmp_path) == {}
+
+
+def test_the_uploaders_description_and_chapters_are_part_of_the_video_context_and_cut_at_the_limit(tmp_path):
+    from mathula_tv.youtube_captions import DESCRIPTION_CHARS, video_context
+
+    (tmp_path / "input").mkdir()
+    description = "Advocate Dali Mpofu on the coalition talks.\n\n  \nWatch more at sabcnews.com\n" + "x" * 3000
+    (tmp_path / "input" / "youtube_source.json").write_text(json.dumps({"title": "DA and MK Party conclude coalition talks", "channel": "SABC News", "description": description,
+                                                                          "chapters": ["Intro", "The talks"]}), encoding="utf-8")
+    got = video_context(tmp_path)
+    assert got["title"] == "DA and MK Party conclude coalition talks"
+    assert got["description"].startswith("Advocate Dali Mpofu on the coalition talks.\nWatch more at sabcnews.com\n") and len(got["description"]) == DESCRIPTION_CHARS
+    assert got["chapters"] == "Intro; The talks"
+
+
+def test_pass_1_is_told_how_to_use_the_title_and_the_payload_carries_it():
+    from mathula_tv.native_dub import PASS1_SYSTEM_PROMPT
+
+    assert "THE VIDEO'S OWN TITLE" in PASS1_SYSTEM_PROMPT and '"video"' in PASS1_SYSTEM_PROMPT and "Never take a name from the title" in PASS1_SYSTEM_PROMPT
+
+
+def test_the_agent_is_shown_the_videos_title_and_description_when_it_opens_the_clip(tmp_path):
+    from types import SimpleNamespace
+
+    from mathula_tv.dub_workbench import Workbench
+
+    job = tmp_path / "jobs" / "job-1" / "input"
+    job.mkdir(parents=True)
+    (job / "youtube_source.json").write_text(json.dumps({"title": "DA and MK Party conclude coalition talks", "channel": "SABC News",
+                                                          "description": "Let's cross to SABC News reporter Samkele Maseko."}), encoding="utf-8")
+    store = SimpleNamespace(root=tmp_path / "experience", load_corpus=lambda: {"clips": {"c1": {"job_id": "job-1"}}})
+    bench = object.__new__(Workbench)
+    bench.store = store
+    opened: dict = {}
+    bench._add_video(opened, "c1")
+    assert opened["video"]["title"] == "DA and MK Party conclude coalition talks" and "Samkele Maseko" in opened["video"]["description"] and opened["video"]["note"]
+    other: dict = {}
+    bench.store = SimpleNamespace(root=tmp_path / "experience", load_corpus=lambda: {"clips": {"c2": {"job_id": "job-none"}}})
+    bench._add_video(other, "c2")
+    assert "video" not in other                                   # a job that did not come from YouTube has nothing to show
