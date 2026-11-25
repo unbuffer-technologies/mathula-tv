@@ -27,6 +27,7 @@ from .logging_utils import configure_logging, redact
 from .media import checksum
 from .models import PRODUCTION_STATES, utcnow
 from .orchestrator import Orchestrator
+from .x_ingestion import download_x_video, is_x_url, record_x_submission
 from .youtube_ingestion import (
     download_youtube_video,
     is_youtube_url,
@@ -770,7 +771,7 @@ def parser() -> argparse.ArgumentParser:
 
     experience_cli.add_parser(commands)
     submit = commands.add_parser("submit")
-    submit.add_argument("video", help="Local MP4/WebM path or a YouTube video URL")
+    submit.add_argument("video", help="Local MP4/WebM path, a YouTube video URL, or a link to one X (Twitter) post with a video")
     submit.add_argument("--target-language", default="zu-ZA")
     submit.add_argument("--force", action="store_true")
 
@@ -1621,13 +1622,15 @@ def main(argv: list[str] | None = None) -> int:
     phase_timing_reported = False
     try:
         if args.command == "submit":
-            if is_youtube_url(args.video):
+            if is_youtube_url(args.video) or is_x_url(args.video):
                 maximum_minutes = float(getattr(settings, "max_source_duration_minutes", 240))
-                print("[submit] Reading YouTube metadata...", file=sys.stderr, flush=True)
-                with download_youtube_video(
-                    args.video,
-                    max_duration_seconds=maximum_minutes * 60.0,
-                    cookies_file=settings.youtube_cookies_file or None,
+                from_x = is_x_url(args.video)
+                site, record_submission = ("X", record_x_submission) if from_x else ("YouTube", record_youtube_submission)
+                print(f"[submit] Reading {site} metadata...", file=sys.stderr, flush=True)
+                with (
+                    download_x_video(args.video, max_duration_seconds=maximum_minutes * 60.0, cookies_file=getattr(settings, "x_cookies_file", None) or None)
+                    if from_x
+                    else download_youtube_video(args.video, max_duration_seconds=maximum_minutes * 60.0, cookies_file=settings.youtube_cookies_file or None)
                 ) as download:
                     print(
                         f"[submit] Download complete: {download.path.name} "
@@ -1642,11 +1645,11 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     job = app.submit(download.path, args.target_language, args.force)
                     print(
-                        f"[submit] Job prepared: {job.job_id}; saving YouTube provenance...",
+                        f"[submit] Job prepared: {job.job_id}; saving {site} provenance...",
                         file=sys.stderr,
                         flush=True,
                     )
-                    record_youtube_submission(app, job, download)
+                    record_submission(app, job, download)
             else:
                 print("[submit] Preparing Mathula job and source audio...", file=sys.stderr, flush=True)
                 job = app.submit(Path(args.video), args.target_language, args.force)

@@ -165,17 +165,13 @@ def test_download_recovers_when_after_move_path_is_stale_on_windows(
     actual = tmp_path / "source-65ftQcgDVI4.mp4"
     actual.write_bytes(b"complete-media")
 
-    class Result:
-        stdout = str(tmp_path / "Madlanga Commissionn  Fadiel Adams back in the hot seat [65ftQcgDVI4].mp4") + "\n"
-
     captured: list[str] = []
 
-    def fake_run(command, *, purpose):
+    def fake_run_live(command, *, purpose):          # the download runs through _run_live (its progress is shown): a test must never reach yt-dlp and the network
         assert purpose == "download"
         captured.extend(command)
-        return Result()
 
-    monkeypatch.setattr(module, "_run", fake_run)
+    monkeypatch.setattr(module, "_run_live", fake_run_live)
     monkeypatch.setattr(module, "_yt_dlp_command", lambda: ["python", "-m", "yt_dlp"])
 
     resolved = module._download("https://www.youtube.com/watch?v=65ftQcgDVI4", tmp_path)

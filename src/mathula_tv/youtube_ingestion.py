@@ -127,25 +127,39 @@ def record_youtube_submission(
 ) -> None:
     """Persist YouTube provenance locally and refresh the durable GCS manifest."""
 
-    record = download.manifest()
     job_dir = Path(orchestrator.jobs.job_dir(job.job_id))
     for caption in download.captions:          # YouTube's own captions travel with the job (see youtube_captions)
         target = job_dir / "input/youtube_captions" / caption.name.removeprefix("captions-")
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(caption, target)
-    source_manifest_path = job_dir / "input/youtube_source.json"
+    record_source_submission(orchestrator, job, download.manifest(), file_name="youtube_source.json", media_key="youtube_source", webpage_url=download.webpage_url)
+
+
+def record_source_submission(
+    orchestrator: Any,
+    job: Any,
+    record: dict[str, Any],
+    *,
+    file_name: str,
+    media_key: str,
+    webpage_url: str,
+) -> None:
+    """Save where a downloaded source came from (``input/<file_name>``, the job's ``media[<media_key>]``, the source URL) and refresh the durable GCS manifest.  Shared by every site a job can be downloaded from."""
+
+    job_dir = Path(orchestrator.jobs.job_dir(job.job_id))
+    source_manifest_path = job_dir / "input" / file_name
     _atomic_write_json(source_manifest_path, record)
 
-    job.media["youtube_source"] = record
-    job.objects["source_url"] = download.webpage_url
-    job.objects["youtube_source_local"] = str(source_manifest_path)
+    job.media[media_key] = record
+    job.objects["source_url"] = webpage_url
+    job.objects[f"{media_key}_local"] = str(source_manifest_path)
     job.providers["source_download"] = "yt-dlp"
 
     gcs = getattr(orchestrator, "gcs", None)
     if gcs is not None:
-        job.objects["youtube_source"] = gcs.upload(
+        job.objects[media_key] = gcs.upload(
             job.job_id,
-            "input/youtube_source.json",
+            f"input/{file_name}",
             source_manifest_path,
         )
 
@@ -185,19 +199,19 @@ def _optional_text(value: Any) -> str | None:
     return text or None
 
 
-def _yt_dlp_command() -> list[str]:
+def _yt_dlp_command(site: str = "YouTube") -> list[str]:
     if importlib.util.find_spec("yt_dlp") is not None:
         return [sys.executable, "-m", "yt_dlp"]
     executable = shutil.which("yt-dlp")
     if executable:
         return [executable]
     raise YouTubeIngestionError(
-        "YouTube submission requires yt-dlp. Install it inside the active Mathula TV "
+        f"{site} submission requires yt-dlp. Install it inside the active Mathula TV "
         "virtual environment with: python -m pip install -U yt-dlp"
     )
 
 
-def _run(command: Sequence[str], *, purpose: str) -> subprocess.CompletedProcess[str]:
+def _run(command: Sequence[str], *, purpose: str, site: str = "YouTube") -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         list(command),
         check=False,
@@ -206,11 +220,11 @@ def _run(command: Sequence[str], *, purpose: str) -> subprocess.CompletedProcess
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "unknown yt-dlp error").strip()
-        raise YouTubeIngestionError(f"YouTube {purpose} failed: {detail[-2000:]}")
+        raise YouTubeIngestionError(f"{site} {purpose} failed: {detail[-2000:]}")
     return result
 
 
-def _run_live(command: Sequence[str], *, purpose: str) -> None:
+def _run_live(command: Sequence[str], *, purpose: str, site: str = "YouTube") -> None:
     """Run yt-dlp while forwarding progress to the user's console.
 
     Download progress must not disappear into ``capture_output``: long YouTube
@@ -243,7 +257,7 @@ def _run_live(command: Sequence[str], *, purpose: str) -> None:
     returncode = process.wait()
     if returncode != 0:
         detail = "\n".join(tail).strip() or "unknown yt-dlp error"
-        raise YouTubeIngestionError(f"YouTube {purpose} failed: {detail[-4000:]}")
+        raise YouTubeIngestionError(f"{site} {purpose} failed: {detail[-4000:]}")
 
 
 def _cookies_args(cookies_file: Path | None) -> list[str]:
@@ -252,18 +266,20 @@ def _cookies_args(cookies_file: Path | None) -> list[str]:
     return ["--cookies", str(cookies_file)]
 
 
-def _read_metadata(url: str, *, cookies_file: Path | None = None) -> dict[str, Any]:
+def _read_metadata(url: str, *, cookies_file: Path | None = None, site: str = "YouTube", extra_args: Sequence[str] = ()) -> dict[str, Any]:
     result = _run(
         [
-            *_yt_dlp_command(),
+            *_yt_dlp_command(site),
             "--no-playlist",
             "--no-warnings",
             "--skip-download",
             "--dump-single-json",
+            *extra_args,
             *_cookies_args(cookies_file),
             url,
         ],
         purpose="metadata lookup",
+        site=site,
     )
     try:
         metadata = json.loads(result.stdout)
@@ -318,7 +334,7 @@ def _is_supported_download(path: Path) -> bool:
     )
 
 
-def _resolve_downloaded_media(directory: Path, reported_paths: Sequence[Path]) -> Path:
+def _resolve_downloaded_media(directory: Path, reported_paths: Sequence[Path], site: str = "YouTube") -> Path:
     """Resolve yt-dlp's actual media path defensively.
 
     yt-dlp's ``after_move:filepath`` output has had edge cases where the reported
@@ -343,7 +359,7 @@ def _resolve_downloaded_media(directory: Path, reported_paths: Sequence[Path]) -
         reported = str(reported_paths[-1]) if reported_paths else "<none>"
         observed = ", ".join(sorted(path.name for path in directory.iterdir())) or "<empty>"
         raise YouTubeIngestionError(
-            "Downloaded YouTube media is missing or empty: "
+            f"Downloaded {site} media is missing or empty: "
             f"reported={reported}; observed={observed}"
         )
 

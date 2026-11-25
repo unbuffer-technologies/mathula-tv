@@ -664,7 +664,7 @@ def _source_metadata(job_root: Path, job: Any) -> dict[str, Any]:
         "local_source_path": str(getattr(job, "local_source_path", "")),
         "source_language": str(getattr(job, "source_language", "")),
     }
-    youtube_path = job_root / "input" / "youtube_source.json"
+    youtube_path = next((p for p in (job_root / "input" / "youtube_source.json", job_root / "input" / "x_source.json") if p.is_file()), job_root / "input" / "youtube_source.json")          # a job comes from YouTube or from X
     if youtube_path.is_file():
         try:
             youtube = read_json(youtube_path)
