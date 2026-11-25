@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .abbreviations import expand as expand_abbreviations
+
 _DIGITS = re.compile(r"(?<![A-Za-z])\d[\d.,:/%-]*\d%?|\d")
 _ABBREVIATION = re.compile(r"(?<![A-Za-z])(?:Mnu|Nkk|Nksz|Dkt|Dr|Prof|Mr|Mrs|Ms|Mnr|Mev|Adv|Hon|Cllr|Rev|Gen|Col|Capt|Lt|St|Jr|Sr|No)\.(?=\s|$)")
 _ALL_CAPS = re.compile(r"(?<![A-Za-z-])[A-Z]{2,6}(?![A-Za-z])")
@@ -17,9 +19,10 @@ _ALL_CAPS = re.compile(r"(?<![A-Za-z-])[A-Z]{2,6}(?![A-Za-z])")
 def say_it(dictionary: Any, text: str, voice: str | None = None) -> dict[str, Any]:
     """``dictionary`` is a PronunciationDictionary; ``text`` the agent's Zulu line (``~pauseN`` markers are not speech and are left out)."""
     plain = re.sub(r"\s*~pause\d+\s*", " ", str(text or "")).strip()
+    plain, written_out = expand_abbreviations(plain)          # the abbreviations the system writes out itself, shown like any other change
     result = dictionary.apply(plain, voice=voice)
     spoken = result.tts_text
-    changes = [{"was": s.before, "now": s.after, "kind": s.kind} for s in result.substitutions if s.before != s.after]
+    changes = [{"was": c["was"], "now": c["now"], "kind": "abbreviation"} for c in written_out] + [{"was": s.before, "now": s.after, "kind": s.kind} for s in result.substitutions if s.before != s.after]
     left_over: list[str] = []
     for label, pattern in (("digits the voice will read by itself", _DIGITS), ("an abbreviation the voice will read letter by letter or skip", _ABBREVIATION),
                            ("capitals the voice will spell or guess at", _ALL_CAPS)):

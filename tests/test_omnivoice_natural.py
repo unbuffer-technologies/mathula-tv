@@ -820,3 +820,132 @@ def test_the_primed_generations_are_asked_for_with_the_first_pass_when_copies_ar
     assert peaks[1][0] == 1 and peaks[3][0] == 3                                                 # first pass + two primed generations in the air together, only with three copies
     assert peaks[1][1] == peaks[3][1] >= 3 and all({"manyama", "phineas"} <= set(names) for names in peaks[3][2])         # the same requests either way: the audio does not depend on it
 
+
+def test_a_title_before_a_name_is_not_part_of_the_name():
+    runs = ot.ReferenceBank.dub_name_runs
+    assert runs("Hlobo luni, i-ActionSA efisa ukulubona, Mnu Mashaba, ngemuva kokuthola") == [["ActionSA"], ["Mashaba"]] or runs("Mnu Mashaba, ngemuva")[0] == ["Mashaba"]
+    assert runs("noMnu. Phineas Manyama, siyabonga") == [["Phineas", "Manyama"]]
+    assert runs("uMnumzane Khumalo uzoba yisekela") == [["Khumalo"]]
+    assert runs("Dkt Matebula uthe") == [["Matebula"]] and runs("Mnumzana Cele") == [["Cele"]]
+    assert runs("Mnu") == []                                                                       # a title alone is no name
+
+
+def test_an_abbreviated_title_is_spelled_out_for_the_voice_even_when_the_name_after_it_is_one_the_speaker_says(tmp_path):
+    bank = _bank_with_a_name(tmp_path)
+    backend = ot.OmniVoiceTTSBackend(ScriptedClient(lambda call, ref: [_span_audio()]), banks={"job": bank})
+    group = {**GROUP, "parts": [{"type": "text", "segment_id": "s", "text": "Sawubona Mnu Phineas Manyama, siyabonga kakhulu."}]}
+    spans, _gaps = backend.plan(group, {"selected_voice": "x"}, "job")
+    spoken = " ".join(spans)
+    assert "Mnumzana" in spoken and "Mnu " not in spoken                                            # the voice says the word, not the abbreviation
+    assert "Phineas Manyama" in spoken                                                              # and the name the speaker says keeps the spelling it was heard with
+    group = {**GROUP, "parts": [{"type": "text", "segment_id": "s", "text": "Sikhulume noMnu. Adams, nokho."}]}
+    assert "noMnumzana Adams" in " ".join(backend.plan(group, {"selected_voice": "x"}, "job")[0])
+
+
+def test_a_unit_of_one_sentence_gets_the_times_of_its_words_for_the_studio_strip(tmp_path):
+    bank = _bank(tmp_path)
+    backend = ot.OmniVoiceTTSBackend(ScriptedClient(lambda call, ref: [_span_audio()]), banks={"job": bank})
+    audio, rate, answer, report, reference = backend.speak(GROUP, ["Sawubona baba wami nonke."], [], "job")
+    assert len(report["words"]) == 4 and [w["text"] for w in report["words"]] == ["Sawubona", "baba", "wami", "nonke."]
+    assert all(w["end_s"] > w["start_s"] for w in report["words"])
+
+
+def _draws(*durations, text="wase-Ekurhuleni", extra=None):
+    return [{"score": 0.1 * i, "name_s": s, "names": [{"text": text, "s": s}] + ([extra[i]] if extra else [])} for i, s in enumerate(durations)]
+
+
+def test_a_draw_that_said_a_name_far_longer_than_the_others_is_set_aside_even_though_it_is_the_longest():
+    echo = _draws(0.98, 1.72, 0.94)                                                     # prod-x1 "wase-Ekurhuleni": the longest is a word said twice
+    assert ot.stretched_draws(echo) == [False, True, False] and ot.pick_take(echo) == 0  # draws 1 and 3 are the usual ones, and of them the longer (0.98) is used
+    assert ot.pick_take(_draws(0.98, 1.72, 1.05)) == 2
+
+
+def test_the_draws_the_ear_chose_are_not_set_aside_by_the_guard():
+    assert ot.stretched_draws(_draws(0.38, 0.30, 0.40, text="i-NEC")) == [False, False, False] and ot.pick_take(_draws(0.38, 0.30, 0.40, text="i-NEC")) == 2
+    assert ot.stretched_draws(_draws(0.42, 0.641, 0.54, text="yi-ANC")) == [False, False, False] and ot.pick_take(_draws(0.42, 0.641, 0.54, text="yi-ANC")) == 1
+
+
+def test_with_fewer_than_three_draws_the_guard_says_nothing_and_the_longest_name_stands():
+    assert ot.stretched_draws(_draws(0.98, 1.72)) == [False, False] and ot.pick_take(_draws(0.98, 1.72)) == 1
+    assert ot.stretched_draws([{"score": 0.0}] * 3) == [False] * 3                       # no names: nothing to compare
+
+
+def test_each_name_of_a_span_is_compared_with_its_own_draws():
+    other = [{"text": "Mashaba", "s": 0.23}, {"text": "Mashaba", "s": 0.25}, {"text": "Mashaba", "s": 0.9}]
+    flags = ot.stretched_draws(_draws(0.98, 1.0, 1.05, extra=other))
+    assert flags == [False, False, True]                                                # the third said "Mashaba" at four times the usual length
+
+
+def test_a_name_is_given_its_pace_against_the_rest_of_its_sentence():
+    words = "Hlobo luni lokwakheka komkhandlu wase-Ekurhuleni efisa ukulubona".split()
+    times = [{"start": 0.0, "end": 0.22}, {"start": 0.22, "end": 0.40}, {"start": 0.40, "end": 0.80}, {"start": 0.80, "end": 1.30}, {"start": 1.30, "end": 3.03}, {"start": 3.03, "end": 3.31}, {"start": 3.31, "end": 3.89}]
+    [name] = ot.name_lengths(words, times, {"ekurhuleni"})
+    assert name["text"] == "wase-Ekurhuleni" and abs(name["s"] - 1.73) < 0.001 and name["pace"] < 0.5          # 8.7 letters a second against about 20 for the rest
+    assert ot.name_lengths(words, [None] * 7, {"ekurhuleni"}) == []
+
+
+def test_the_guard_looks_at_each_word_of_a_run_of_names_so_a_second_name_does_not_hide_an_echo():
+    # prod-x1 row 0: the run "wase-Ekurhuleni i-ActionSA" took 1.86, 2.37 and 1.94 s (1.2x the median), but the first word alone 0.98, 1.72 and 0.94 s
+    draws = [{"score": 0.0, "name_s": run, "names": [{"text": "wase-Ekurhuleni i-ActionSA", "s": run, "words": [{"text": "wase-Ekurhuleni", "s": a}, {"text": "i-ActionSA", "s": run - a}]}]}
+             for run, a in ((1.864, 0.98), (2.366, 1.72), (1.944, 0.94))]
+    assert ot.stretched_draws(draws) == [False, True, False] and ot.pick_take(draws) == 2                    # draw 2 is the longest run, and it is set aside: of the rest 3 is the longer
+    [name] = ot.name_lengths("Hlobo luni lokwakheka komkhandlu wase-Ekurhuleni i-ActionSA efisa".split(),
+                             [{"start": 0.0, "end": 0.2}, {"start": 0.2, "end": 0.4}, {"start": 0.4, "end": 0.8}, {"start": 0.8, "end": 1.3}, {"start": 1.3, "end": 3.03}, {"start": 3.03, "end": 3.65}, {"start": 3.65, "end": 3.9}],
+                             {"ekurhuleni", "actionsa"})
+    assert [w["text"] for w in name["words"]] == ["wase-Ekurhuleni", "i-ActionSA"] and abs(name["words"][0]["s"] - 1.73) < 0.001
+
+
+def test_an_english_word_kept_in_english_after_a_zulu_prefix_is_a_candidate_for_the_speakers_own_audio():
+    runs = ot.ReferenceBank.dub_name_runs
+    assert runs("angikwazi ukukunika ama-details amanye, kodwa") == [["details"]]
+    assert runs("izihlalo ezingu-forty kulo mkhandlu?") == [["forty"]]
+    assert runs("uPhineas Manyama, ama-details okugcina") == [["Phineas", "Manyama"], ["details"]]               # a name run and a word, apart
+    assert runs("Ngakho-ke yilokho, ngoba-ke nje, ama-photos kuphela") == [["photos"]]                         # short stems and Zulu words with a hyphen are not taken
+    assert runs("i-ANC iyavuma, no-1 kuphela, kuka-230") == [["ANC"]]
+
+
+def test_a_snap_that_may_not_go_into_the_word_never_cuts_its_edges_off(tmp_path):
+    bank = _bank(tmp_path)
+    for start, end in ((2.0, 2.34), (5.1, 5.5), (12.0, 12.3)):
+        inside_start, inside_end = bank.snap(start, end, start - 0.3, end + 0.3, inward=0.0)
+        assert inside_start <= start + 1e-9 and inside_end >= end - 1e-9                 # outward only: the word is whole
+        assert inside_end - inside_start >= end - start - 1e-9
+
+
+
+def _bank_where_the_speaker_says(tmp_path, word):
+    bank = _bank(tmp_path)
+    for w in bank.words:
+        if 10.0 <= float(w["start"]) < 20.0 and w["text"] in ("w5", "w6"):
+            w["text"] = word if w["text"] == "w5" else "again,"
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    return bank
+
+
+def test_a_word_after_a_glued_prefix_is_spoken_as_two_words_and_its_times_come_back_as_the_words_of_the_text(tmp_path):
+    client = ScriptedClient(lambda call, ref: [_span_audio()])
+    backend = ot.OmniVoiceTTSBackend(client, banks={"job": _bank(tmp_path)})
+    audio, rate, answer, report, reference = backend.speak(GROUP, ["Kunamaqembu ama-details okugcina silinde."], [], "job")
+    sent = [t for r in client.requests for t in r["spans"]]
+    assert sent and all("ama details" in t and "ama-details" not in t for t in sent)               # the speaker did not say it: the voice must say all of it
+    assert [w["text"] for w in report["words"]] == ["Kunamaqembu", "ama-details", "okugcina", "silinde."]      # the words of the dub text, not of what the voice was sent
+
+
+def test_a_word_the_speaker_says_stays_glued_in_the_sentence_it_is_cut_out_of_and_is_spoken_in_full_in_the_primed_one(tmp_path):
+    client = ScriptedClient(lambda call, ref: [_span_audio(), _span_audio(), _span_audio()])
+    backend = ot.OmniVoiceTTSBackend(client, banks={"job": _bank_where_the_speaker_says(tmp_path, "details")})
+    audio, rate, answer, report, reference = backend.speak(GROUP, ["Kunamaqembu ama-details okugcina silinde."], [], "job")
+    sent = [t for r in client.requests for t in r["spans"]]
+    assert any("ama-details" in t and "ama details" not in t for t in sent)                        # the cluster: its own "details" is replaced, and the word after it stays whole
+    assert any("ama details" in t for t in sent)                                                    # the primed sentence the word is taken from, or the primed span itself, says it in full
+    assert [w["text"] for w in report["words"]] == ["Kunamaqembu", "ama-details", "okugcina", "silinde."]
+
+
+def test_two_names_with_a_word_or_so_between_them_are_taken_as_one_stretch_from_the_primed_sentence():
+    words = "Kodwa ngicabanga ukuthi yebo, ama-details okugcina, silinde i-ANC ukuthi iwabeke phansi,".split()
+    names = ["anc", "details"]
+    assert ot.swap_regions(words, names) == [(3, 7)]                          # yebo ... i-ANC: "okugcina" is not left between two splices
+    far = "Kodwa ama-details okugcina kakhulu silinde i-ANC ukuthi".split()
+    assert ot.swap_regions(far, names) == [(0, 1), (4, 5)]                       # two words between: two stretches, as before
+    assert ot.swap_regions("Sawubona baba wami.".split(), names) == []
+    assert ot.swap_regions("Kanti futhi i-NEC iwamukele".split(), ["nec"]) == [(1, 2)]          # one name: the name with the vowel before it, as before

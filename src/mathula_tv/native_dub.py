@@ -9053,6 +9053,9 @@ def _native_dub_tts_ready_text(
     real motivating case: "racism" garbles on zu-ZA-ThandoNeural but not on
     zu-ZA-ThembaNeural) -- omitting it preserves today's exact behavior.
     """
+    from .abbreviations import expand as expand_abbreviations
+
+    text = expand_abbreviations(text)[0]          # every abbreviation with a spoken form is written out first (abbreviations.py), whatever follows it
     dictionary = _native_dub_pronunciation_dictionary()
     if job_root is not None:
         dictionary = _NATIVE_DUB_PRONUNCIATION_DICTIONARY_BY_JOB.get(str(job_root), dictionary)

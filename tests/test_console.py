@@ -858,6 +858,9 @@ def test_a_run_can_ask_for_its_own_decoding_settings_and_its_studio_is_a_differe
     first = drawn.studio_run(JOB, "prod-1", make=False)
     second = drawn.studio_run(JOB, "prod-1-pt1", make=False)
     assert first["pending"] and second["pending"]                                                                                               # nothing made, nothing spent, only read
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"span_sentences": "fill", "splice": False}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"span_sentences": 99, "splice_names": False}                                                  # a run can ask for no splicing
+    assert drawn._omni_with({"span_sentences": 99, "splice_names": False}).splice_names is False and drawn._omni_with({"span_sentences": 99}).splice_names is True
 
 
 def test_no_function_of_the_console_page_is_defined_twice():

@@ -580,6 +580,8 @@ class Console:
             voice["span_sentences"] = 99          # omnivoice_tts.FILL_SENTENCES: as many sentences as fit the time budget
         if data.get("follow_word") is False:
             voice["follow_word"] = False
+        if data.get("splice") is False:
+            voice["splice_names"] = False          # no name is cut from a primed sentence and put in: the whole span is spoken primed (every name of it in front of the reference) and used as it is
         return voice or None
 
     def _omni_with(self, voice: dict[str, Any] | None) -> Any:
@@ -600,6 +602,7 @@ class Console:
             copy.generation = dict(voice["generation"]) if voice.get("generation") else None          # on top of the client's own defaults (64 steps)
             copy.span_sentences = int(voice.get("span_sentences") or 1)
             copy.follow_word = voice.get("follow_word") is not False
+            copy.splice_names = voice.get("splice_names") is not False
             copies[key] = copy
         return copies[key]
 
@@ -736,7 +739,7 @@ class Console:
             pins = [draws.take_for(store, text, ref.start_s, ref.end_s) for text in spans]
             generation = self._run_voice(job, run)
             steps = json.dumps(getattr(getattr(self._omni(), "client", None), "default_generation", None), sort_keys=True)
-            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
+            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked-stretch-guard-by-word-prefixed-words-whole-word-glued-in-sentence-spaced-in-primed" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
             prepared.append((name, corpus, group, spans, gaps, pins, store, ref, generation))
         missing = [p for p in prepared if not ((self.audio_dir / f"{p[0]}.wav").is_file() and (self.audio_dir / f"{p[0]}.json").is_file())]
         if missing and not make:                      # only reading: nothing is queued and no GPU is spent
@@ -778,7 +781,7 @@ class Console:
                 words = by_span.get(k, [])
                 sentences.append({"unit": index, "index": k, "text": text, "words": words, "flagged": [f["word"] for f in self._flags(job, run) if f.get("unit_id") == group["group_id"] and f.get("span") == k], "committed": pins[k], "picked": (data.get("picked") or [0] * len(spans))[k],
                                   "draws": [f"/audio/{f}" for f in (data.get("takes") or {}).get(str(k), [])],
-                                  "primed": [[{"url": f"/audio/{x['file']}", "text": x["text"]} for x in ((data.get("primed") or {}).get(str(k)) or {}).get(str(t), [])] for t in range(3)],
+                                  "primed": [[{"url": f"/audio/{x['file']}", "text": x["text"], "names": x.get("names") or [], "stretched": bool(x.get("stretched"))} for x in ((data.get("primed") or {}).get(str(k)) or {}).get(str(t), [])] for t in range(3)],
                                   "marked": pins[k] is not None,
                                   "start": words[0]["start"] if words else offset, "end": words[-1]["end"] if words else offset})
         key = hashlib.sha256("|".join(p[0] for p in prepared).encode("utf-8")).hexdigest()[:32]
@@ -808,7 +811,7 @@ class Console:
             for k, note in enumerate(raw_out):
                 fname = hashlib.sha256(f"{name}|primed|{k}".encode("utf-8")).hexdigest()[:32] + ".wav"
                 sf.write(str(self.audio_dir / fname), note["audio"], int(note["rate"]))
-                primed.setdefault(str(note["span"]), {}).setdefault(str(note["take"]), []).append({"file": fname, "text": str(note["text"]), "names": note.get("names") or [], "source": note.get("source") or []})
+                primed.setdefault(str(note["span"]), {}).setdefault(str(note["take"]), []).append({"file": fname, "text": str(note["text"]), "names": note.get("names") or [], "source": note.get("source") or [], "stretched": bool(note.get("stretched"))})
             sf.write(str(wav), audio, rate)
             meta.write_text(json.dumps({"seconds": round(len(audio) / rate, 2), "words": report.get("words") or [], "takes": files, "picked": report.get("picked"), "primed": primed}), encoding="utf-8")
         except Exception as exc:                                          # noqa: BLE001 - the page is told, the server goes on

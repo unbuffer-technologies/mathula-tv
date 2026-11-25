@@ -24,12 +24,13 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import soundfile as sf
 
 from . import omnivoice_duration as od
+from . import abbreviations
 
 CLIP_MIN_S = 3.0
 CLIP_MAX_S = 9.0
@@ -227,17 +228,34 @@ class ReferenceBank:
             t = t.replace(old, new)
         return "".join(ch for ch in t if ch.isalpha())
 
+    TITLES = abbreviations.title_words()          # said before a name (Mnu, Dr, Prof ... and written out); the speaker's own words for them are "Mr", "Doctor": never part of the name
+
     @staticmethod
     def dub_name_runs(text: str) -> list[list[str]]:
-        """The runs of name-like words in the dub text (a capital, three letters or more), with a Zulu prefix taken off ("uCanny" and "u-Phineas" -> Canny, Phineas; "we-JMPD" -> JMPD).  A comma or a full stop ends a run.
+        """The runs of name-like words in the dub text (a capital, three letters or more; or an English word in lower case after a hyphenated Zulu prefix), with a Zulu prefix taken off ("uCanny" and "u-Phineas" -> Canny, Phineas; "we-JMPD" -> JMPD).  A comma or a full stop ends a run.
         Zulu words that merely begin a sentence are in here too: they are only names when the speaker said something like them (name_matches)."""
         runs: list[list[str]] = []
         current: list[str] = []
+        previous = ""
         for raw in str(text or "").split():
             core = re.sub(r"^[^\w]+|[^\w]+$", "", raw)
-            core = core.split("-")[-1]
+            stem = core.split("-")[-1]
+            spaced = abbreviations.english_stem(previous.lower(), core)          # "ama details": the same word after the space the voice text is written with
+            previous = core
+            if spaced or ("-" in core and stem.isalpha() and stem.islower() and len(stem) >= 4):          # an English word kept in English after a Zulu class prefix ("ama-details", "ezingu-forty"): when the speaker says it, its audio is the pronunciation, as a name's is (prod-x1: the voice dropped the t of "details" in every draw)
+                if current:
+                    runs.append(current)
+                runs.append([stem])
+                current = []
+                continue
+            core = stem
             core = re.sub(r"^(?:[a-z]+|[A-Z])(?=[A-Z][a-z])", "", core)          # uCanny, kwamaHawks (a prefix of any length), uClive (a capital U at the start of a sentence), but not JMPD
             ends = raw.rstrip().endswith((",", ".", "?", "!", ";", ":"))
+            if core.lower() in ReferenceBank.TITLES:          # "Mnu Mashaba": the name is Mashaba, and the title is spelled out by the dictionary (a title taken into the name was protected from it and read as "mnu")
+                if current:
+                    runs.append(current)
+                current = []
+                continue
             if len(core) >= 3 and core[0].isupper():
                 current.append(core)
                 if ends:
@@ -305,7 +323,10 @@ class ReferenceBank:
             a, z = m["first"], m["last"]
             prev_end = float(self.words[a - 1]["end"]) if a > 0 else float(self.words[a]["start"]) - 0.3
             next_start = float(self.words[z + 1]["start"]) if z + 1 < len(self.words) else float(self.words[z]["end"]) + 0.3
-            first, last = self.snap(float(self.words[a]["start"]), float(self.words[z]["end"]), min(prev_end, float(self.words[a]["start"])), max(next_start, float(self.words[z]["end"])))
+            edges = (float(self.words[a]["start"]), float(self.words[z]["end"]), min(prev_end, float(self.words[a]["start"])), max(next_start, float(self.words[z]["end"])))
+            first, last = self.snap(*edges)
+            if last - first < 0.2:                                              # the snap cut into the word: a primer is the whole word, so move the edges outward only
+                first, last = self.snap(*edges, inward=0.0)
             if not 0.2 <= last - first <= PRIMER_MAX_SNIPPET_S:
                 continue
             snippets.append((m["text"], self._clip(first, last), last - first))
@@ -416,7 +437,7 @@ class ReferenceBank:
             self._db = 20.0 * np.log10(np.sqrt((mono[: count * hop].reshape(count, hop) ** 2).mean(axis=1)) + 1e-9)
         return self._db
 
-    def snap(self, start: float, end: float, prev_end: float, next_start: float) -> tuple[float, float]:
+    def snap(self, start: float, end: float, prev_end: float, next_start: float, inward: float = 0.08) -> tuple[float, float]:
         """The clip's edges moved to the quietest point between it and its neighbouring words.  The recogniser's word times are rough, and a clip cut at them starts and ends in the middle of
         speech (20 of 25 clips of prod-119 ended within a few dB of the speech level); the model clones from the clip and an abrupt edge leaves a stray sound at the start of what it says."""
         db = self._levels()
@@ -430,8 +451,8 @@ class ReferenceBank:
             at = min(max(int(current * 100), 0), len(smooth) - 1)
             return best / 100.0 if smooth[best] <= smooth[at] - 3.0 else current              # only when it is clearly quieter than where the recogniser put the edge
 
-        new_start = quietest(max(prev_end, start - 0.15), start + 0.08, start)
-        new_end = quietest(end - 0.08, min(next_start, end + 0.15), end)
+        new_start = quietest(max(prev_end, start - 0.15), start + inward, start)          # ``inward`` is how far into the word an edge may move (the recogniser's times are rough); 0 for a short word, whose closed first sound and weak last sound
+        new_end = quietest(end - inward, min(next_start, end + 0.15), end)                 # are the quietest points of it ("details", 0.34 s: cut to 0.18 s without its d and its s)
         return (new_start, new_end) if new_end - new_start <= CLIP_MAX_S + 0.3 else (start, end)
 
     def as_reference(self, chosen: Mapping[str, Any]) -> Reference:
@@ -988,14 +1009,60 @@ def name_runs(words: Sequence[str], names: Sequence[str] | set[str]) -> list[tup
     return runs
 
 
+def _letters(text: str) -> int:
+    return sum(1 for ch in str(text) if ch.isalpha())
+
+
 def name_lengths(words: Sequence[str], times: Sequence[Mapping[str, Any] | None], names: Sequence[str] | set[str]) -> list[dict[str, Any]]:
-    """How long the voice said each name of ``words`` (``times`` are the aligned times of the same words): [{text, s}]."""
+    """How long the voice said each name of ``words`` (``times`` are the aligned times of the same words): [{text, s, pace}].  ``pace`` is how fast the name was said, in letters a second, against the median
+    of the other words of the same sentence (1.0 = as fast as they are, 0.4 = two and a half times slower: a word said twice, or drawn out)."""
+    import statistics
+
+    runs = name_runs(words, names)
+    inside = {i for first, last in runs for i in range(first, last + 1)}
+    rest = []
+    for i, word in enumerate(words):
+        t = times[i] if i < len(times) else None
+        if i not in inside and t and float(t["end"]) - float(t["start"]) > 0.05 and _letters(word):
+            rest.append(_letters(word) / (float(t["end"]) - float(t["start"])))
+    typical = statistics.median(rest) if len(rest) >= 3 else None
     out = []
-    for first, last in name_runs(words, names):
+    for first, last in runs:
         a, z = (times[first] if first < len(times) else None), (times[last] if last < len(times) else None)
         if a and z:
-            out.append({"text": " ".join(words[first:last + 1]), "s": round(float(z["end"]) - float(a["start"]), 3)})
+            seconds = float(z["end"]) - float(a["start"])
+            entry = {"text": " ".join(words[first:last + 1]), "s": round(seconds, 3),
+                     "words": [{"text": words[i], "s": round(float(times[i]["end"]) - float(times[i]["start"]), 3)} for i in range(first, last + 1) if i < len(times) and times[i]]}
+            if typical and seconds > 0.05:
+                entry["pace"] = round(_letters(" ".join(words[first:last + 1])) / seconds / typical, 2)
+            out.append(entry)
     return out
+
+
+STRETCH = 1.5          # a name said this many times longer than the median of its draws is not a better draw of it but a worse one (a word said twice: prod-x1 "wase-Ekurhuleni", 1.72 s of 0.98/1.72/0.94)
+
+
+def stretched_draws(scores: Sequence[Mapping[str, Any]]) -> list[bool]:
+    """Which draws said a name far longer than the other draws did: the timing of the aligner, not its confidence (the echo drew the highest confidence of the three).  It takes three draws to say what is
+    usual, so fewer say nothing."""
+    import statistics
+
+    flags = [False] * len(scores)
+    if len(scores) < 3:
+        return flags
+    by_name: dict[tuple[str, int], list[tuple[int, float]]] = {}
+    for t, sc in enumerate(scores):
+        for n in sc.get("names") or []:          # word by word: a run of two names dilutes the one that was said twice (1.86, 2.37 and 1.94 s for the run, 0.98, 1.72 and 0.94 s for the word)
+            for k, word in enumerate(n.get("words") or [{"text": n["text"], "s": n["s"]}]):
+                by_name.setdefault((str(n["text"]), k), []).append((t, float(word["s"])))
+    for seen in by_name.values():
+        if len(seen) < 3:
+            continue
+        typical = statistics.median(s for _, s in seen)
+        for t, s in seen:
+            if typical > 0 and s > STRETCH * typical:
+                flags[t] = True
+    return flags
 
 
 def pick_take(scores: Sequence[Mapping[str, Any]]) -> int:
@@ -1004,7 +1071,9 @@ def pick_take(scores: Sequence[Mapping[str, Any]]) -> int:
     one the ear chose both times (0.401 s of 0.38/0.30/0.40, and 0.641 s of 0.42/0.64/0.54)."""
     if not any(float(sc.get("name_s") or 0.0) > 0.0 for sc in scores):
         return min(range(len(scores)), key=lambda t: scores[t]["score"])
-    return max(range(len(scores)), key=lambda t: (float(scores[t].get("name_s") or 0.0), -float(scores[t]["score"])))
+    stretched = stretched_draws(scores)
+    kept = [t for t in range(len(scores)) if not stretched[t]] or list(range(len(scores)))          # a draw that said a name far longer than the others is set aside (stretched_draws)
+    return max(kept, key=lambda t: (float(scores[t].get("name_s") or 0.0), -float(scores[t]["score"])))
 
 
 def joined_with_the_word_before(words: Sequence[str], first: int) -> int:
@@ -1013,6 +1082,23 @@ def joined_with_the_word_before(words: Sequence[str], first: int) -> int:
     if first > 0 and "-" in str(words[first]).strip(".,;:!?") and re.search(r"[aeiou]\W*$", str(words[first - 1]).lower()):
         return first - 1
     return first
+
+
+MERGE_GAP_WORDS = 1          # names this close (at most this many words between them) are taken as one stretch from the primed sentence
+
+
+def swap_regions(words: Sequence[str], names: Sequence[str] | set[str]) -> list[tuple[int, int]]:
+    """The stretches of a sentence that are taken from the primed generation: each name run (with the vowel-ended word before it that it runs into), and a stretch that would leave only a word or so of
+    the cluster between two of them is made one stretch, taken whole ("yebo, ama-details okugcina, silinde i-ANC": the 0.6 s of "okugcina" left between the two names came from another generation,
+    at another pace, with a splice on each side of it, and every draw of it sounded messy)."""
+    regions: list[tuple[int, int]] = []
+    for first, last in name_runs(words, names):
+        first = joined_with_the_word_before(words, first)
+        if regions and first - regions[-1][1] - 1 <= MERGE_GAP_WORDS:
+            regions[-1] = (regions[-1][0], last)
+        else:
+            regions.append((first, last))
+    return regions
 
 
 def _crossfade(a: np.ndarray, b: np.ndarray, n: int) -> np.ndarray:
@@ -1136,6 +1222,7 @@ class OmniVoiceTTSBackend:
         self.speed = speed
         self.follow_word = True          # a span is spoken with the first word of the next one after it (cut off afterwards) so that its last word is not the last thing the model makes; an experiment can turn it off
         self.name_draws = False          # the final render: a span with names is drawn as many times as the Studio draws it (the names differ draw to draw), and the longest name is used, so the video is the audio that was listened to; a run's measurements make one
+        self.splice_names = True         # a cluster's names are cut from their primed sentences and put in; False: the whole span is spoken primed (every name of the span in front of the reference) and used as it is, with no splice
         self.nameless_draws = 1          # how many draws the Studio makes of a unit that carries no names (the draws of a name are the ones listened to; a draw of the speech around it is a call for nothing)
         self.span_sentences = 1          # how many sentences one generation speaks (1 = each its own; an experiment can ask for 2 or 3, see merge_spans)
         self.generation: dict[str, float] | None = None          # the model's decoding settings (position_temperature, guidance_scale, num_step ...); None = the model's own defaults
@@ -1167,6 +1254,7 @@ class OmniVoiceTTSBackend:
             client.default_generation["num_step"] = int(env["OMNIVOICE_NUM_STEP"])
         backend = cls(client, speed=float(env.get("OMNIVOICE_SPEED") or DEFAULT_SPEED), lora=(env.get("OMNIVOICE_LORA", "1").strip().lower() not in {"0", "false", "no"}))
         backend.name_draws = (env.get("OMNIVOICE_NAME_DRAWS") or "").strip().lower() in {"1", "true", "yes"}
+        backend.splice_names = (env.get("OMNIVOICE_SPLICE") or "1").strip().lower() not in {"0", "false", "no", "off"}
         if (env.get("OMNIVOICE_PARALLEL") or "").strip().isdigit():          # set by warm_voice: the copies of the voice this job holds
             client.set_parallel(int(env["OMNIVOICE_PARALLEL"]))
         per_span = (env.get("OMNIVOICE_SPAN_SENTENCES") or "").strip()
@@ -1220,6 +1308,7 @@ class OmniVoiceTTSBackend:
                 if isinstance(piece, int):
                     pieces.append(piece)
                     continue
+                piece = abbreviations.expand(piece)[0]          # "Mnu Mashaba" -> "Mnumzana Mashaba", "Dr. Smith" -> "Doctor Smith", "20 km" -> "20 kilometres": every abbreviation with a spoken form, before the names are put out of the dictionary's reach
                 protected, mapping = protect_names(piece, covered)                          # the dictionary reads the rest, not these
                 ready = _native_dub_tts_ready_parts(protected, job_root=job_root, voice=str(voice_info.get("selected_voice") or ""))
                 for out in ([ready] if isinstance(ready, str) else flatten_parts(ready)):
@@ -1280,11 +1369,25 @@ class OmniVoiceTTSBackend:
         first_pass: dict[Any, Any] = {}                                    # the unprimed pass of the cluster, made by the first draw and shared by the others
         raw_notes: list[dict[str, Any]] = []                              # the primed sentences the names were cut from, exactly as the voice made them (the studio plays them)
 
+        def synth(*, keep: Sequence[Iterable[str]] | None = None, **ask: Any) -> dict[str, Any]:
+            """One request to the voice.  An English word kept after a glued Zulu prefix ("ama-details") is sent as two words, because the voice reads the glued form as one Zulu word and drops the
+            word's consonants; the word times come back folded to the words of the text, so nothing else sees the difference.  A word in ``keep[i]`` (the names of span i the speaker says: they are cut out of
+            a primed sentence and put in) stays glued: the voice then leaves the word after it whole, and the word itself is the speaker's (abbreviations.separate_stems)."""
+            texts = list(ask["spans"])
+            spaced = [abbreviations.separate_stems(text, keep[i] if keep and i < len(keep) and keep[i] else ()) for i, text in enumerate(texts)]
+            if all(all(g == 1 for g in groups) for _, groups in spaced):
+                return self.client.synthesize(**ask)
+            reply = self.client.synthesize(**{**ask, "spans": [text for text, _ in spaced]})
+            words = reply.get("words")
+            if isinstance(words, list) and len(words) == len(spaced):
+                reply = {**reply, "words": [abbreviations.fold_words(w, groups) for w, (_, groups) in zip(words, spaced)]}
+            return reply
+
         def take(reference: Reference) -> tuple[list[tuple[np.ndarray, int, int]], list[dict[str, Any]], int, float]:
             """One synthesis of the unit.  A span that follows another is spoken with the last sentence of the one before in front of it, so the voice does not start cold, and after the generation the
             repeated sentence is cut off between its last word and the first new one.  Where that is: the service aligns the known text with its own audio (one request carries every span of the unit and the word
             times of each); a service that cannot is answered by speaking each lead alone as well and warping it onto the start of the generation (voice_takes.align_end)."""
-            use_words = getattr(self, "service_aligns", None) is not False and any(leads)
+            use_words = getattr(self, "service_aligns", None) is not False          # a unit of one sentence has no lead to cut, but its words are the Studio's word strip and the cut of its stray ends
 
             refs = [bank.primed(reference, primer) for primer in primers]
             take_no = take_count[0]
@@ -1308,8 +1411,8 @@ class OmniVoiceTTSBackend:
                 once more pinned to the fluent length, which only stretches it.  One that comes out LONGER is left as it is: pinning it down squeezed the short syllable in front of a name ("ngu-Eric" heard as
                 "Eric": 0 of 5 clean pinned, 5 of 5 clean unpinned, prod-125 1:01)."""
                 reused = (salt, tuple(sent)) in first_pass          # the cluster is spoken once: the draws of a span with names differ in how its names are primed, not in the speech around them
-                first_future = None if reused else pool.submit(self.client.synthesize, spans=sent, gaps_ms=[0] * (len(sent) - 1), reference=reference, speed=self.speed, lora=self.lora, generation=self.generation, align=True,
-                                                               seeds=[seed_for(i, text, "first", salt) for i, text in enumerate(sent)])
+                first_future = None if reused else pool.submit(synth, spans=sent, gaps_ms=[0] * (len(sent) - 1), reference=reference, speed=self.speed, lora=self.lora, generation=self.generation, align=True,
+                                                               seeds=[seed_for(i, text, "first", salt) for i, text in enumerate(sent)], keep=[p["names"] if p else () for p in primers])
                 futures: dict[Any, Any] = {}
 
                 def primed_kwargs(index: int, text: str, tag: str) -> dict[str, Any]:
@@ -1318,7 +1421,7 @@ class OmniVoiceTTSBackend:
                 def fetch(key: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
                     """The reply of a primed generation: the one already on its way (submitted with the first pass, so they are spoken side by side), or made now."""
                     future = futures.get(key)
-                    return future.result() if future is not None else self.client.synthesize(**kwargs)
+                    return future.result() if future is not None else synth(**kwargs)
 
                 def sentence_plan(index: int, j: int, sentences_in: list[str]) -> tuple[str | None, str | None, str, int]:
                     """For the j-th sentence of a cluster: what is spoken before it, the word after it, the text of the generation and how many words of it come first (the way the pipeline speaks any sentence)."""
@@ -1330,13 +1433,13 @@ class OmniVoiceTTSBackend:
                     if primer is None:
                         continue
                     sentences_in = [x for x in vt.SENTENCE_END.split(spans[index].strip()) if x.strip()]
-                    if self.span_sentences > 1 and len(sentences_in) > 1 and sum(len(x.split()) for x in sentences_in) == len(spans[index].split()):
+                    if self.splice_names and self.span_sentences > 1 and len(sentences_in) > 1 and sum(len(x.split()) for x in sentences_in) == len(spans[index].split()):
                         for j in reversed(range(len(sentences_in))):
                             if name_runs(sentences_in[j].split(), primer["names"]):
                                 text_in = sentence_plan(index, j, sentences_in)[2]
-                                futures[("s", index, text_in)] = pool.submit(self.client.synthesize, **primed_kwargs(index, text_in, "primed-sentence"))
+                                futures[("s", index, text_in)] = pool.submit(synth, **primed_kwargs(index, text_in, "primed-sentence"))
                     else:
-                        futures[("b", index)] = pool.submit(self.client.synthesize, **primed_kwargs(index, sent[index], "primed"))
+                        futures[("b", index)] = pool.submit(synth, **primed_kwargs(index, sent[index], "primed"))
                 first = first_pass[(salt, tuple(sent))] if reused else first_future.result()
                 if not isinstance(first.get("words"), list):
                     return first                                                       # the service does not align: the caller asks the old way, with one reference
@@ -1351,7 +1454,7 @@ class OmniVoiceTTSBackend:
                     sentences_in = [x for x in vt.SENTENCE_END.split(spans[index].strip()) if x.strip()]
                     n_lead = len(leads[index].split()) if leads[index] else 0
                     now_times = words_by_span[index]
-                    if self.span_sentences > 1 and len(sentences_in) > 1 and isinstance(now_times, list) and len(now_times) == len(sent[index].split()) and sum(len(x.split()) for x in sentences_in) == len(spans[index].split()):
+                    if self.splice_names and self.span_sentences > 1 and len(sentences_in) > 1 and isinstance(now_times, list) and len(now_times) == len(sent[index].split()) and sum(len(x.split()) for x in sentences_in) == len(spans[index].split()):
                         ranges, at = [], n_lead
                         for x in sentences_in:
                             ranges.append((at, at + len(x.split()) - 1, x))
@@ -1374,8 +1477,7 @@ class OmniVoiceTTSBackend:
                             raw_notes.append({"span": index, "take": take_no, "text": text_in, "audio": primed_audio, "rate": rate_seen, "names": name_lengths(text_in.split(), reply["words"][0], primer["names"]), "source": [{"text": t, "s": round(x, 3)} for t, _, x in primer["snippets"]]})
                             swapped = 0
                             words_s = text_s.split()
-                            for run_first, run_last in reversed(name_runs(words_s, primer["names"])):          # only the name is taken from the primed sentence; the cluster keeps everything else
-                                run_first = joined_with_the_word_before(words_s, run_first)
+                            for run_first, run_last in reversed(swap_regions(words_s, primer["names"])):          # the names are taken from the primed sentence (with a word or so between two of them); the cluster keeps everything else
                                 out = swap_word_run(audio_now, rate_seen, times_now, first_w + run_first, first_w + run_last, primed_audio, reply["words"][0], n_before + run_first, n_before + run_last, cut_at)
                                 if out is not None:
                                     (audio_now, times_now), swapped = out, swapped + 1
@@ -1393,7 +1495,7 @@ class OmniVoiceTTSBackend:
                     pinned = primed_s < natural
                     if pinned:                                                         # the names made it faster than the speaker is: stretch it to the speaker's length
                         gpu += float(reply.get("gpu_s") or 0.0)
-                        again = pool.submit(self.client.synthesize, spans=[sent[index]], gaps_ms=[], reference=refs[index], speed=self.speed, lora=self.lora, generation=self.generation, align=True, durations_s=[round(natural, 3)],
+                        again = pool.submit(synth, spans=[sent[index]], gaps_ms=[], reference=refs[index], speed=self.speed, lora=self.lora, generation=self.generation, align=True, durations_s=[round(natural, 3)],
                                             seeds=[seed_for(index, sent[index], "stretched", salt, primer["names"])]).result()          # through the same pool: never more requests in the air than copies
                         if isinstance(again.get("words"), list) and again["words"]:
                             again_audio, again_rate = _decode_answer(again)
@@ -1427,7 +1529,7 @@ class OmniVoiceTTSBackend:
                 sent = [" ".join(part for part in (lead, span, follow if with_words else None) if part) for lead, span, follow in zip(leads, spans, follows)] + heard
                 if with_words and any(ref is not reference for ref in refs):
                     return ask_per_reference(sent), 0
-                reply = self.client.synthesize(spans=sent, gaps_ms=[max(0, g) for g in gaps] + [0] * len(heard), reference=reference, speed=self.speed, lora=self.lora, generation=self.generation, **({"align": True} if with_words else {}),
+                reply = synth(spans=sent, gaps_ms=[max(0, g) for g in gaps] + [0] * len(heard), reference=reference, speed=self.speed, lora=self.lora, generation=self.generation, **({"align": True} if with_words else {}),
                                                seeds=[seed_for(i, text, "first", salt) for i, text in enumerate(sent)])
                 return reply, len(heard)
 
@@ -1536,7 +1638,8 @@ class OmniVoiceTTSBackend:
                                "natural_gap_s": None if natural[index] is None else round(natural[index], 3), "target_after_s": round(target[index], 3) if index < len(target) else None})
                 scores[-1]["score"] = round(scores[-1]["score"] + extra, 3)
             for index, scored in enumerate(scores):                          # how long the voice said the names of each span in this take (the primed sentences the names come from)
-                scored["name_s"] = round(sum(float(n["s"]) for note in raw_notes if note["span"] == index and note["take"] == take_no for n in note.get("names") or []), 3)
+                scored["names"] = [n for note in raw_notes if note["span"] == index and note["take"] == take_no for n in note.get("names") or []]
+                scored["name_s"] = round(sum(float(n["s"]) for n in scored["names"]), 3)
             notes.append(info)
             return cores, scores, rate, float(answer.get("gpu_s") or 0.0)
 
@@ -1573,6 +1676,11 @@ class OmniVoiceTTSBackend:
             takes.append(take(reference))
         audio, rate, starts, picks, kept, cores = build(takes)
         if raw_out is not None:
+            for i in range(len(spans)):
+                flags = stretched_draws([takes[t][1][i] for t in range(len(takes))])
+                for note in raw_notes:
+                    if note["span"] == i and note["take"] < len(flags):
+                        note["stretched"] = flags[note["take"]]
             raw_out[:] = raw_notes
         if takes_out is not None:
             takes_out[:] = [[takes[t][0][i][0] for t in (range(len(takes)) if primers[i] is not None or pinned[i] is not None or self.nameless_draws > 1 else range(1))] for i in range(len(spans))]          # every take of every span, as kept (the studio plays them as the draws)

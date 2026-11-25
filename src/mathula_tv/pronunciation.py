@@ -521,7 +521,7 @@ _SUPPORTED_SA_LANGUAGE_LOCALES = {
 # a conspicuous pause.  Expand only the hidden TTS form; the approved translation
 # and captions retain their editorial spelling.
 _ZU_HONORIFIC_EXPANSIONS = {
-    "mnu": "Mnumzane",
+    "mnu": "Mnumzana",          # the ear (2026-11-25: "Mnu is not pronounced mnumzana"); "umnumzana" is the commonest form of the word in the spoken corpus (88), and the project's own note says Mnu is short for Mnumzana
     "nkk": "Nkosikazi",
     "nksz": "Nkosazana",
     "dkt": "Dokotela",

@@ -92,7 +92,9 @@ class FakeClient:
 
 
 def _backend(tmp_path):
-    return ot.OmniVoiceTTSBackend(FakeClient(), speed=0.85, banks={"job": _bank(tmp_path)})
+    backend = ot.OmniVoiceTTSBackend(FakeClient(), speed=0.85, banks={"job": _bank(tmp_path)})
+    backend.service_aligns = False          # this fake service gives no word times (the real one does); without it a unit asks for them first and then again without
+    return backend
 
 
 def test_a_group_is_spoken_through_the_service_with_its_own_reference_and_the_result_reads_like_azures(tmp_path):
