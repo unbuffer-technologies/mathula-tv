@@ -249,9 +249,9 @@ def run_production(
     playbook_version: str | None = None, render: bool = True, reflect_after: bool = True, judge_meaning: bool = True,
     max_turns: int | None = None, max_total_tokens: int | None = None, tts_budget: int | None = None, repair_from: str | None = None,
     hook: bool = False, audio_only: bool = False, mode: str | None = None, compact: bool = True, budget: str | None = None, resume: bool = False,
-    fresh: bool = False,
+    fresh: bool = False, opening_cut: bool = False,
 ) -> dict[str, Any]:
-    """``fresh``: ignore earlier runs of the job and draft from nothing; by default a job that has been dubbed before starts from its best earlier submission (see warm_start)."""
+    """``opening_cut``: with the OmniVoice voice the finish (dub_finish) keeps the whole video and adds the footer card; this also cuts the opening to the hook's anchor.  ``fresh``: ignore earlier runs of the job and draft from nothing; by default a job that has been dubbed before starts from its best earlier submission (see warm_start)."""
     from .cli import create_tts_backend
     from .dub_agent import BUDGET_LIMITS, agent_budget, agent_mode, build_system_prompt, new_chat_client, run_agent
     from .dub_judge import UnitJudge
@@ -319,6 +319,14 @@ def run_production(
                 workbench.seed_decisions = {str(e["english"]).casefold(): e for e in json.loads(saved.read_text(encoding="utf-8")).get("decisions") or [] if isinstance(e, dict) and e.get("english")}
         except (OSError, ValueError):
             pass
+    try:        # the clusters the agent measured with (OMNIVOICE_SPAN_SENTENCES) are the run's own voice setting: the studio and the finish read them from here
+        per_span = (os.environ.get("OMNIVOICE_SPAN_SENTENCES") or "").strip().lower()
+        if per_span and ws.current_voice_provider() == "omnivoice":
+            voice_file = store.repeat_dir(run_id, clip_id, 1).parent / "voice.json"
+            voice_file.parent.mkdir(parents=True, exist_ok=True)
+            voice_file.write_text(json.dumps({"span_sentences": "fill" if per_span == "fill" else int(per_span)}), encoding="utf-8")
+    except Exception as exc:        # noqa: BLE001 - never stops a run
+        print(f"[voice] the run's voice settings were not saved: {type(exc).__name__}")
     summary = run_agent(
         client, workbench, clip_id=clip_id, run_id=run_id, repeat=1, max_turns=max_turns,
         max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=build_system_prompt(playbook, mode=mode, budget=budget, web=bool(getattr(client, "web_budget", 0))),
@@ -344,7 +352,14 @@ def run_production(
         "headline": _headline(run_dir),
     }
 
-    if render and (run_dir / "submission.json").is_file():
+    if render and (run_dir / "submission.json").is_file() and ws.current_voice_provider() == "omnivoice":
+        try:        # the video to post and what to post it with, from the studio's audio (dub_finish); the legacy render below is for the other voices
+            from .dub_finish import finish
+
+            report["finish"] = finish(settings, job_id=job_id, run_id=run_id, clip_id=clip_id, opening_cut=opening_cut)
+        except Exception as exc:        # a finishing problem must not lose the dub, the report or the lessons
+            report["finish_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+    elif render and (run_dir / "submission.json").is_file():
         try:
             from .dub_render import render_submission
             from .job_pronunciations import build as build_job_pronunciations
@@ -405,7 +420,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fresh", action="store_true", help="do not start from the job's best earlier submission: draft the whole clip from nothing (the default for a job never dubbed before)")
     parser.add_argument("--hook", action="store_true",
                         help="render the hook edit and footer overlay and write the job-ID-named handoff files for posting")
-    parser.add_argument("--no-render", action="store_true")
+    parser.add_argument("--no-render", action="store_true", help="skip the finish: with the OmniVoice voice the video with the footer card and the files to post it with (dub_finish)")
+    parser.add_argument("--opening-cut", action="store_true", help="OmniVoice finish: also cut the opening to the hook's anchor (default: the whole video, with the footer card)")
     parser.add_argument("--audio-only", action="store_true",
                         help="synthesise, time and mix the dub audio and check it, but encode no video and make no hook (a quick check of a run; not the agent's training mode, see --mode)")
     parser.add_argument("--no-reflect", action="store_true")
@@ -449,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         settings, client, job_id=args.job, clip_id=args.clip, run_id=args.run_id, playbook_version=args.playbook,
         render=not args.no_render, reflect_after=not args.no_reflect, judge_meaning=not args.no_judge,
         max_total_tokens=args.max_tokens, repair_from=args.repair_from, hook=args.hook, audio_only=args.audio_only,
-        mode=args.mode, compact=not args.no_compact, budget=args.budget, resume=args.resume, fresh=args.fresh)
+        mode=args.mode, compact=not args.no_compact, budget=args.budget, resume=args.resume, fresh=args.fresh, opening_cut=args.opening_cut)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     return 0 if report["met_bar"] else 2
 
