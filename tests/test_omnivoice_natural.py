@@ -355,6 +355,39 @@ def test_the_speakers_own_names_are_cut_from_the_source_and_put_in_front_of_the_
     assert bank.primer_for("SPEAKER_01", 0.0, 40.0, "uPhineas") is None                       # another speaker's names are not this voice's
 
 
+def test_the_draw_with_the_clearest_names_is_kept_where_the_aligner_can_say_and_the_longest_name_otherwise():
+    draws = [{"name_s": 1.02, "score": 0.0, "clarity": 0.30}, {"name_s": 0.70, "score": 0.0, "clarity": 0.18}, {"name_s": 0.74, "score": 0.0, "clarity": 0.39}]
+    assert ot.pick_take(draws) == 2                                                                      # be-ActionSA: the longest (draw 1) was the bad one; the ear took the clearest
+    assert ot.pick_take([{**d, "clarity": None} for d in draws]) == 0                                    # no letter confidence: the longest name, as before
+    assert ot.pick_take([draws[0], {**draws[1], "clarity": None}, draws[2]]) == 0                        # one draw without it: the rule that every draw can be judged by
+    said = lambda s: [{"text": "Phineas", "s": s, "words": [{"text": "Phineas", "s": s}]}]                  # noqa: E731
+    long = [{"name_s": 1.0, "score": 0.0, "clarity": 0.5, "names": said(1.0)}, {"name_s": 1.0, "score": 0.0, "clarity": 0.5, "names": said(1.0)}, {"name_s": 2.4, "score": 0.0, "clarity": 0.9, "names": said(2.4)}]
+    assert ot.pick_take(long) in (0, 1)                                                                   # a name said twice as long as the others is set aside however clear it reads
+    assert ot.pick_take([{"name_s": 0.5, "score": 1.0, "clarity": 0.5}, {"name_s": 0.5, "score": 0.2, "clarity": 0.5}]) == 1                  # equal clarity and length: the least wrong audio
+
+
+def test_a_name_carries_how_sure_the_aligner_is_of_its_letters_as_its_clarity():
+    words = "kodwa be-ActionSA, sekuphele".split()
+    times = [{"start": 0.0, "end": 0.3}, {"start": 0.4, "end": 1.2, "letters": [["b", 0.4, 0.9], ["e", 0.5, 0.9], ["a", 0.7, 0.1], ["c", 0.8, 0.1]]}, {"start": 1.3, "end": 1.8}]
+    found = ot.name_lengths(words, times, ["actionsa"])
+    assert found and found[0]["clarity"] == 0.5
+    assert "clarity" not in ot.name_lengths(words, [times[0], {k: v for k, v in times[1].items() if k != "letters"}, times[2]], ["actionsa"])[0]
+
+
+def test_a_draw_the_listener_committed_is_found_by_the_clip_as_the_studio_names_it_not_by_where_the_render_snaps_its_edges(tmp_path):
+    from mathula_tv import draws as dr
+
+    bank = _bank_with_a_name(tmp_path)
+    raw = bank.ranked("SPEAKER_00", 0, 40000)[0]
+    bank.snap = lambda start, end, prev_end, next_start, inward=0.08: (start + 0.05, end + 0.05)           # the render snaps the clip's edges to the quiet; the Studio stamps a commit with the raw ones
+    spans = ["Siyabonga uPhineas Manyama ukhulumile."]
+    dr.commit(tmp_path, spans[0], raw["start"], raw["end"], 0, take=1)
+    client = ScriptedClient(lambda call, ref: [_span_audio(), _span_audio(), _span_audio()])
+    backend = ot.OmniVoiceTTSBackend(client, banks={str(tmp_path): bank})
+    report = backend.speak(GROUP, spans, [], str(tmp_path))[3]
+    assert report["picked"] == [1]                                                                     # draw 2 was committed: the render keeps it, whatever it would have chosen
+
+
 def test_the_primer_gives_way_to_the_budget_when_there_are_many_names(tmp_path):
     bank = _bank_with_a_name(tmp_path)
     import mathula_tv.omnivoice_tts as module
@@ -934,10 +967,229 @@ def test_a_word_after_a_glued_prefix_is_spoken_as_two_words_and_its_times_come_b
 def test_a_word_the_speaker_says_stays_glued_in_the_sentence_it_is_cut_out_of_and_is_spoken_in_full_in_the_primed_one(tmp_path):
     client = ScriptedClient(lambda call, ref: [_span_audio(), _span_audio(), _span_audio()])
     backend = ot.OmniVoiceTTSBackend(client, banks={"job": _bank_where_the_speaker_says(tmp_path, "details")})
+    backend.splice_mix = False                                                                      # the cut-in splice: the cluster keeps the glued form (a mix speaks the host as a reference-only sentence is spoken)
     audio, rate, answer, report, reference = backend.speak(GROUP, ["Kunamaqembu ama-details okugcina silinde."], [], "job")
     sent = [t for r in client.requests for t in r["spans"]]
     assert any("ama-details" in t and "ama details" not in t for t in sent)                        # the cluster: its own "details" is replaced, and the word after it stays whole
     assert any("ama details" in t for t in sent)                                                    # the primed sentence the word is taken from, or the primed span itself, says it in full
+    assert [w["text"] for w in report["words"]] == ["Kunamaqembu", "ama-details", "okugcina", "silinde."]
+
+
+def _spoken(rate, seconds, words, freq):
+    """A track of tone bursts (one per (start, end) in ``words``) in silence."""
+    audio = np.zeros(int(seconds * rate), dtype=np.float32)
+    for a, z in words:
+        i, j = int(a * rate), int(z * rate)
+        audio[i:j] = (0.2 * np.sin(2 * np.pi * freq * np.arange(j - i) / rate)).astype(np.float32)
+    return audio
+
+
+def _dominant(audio, rate):
+    spectrum = np.abs(np.fft.rfft(audio * np.hanning(len(audio))))
+    return float(np.argmax(spectrum)) * rate / len(audio)
+
+
+def test_a_name_is_mixed_in_at_the_quiet_points_beside_it_with_the_host_whole_on_either_side():
+    rate = RATE
+    host_words = [(0.1, 0.5), (0.6, 1.0), (1.15, 1.55)]
+    snippet_words = [(0.1, 0.5), (0.6, 1.1), (1.25, 1.65)]                                              # the name is longer in the primed sentence
+    host, snippet = _spoken(rate, 1.7, host_words, 150), _spoken(rate, 1.8, snippet_words, 300)
+    times, s_times = _words_at(host_words), _words_at(snippet_words)
+    out = ot.mix_word_run(host, rate, times, 1, 1, snippet, s_times, 1, 1)
+    assert out is not None
+    joined, moved = out
+    assert np.array_equal(joined[: int(0.45 * rate)], host[: int(0.45 * rate)])                         # the host is whole until the quiet point before the name
+    assert np.array_equal(joined[-int(0.4 * rate):], host[-int(0.4 * rate):])                          # and from the quiet point after it
+    name = joined[int(0.62 * rate): int(0.92 * rate)]
+    assert abs(_dominant(name, rate) - 300) < 20                                                      # in between it is the primed sentence
+    assert abs((len(joined) - len(host)) / rate - (moved[2]["start"] - times[2]["start"])) < 1e-4     # what follows moves by the change in length
+    assert 0.05 * rate < len(joined) - len(host) <= 0.12 * rate                                        # the primed name is 0.1 s longer and nothing is cut out of its speech: the sentence is that much longer
+    assert float(np.max(np.abs(np.diff(joined)))) < 0.1                                                # no click anywhere
+
+
+def test_the_cross_fades_never_touch_the_name_even_where_it_has_a_quiet_closure_in_its_first_milliseconds():
+    rate = RATE
+    words = [(0.1, 0.5), (0.6, 1.0), (1.15, 1.55)]
+    host, snippet = _spoken(rate, 1.7, words, 150), _spoken(rate, 1.7, words, 300)
+    snippet[int(0.62 * rate): int(0.68 * rate)] = 0.0                                                   # a stop's closure at the start of the primed name: the quietest place near it
+    snippet[int(0.92 * rate): int(0.98 * rate)] = 0.0                                                   # and another at its end
+    joined, moved = ot.mix_word_run(host, rate, _words_at(words), 1, 1, snippet, _words_at(words), 1, 1, sync=False)
+    assert np.array_equal(joined[int(0.6 * rate): int(1.0 * rate)], snippet[int(0.6 * rate): int(1.0 * rate)])        # the primed name is whole: no part of it faded, none of the host's under it
+    assert np.array_equal(joined[: int(0.45 * rate)], host[: int(0.45 * rate)]) and np.array_equal(joined[int(1.15 * rate): int(1.5 * rate)], host[int(1.15 * rate): int(1.5 * rate)])
+
+
+def test_a_name_shorter_than_its_stretch_keeps_its_length_and_the_sentence_closes_up():
+    rate = RATE
+    host_words = [(0.1, 0.5), (0.6, 1.2), (1.3, 1.7)]
+    snippet_words = [(0.1, 0.5), (0.6, 0.9), (1.0, 1.4)]
+    host, snippet = _spoken(rate, 1.8, host_words, 150), _spoken(rate, 1.5, snippet_words, 300)
+    joined, moved = ot.mix_word_run(host, rate, _words_at(host_words), 1, 1, snippet, _words_at(snippet_words), 1, 1)
+    assert len(joined) < len(host) - int(0.2 * rate)                                                   # nothing was repeated to fill it: the sentence is shorter by what the name lacks
+    assert moved[2]["start"] < 1.3
+
+
+def test_a_name_that_opens_its_sentence_starts_from_the_primed_sentence_and_takes_the_lead_times_from_it():
+    rate = RATE
+    host_words = [(0.1, 0.5), (0.7, 1.1), (1.2, 1.6)]                                                 # lead word, name, word after
+    snippet_words = [(0.2, 0.6), (0.9, 1.3), (1.4, 1.8)]
+    host, snippet = _spoken(rate, 1.7, host_words, 150), _spoken(rate, 1.9, snippet_words, 300)
+    joined, moved = ot.mix_word_run(host, rate, _words_at(host_words), 1, 1, snippet, _words_at(snippet_words), 1, 1, opens_sentence=True)
+    assert np.array_equal(joined[: int(0.55 * rate)], snippet[: int(0.55 * rate)])                     # the lead and the quiet before the name are the primed sentence's own
+    assert abs(moved[0]["start"] - 0.2) < 1e-6                                                         # the lead word is where the primed sentence has it
+    assert np.array_equal(joined[-int(0.3 * rate):], host[-int(0.3 * rate):])
+
+
+def _syllables(rate, seconds, shift_s=0.0):
+    """A voice with a syllable pulse every 0.15 s (a different loudness shape at every syllable), moved ``shift_s`` later."""
+    t = np.arange(int(seconds * rate)) / rate - shift_s
+    pulse = 0.15 + 0.85 * np.abs(np.sin(np.pi * t / 0.15)) ** 2 * (1.0 + 0.5 * np.sin(2 * np.pi * t / 0.9))
+    return (0.2 * pulse * np.sin(2 * np.pi * 150 * t)).astype(np.float32)
+
+
+def test_two_renditions_that_are_a_few_hundredths_of_a_second_apart_are_lined_up_by_their_syllables():
+    rate = RATE
+    host, snippet = _syllables(rate, 2.0), _syllables(rate, 2.0, shift_s=0.027)
+    found = ot.sync_join(host, int(1.0 * rate), snippet, int(1.0 * rate), rate, int(0.08 * rate))
+    assert found["applied"] and abs(int(found["lag"]) - int(0.027 * rate)) <= 0.002 * rate           # the primed track is 27 ms late: it is moved back by that
+    assert found["env_corr"] > 0.9 and found["wave_corr"] > 0.8
+    silent = np.zeros(2 * rate, dtype=np.float32)
+    quiet = ot.sync_join(silent, int(1.0 * rate), silent, int(1.0 * rate), rate, int(0.08 * rate))
+    assert quiet["applied"] is False and quiet["lag"] == 0                                              # no speech at the join, nothing to echo, nothing moved
+    unlike = (0.2 * np.random.default_rng(1).standard_normal(2 * rate)).astype(np.float32)
+    assert ot.sync_join(host, int(1.0 * rate), unlike, int(1.0 * rate), rate, int(0.08 * rate))["applied"] is False      # shapes that do not agree are not trusted
+
+
+def test_a_mix_records_what_each_join_was_like_and_moves_the_primed_track_only_when_asked_to():
+    rate = RATE
+    host_words = [(0.1, 0.5), (0.6, 1.0), (1.1, 1.5)]
+    snippet_words = [(0.1, 0.5), (0.6, 1.0), (1.1, 1.5)]
+    host, snippet = _syllables(rate, 1.7), _syllables(rate, 1.7, shift_s=0.02)
+    times = _words_at(host_words)
+    notes: list = []
+    synced = ot.mix_word_run(host, rate, times, 1, 1, snippet, _words_at(snippet_words), 1, 1, sync=True, notes=notes)
+    plain_notes: list = []
+    plain = ot.mix_word_run(host, rate, times, 1, 1, snippet, _words_at(snippet_words), 1, 1, sync=False, notes=plain_notes)
+    assert synced is not None and plain is not None and len(notes) == 1 and len(plain_notes) == 1
+    assert [j["side"] for j in notes[0]["joins"]] == ["before", "after"] and notes[0]["synced"] is True and plain_notes[0]["synced"] is False
+    assert all(j["applied"] is False for j in plain_notes[0]["joins"]) and all("lag_ms" in j and "level_host" in j for j in notes[0]["joins"])
+    assert all(abs(j["lag_ms"]) <= 1000 * ot.MIX_SYNC_REACH_S + 3 for j in notes[0]["joins"])           # never farther than the reach
+
+
+def test_a_join_inside_the_next_word_is_at_the_deep_quiet_point_of_both_tracks_not_at_a_dip_or_a_look_alike_position():
+    rate = RATE
+    host_words = [(0.1, 0.5), (0.6, 1.0), (1.0, 1.6)]                                                  # the next word follows the name at once: no silence to join in
+    snippet_words = [(0.1, 0.5), (0.6, 1.0), (1.0, 1.6)]
+    host, snippet = _spoken(rate, 1.9, host_words, 150), _spoken(rate, 1.9, snippet_words, 300)
+    host[int(1.30 * rate): int(1.34 * rate)] = 0.0                                                     # the stop's closure: 0.30 s into the host's word
+    host[int(1.18 * rate): int(1.22 * rate)] *= 0.3                                                    # a dip that is not quiet
+    snippet[int(1.20 * rate): int(1.24 * rate)] = 0.0                                                  # the same closure 0.20 s into the primed track's word
+    snippet[int(1.50 * rate): int(1.54 * rate)] *= 0.3
+    notes: list = []
+    out = ot.mix_word_run(host, rate, _words_at(host_words), 1, 1, snippet, _words_at(snippet_words), 1, 1, sync=False, notes=notes)
+    assert out is not None
+    after = notes[0]["joins"][1]
+    assert abs(after["host_s"] - 1.32) < 0.015 and abs(after["primed_s"] - 1.22) < 0.015                # both at the closure, though it is at a different distance into each word
+    valleys = ot._valleys(host, rate, 1.1, 1.6, ot._speech_level(host, rate))
+    assert [round(c / rate, 2) for c, _ in valleys] == [1.32]                                            # only the deep one counts
+
+
+def test_a_silence_beside_the_name_in_both_tracks_is_where_the_join_goes_with_a_fade_that_fits_it():
+    rate = RATE
+    host_words = [(0.1, 0.5), (0.58, 1.0), (1.06, 1.5)]                                                # 0.08 s of silence before the name and 0.06 s after it
+    snippet_words = [(0.1, 0.5), (0.7, 1.1), (1.8, 2.2)]                                               # 0.2 s before the name and 0.7 s after it
+    host, snippet = _spoken(rate, 1.7, host_words, 150), _spoken(rate, 2.4, snippet_words, 300)
+    notes: list = []
+    out = ot.mix_word_run(host, rate, _words_at(host_words), 1, 1, snippet, _words_at(snippet_words), 1, 1, sync=False, notes=notes)
+    assert out is not None
+    before, after = notes[0]["joins"]
+    assert 0.5 < before["host_s"] < 0.58 and 0.5 < before["primed_s"] < 0.7                              # inside each silence
+    assert abs(after["host_s"] - 1.03) < 0.01 and 1.1 < after["primed_s"] < 1.5 and after["fade_ms"] <= 60                  # in the primed silence (0.7 s long; the search reaches 0.4 s from the name), in the host's short one
+    assert 70 <= before["fade_ms"] <= 80 and 50 <= after["fade_ms"] <= 60                                # the full fade (80 ms) about fits the first silence; the 60 ms silence after the name sets that fade
+
+
+def test_a_letter_is_named_by_its_time_and_a_point_between_letters_by_how_far_along_it_is():
+    letters = [0.5, 0.6, 0.8, 0.9]
+    assert ot._letter_position(letters, 0.6) == 1.0 and abs(ot._letter_position(letters, 0.7) - 1.5) < 1e-9 and ot._letter_position(letters, 0.9) == 3.0
+    assert ot._letter_position(letters, 0.4) < 0 and ot._letter_position(letters, 1.0) > 3
+    assert ot._letter_times([{"letters": [["a", 0.1], ["b", 0.2]]}, {"letters": [["c", 0.5]]}]) == [0.1, 0.2, 0.5]
+    assert ot._letter_times([{"letters": [["a", 0.1]]}, None]) is None and ot._letter_times([{"start": 0.0}]) is None
+
+
+def test_with_letter_times_a_pause_is_not_paired_with_the_closure_inside_the_next_word():
+    rate = RATE
+
+    def entry(start, end, letters):
+        return {"start": start, "end": end, "letters": [[c, round(start + k * (end - start) / len(letters), 3)] for k, c in enumerate(letters)]}
+
+    host_words = [entry(0.1, 0.5, "baph"), entry(0.6, 1.0, "amadetails"), entry(1.15, 1.7, "okugcina")]
+    snippet_words = [entry(0.1, 0.5, "baph"), entry(0.6, 1.0, "amadetails"), entry(1.0, 1.55, "okugcina")]          # no pause after the name in the primed track
+    host, snippet = _spoken(rate, 1.9, [(0.1, 0.5), (0.6, 1.0), (1.15, 1.7)], 150), _spoken(rate, 1.9, [(0.1, 0.5), (0.6, 1.0), (1.0, 1.55)], 300)
+    host[int(1.33 * rate): int(1.37 * rate)] = 0.0                                                       # the "g": the fourth letter of "okugcina"
+    snippet[int(1.2 * rate): int(1.24 * rate)] = 0.0
+    notes: list = []
+    out = ot.mix_word_run(host, rate, host_words, 1, 1, snippet, snippet_words, 1, 1, sync=False, notes=notes)
+    assert out is not None
+    after = notes[0]["joins"][1]
+    assert abs(after["host_s"] - 1.35) < 0.015 and abs(after["primed_s"] - 1.22) < 0.015                  # closure with closure, not the host's pause (1.07) with the primed closure
+
+
+def test_a_next_word_the_primed_voice_ran_the_name_into_is_taken_with_it_and_the_join_is_made_after_it():
+    rate = RATE
+    host_words = [(0.1, 0.5), (0.6, 1.0), (1.4, 1.9), (2.2, 2.7)]                                      # a pause before the next word, and another before the one after
+    snippet_words = [(0.1, 0.5), (0.6, 1.0), (1.0, 1.5), (1.8, 2.3)]                                   # the primed voice runs the name into the next word: nothing quiet between them
+    host, snippet = _spoken(rate, 3.0, host_words, 150), _spoken(rate, 2.6, snippet_words, 300)
+    notes: list = []
+    out = ot.mix_word_run(host, rate, _words_at(host_words), 1, 1, snippet, _words_at(snippet_words), 1, 1, sync=False, notes=notes)
+    assert out is not None and notes[0]["words"] == [1, 2]                                              # the name and the next word are one stretch
+    after = notes[0]["joins"][-1]
+    assert 1.9 <= after["host_s"] <= 2.2 and 1.5 <= after["primed_s"] <= 1.8                           # the join is in the pause after that word, in both tracks
+    assert out[1][3]["start"] < 2.2                                                                      # the primed voice took no pause there, so what follows moves up
+
+
+def test_there_is_no_mix_without_a_word_on_each_side_of_the_name():
+    rate = RATE
+    words = [(0.1, 0.5), (0.6, 1.0)]
+    track = _spoken(rate, 1.2, words, 150)
+    assert ot.mix_word_run(track, rate, _words_at(words), 0, 0, track, _words_at(words), 0, 0) is None
+    assert ot.mix_word_run(track, rate, _words_at(words), 1, 1, track, _words_at(words), 1, 1) is None
+
+
+def test_a_primed_stretch_that_pauses_more_than_the_host_loses_the_pauses_and_no_speech():
+    rate = RATE
+    speech = _spoken(rate, 1.0, [(0.0, 0.3), (0.7, 1.0)], 200)                                         # a 0.4 s pause in the middle
+    squeezed, removed = ot._squeeze_silence(speech, int(0.3 * rate), rate)
+    assert 0.25 * rate < removed <= 0.3 * rate + 2 and len(squeezed) < len(speech) - int(0.25 * rate) and ot._squeeze_silence(speech, 0, rate) == (speech, 0)
+    tone = _spoken(rate, 1.0, [(0.0, 1.0)], 200)
+    assert ot._squeeze_silence(tone, int(0.2 * rate), rate)[1] == 0                                    # no pause, nothing to take out: speech is never cut
+    assert not hasattr(ot, "_trim_middle")
+
+
+def test_where_the_next_word_starts_too_close_to_the_name_the_join_is_made_inside_it_past_its_first_sound_in_both_tracks():
+    rate = RATE
+    host_words = [(0.1, 0.5), (0.6, 1.0), (1.18, 1.7)]                                                 # the host leaves 0.18 s before the next word
+    snippet_words = [(0.1, 0.5), (0.6, 1.0), (1.0, 1.52)]                                              # the primed sentence none: no silence to join in, in one of the tracks
+    host, snippet = _spoken(rate, 1.9, host_words, 150), _spoken(rate, 1.9, snippet_words, 300)
+    for track, (a, z) in ((host, host_words[2]), (snippet, snippet_words[2])):
+        mid = int((a + 0.2) * rate)
+        track[mid - int(0.015 * rate): mid + int(0.015 * rate)] = 0.0                                  # a quiet valley between its two syllables, 0.2 s into the word
+    notes: list = []
+    out = ot.mix_word_run(host, rate, _words_at(host_words), 1, 1, snippet, _words_at(snippet_words), 1, 1, sync=False, notes=notes)
+    assert out is not None
+    after = notes[0]["joins"][1]
+    assert after["host_s"] >= host_words[2][0] + ot.MIX_ONSET_S and after["primed_s"] >= snippet_words[2][0] + ot.MIX_ONSET_S          # neither track is cross-faded across the word's first sound
+    wide = [(0.1, 0.5), (0.6, 1.0), (1.3, 1.8)]
+    notes2: list = []
+    ot.mix_word_run(_spoken(rate, 1.9, wide, 150), rate, _words_at(wide), 1, 1, _spoken(rate, 1.9, wide, 300), _words_at(wide), 1, 1, sync=False, notes=notes2)
+    assert notes2[0]["joins"][1]["host_s"] < 1.3                                                       # with room in both, the join stays in the gap before the word
+
+
+def test_with_the_mix_the_host_is_spoken_as_a_reference_only_sentence_is_and_the_word_stays_in_the_dub_text(tmp_path):
+    client = ScriptedClient(lambda call, ref: [_span_audio(), _span_audio(), _span_audio()])
+    backend = ot.OmniVoiceTTSBackend(client, banks={"job": _bank_where_the_speaker_says(tmp_path, "details")})
+    assert backend.splice_mix is True
+    audio, rate, answer, report, reference = backend.speak(GROUP, ["Kunamaqembu ama-details okugcina silinde."], [], "job")
+    sent = [t for r in client.requests for t in r["spans"]]
+    assert any("details" in t for t in sent) and all("ama-details" not in t for t in sent if "details" in t)          # the host and the primed sentence both say the English word after the prefix
     assert [w["text"] for w in report["words"]] == ["Kunamaqembu", "ama-details", "okugcina", "silinde."]
 
 
@@ -958,3 +1210,264 @@ def test_the_last_span_of_a_unit_is_followed_by_a_plain_word_that_is_cut_away_an
     assert [w["text"] for w in report["words"]] == ["Sawubona", "baba", "wami."]                  # the plain word is not in the words
     assert len(audio) / rate < 3.4                                                                 # and not in the audio: the 0.65 s the service spoke for it is cut away
     assert abs(float(audio[-1])) < 1e-3                                                            # and the end fades out, it does not stop
+
+
+def _bank_with_places(tmp_path, middle):
+    bank = _bank(tmp_path)
+    for w in bank.words:
+        if 10.0 <= float(w["start"]) < 20.0:
+            if w["text"] == "w5":
+                w["text"] = "Tswane"
+            elif w["text"] == "w6":
+                w["text"] = middle
+            elif w["text"] == "w7":
+                w["text"] = "Johannesburg,"
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    return bank
+
+
+def test_two_names_the_speaker_says_with_a_connector_between_them_are_cut_whole_with_the_connector_in_the_transcript(tmp_path):
+    bank = _bank_with_places(tmp_path, "and")
+    text = "kanti e-Tshwane nase-Johannesburg lezo zikhundla"
+    match = bank.name_matches("SPEAKER_00", 0.0, 40.0, text)[0]
+    assert match["tokens"] == ["Tshwane", "Johannesburg"] and match["text"] == "Tshwane and Johannesburg"          # the model reads the words the clip says
+    assert match["last"] - match["first"] == 2 and match["source_text"] == "Tswane and Johannesburg,"            # Tswane is in the clip, not left out as it was ("and Johannesburg")
+    primer = bank.primer_for("SPEAKER_00", 0.0, 40.0, text)
+    assert [t for t, _, _ in primer["snippets"]] == ["Tshwane and Johannesburg"] and primer["names"] == ["johannesburg", "tshwane"]          # "and" is no name
+
+
+def test_a_word_between_two_names_that_is_not_a_connector_is_not_taken_into_the_clip(tmp_path):
+    bank = _bank_with_places(tmp_path, "kakhulu")
+    found = bank.name_matches("SPEAKER_00", 0.0, 40.0, "kanti e-Tshwane nase-Johannesburg lezo")
+    assert all("kakhulu" not in m["source_text"] and "kakhulu" not in m["text"] for m in found)                      # only a connector (and, of, the ...) is taken between two names
+
+
+def test_a_misheard_name_the_job_corrected_in_one_place_is_corrected_wherever_the_recogniser_spelt_it_that_way(tmp_path):
+    bank = _bank(tmp_path)
+    for start, stop, speaker in ((10.0, 20.0, "AZURE_1"), (20.0, 30.0, "AZURE_1")):
+        for w in bank.words:
+            if start <= float(w["start"]) < stop and w["text"] == "w5":
+                w["text"] = "Iguruleni"
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    assert bank.name_matches("SPEAKER_00", 0.0, 40.0, "kwase-Ekurhuleni nje")[0]["restored_text"] == "Iguruleni"          # as heard (0.74 like Ekurhuleni: a long name passes at 0.65)
+    first = sorted((w for w in bank.words if 10.0 <= float(w["start"]) < 20.0), key=lambda w: float(w["start"]))
+    heard = " ".join(str(w["text"]) for w in first)
+    seg = {"start_ms": 10000, "end_ms": 19900, "changed": True, "source_text": heard.lower(), "restored_text": heard.replace("Iguruleni", "Ekurhuleni") + "."}
+    assert bank.restore([seg]) == 2                                                                   # the one the pass restored, and the same spelling in the other stretch
+    found = bank.name_matches("SPEAKER_00", 0.0, 40.0, "kwase-Ekurhuleni nje")
+    assert [m["text"] for m in found] == ["Ekurhuleni"] and found[0]["restored_text"] == "Ekurhuleni"
+
+
+def test_a_long_name_said_alone_is_found_through_a_far_off_recogniser_guess_and_a_short_one_is_not(tmp_path):
+    bank = _bank(tmp_path)
+    for w in bank.words:
+        if 10.0 <= float(w["start"]) < 20.0 and w["text"] == "w5":
+            w["text"] = "Likuhuli."
+        if 20.0 <= float(w["start"]) < 30.0 and w["text"] == "w5":
+            w["text"] = "Selo"
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    found = bank.name_matches("SPEAKER_00", 0.0, 40.0, "kwi-Ekurhuleni nje")
+    assert [m["text"] for m in found] == ["Ekurhuleni"] and found[0]["similarity"] >= ot.NAME_SIMILARITY_LONG          # 0.67 alike: enough for a ten-letter name
+    assert bank.name_matches("SPEAKER_00", 0.0, 40.0, "u-Cele nje") == []                                            # a four-letter name is held to the old bar
+
+
+def test_a_name_the_speaker_draws_out_in_the_window_is_taken_from_where_they_say_it_at_their_usual_pace(tmp_path):
+    bank = _bank(tmp_path)
+    for w in bank.words:
+        if w["text"] != "w5":
+            continue
+        if 10.0 <= float(w["start"]) < 20.0:                      # the usual saying: a third of a second
+            w["text"] = "ANC"
+        elif 20.0 <= float(w["start"]) < 30.0:                    # drawn out: more than a second for three letters (prod-s2 unit 2, 1.26 s)
+            w["text"] = "ANC"
+            w["end"] = float(w["start"]) + 1.3
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    slow = bank.primer_for("SPEAKER_00", 20.0, 30.0, "yi-ANC iyaphikelela")                       # the window holds only the drawn-out one
+    assert slow is not None and [t for t, _, _ in slow["snippets"]] == ["ANC"]
+    assert slow["snippets"][0][2] < 0.8                                                            # the usual saying from the other stretch, not the 1.3 s one
+    kept = bank.primer_for("SPEAKER_00", 10.0, 20.0, "yi-ANC iyaphikelela")
+    assert kept is not None and kept["snippets"][0][2] < 0.8                                       # a usual saying in the window stays
+    assert bank.typical_chars_per_s("SPEAKER_00") > 5.0
+
+
+def test_a_drawn_out_name_with_no_other_saying_in_the_job_is_still_used_as_before(tmp_path):
+    bank = _bank(tmp_path)
+    for w in bank.words:
+        if w["text"] == "w5" and 20.0 <= float(w["start"]) < 30.0:
+            w["text"] = "Zenzele"
+            w["end"] = float(w["start"]) + 1.9
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    primer = bank.primer_for("SPEAKER_00", 20.0, 30.0, "u-Zenzele uthe")
+    assert primer is not None and primer["snippets"][0][2] > 1.0                                  # nothing better in the job: the one there is
+
+
+def test_a_word_alike_only_by_its_letters_is_not_taken_for_a_long_name_and_a_name_written_as_two_words_is_cut_whole(tmp_path):
+    bank = _bank(tmp_path)
+    for w in bank.words:
+        if w["text"] == "w5" and 10.0 <= float(w["start"]) < 20.0:
+            w["text"] = "Action"
+        elif w["text"] == "w6" and 10.0 <= float(w["start"]) < 20.0:
+            w["text"] = "SA"
+        elif w["text"] == "w5" and 20.0 <= float(w["start"]) < 30.0:
+            w["text"] = "national"
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    two = bank.name_matches("SPEAKER_00", 10.0, 20.0, "kwi-ActionSA nje")
+    assert [m["text"] for m in two] == ["ActionSA"] and two[0]["source_text"] == "Action SA" and two[0]["last"] - two[0]["first"] == 1          # "Action" alone would teach half the name
+    assert bank.name_matches("SPEAKER_00", 20.0, 30.0, "kwi-ActionSA nje") == []                                               # "national": 0.75 alike, half its consonants: not the name (prod-s2 unit 6)
+
+
+def test_a_text_is_counted_in_syllables_with_acronyms_said_letter_by_letter():
+    assert ot.syllables("ANC") == 3 and ot.syllables("MMC") == 3 and ot.syllables("WHO") == 5
+    assert ot.syllables("details") == 2 and ot.syllables("Ekurhuleni") == 5 and ot.syllables("Johannesburg") == 4
+    assert ot.syllables("") == 0
+
+
+def test_a_name_said_faster_than_the_reference_is_slowed_toward_its_syllable_speed_with_the_text_and_pitch_kept(tmp_path):
+    import shutil
+    if not shutil.which("ffmpeg"):
+        import pytest
+        pytest.skip("ffmpeg is not installed here")
+    bank = _bank_with_a_name(tmp_path)
+    primer = bank.primer_for("SPEAKER_00", 0.0, 40.0, "Siyabonga uPhineas Manyama ukhulumile.")
+    base = bank.as_reference(bank.ranked("SPEAKER_00", 0, 40000)[0])
+    plain = bank.primed(base, primer)
+    matched = bank.primed(base, primer, 1.5)
+    said = primer["snippets"][0][2]
+    faster = (ot.syllables(primer["snippets"][0][0]) / said) / (ot.syllables(base.text) / base.seconds)
+    assert plain.text == matched.text                                                              # the transcript is the same words
+    if faster > 1.15:
+        extra = matched.seconds - plain.seconds
+        assert 0.1 < extra <= 0.5 * said * primer["reps"] + 0.1                                    # each copy is longer, by at most half again
+    assert bank.primed(base, primer, 0.0).seconds == plain.seconds                                 # switched off: as before
+    data = np.sin(2 * np.pi * 200 * np.arange(RATE) / RATE).astype(np.float32)
+    slowed = ot.stretch_audio(data, RATE, 1.5)
+    assert abs(len(slowed) / RATE - 1.5) < 0.1 and ot.stretch_audio(data, RATE, 1.0) is data
+    spectrum = np.abs(np.fft.rfft(slowed[: RATE]))
+    assert abs(np.argmax(spectrum) - 200) <= 3                                                      # the pitch did not move
+
+
+def test_a_primed_sentence_can_be_pinned_to_the_length_the_plain_reference_gives_it(tmp_path):
+    bank = _bank_with_a_name(tmp_path)
+    spans = ["Siyabonga uPhineas Manyama ukhulumile kakhulu namhlanje."]
+
+    def requests_for(pin):
+        client = ScriptedClient(lambda call, ref: [_span_audio(), _span_audio(), _span_audio()])
+        backend = ot.OmniVoiceTTSBackend(client, banks={"job": bank})
+        backend.pin_to_reference = pin
+        backend.speak(GROUP, spans, [], "job")
+        return client.pins
+
+    free, pinned = requests_for(False), requests_for(True)
+    assert all(p is None for p in free[:1])                                                         # the first pass is never pinned
+    primed_pins = [p for p in pinned if p]
+    assert primed_pins and all(len(p) == 1 and p[0] > 1.0 for p in primed_pins)                     # the primed generation carries a length, from the plain reference
+
+
+def test_with_priming_off_no_name_is_primed_and_none_is_kept_out_of_the_dictionary(tmp_path):
+    bank = _bank_with_a_name(tmp_path)
+    backend = ot.OmniVoiceTTSBackend(ScriptedClient(lambda call, ref: [_span_audio()]), banks={"job": bank})
+    group = {**GROUP, "parts": [{"type": "text", "segment_id": "s", "text": "Siyabonga uPhineas Manyama ukhulumile."}]}
+    assert backend.span_primers(group, ["Siyabonga uPhineas Manyama ukhulumile."], "job")[0] is not None
+    backend.priming = False
+    assert backend.span_primers(group, ["Siyabonga uPhineas Manyama ukhulumile."], "job") == [None]
+    client = ScriptedClient(lambda call, ref: [_span_audio()])
+    quiet = ot.OmniVoiceTTSBackend(client, banks={"job": bank})
+    quiet.priming = False
+    quiet.speak(group, ["Siyabonga uPhineas Manyama ukhulumile."], [], "job")
+    assert all(ref.text == bank.as_reference(bank.ranked("SPEAKER_00", 0, 40000)[0]).text for ref in client.refs)          # only the reference clip, never names in front of it
+
+
+def _words_at(spans):
+    return [{"start": a, "end": z} for a, z in spans]
+
+
+def test_a_stretch_of_words_is_widened_to_real_pauses_in_both_generations_and_touching_stretches_become_one():
+    # five words; a pause of 0.3 s before word 2 and after word 3 in both generations; words 3 and 4 run together, and so do 0 and 1
+    host = _words_at([(0.0, 0.4), (0.45, 0.85), (1.15, 1.5), (1.52, 1.9), (2.2, 2.6)])
+    snippet = _words_at([(0.0, 0.4), (0.44, 0.9), (1.2, 1.55), (1.57, 1.95), (2.3, 2.7)])
+    assert ot.pause_bounded(2, 3, 5, host, 0, snippet, 0) == (2, 3)                                   # already against pauses
+    assert ot.pause_bounded(3, 3, 5, host, 0, snippet, 0) == (2, 3)                                   # word 3 begins in continuous speech with word 2: the stretch widens to the pause before it
+    assert ot.pause_bounded(1, 1, 5, host, 0, snippet, 0) == (0, 1)                                   # and word 1 runs on from word 0
+    assert ot.pause_bounded(3, 3, 5, host, 0, snippet, 0, max_extra=0) == (3, 3)
+    assert ot.merge_regions([(0, 1), (2, 3), (6, 7)]) == [(0, 3), (6, 7)] and ot.merge_regions([(4, 5), (1, 2)]) == [(1, 2), (4, 5)]
+
+
+def test_the_refined_splice_blends_with_equal_power_matches_the_name_to_its_host_and_keeps_the_audio_whole():
+    rate = RATE
+    t = np.arange(rate * 4) / rate
+    host = (0.2 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+    snippet = (0.15 * np.sin(2 * np.pi * 180 * t + 0.7)).astype(np.float32)                          # the same voice, a quarter quieter, a different phase
+    times = [{"start": 0.2, "end": 0.9}, {"start": 1.2, "end": 1.9}, {"start": 2.2, "end": 2.9}]
+    s_times = [{"start": 0.2, "end": 0.9}, {"start": 1.2, "end": 1.9}, {"start": 2.2, "end": 2.9}]
+    cut = lambda audio, t0, t1: (t0 + t1) / 2.0                                                      # noqa: E731
+    plain = ot.swap_word_run(host, rate, times, 1, 1, snippet, s_times, 1, 1, cut)
+    refined = ot.swap_word_run(host, rate, times, 1, 1, snippet, s_times, 1, 1, cut, refine=True)
+    assert plain is not None and refined is not None and abs(len(plain[0]) - len(refined[0])) < 0.05 * rate
+    middle = refined[0][int(1.3 * rate): int(1.8 * rate)]
+    assert 0.17 < float(np.sqrt(np.mean(middle ** 2))) * np.sqrt(2) < 0.23                          # the name came in at the host's level (0.2), not its own (0.15)
+    around = refined[0][int(1.1 * rate): int(1.3 * rate)]
+    assert float(np.max(np.abs(np.diff(around)))) < 0.1                                              # no click across the join
+    eq = ot._crossfade_equal(np.ones(200, dtype=np.float32), np.ones(200, dtype=np.float32), 100)
+    assert float(eq[100:200].max()) > 1.3 and float(eq[100:200].min()) > 0.95                         # equal power: two equal signals swell to 1.41 in the middle of the blend, they do not dip
+
+
+def test_a_name_with_a_prefix_is_joined_inside_the_prefix_and_the_word_before_stays_the_hosts():
+    rate = RATE
+    t = np.arange(rate * 4) / rate
+    host = (0.2 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+    snippet = (0.2 * np.sin(2 * np.pi * 180 * t + 1.1) * (1.0 + 0.3 * np.sin(2 * np.pi * 3 * t))).astype(np.float32)          # the same voice, another rendition, a little later in the sentence
+    times = [{"start": 0.2, "end": 0.9}, {"start": 1.2, "end": 2.2}, {"start": 2.5, "end": 3.2}]
+    s_times = [{"start": 0.2, "end": 0.9}, {"start": 1.5, "end": 2.5}, {"start": 2.8, "end": 3.5}]
+    cut = lambda audio, t0, t1: (t0 + t1) / 2.0                                                      # noqa: E731
+    words = "kodwa ama-details okugcina".split()
+    assert ot.prefix_share(["baphothule", "ama-details"], 1) == 0.3 and ot.prefix_share(words, 1) == 0.3 and ot.prefix_share(["ama-details"], 0) is None and ot.prefix_share(["bonke", "details"], 1) is None
+    out = ot.swap_word_run(host, rate, times, 1, 1, snippet, s_times, 1, 1, cut, refine=True, inside=0.3)
+    assert out is not None
+    joined = out[0]
+    n = min(len(joined), len(host))
+    differs = np.flatnonzero(np.abs(joined[:n] - host[:n]) > 1e-6)
+    assert differs.size and 1.2 <= differs[0] / rate <= 1.5                                           # the host is untouched until the prefix, and the cross-fade begins inside it
+    assert float(np.max(np.abs(np.diff(joined[int(1.15 * rate): int(1.6 * rate)])))) < 0.1            # no click across the join
+    found = ot._prefix_cut(host, int(1.2 * rate), int(1.5 * rate), snippet, int(1.5 * rate), int(1.8 * rate), int(0.02 * rate), 24)
+    assert found is not None and found[0] > 0.9 and int(1.2 * rate) + int(0.02 * rate) <= found[1] <= int(1.5 * rate) and int(1.5 * rate) <= found[2] and found[2] + int(0.02 * rate) <= int(1.8 * rate)          # both overlapping stretches lie wholly inside the prefix
+    way_h, way_s = (found[1] - int(0.02 * rate) - int(1.2 * rate)) / (int(0.3 * rate) - int(0.02 * rate)), (found[2] - int(1.5 * rate)) / (int(0.3 * rate) - int(0.02 * rate))
+    assert abs(way_h - way_s) <= ot.PREFIX_JOIN_SLACK + 0.05                                          # as far through its prefix in one as in the other: the prefix is said once
+    assert ot._prefix_cut(host, 0, 100, snippet, 0, 100, int(0.02 * rate), 24) is None                  # a prefix shorter than the cross-fade is not joined inside
+    assert ot.swap_regions("kodwa baphothule ama-details okugcina".split(), {"details", "ama-details"}, with_word_before=False) == [(2, 2)]
+
+
+def test_with_host_per_draw_every_draw_has_a_first_pass_of_its_own_and_without_it_the_draws_share_one(tmp_path):
+    bank = _bank_with_a_name(tmp_path)
+    spans = ["Okokuqala uPhineas Manyama kuhle."]
+
+    def first_pass_requests(per_draw):
+        client = ScriptedClient(lambda call, ref: [_span_audio(), _span_audio(), _span_audio()])
+        backend = ot.OmniVoiceTTSBackend(client, banks={"job": bank})
+        backend.host_per_draw = per_draw
+        backend.speak(GROUP, spans, [], "job", all_takes=True)
+        unprimed = [r for r, ref in zip(client.requests, client.refs) if ref.text == bank.as_reference(bank.ranked("SPEAKER_00", 0, 40000)[0]).text]
+        return len(unprimed)
+
+    shared, own = first_pass_requests(False), first_pass_requests(True)
+    assert own == 3 * shared                                                                       # one first pass per draw, three draws
+
+
+def test_the_host_per_draw_setting_is_a_runs_own_voice_setting(tmp_path):
+    from mathula_tv import console as console_module
+    assert "host_per_draw" in open(console_module.__file__, encoding="utf-8").read()
+
+
+def test_a_drawn_out_name_is_kept_in_the_primer_when_asked_for_the_speakers_own_saying(tmp_path):
+    bank = _bank(tmp_path)
+    for w in bank.words:
+        if w["text"] != "w5":
+            continue
+        if 10.0 <= float(w["start"]) < 20.0:
+            w["text"] = "ANC"
+        elif 20.0 <= float(w["start"]) < 30.0:
+            w["text"] = "ANC"
+            w["end"] = float(w["start"]) + 1.3
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    usual = bank.primer_for("SPEAKER_00", 20.0, 30.0, "yi-ANC iyaphikelela")
+    own = bank.primer_for("SPEAKER_00", 20.0, 30.0, "yi-ANC iyaphikelela", usual_pace=False)
+    assert usual["snippets"][0][2] < 0.8 and own["snippets"][0][2] > 1.0                           # the usual saying from the other stretch, or the 1.3 s the speaker took in this window

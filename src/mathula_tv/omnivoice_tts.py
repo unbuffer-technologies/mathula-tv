@@ -36,9 +36,15 @@ CLIP_MIN_S = 3.0
 CLIP_MAX_S = 9.0
 NAME_SIMILARITY = 0.8        # how alike (spelt as the voice would say them) a name of the dub and the words the speaker said must be: "Canny Maphanga" and the recogniser's "Kanima Panga" are 0.87, "Ayanda Nyathi" and "Ayanda Nyati" 0.96, unrelated words under 0.3
 NAME_SIMILARITY_ONE_WORD = 0.85
+NAME_SIMILARITY_LONG = 0.65          # a long name (NAME_LONG_LETTERS letters or more) said alone: an unrelated word is almost never this alike to it, and the recogniser's guesses at a long place name are far from it ("Likuhuli" and "Iguruleni" for Ekurhuleni: 0.67, 0.74)
+NAME_LONG_LETTERS = 8
+NAME_SKELETON_MIN = 0.6              # a name that passes only by the lowered bars must also share this much of its consonants with the word heard
+NAME_CONNECTORS = frozenset({"and", "&", "of", "the", "in", "at"})          # a word the speaker says between two names that the dub joins with a Zulu prefix ("Tswane and Johannesburg": "e-Tshwane nase-Johannesburg"): it is in the clip and in its transcript
 PRIMER_REPS = 3              # a name the source says is put in front of the reference this many times (heard on "Phineas": once 0 of 3 right, three times 2 of 3, and 3 of 3 with the names first)
 PRIMER_MAX_S = 9.0           # the names, all repetitions together, never take more of the reference than this (the model asks for 3-10 s in all; the clip it is put in front of is about 8.5 s)
 PRIMER_MAX_SNIPPET_S = 4.0   # a run of names longer than this was cut wrongly
+PRIMER_SLOW_FACTOR = 2.0      # a name the speaker draws out to more than this many times what it takes at their usual pace is not the one to put in front of the reference: it drags the pace of the whole primed sentence
+PRIMER_SLOW_MIN_S = 0.6       # (and is at least this long: "ANC" for 1.26 s in prod-s2 unit 2, 0.36-0.40 s everywhere else: the primed reference ran at 10.7 characters a second instead of 13.5 and the voice took 25% longer over two sentences)
 PRIMER_GAP_S = 0.05          # the least silence between the copies (more reads to the model as a slower speaker: 0.25 s made the sentence 13% longer, 0.05 s 6%); ReferenceBank.primed sets the real gap from the clip's pace
 PRIMER_GAP_MAX_S = 0.6       # and the most
 CLIP_TARGET_S = 8.0          # a longer clip says more about the voice; 3-10 s is what the model asks for
@@ -61,6 +67,50 @@ class Reference:
     start_s: float
     end_s: float
     speaker: str
+
+
+def syllables(text: str) -> int:
+    """A rough syllable count of a text, for pace: an acronym says its letters (W says three), any other word its groups of vowels."""
+    total = 0
+    for word in re.findall(r"[A-Za-z']+", str(text or "")):
+        if word.isupper() and len(word) <= 5:
+            total += len(word) + word.count("W") * 2
+            continue
+        low = word.lower()
+        groups = len(re.findall(r"[aeiouy]+", low))
+        if low.endswith("e") and groups > 1 and not low.endswith(("le", "ne", "se", "me")):
+            groups -= 1
+        total += max(groups, 1)
+    return total
+
+
+def stretch_audio(piece: np.ndarray, rate: int, factor: float) -> np.ndarray:
+    """``piece`` made ``factor`` times longer without changing its pitch (ffmpeg's atempo, which takes 0.5 to 2 a step); the piece itself when ffmpeg is not there or fails."""
+    if abs(factor - 1.0) < 0.02:
+        return piece
+    import shutil
+    import tempfile
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return piece
+    tempo, steps = 1.0 / factor, []
+    while tempo < 0.5:
+        steps.append("atempo=0.5")
+        tempo /= 0.5
+    while tempo > 2.0:
+        steps.append("atempo=2.0")
+        tempo /= 2.0
+    steps.append(f"atempo={tempo:.4f}")
+    try:
+        with tempfile.TemporaryDirectory() as folder:
+            source, target = os.path.join(folder, "a.wav"), os.path.join(folder, "b.wav")
+            sf.write(source, piece, rate, subtype="PCM_16")
+            subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", source, "-filter:a", ",".join(steps), target], check=True, timeout=30)
+            out, out_rate = sf.read(target, dtype="float32")
+        return (out.mean(axis=1) if out.ndim > 1 else out) if out_rate == rate else piece
+    except Exception:                    # noqa: BLE001 - a primer is an optimisation of the reference: unstretched is what it was
+        return piece
 
 
 class ReferenceBank:
@@ -166,6 +216,19 @@ class ReferenceBank:
                     for offset in range(i2 - i1):
                         inside[i1 + offset]["restored"] = kept[j1 + offset][1]
                         count += 1
+        # a name the recogniser misheard that the job corrected in one place is the same name wherever it spelt it that way again (prod-s1: "Iguruleni" was restored to Ekurhuleni in the first unit and left as
+        # heard in the second speaker's, 0.74 alike to Ekurhuleni, under the bar for one word, so the second speaker's Ekurhuleni was never primed)
+        respelt: dict[str, set[str]] = {}
+        for word in self.words:
+            fixed = str(word.get("restored") or "")
+            heard = re.sub(r"[^\w']", "", str(word["text"])).lower()
+            if fixed[:1].isupper() and len(heard) >= 5 and heard != fixed.lower() and SequenceMatcher(None, self._sound_key(heard), self._sound_key(fixed)).ratio() >= 0.7:
+                respelt.setdefault(heard, set()).add(fixed)
+        for word in self.words:
+            heard = re.sub(r"[^\w']", "", str(word["text"])).lower()
+            if not word.get("restored") and len(respelt.get(heard, ())) == 1:          # only where the job corrected it one way
+                word["restored"] = next(iter(respelt[heard]))
+                count += 1
         return count
 
     @staticmethod
@@ -227,6 +290,11 @@ class ReferenceBank:
         for old, new in (("ph", "f"), ("ck", "k"), ("c", "k"), ("q", "k"), ("x", "ks"), ("y", "i"), ("w", "u")):
             t = t.replace(old, new)
         return "".join(ch for ch in t if ch.isalpha())
+
+    @staticmethod
+    def _skeleton(key: str) -> str:
+        """The consonants of a sound key (a recogniser's guess at a name keeps its consonants better than its vowels)."""
+        return re.sub(r"[aeiou]", "", key)
 
     TITLES = abbreviations.title_words()          # said before a name (Mnu, Dr, Prof ... and written out); the speaker's own words for them are "Mr", "Doctor": never part of the name
 
@@ -291,25 +359,38 @@ class ReferenceBank:
                     key = self._sound_key(" ".join(tokens))
                     if len(key) < 3:
                         continue
-                    best, best_at = 0.0, None
-                    for n in (length,):                                              # as many words as the name has: a word of the text that the audio does not say, or the other way round, would teach the model the wrong thing
+                    best, best_at, best_inside, best_counted = 0.0, None, None, ""
+                    for n in ((length, length + 1) if length > 1 else (1, 2)):          # as many words as the name has: a word of the text that the audio does not say, or the other way round, would teach the model the wrong thing; the exceptions are a connector between two names ("Tswane and Johannesburg") and a one-word name the recogniser wrote as two ("Action SA")
                         for j in range(0, len(words) - n + 1):
                             window = words[j: j + n]
                             if any(window[k + 1][0] != window[k][0] + 1 for k in range(n - 1)):
                                 continue
-                            similarity = SequenceMatcher(None, key, self._sound_key(" ".join(self._said(w) for _, w in window))).ratio()
-                            if similarity > best:
-                                best, best_at = similarity, window
-                    needed = NAME_SIMILARITY if length > 1 else NAME_SIMILARITY_ONE_WORD
+                            inside = None
+                            counted = [self._said(w) for _, w in window]
+                            if n > length and length > 1:
+                                inside = next((q for q in range(1, n - 1) if re.sub(r"\W", "", counted[q]).lower() in NAME_CONNECTORS), None)
+                                if inside is None:
+                                    continue
+                                counted = [x for q, x in enumerate(counted) if q != inside]
+                            joiner = "" if (n > length and length == 1) else " "
+                            similarity = SequenceMatcher(None, key, self._sound_key(joiner.join(counted))).ratio()
+                            if similarity > best + (0.04 if (n > length and length == 1) else 0.0):          # the two-word reading must be clearly better than the one word
+                                best, best_at, best_inside, best_counted = similarity, window, inside, joiner.join(counted)
+                    needed = NAME_SIMILARITY if length > 1 else (NAME_SIMILARITY_LONG if len(key) >= NAME_LONG_LETTERS else NAME_SIMILARITY_ONE_WORD)
                     if best_at is None or best < needed or (length == 1 and len(key) < 4 and not tokens[0].isupper()):
                         continue
+                    if length == 1 and best < NAME_SIMILARITY_ONE_WORD and SequenceMatcher(None, self._skeleton(key), self._skeleton(self._sound_key(best_counted))).ratio() < NAME_SKELETON_MIN:
+                        continue                                                       # "national" is 0.75 like ActionSA by its letters but shares half of its consonants; the recogniser's real guesses ("Likuhuli", "Iguruleni" for Ekurhuleni) share two thirds
                     for k in range(at, at + length):
                         used[k] = True
-                    found.append({"tokens": tokens, "text": " ".join(tokens), "first": best_at[0][0], "last": best_at[-1][0],
+                    spoken = list(tokens)
+                    if best_inside is not None:                                       # the connector is in the clip, so it is in the transcript the model reads, between the names it joins
+                        spoken.insert(best_inside, re.sub(r"^\W+|\W+$", "", self._said(best_at[best_inside][1])))
+                    found.append({"tokens": tokens, "text": " ".join(spoken), "first": best_at[0][0], "last": best_at[-1][0],
                                   "source_text": " ".join(str(w["text"]) for _, w in best_at), "restored_text": " ".join(self._said(w) for _, w in best_at), "similarity": round(best, 2)})
         return sorted(found, key=lambda m: -len(m["tokens"]))
 
-    def primer_for(self, speaker_id: str, start_s: float, end_s: float, span_text: str) -> dict[str, Any] | None:
+    def primer_for(self, speaker_id: str, start_s: float, end_s: float, span_text: str, usual_pace: bool = True) -> dict[str, Any] | None:
         """The names this span says that the speaker also says in the source window, cut from the source in the speaker's own voice: {names, snippets: [(text, wav, seconds)], reps, seconds}, or None.
         The snippet's text is the dub's spelling of the name (what the audio really says), not the recogniser's.  The model copies how a name is said from its reference when the reference carries that
         word, and one copy is not enough (0 of 3 right), three are (2 of 3; 3 of 3 with them first)."""
@@ -323,10 +404,12 @@ class ReferenceBank:
             a, z = m["first"], m["last"]
             prev_end = float(self.words[a - 1]["end"]) if a > 0 else float(self.words[a]["start"]) - 0.3
             next_start = float(self.words[z + 1]["start"]) if z + 1 < len(self.words) else float(self.words[z]["end"]) + 0.3
-            edges = (float(self.words[a]["start"]), float(self.words[z]["end"]), min(prev_end, float(self.words[a]["start"])), max(next_start, float(self.words[z]["end"])))
-            first, last = self.snap(*edges)
-            if last - first < 0.2:                                              # the snap cut into the word: a primer is the whole word, so move the edges outward only
-                first, last = self.snap(*edges, inward=0.0)
+            first, last = self._edges_of(a, z)
+            expected = (len(m["text"]) + 1) / self.typical_chars_per_s(speaker_id)
+            if usual_pace and last - first > max(PRIMER_SLOW_MIN_S, PRIMER_SLOW_FACTOR * expected):          # this time the speaker drew it out: take the speaker's usual saying of it from elsewhere in the job (not when only the name is used, as in a splice: the host keeps its pace and the drawn-out name is how the speaker said it)
+                other = self._usual_saying(speaker_id, m, expected)
+                if other is not None:
+                    first, last = other
             if not 0.2 <= last - first <= PRIMER_MAX_SNIPPET_S:
                 continue
             snippets.append((m["text"], self._clip(first, last), last - first))
@@ -339,10 +422,48 @@ class ReferenceBank:
             snippets.pop()
         while reps > 1 and total() * reps > PRIMER_MAX_S:
             reps -= 1
-        said = {re.sub(r"^\W+|\W+$", "", w).lower() for text, _, _ in snippets for w in text.split()}
+        said = {re.sub(r"^\W+|\W+$", "", w).lower() for text, _, _ in snippets for w in text.split()} - NAME_CONNECTORS
         return {"names": sorted(said), "snippets": snippets, "reps": reps, "seconds": total() * reps}
 
-    def primed(self, base: Reference, primer: Mapping[str, Any] | None) -> Reference:
+    def _edges_of(self, a: int, z: int) -> tuple[float, float]:
+        """The audio edges of the words ``a``..``z`` of the source (a primer is the whole word: the snap trims the quiet, and when it cut into the word the edges move outward only)."""
+        prev_end = float(self.words[a - 1]["end"]) if a > 0 else float(self.words[a]["start"]) - 0.3
+        next_start = float(self.words[z + 1]["start"]) if z + 1 < len(self.words) else float(self.words[z]["end"]) + 0.3
+        edges = (float(self.words[a]["start"]), float(self.words[z]["end"]), min(prev_end, float(self.words[a]["start"])), max(next_start, float(self.words[z]["end"])))
+        first, last = self.snap(*edges)
+        if last - first < 0.2:
+            first, last = self.snap(*edges, inward=0.0)
+        return first, last
+
+    def typical_chars_per_s(self, speaker_id: str) -> float:
+        """How many characters a second this speaker's clean clips run at (their median), 13.5 when there are none."""
+        rates = [len(c["text"]) / max(c["end"] - c["start"], 0.1) for c in self._candidates if c["speaker"] == speaker_id]
+        return float(np.median(rates)) if rates else 13.5
+
+    def _usual_saying(self, speaker_id: str, match: Mapping[str, Any], expected_s: float) -> tuple[float, float] | None:
+        """Where else in the job this speaker says the same name (the same number of words, as alike as ``name_matches`` asks), as (first, last) audio edges: the one whose length is nearest what it takes at
+        their usual pace and is not itself drawn out; None when the job has no other."""
+        key = self._sound_key(" ".join(match["tokens"]))
+        words = [(i, w) for i, w in enumerate(self.words) if not w.get("overlap") and self.speaker_of_raw.get(str(w.get("raw_speaker")), str(w.get("raw_speaker"))) == speaker_id]
+        n = int(match["last"]) - int(match["first"]) + 1
+        needed = NAME_SIMILARITY if len(match["tokens"]) > 1 else (NAME_SIMILARITY_LONG if len(key) >= NAME_LONG_LETTERS else NAME_SIMILARITY_ONE_WORD)
+        best, best_score = None, None
+        for j in range(0, len(words) - n + 1):
+            window = words[j: j + n]
+            if window[0][0] == match["first"] or any(window[k + 1][0] != window[k][0] + 1 for k in range(n - 1)):
+                continue
+            said = [self._said(w) for _, w in window if re.sub(r"\W", "", self._said(w)).lower() not in NAME_CONNECTORS]
+            if SequenceMatcher(None, key, self._sound_key(" ".join(said))).ratio() < needed:
+                continue
+            first, last = self._edges_of(window[0][0], window[-1][0])
+            if not 0.2 <= last - first <= max(PRIMER_SLOW_MIN_S, PRIMER_SLOW_FACTOR * expected_s):
+                continue
+            score = abs((last - first) / max(expected_s, 0.1) - 1.0)
+            if best_score is None or score < best_score:
+                best, best_score = (first, last), score
+        return best
+
+    def primed(self, base: Reference, primer: Mapping[str, Any] | None, match_syllables: float = 0.0) -> Reference:
         """The reference with the speaker's own names, each run repeated ``reps`` times, put in front of it (names first, then the fluent clip), and the transcript to match.
 
         The voice takes its pace from the whole reference: characters said per second.  Names cut from the source are said fast and tight, so a run of them made the voice speak 19% faster than the
@@ -355,12 +476,18 @@ class ReferenceBank:
             head = head.mean(axis=1)
         pieces: list[np.ndarray] = []
         texts: list[str] = []
+        clip_syllables = syllables(base.text) / max(base.seconds, 0.1)          # how many syllables a second the reference clip is spoken at
         for _ in range(int(primer["reps"])):
             for text, wav, _seconds in primer["snippets"]:
                 piece, piece_rate = sf.read(io.BytesIO(wav), dtype="float32")
                 if piece_rate != rate:
                     return base
-                pieces.append(piece.mean(axis=1) if piece.ndim > 1 else piece)
+                piece = piece.mean(axis=1) if piece.ndim > 1 else piece
+                if match_syllables > 1.0:          # a name said faster than the clip is spoken slows toward the clip's syllable speed (at most ``match_syllables`` times longer), pitch kept
+                    faster = (syllables(text) / max(len(piece) / rate, 0.05)) / max(clip_syllables, 0.1)
+                    if faster > 1.15:
+                        piece = stretch_audio(piece, rate, min(faster, match_syllables))
+                pieces.append(piece)
                 texts.append(text)
         clip_pace = len(base.text) / max(base.seconds, 0.1)
         lacking = sum(len(t) + 1 for t in texts) / clip_pace - sum(len(x) for x in pieces) / rate
@@ -369,15 +496,19 @@ class ReferenceBank:
         return Reference(wav=wav_bytes(audio, rate), text=" ".join(texts + [base.text]), seconds=len(audio) / rate, start_s=base.start_s, end_s=base.end_s, speaker=base.speaker)
 
     def ranked(self, speaker_id: str, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
-        """The clips to clone for a unit, best first: those inside its window, then the closest in time (preferring the same speaker) for a window too short to hold one."""
+        """The clips to clone for a unit, best first.  The person talking in the unit's window is who is cloned (a merged label cannot give the wrong voice: the speaker of the best clip inside the window, else the
+        unit's own label), and the clip is that person's BEST clip anywhere in the job, so they have one voice and one pace in every turn.  The unit's own window used to decide the clip, and every turn had its
+        own reference and its own pace: the second speaker's 3.7 s turn held only a 3.6 s clip at 3.57 words/s (their usual is 2.75) and came out at 21 characters a second against 14 in their other turns (prod-s1).
+        After that the other speakers' clips, the closest in time first."""
         start, end = start_ms / 1000.0, end_ms / 1000.0
         if not self._candidates:
             raise LookupError("the job has no clean 3-9 s clip of any speaker to clone")
         inside = sorted((c for c in self._candidates if c["start"] >= start - 0.05 and c["end"] <= end + 0.05), key=self._score, reverse=True)
+        talking = inside[0]["speaker"] if inside else speaker_id
+        mine = sorted((c for c in self._candidates if c["speaker"] == talking), key=lambda c: (-self._score(c), c["start"]))
         middle = (start + end) / 2.0
-        others = sorted((c for c in self._candidates if c not in inside),
-                        key=lambda c: (abs((c["start"] + c["end"]) / 2.0 - middle) + (0.0 if c["speaker"] == speaker_id else 25.0), -self._score(c)))
-        return inside + others
+        others = sorted((c for c in self._candidates if c["speaker"] != talking), key=lambda c: (abs((c["start"] + c["end"]) / 2.0 - middle) + (0.0 if c["speaker"] == speaker_id else 25.0), -self._score(c)))
+        return mine + others
 
     PAUSE_CLIPS = 40                      # the longest clips of the speaker, looked at for their pauses
     PAUSE_MIN_RUNS = 8                    # fewer pauses than this say nothing about the speaker
@@ -1035,6 +1166,9 @@ def name_lengths(words: Sequence[str], times: Sequence[Mapping[str, Any] | None]
                      "words": [{"text": words[i], "s": round(float(times[i]["end"]) - float(times[i]["start"]), 3)} for i in range(first, last + 1) if i < len(times) and times[i]]}
             if typical and seconds > 0.05:
                 entry["pace"] = round(_letters(" ".join(words[first:last + 1])) / seconds / typical, 2)
+            sure = [float(item[2]) for i in range(first, min(last + 1, len(times))) if times[i] for item in (times[i].get("letters") or []) if len(item) > 2]
+            if sure:                                                                         # how sure the aligner is that each letter of the name was said (0-1; a swallowed letter is near 0): the mean
+                entry["clarity"] = round(sum(sure) / len(sure), 3)
             out.append(entry)
     return out
 
@@ -1068,11 +1202,16 @@ def stretched_draws(scores: Sequence[Mapping[str, Any]]) -> list[bool]:
 def pick_take(scores: Sequence[Mapping[str, Any]]) -> int:
     """Which draw of a span is used: where the span carries names the speaker says, the draw in which the voice said them longest (the audio score, voice_takes.score_span, breaking a tie); otherwise the draw
     with the least wrong in the audio.  The way a name goes wrong is that it is swallowed, said shorter than the speaker says it, and of the three draws of "i-NEC" and of "yi-ANC" the longest name was the
-    one the ear chose both times (0.401 s of 0.38/0.30/0.40, and 0.641 s of 0.42/0.64/0.54)."""
+    one the ear chose both times (0.401 s of 0.38/0.30/0.40, and 0.641 s of 0.42/0.64/0.54).
+    Where the aligner also says how sure it is of each letter of the names (``clarity``, the mean over them: a swallowed letter is near 0), the draw whose names were said most clearly is used: the user picks
+    draws by enunciation, and the clearest draw was the one picked in 3 of 3 clear verdicts of 2026-11-26 where the longest name was not (be-ActionSA: 1.02 s of 1.02/0.70/0.74 was the bad one).  A draw the
+    listener committed is never overruled (``pinned`` in speak)."""
     if not any(float(sc.get("name_s") or 0.0) > 0.0 for sc in scores):
         return min(range(len(scores)), key=lambda t: scores[t]["score"])
     stretched = stretched_draws(scores)
     kept = [t for t in range(len(scores)) if not stretched[t]] or list(range(len(scores)))          # a draw that said a name far longer than the others is set aside (stretched_draws)
+    if all(scores[t].get("clarity") is not None for t in kept):
+        return max(kept, key=lambda t: (float(scores[t]["clarity"]), float(scores[t].get("name_s") or 0.0), -float(scores[t]["score"])))
     return max(kept, key=lambda t: (float(scores[t].get("name_s") or 0.0), -float(scores[t]["score"])))
 
 
@@ -1084,6 +1223,18 @@ def joined_with_the_word_before(words: Sequence[str], first: int) -> int:
     return first
 
 
+def prefix_share(words: Sequence[str], first: int) -> float | None:
+    """For a name that carries a Zulu prefix after a word ending in a vowel ("baphothule ama-details"): the share of the name's letters that the prefix is (0.3 for "ama" of "ama-details"), else None.
+    The prefix is said the same way in every generation of the sentence, so a splice can be joined inside it instead of taking the word before as well."""
+    word = str(words[first]).strip(".,;:!?")
+    if first > 0 and "-" in word and re.search(r"[aeiou]\W*$", str(words[first - 1]).lower()):
+        letters = len(re.sub(r"\W", "", word))
+        head = len(word.split("-", 1)[0])
+        if letters and head:
+            return head / letters
+    return None
+
+
 TRAILING_FOLLOW = "Futhi"      # spoken after the last span of a unit (cut away afterwards): with nothing after it the model's generation ends ON the last word, which is then chopped at full volume (prod-x1 "ngomphumela", draw 3 of the primed span ended at -49 dB)
 FINAL_TAIL_KEEP_S = 0.30       # the end of a unit keeps up to this much after its last word (the word's own decay), and fades out over FINAL_FADE_S
 FINAL_FADE_S = 0.08
@@ -1092,13 +1243,13 @@ FINAL_FADE_S = 0.08
 MERGE_GAP_WORDS = 1          # names this close (at most this many words between them) are taken as one stretch from the primed sentence
 
 
-def swap_regions(words: Sequence[str], names: Sequence[str] | set[str]) -> list[tuple[int, int]]:
+def swap_regions(words: Sequence[str], names: Sequence[str] | set[str], with_word_before: bool = True) -> list[tuple[int, int]]:
     """The stretches of a sentence that are taken from the primed generation: each name run (with the vowel-ended word before it that it runs into), and a stretch that would leave only a word or so of
     the cluster between two of them is made one stretch, taken whole ("yebo, ama-details okugcina, silinde i-ANC": the 0.6 s of "okugcina" left between the two names came from another generation,
     at another pace, with a splice on each side of it, and every draw of it sounded messy)."""
     regions: list[tuple[int, int]] = []
     for first, last in name_runs(words, names):
-        first = joined_with_the_word_before(words, first)
+        first = joined_with_the_word_before(words, first) if with_word_before else first          # with_word_before False: the name alone, joined inside its prefix (swap_word_run inside=)
         if regions and first - regions[-1][1] - 1 <= MERGE_GAP_WORDS:
             regions[-1] = (regions[-1][0], last)
         else:
@@ -1114,9 +1265,112 @@ def _crossfade(a: np.ndarray, b: np.ndarray, n: int) -> np.ndarray:
     return np.concatenate([a[:-n], a[-n:] * (1.0 - ramp) + b[:n] * ramp, b[n:]])
 
 
+def _crossfade_equal(a: np.ndarray, b: np.ndarray, n: int) -> np.ndarray:
+    """Like _crossfade but with equal-power curves (cos/sin), so the level does not dip in the middle of the blend."""
+    n = min(n, len(a), len(b))
+    if n < 2:
+        return np.concatenate([a, b])
+    t = np.linspace(0.0, np.pi / 2.0, n, dtype=a.dtype)
+    return np.concatenate([a[:-n], a[-n:] * np.cos(t) + b[:n] * np.sin(t), b[n:]])
+
+
+def _alike_cut(host: np.ndarray, at: int, snippet: np.ndarray, around: int, window: int, reach: int, before: bool) -> int:
+    """Where in ``snippet``, within ``reach`` samples of ``around``, to cut so that the snippet looks most like the host at the join: for a join into the snippet (``before``) the ``window`` samples of the
+    snippet that come just before the cut are compared with the ``window`` samples of the host before ``at`` (normalised correlation); for the join back out they are the ones just after the cut against
+    the host's just after ``at``.  Signals that are both near silence are left where they were."""
+    ref = host[max(0, at - window): at] if before else host[at: at + window]
+    if len(ref) < window or float(np.sqrt(np.mean(ref ** 2))) < 1e-4:
+        return around
+    best, best_corr = around, -2.0
+    norm_ref = float(np.linalg.norm(ref)) + 1e-9
+    for j in range(around - reach, around + reach + 1, max(1, reach // 60)):
+        seg = snippet[j - window: j] if before else snippet[j: j + window]
+        if j - window < 0 or len(seg) < window or j + window > len(snippet):
+            continue
+        corr = float(np.dot(ref, seg)) / (norm_ref * (float(np.linalg.norm(seg)) + 1e-9))
+        if corr > best_corr:
+            best, best_corr = j, corr
+    return best
+
+
+def _speech_level(audio: np.ndarray, rate: int) -> float:
+    """The loudness of the speech in a stretch: the rms of its louder half of 10 ms frames."""
+    n = max(1, int(0.01 * rate))
+    count = len(audio) // n
+    if count < 4:
+        return float(np.sqrt(np.mean(audio ** 2))) if len(audio) else 0.0
+    rms = np.sqrt((audio[: count * n].reshape(count, n) ** 2).mean(axis=1))
+    return float(np.sqrt(np.mean(np.sort(rms)[count // 2:] ** 2)))
+
+
+def _prefix_cut(part: np.ndarray, host_from: int, host_to: int, snippet: np.ndarray, snip_from: int, snip_to: int, n: int, step: int) -> tuple[float, int, int] | None:
+    """Where to join two generations of the same prefix, inside it: (correlation, cut in ``part``, cut in ``snippet``).  The ``n`` samples that are cross-faded are the ``n`` of ``part`` just before the
+    host cut and the ``n`` of ``snippet`` just after the snippet cut; both must lie inside the prefix (``host_from``..``host_to`` and ``snip_from``..``snip_to``), and the pair that look most alike
+    (normalised correlation of the two overlapping stretches, so also in phase) is the join."""
+    host_from = max(host_from, 0)
+    host_to = min(host_to, len(part))
+    snip_from = max(snip_from, 0)
+    snip_to = min(snip_to, len(snippet))
+    if host_to - host_from < n or snip_to - snip_from < n:
+        return None
+    seg = snippet[snip_from:snip_to].astype(np.float64)
+    csum = np.concatenate([[0.0], np.cumsum(seg ** 2)])
+    seg_norm = np.sqrt(np.maximum(csum[n:] - csum[:-n], 0.0)) + 1e-9
+    best: tuple[float, int, int] | None = None
+    host_room, snip_room = host_to - host_from - n, snip_to - snip_from - n
+    for hi in range(host_from + n, host_to + 1, max(1, step)):
+        ref = part[hi - n: hi].astype(np.float64)
+        ref_norm = float(np.linalg.norm(ref))
+        if ref_norm < 1e-6:
+            continue
+        corr = np.correlate(seg, ref, "valid") / (seg_norm * ref_norm)
+        centre = (hi - n - host_from) / max(1, host_room) * snip_room          # the same way through the prefix in the snippet: a-m-a has two vowels alike, and a join from the end of one into the start of the other says the prefix twice
+        lo_m, hi_m = max(0, int(centre - PREFIX_JOIN_SLACK * (snip_to - snip_from))), min(len(corr) - 1, int(centre + PREFIX_JOIN_SLACK * (snip_to - snip_from)))
+        if hi_m < lo_m:
+            continue
+        m = lo_m + int(np.argmax(corr[lo_m: hi_m + 1]))
+        if best is None or float(corr[m]) > best[0]:
+            best = (float(corr[m]), hi, snip_from + m)
+    return best
+
+
+PREFIX_JOIN_SLACK = 0.2             # the two cuts are as far through their prefixes, give or take this share of the prefix
+PREFIX_JOIN_MIN_CORR = 0.5          # a join inside a prefix is used when the two overlapping stretches correlate at least this well, else the name is cut at its word boundaries as any other
+
+
+def pause_bounded(first: int, last: int, count: int, host_times: Sequence[Mapping[str, Any] | None], host_offset: int, snippet_times: Sequence[Mapping[str, Any] | None], snippet_offset: int,
+                  min_gap_s: float = 0.10, max_extra: int = 3) -> tuple[int, int]:
+    """The words ``first``..``last`` of a sentence (``count`` words), widened until both ends sit against a real pause (a silence of ``min_gap_s`` or more, in the host AND in the snippet's generation), by at
+    most ``max_extra`` words each way: a cut in the middle of continuous speech is heard, a cut in a pause is not."""
+    def gap(times: Sequence[Mapping[str, Any] | None], i: int, after: bool) -> float:
+        a, b = (i, i + 1) if after else (i - 1, i)
+        if a < 0 or b >= len(times) or not times[a] or not times[b]:
+            return 9.0
+        return float(times[b]["start"]) - float(times[a]["end"])
+
+    lo, hi, extra = first, last, 0
+    while extra < max_extra and lo > 0 and min(gap(host_times, host_offset + lo, False), gap(snippet_times, snippet_offset + lo, False)) < min_gap_s:
+        lo, extra = lo - 1, extra + 1
+    extra = 0
+    while extra < max_extra and hi < count - 1 and min(gap(host_times, host_offset + hi, True), gap(snippet_times, snippet_offset + hi, True)) < min_gap_s:
+        hi, extra = hi + 1, extra + 1
+    return lo, hi
+
+
+def merge_regions(regions: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Stretches of words (first, last) with those that overlap or touch made one, in order."""
+    merged: list[tuple[int, int]] = []
+    for lo, hi in sorted(regions):
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
 def swap_word_run(part: np.ndarray, rate: int, times: Sequence[Mapping[str, Any] | None], first: int, last: int,
                   snippet: np.ndarray, snippet_times: Sequence[Mapping[str, Any] | None], s_first: int, s_last: int,
-                  cut_at: Callable[[np.ndarray, float, float], float], keep_s: float | None = None) -> tuple[np.ndarray, list[Mapping[str, Any] | None]] | None:
+                  cut_at: Callable[[np.ndarray, float, float], float], keep_s: float | None = None, refine: bool = False, inside: float | None = None) -> tuple[np.ndarray, list[Mapping[str, Any] | None]] | None:
     """``part`` with its words ``first``..``last`` replaced by the words ``s_first``..``s_last`` of ``snippet`` (another generation of the same words), and every word's time after the swap:
     (new audio, new word times), or None when a word has no time.  Both are cut in the quiet between the word before and the run (and between the run and the word after), joined with a short
     crossfade; the words after the swap move by the difference in length, and the run takes its times from the snippet.  ``times`` are seconds from the start of ``part``; ``cut_at(audio, from_s,
@@ -1140,10 +1394,28 @@ def swap_word_run(part: np.ndarray, rate: int, times: Sequence[Mapping[str, Any]
     sa, sz = edges(snippet, snippet_times, s_first, s_last)
     i_a, i_z, j_a, j_z = (int(round(t * rate)) for t in (a, z, sa, sz))
     n = int(SWAP_FADE_S * rate)
+    if refine:                                                                  # cuts where the two generations look alike, a gain that puts the name at the host's speech level, an equal-power blend (longer across quiet)
+        window, reach = int(0.015 * rate), int(0.03 * rate)
+        j_a = _alike_cut(part, i_a, snippet, j_a, window, reach, True)
+        j_z = _alike_cut(part, i_z, snippet, j_z, window, reach, False)
+        n = int(0.02 * rate)
+        quiet = max(_speech_level(part[max(0, i_a - window): i_a + window], rate), _speech_level(part[max(0, i_z - window): i_z + window], rate)) < 0.25 * max(_speech_level(part[i_a:i_z], rate), 1e-6)
+        n = int(0.04 * rate) if quiet else n
+    if inside is not None and refine:                                           # the name alone, joined inside its prefix: both tracks say it the same way, so the cross-fade lies wholly within it, where the two look most alike
+        window = int(0.02 * rate)
+        h0, h1, s0, s1 = float(a_word["start"]), float(a_word["end"]), float(s_a["start"]), float(s_a["end"])
+        found = _prefix_cut(part, int(h0 * rate), int((h0 + inside * (h1 - h0)) * rate), snippet, int(s0 * rate), int((s0 + inside * (s1 - s0)) * rate), window, max(1, rate // 1000))
+        if found is not None and found[0] >= PREFIX_JOIN_MIN_CORR:
+            i_a, j_a, n = found[1], found[2], window
     middle = snippet[j_a:j_z]
+    if refine and len(middle) > 0:
+        host_level, own_level = _speech_level(part[i_a:i_z], rate), _speech_level(middle, rate)
+        if host_level > 1e-6 and own_level > 1e-6:
+            middle = middle * float(np.clip(host_level / own_level, 0.7, 1.4))
     if len(middle) < 2 * n or i_a < n or len(part) - i_z < n:
         return None
-    joined = _crossfade(_crossfade(part[:i_a], middle, n), part[i_z:], n)
+    blend = _crossfade_equal if refine else _crossfade
+    joined = blend(blend(part[:i_a], middle, n), part[i_z:], n)
     delta = ((i_a - n + len(middle) - n) - i_z) / rate                      # how far everything after the run moves
     moved: list[Mapping[str, Any] | None] = []
     for k, t in enumerate(times):
@@ -1157,6 +1429,358 @@ def swap_word_run(part: np.ndarray, rate: int, times: Sequence[Mapping[str, Any]
         else:
             moved.append({**t, "start": float(t["start"]) + delta, "end": float(t["end"]) + delta})
     return joined, moved
+
+
+MIX_FADE_S = 0.08              # a name is mixed in and out over this long, at the quietest point around the words either side of it
+MIX_BOUND_REACH_S = 0.12       # a join is looked for this far back into the word before the name (and on into the word after it), never inside the name
+MIX_NAME_MARGIN_S = 0.02       # a cross-fade clears the name's own edge by this much, since the aligner's edge is not exact
+MIX_VALLEY_DB = -25.0           # a quiet point worth joining at is at least this far below the track's speech level (a pause, a stop's closure)
+MIX_JOIN_REACH_S = 0.40        # a join is looked for this far back from the name, or on from it, in each track
+MIX_SHALLOW_DB = -12.0          # when one track has no valley as deep as that, the search is made again with dips this far under speech (the voice ran the name into the next word)
+MIX_SHAPE_DB = 40.0            # a pair of quiet points is worth this much (dB of depth) for every 1.0 of similarity between the loudness shapes around them
+MIX_DIST_DB_PER_S = 40.0       # and costs this much per second of difference in how far from the name each is
+MIX_LETTER_DB = 15.0           # and this much per letter of difference in where in the words each sits, when the aligner gave the time of each letter (the same text is read in both tracks, so the same event is at the same letter)
+MIX_SHAPE_SPAN_S = 0.45        # the loudness shape compared runs this far from a quiet point, on the side that is played from the other track
+MIX_MIN_FADE_S = 0.03          # the shortest cross-fade, in a silence too short for the full one
+MIX_EXTEND_WORDS = 2           # a stretch with no quiet pair beside it takes the next word too, at most this many times a side
+MIX_ONSET_S = 0.04             # where the next word has no room beside the name, a join is made this far into it, past its first sound
+MIX_PAUSE_KEEP_S = 0.04        # a pause is shortened to this at the least
+
+
+def _quietest(audio: np.ndarray, rate: int, t0: float, t1: float) -> int:
+    """The sample at the centre of the quietest 20 ms of ``audio`` between the times ``t0`` and ``t1``: a mix there has no speech to echo."""
+    i0, i1 = max(0, int(t0 * rate)), min(len(audio), int(t1 * rate))
+    window = int(0.02 * rate)
+    if i1 - i0 <= window:
+        return (i0 + i1) // 2
+    csum = np.concatenate([[0.0], np.cumsum(audio[i0:i1].astype(np.float64) ** 2)])
+    return i0 + int(np.argmin(csum[window:] - csum[:-window])) + window // 2
+
+
+def _squeeze_silence(audio: np.ndarray, remove: int, rate: int) -> tuple[np.ndarray, int]:
+    """``audio`` shorter by up to ``remove`` samples, all taken out of its silent stretches (each keeps MIX_PAUSE_KEEP_S): the primed sentence pauses around a name where the host does not."""
+    hop = int(0.005 * rate)
+    count = len(audio) // hop
+    if remove <= 0 or count < 4:
+        return audio, 0
+    rms = np.sqrt((audio[: count * hop].reshape(count, hop) ** 2).mean(axis=1))
+    quiet = rms < 0.04 * float(np.percentile(rms, 90))
+    runs: list[tuple[int, int, int]] = []
+    i = 0
+    while i < count:
+        if quiet[i]:
+            j = i
+            while j < count and quiet[j]:
+                j += 1
+            spare = (j - i) * hop - int(MIX_PAUSE_KEEP_S * rate)
+            if spare > 0:
+                runs.append((i * hop, j * hop, spare))
+            i = j
+        else:
+            i += 1
+    total = sum(spare for _, _, spare in runs)
+    if total <= 0:
+        return audio, 0
+    take = min(remove, total)
+    pieces, at, removed = [], 0, 0
+    for a, b, spare in runs:
+        cut = int(round(spare * take / total))
+        middle = (a + b) // 2
+        pieces.append(audio[at: middle - cut // 2])
+        at = middle + (cut - cut // 2)
+        removed += cut
+    pieces.append(audio[at:])
+    n = int(0.004 * rate)
+    out = pieces[0]
+    for piece in pieces[1:]:
+        out = _crossfade_equal(out, piece, n) if len(out) > n and len(piece) > n else np.concatenate([out, piece])
+    return out, removed
+
+
+def _valleys(audio: np.ndarray, rate: int, t0: float, t1: float, speech: float, depth_db: float | None = None) -> list[tuple[int, float]]:
+    """The quiet points of ``audio`` between the times ``t0`` and ``t1``: (sample at the centre, dB below the track's speech level) of each stretch whose 5 ms level is the lowest within 30 ms either side and
+    deeper than MIX_VALLEY_DB.  A held silence is one point, at its centre."""
+    hop = int(0.005 * rate)
+    i0, i1 = max(0, int(t0 * rate)), min(len(audio), int(t1 * rate))
+    count = (i1 - i0) // hop
+    if count < 5:
+        return []
+    level = np.sqrt((audio[i0: i0 + count * hop].astype(np.float64).reshape(count, hop) ** 2).mean(axis=1))
+    db = np.convolve(20.0 * np.log10(np.maximum(level / max(speech, 1e-9), 1e-5)), np.ones(3) / 3.0, mode="same")
+    limit = MIX_VALLEY_DB if depth_db is None else depth_db
+    low = [i for i in range(1, count - 1) if db[i] <= limit and db[i] <= db[max(0, i - 6): i + 7].min() + 1e-9]
+    points: list[tuple[int, float]] = []
+    run: list[int] = []
+    for i in low + [None]:
+        if i is not None and (not run or i - run[-1] <= 6):
+            run.append(i)
+            continue
+        if run:
+            middle = run[len(run) // 2]
+            points.append((i0 + middle * hop + hop // 2, float(db[run].min())))
+        run = [i] if i is not None else []
+    return points
+
+
+def _letter_times(entries: Sequence[Mapping[str, Any] | None]) -> list[float] | None:
+    """The time of every letter of the words ``entries`` (each a word's timing with its "letters": [[letter, seconds]]), in order, or None when a word is missing or has no letter times."""
+    out: list[float] = []
+    for entry in entries:
+        letters = entry.get("letters") if entry else None
+        if not letters:
+            return None
+        out.extend(float(item[1]) for item in letters)
+    return out if len(out) >= 2 else None
+
+
+def _letter_position(times: Sequence[float], t: float) -> float:
+    """Where ``t`` falls in the run of letters: 3.0 at the third letter's time, 3.5 half way to the next; before the first or after the last, the distance in letters at 0.1 s a letter."""
+    if t <= times[0]:
+        return (t - times[0]) / 0.1
+    if t >= times[-1]:
+        return len(times) - 1 + (t - times[-1]) / 0.1
+    k = max(i for i in range(len(times)) if times[i] <= t)
+    return k + (t - times[k]) / max(times[k + 1] - times[k], 1e-6)
+
+
+def _silence_extent(audio: np.ndarray, rate: int, centre: int, speech: float) -> int:
+    """How many samples around ``centre`` stay more than MIX_VALLEY_DB below the track's speech level (5 ms steps, at most 0.5 s each way): the width of the silence or closure that point is the middle of."""
+    hop = int(0.005 * rate)
+    reach = int(0.5 * rate)
+
+    def frames(direction: int) -> int:
+        n, at = 0, centre
+        while n * hop < reach:
+            lo, hi = (at, at + hop) if direction > 0 else (at - hop, at)
+            if lo < 0 or hi > len(audio):
+                break
+            level = 20.0 * np.log10(max(float(np.sqrt(np.mean(audio[lo:hi].astype(np.float64) ** 2))) / max(speech, 1e-9), 1e-5))
+            if level > MIX_VALLEY_DB:
+                break
+            n, at = n + 1, at + direction * hop
+        return n * hop
+
+    return frames(1) + frames(-1)
+
+
+def _loudness_db(audio: np.ndarray, rate: int, start: int, span: float, speech: float) -> np.ndarray | None:
+    """The loudness of ``audio`` in 5 ms steps over ``span`` seconds from sample ``start`` (a negative ``span`` runs back from it), in dB below the track's speech level (floored at -40 dB), or None past an end."""
+    hop = int(0.005 * rate)
+    count = int(abs(span) / 0.005)
+    lo = start if span > 0 else start - count * hop
+    if lo < 0 or lo + count * hop > len(audio) or count < 4:
+        return None
+    level = np.sqrt((audio[lo: lo + count * hop].astype(np.float64).reshape(count, hop) ** 2).mean(axis=1))
+    return np.clip(20.0 * np.log10(np.maximum(level / max(speech, 1e-9), 1e-5)), -40.0, 6.0)
+
+
+def _shape_match(host: np.ndarray, c_host: int, primed: np.ndarray, c_primed: int, rate: int, host_speech: float, primed_speech: float, side: str) -> float:
+    """How alike the two tracks are around a pair of quiet points where it matters (correlation, -1..1): for a join after the name, the MIX_SHAPE_SPAN_S that follows it (the host plays on from there, so
+    it must be the same syllables as the primed sentence has after its point); for a join before the name, the same span that precedes it.  A pause is not like the closure inside a word, though both are quiet
+    and both follow the same loud speech."""
+    span = MIX_SHAPE_SPAN_S if side == "after" else -MIX_SHAPE_SPAN_S
+    a, b = _loudness_db(host, rate, c_host, span, host_speech), _loudness_db(primed, rate, c_primed, span, primed_speech)
+    if a is None or b is None or float(np.std(a)) < 1e-6 or float(np.std(b)) < 1e-6:
+        return 0.0
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+MIX_SYNC_REACH_S = 0.04        # the primed track is moved at most this far to line its syllables up with the host's at a join
+MIX_SYNC_CONTEXT_S = 0.15      # about a syllable: the stretch of each track whose loudness shape is compared
+MIX_SYNC_MIN_CORR = 0.4        # the shapes must be at least this alike (correlation) to trust the lag
+MIX_LOUD = 0.15                # a join has speech in it when either track is this share of its own speech level there
+
+
+def _loudness_shape(audio: np.ndarray, hop: int) -> np.ndarray:
+    count = len(audio) // hop
+    return np.sqrt((audio[: count * hop].astype(np.float64).reshape(count, hop) ** 2).mean(axis=1))
+
+
+def sync_join(host: np.ndarray, c_host: int, snippet: np.ndarray, c_snippet: int, rate: int, width: int) -> dict[str, float | bool]:
+    """Similarity-guided syllable sync at a join.  The cross-fade runs over ``width`` samples centred on ``c_host`` in the host and ``c_snippet`` in the primed sentence.  Where either track has speech there
+    and the two are not in step, the cross-fade is heard as an echo: two renditions of the same syllable, a few hundredths of a second apart.  The lag that lines the primed track up is found from the
+    loudness shape of a syllable (about MIX_SYNC_CONTEXT_S) of each, within MIX_SYNC_REACH_S, then fine-tuned to the sample from the waveforms over the cross-fade itself.  It is used only when
+    there is speech at the join and the shapes agree (MIX_SYNC_MIN_CORR).  Returns the lag (samples to add to ``c_snippet``), whether it applies, and what it was measured from."""
+    hop = max(1, rate // 400)
+    context, reach, half = int(MIX_SYNC_CONTEXT_S * rate), int(MIX_SYNC_REACH_S * rate), width // 2
+    out: dict[str, float | bool] = {"lag": 0, "applied": False, "env_corr": 0.0, "wave_corr": 0.0, "level_host": 0.0, "level_snippet": 0.0}
+    if c_host - half < 0 or c_host + half > len(host) or c_snippet - half < 0 or c_snippet + half > len(snippet):
+        return out
+    host_speech, snippet_speech = _speech_level(host, rate), _speech_level(snippet, rate)
+    out["level_host"] = round(float(np.sqrt(np.mean(host[c_host - half: c_host + half] ** 2))) / max(host_speech, 1e-9), 3)
+    out["level_snippet"] = round(float(np.sqrt(np.mean(snippet[c_snippet - half: c_snippet + half] ** 2))) / max(snippet_speech, 1e-9), 3)
+    h0 = c_host - context // 2
+    if h0 < 0 or h0 + context > len(host):
+        return out
+    shape = _loudness_shape(host[h0: h0 + context], hop)
+    if float(np.std(shape)) < 1e-9:
+        return out
+    best_lag, best = 0, -2.0
+    for lag in range(-reach, reach + 1, hop):
+        s0 = c_snippet - context // 2 + lag
+        if s0 < 0 or s0 + context > len(snippet):
+            continue
+        other = _loudness_shape(snippet[s0: s0 + context], hop)
+        if len(other) != len(shape) or float(np.std(other)) < 1e-9:
+            continue
+        corr = float(np.corrcoef(shape, other)[0, 1])
+        if corr > best:
+            best_lag, best = lag, corr
+    out["env_corr"] = round(best, 3)
+    ref = host[c_host - half: c_host + half].astype(np.float64)
+    ref_norm = float(np.linalg.norm(ref)) + 1e-9
+    fine_lag, fine = best_lag, -2.0
+    for lag in range(best_lag - hop, best_lag + hop + 1):
+        a = c_snippet + lag - half
+        if a < 0 or a + width > len(snippet):
+            continue
+        seg = snippet[a: a + width].astype(np.float64)
+        corr = float(np.dot(ref, seg)) / (ref_norm * (float(np.linalg.norm(seg)) + 1e-9))
+        if corr > fine:
+            fine_lag, fine = lag, corr
+    out["wave_corr"] = round(fine, 3)
+    if max(float(out["level_host"]), float(out["level_snippet"])) >= MIX_LOUD and best >= MIX_SYNC_MIN_CORR:
+        out["lag"], out["applied"] = fine_lag, True
+    return out
+
+
+def mix_word_run(part: np.ndarray, rate: int, times: Sequence[Mapping[str, Any] | None], first: int, last: int,
+                 snippet: np.ndarray, snippet_times: Sequence[Mapping[str, Any] | None], s_first: int, s_last: int, opens_sentence: bool = False,
+                 sync: bool = True, notes: list[dict[str, Any]] | None = None, extend: int = MIX_EXTEND_WORDS) -> tuple[np.ndarray, list[Mapping[str, Any] | None]] | None:
+    """``part`` with its words ``first``..``last`` (a name) taken from ``snippet`` (another generation of the sentence): (new audio, new word times), or None when a word the mix needs has no time.
+
+    It is a mix, not a splice: the host plays into the primed sentence and back, cross-faded for MIX_FADE_S in a real silence beside the name in both tracks (a shorter fade where the silence is shorter), or else at the quiet point of the bounding word (found in
+    each track on its own), so the energy and the rhythm carry over.  The host's own stretch from join to join (the placeholder) is dropped whole and nothing is cut out of the primed speech: its pauses
+    are shortened where it pauses more than the host did, and the rest of the sentence moves by the difference in length.  Where the next word starts too close to the name in either track for the
+    cross-fade to fit between them, the join is made inside that word past its first sound (MIX_ONSET_S), at the same point in both tracks: the fade never straddles a word's start, which is heard as a hiccup.
+    A name that opens its sentence (``opens_sentence``) puts the primed sentence's own beginning in front of it, since what is in front of it is the lead, cut away afterwards.  With ``sync`` each join
+    where there is speech is first lined up with sync_join (the primed track moved by the lag it finds); ``notes`` gets one record per mix: the joins' levels, lags and similarities."""
+    wb, wa = (times[first - 1] if first > 0 else None), (times[last + 1] if last + 1 < len(times) else None)
+    sb, sa = (snippet_times[s_first - 1] if s_first > 0 else None), (snippet_times[s_last + 1] if s_last + 1 < len(snippet_times) else None)
+    if not (wb and wa and sb and sa and times[first] and times[last] and snippet_times[s_first] and snippet_times[s_last]):
+        return None
+    width = int(MIX_FADE_S * rate)
+    clear = width / 2 / rate + MIX_NAME_MARGIN_S                  # from the centre of a join to the name's edge: the whole cross-fade lies in the bounding word, clear of the name in BOTH tracks
+
+    def before_name(audio: np.ndarray, word: Mapping[str, Any], name_start: float) -> int:
+        latest = name_start - clear
+        return _quietest(audio, rate, min(max(float(word["start"]) + width / 2 / rate, latest - MIX_BOUND_REACH_S), latest - 0.01), latest + 0.01)
+
+    def after_name(audio: np.ndarray, word: Mapping[str, Any], name_end: float) -> int:
+        earliest = name_end + clear
+        return _quietest(audio, rate, earliest - 0.01, max(min(float(word["end"]) - width / 2 / rate, earliest + MIX_BOUND_REACH_S), earliest + 0.01))
+
+    h_n0, h_n1 = float(times[first]["start"]), float(times[last]["end"])
+    s_n0, s_n1 = float(snippet_times[s_first]["start"]), float(snippet_times[s_last]["end"])
+    c_hl, c_sl = before_name(part, wb, h_n0), before_name(snippet, sb, s_n0)
+    c_hr, c_sr = after_name(part, wa, h_n1), after_name(snippet, sa, s_n1)
+    h_speech, s_speech = _speech_level(part, rate), _speech_level(snippet, rate)
+    half = width / 2 / rate
+    wl = wr = width
+
+    def join_between(side: str) -> tuple[int, int, int] | None:
+        """The pair of quiet points (one in each track), and the fade to use, that a cross-fade beside the name is best made at: both deep (a pause, or a stop's closure inside a word), the loudness around
+        them alike (so the pause is paired with the pause and the closure with the closure), and about as far from the name in each.  The fade is as long as the silence they sit in where that is the shorter
+        (never less than MIX_MIN_FADE_S), else MIX_FADE_S; it clears the name by MIX_NAME_MARGIN_S.  The word times of a spelled acronym are not exact, so only what is heard decides."""
+        if side == "before":
+            h_ref, s_ref = h_n0, s_n0
+            h_lo, s_lo = max(float(wb["start"]) + half, min(h_ref, float(wb["end"])) - MIX_JOIN_REACH_S), max(float(sb["start"]) + half, min(s_ref, float(sb["end"])) - MIX_JOIN_REACH_S)          # the reach is counted from the word before, so a long pause in one track does not hide the word's own closures
+            h_hi, s_hi = h_ref - 0.02, s_ref - 0.02
+        else:
+            h_ref, s_ref = h_n1, s_n1
+            h_lo, s_lo = h_ref, s_ref
+            h_hi, s_hi = max(float(wa["end"]) - half, h_lo + 0.02), max(float(sa["end"]) - half, s_lo + 0.02)
+            h_hi, s_hi = min(h_hi, max(h_ref, float(wa["start"])) + MIX_JOIN_REACH_S), min(s_hi, max(s_ref, float(sa["start"])) + MIX_JOIN_REACH_S)          # counted from the next word, for the same reason
+        words_host = (times[first - 1], times[first]) if side == "before" else (times[last], times[last + 1])
+        words_primed = (snippet_times[s_first - 1], snippet_times[s_first]) if side == "before" else (snippet_times[s_last], snippet_times[s_last + 1])
+        letters_host, letters_primed = _letter_times(words_host), _letter_times(words_primed)
+        if letters_host is not None and (letters_primed is None or len(letters_host) != len(letters_primed)):
+            letters_host = letters_primed = None
+        host_valleys, primed_valleys = _valleys(part, rate, h_lo, h_hi, h_speech), _valleys(snippet, rate, s_lo, s_hi, s_speech)
+        if not host_valleys or not primed_valleys:
+            host_valleys, primed_valleys = _valleys(part, rate, h_lo, h_hi, h_speech, MIX_SHALLOW_DB), _valleys(snippet, rate, s_lo, s_hi, s_speech, MIX_SHALLOW_DB)
+        best: tuple[float, int, int, int] | None = None
+        for c_h, db_h in host_valleys:
+            ext_h = _silence_extent(part, rate, c_h, h_speech)
+            for c_s, db_s in primed_valleys:
+                ext_s = _silence_extent(snippet, rate, c_s, s_speech)
+                fade = max(int(MIX_MIN_FADE_S * rate), min(width, ext_h, ext_s) if min(ext_h, ext_s) >= int(0.05 * rate) else width)
+                margin = MIX_NAME_MARGIN_S * rate
+                clear_ok = (c_h + fade / 2 <= h_ref * rate - margin and c_s + fade / 2 <= s_ref * rate - margin) if side == "before" else (c_h - fade / 2 >= h_ref * rate + margin and c_s - fade / 2 >= s_ref * rate + margin)
+                if fade > min(ext_h, ext_s) and not clear_ok:                                    # a fade that fits inside both silences has nothing spoken under it; a closure's neighbours are speech, which must not be the name's
+                    continue
+                apart = abs(abs(c_h / rate - h_ref) - abs(c_s / rate - s_ref))
+                cost = (db_h + db_s) / 2.0 - MIX_SHAPE_DB * _shape_match(part, c_h, snippet, c_s, rate, h_speech, s_speech, side) + MIX_DIST_DB_PER_S * apart
+                if letters_host is not None and letters_primed is not None:
+                    cost += MIX_LETTER_DB * abs(_letter_position(letters_host, c_h / rate) - _letter_position(letters_primed, c_s / rate))
+                if best is None or cost < best[0]:
+                    best = (cost, c_h, c_s, fade)
+        return None if best is None else (best[1], best[2], best[3])
+
+    found_before, found_after = join_between("before"), join_between("after")
+    if found_after is None and extend > 0 and last + 2 < len(times) and last + 2 < len(snippet_times) and s_last + 2 < len(snippet_times) and times[last + 2] and snippet_times[s_last + 2]:
+        return mix_word_run(part, rate, times, first, last + 1, snippet, snippet_times, s_first, s_last + 1, opens_sentence, sync, notes, extend - 1)          # no quiet pair after the name (the voice ran it into the next word): the next word is taken too, and the join is made after it
+    if found_before is None and not opens_sentence and extend > 0 and first >= 2 and s_first >= 2 and times[first - 2] and snippet_times[s_first - 2]:
+        return mix_word_run(part, rate, times, first - 1, last, snippet, snippet_times, s_first - 1, s_last, opens_sentence, sync, notes, extend - 1)
+    if found_before:
+        c_hl, c_sl, wl = found_before
+    if found_after:
+        c_hr, c_sr, wr = found_after
+    joins: list[dict[str, Any]] = []
+    if not opens_sentence:
+        joins.append({"side": "before", **sync_join(part, c_hl, snippet, c_sl, rate, wl)})
+    joins.append({"side": "after", **sync_join(part, c_hr, snippet, c_sr, rate, wr)})
+    for j in joins:
+        if sync and j["applied"]:
+            if j["side"] == "before":
+                lag = min(int(j["lag"]), int((s_n0 - (wl / 2 / rate + MIX_NAME_MARGIN_S)) * rate) - c_sl)          # a lag never takes the fade over the primed name's edge (the name would be faded in, clipped)
+                c_sl += lag
+            else:
+                lag = max(int(j["lag"]), int((s_n1 + wr / 2 / rate + MIX_NAME_MARGIN_S) * rate) - c_sr)
+                c_sr += lag
+            j["lag"] = lag
+    hl0, s0, hr0, t0 = c_hl - wl // 2, c_sl - wl // 2, c_hr - wr // 2, c_sr - wr // 2
+    mid_s = snippet[c_sl:t0] if opens_sentence else snippet[s0 + wl:t0]
+    mid_h = hr0 - c_hl if opens_sentence else hr0 - (hl0 + wl)
+    if mid_h < int(0.05 * rate) or len(mid_s) < int(0.05 * rate) or hl0 < 0 or s0 < 0 or hr0 + wr > len(part) or t0 + wr > len(snippet):
+        return None
+    need = len(mid_s) - mid_h                                   # > 0: the name is longer than its stretch
+    asked, squeezed = need, 0
+    if need > 0:
+        mid_s, squeezed = _squeeze_silence(mid_s, need, rate)
+        need -= squeezed
+    mid = mid_s
+    ramp_after = np.linspace(0.0, np.pi / 2.0, wr, dtype=np.float32)
+    out_of = snippet[t0:t0 + wr] * np.cos(ramp_after) + part[hr0:hr0 + wr] * np.sin(ramp_after)
+    if opens_sentence:
+        joined = np.concatenate([snippet[:c_sl], mid, out_of, part[hr0 + wr:]])
+        anchor, name_from, delta = c_sl, c_sl, (c_sl + len(mid) - hr0) / rate
+    else:
+        ramp_before = np.linspace(0.0, np.pi / 2.0, wl, dtype=np.float32)
+        into = part[hl0:hl0 + wl] * np.cos(ramp_before) + snippet[s0:s0 + wl] * np.sin(ramp_before)
+        joined = np.concatenate([part[:hl0], into, mid, out_of, part[hr0 + wr:]])
+        anchor, name_from, delta = hl0 + wl, s0 + wl, (len(mid) - mid_h) / rate
+    scale = len(mid) / max(1, len(mid_s))
+    moved: list[Mapping[str, Any] | None] = []
+    for k, t in enumerate(times):
+        if t is None:
+            moved.append(t)
+        elif k < first:
+            j = s_first - (first - k)
+            moved.append({**t, "start": float(snippet_times[j]["start"]), "end": float(snippet_times[j]["end"])} if opens_sentence and j >= 0 and snippet_times[j] else t)
+        elif k <= last:
+            sw = snippet_times[s_first + (k - first)]
+            if not sw:
+                return None
+            moved.append({**t, "start": (anchor + (float(sw["start"]) * rate - name_from) * scale) / rate, "end": (anchor + (float(sw["end"]) * rate - name_from) * scale) / rate})
+        else:
+            moved.append({**t, "start": float(t["start"]) + delta, "end": float(t["end"]) + delta})
+    if notes is not None:
+        notes.append({"words": [first, last], "synced": sync, "longer_ms": round(1000.0 * asked / rate), "pauses_out_ms": round(1000.0 * squeezed / rate), "joins": [{"side": j["side"], "level_host": j["level_host"], "level_snippet": j["level_snippet"], "env_corr": j["env_corr"], "wave_corr": j["wave_corr"],
+                                                                         "lag_ms": round(1000.0 * int(j["lag"]) / rate, 1), "applied": bool(sync and j["applied"]),
+                                                                         "host_s": round((c_hl if j["side"] == "before" else c_hr) / rate, 3), "primed_s": round((c_sl if j["side"] == "before" else c_sr) / rate, 3),
+                                                                         "fade_ms": round(1000.0 * (wl if j["side"] == "before" else wr) / rate)} for j in joins]})
+    return joined.astype(part.dtype), moved
 
 
 def to_spans(pieces: Sequence[str | int], sentence_gaps: Sequence[float] | None = None) -> tuple[list[str], list[int]]:
@@ -1227,6 +1851,17 @@ class OmniVoiceTTSBackend:
         self.speed = speed
         self.follow_word = True          # a span is spoken with the first word of the next one after it (cut off afterwards) so that its last word is not the last thing the model makes; an experiment can turn it off
         self.name_draws = False          # the final render: a span with names is drawn as many times as the Studio draws it (the names differ draw to draw), and the longest name is used, so the video is the audio that was listened to; a run's measurements make one
+        self.primer_usual_pace = True       # a name the speaker drew out in the window is replaced in the primer by their usual saying of it (the drawn-out one drags a whole primed sentence); False for a splice, which takes only the name
+        self.host_spaced = False            # the host of a splice is sent the same text a reference-only sentence is (an English word after a Zulu prefix spaced), so it is that sentence exactly
+        self.host_per_draw = False          # each draw speaks the cluster's first pass again with its own seed (one speaker's sentence can range from 4% to 15% of it in breaks between seeds, and a host shared by the draws cannot be re-rolled)
+        self.splice_refine = False          # a splice cuts where the two generations look alike, matches the name's level to its host and blends with equal power
+        self.splice_mix = True              # a name is mixed in from its primed sentence (cross-faded at the quietest points around it, mix_word_run) instead of cut in; it implies host_spaced and the speaker's own saying of a name in the primer
+        self.splice_sync = True             # each join of a mix where there is speech is lined up first (sync_join): the primed track moved by the lag at which the two syllables' loudness shapes agree
+        self.splice_inside_prefix = False   # a name with a Zulu prefix is taken alone and joined inside its prefix, at the moment the two generations look most alike (not with the word before it)
+        self.splice_phrases = False         # and widens each swapped stretch to the nearest real pauses (at most 3 words each way), so its joins fall in silence
+        self.priming = True          # False: the reference clip only; no name of the speaker is put in front of it and none is kept out of the pronunciation dictionary (phonetic respelling decides how a name is read)
+        self.pin_to_reference = False          # a primed sentence is spoken for the length the plain reference clip gives it (its pace), not the length its primed reference gives it
+        self.match_primer_syllables = 0.0          # 0: the names are put in front of the reference as the speaker said them; 1.5 (say): a name said faster than the reference clip is slowed toward its syllable speed, at most this many times longer
         self.splice_names = True         # a cluster's names are cut from their primed sentences and put in; False: the whole span is spoken primed (every name of the span in front of the reference) and used as it is, with no splice
         self.nameless_draws = 1          # how many draws the Studio makes of a unit that carries no names (the draws of a name are the ones listened to; a draw of the speech around it is a call for nothing)
         self.span_sentences = 1          # how many sentences one generation speaks (1 = each its own; an experiment can ask for 2 or 3, see merge_spans)
@@ -1260,6 +1895,20 @@ class OmniVoiceTTSBackend:
         backend = cls(client, speed=float(env.get("OMNIVOICE_SPEED") or DEFAULT_SPEED), lora=(env.get("OMNIVOICE_LORA", "1").strip().lower() not in {"0", "false", "no"}))
         backend.name_draws = (env.get("OMNIVOICE_NAME_DRAWS") or "").strip().lower() in {"1", "true", "yes"}
         backend.splice_names = (env.get("OMNIVOICE_SPLICE") or "1").strip().lower() not in {"0", "false", "no", "off"}
+        backend.primer_usual_pace = (env.get("OMNIVOICE_PRIMER_USUAL_PACE") or "1").strip().lower() not in {"0", "false", "no", "off"}
+        backend.host_spaced = (env.get("OMNIVOICE_HOST_SPACED") or "").strip().lower() in {"1", "true", "yes", "on"}
+        backend.host_per_draw = (env.get("OMNIVOICE_HOST_PER_DRAW") or "").strip().lower() in {"1", "true", "yes", "on"}
+        backend.splice_refine = (env.get("OMNIVOICE_SPLICE_REFINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+        backend.splice_mix = (env.get("OMNIVOICE_SPLICE_MIX") or "1").strip().lower() not in {"0", "false", "no", "off"}
+        backend.splice_sync = (env.get("OMNIVOICE_SPLICE_SYNC") or "1").strip().lower() not in {"0", "false", "no", "off"}
+        backend.splice_inside_prefix = (env.get("OMNIVOICE_SPLICE_INSIDE_PREFIX") or "").strip().lower() in {"1", "true", "yes", "on"}
+        backend.splice_phrases = (env.get("OMNIVOICE_SPLICE_PHRASES") or "").strip().lower() in {"1", "true", "yes", "on"}
+        backend.priming = (env.get("OMNIVOICE_PRIMING") or "1").strip().lower() not in {"0", "false", "no", "off"}
+        backend.pin_to_reference = (env.get("OMNIVOICE_PIN_TO_REFERENCE") or "").strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            backend.match_primer_syllables = float(env.get("OMNIVOICE_PRIMER_SYLLABLES") or 0.0)
+        except ValueError:
+            backend.match_primer_syllables = 0.0
         if (env.get("OMNIVOICE_PARALLEL") or "").strip().isdigit():          # set by warm_voice: the copies of the voice this job holds
             client.set_parallel(int(env["OMNIVOICE_PARALLEL"]))
         per_span = (env.get("OMNIVOICE_SPAN_SENTENCES") or "").strip()
@@ -1279,11 +1928,13 @@ class OmniVoiceTTSBackend:
 
     def span_primers(self, group: Mapping[str, Any], spans: Sequence[str], job_root: Path | str | None) -> list[dict[str, Any] | None]:
         """For each span, the speaker's own names it carries (ReferenceBank.primer_for), or None."""
+        if not self.priming:
+            return [None] * len(spans)
         try:
             bank = self.bank_for(job_root)
             start = int(group.get("start_ms") or 0)
             end = int(group.get("source_end_ms") or (start + int(group.get("source_span_ms") or 0)))
-            return [bank.primer_for(str(group.get("speaker_id") or ""), start / 1000.0, end / 1000.0, span) for span in spans]
+            return [bank.primer_for(str(group.get("speaker_id") or ""), start / 1000.0, end / 1000.0, span, self.primer_usual_pace and not (self.splice_mix and self.splice_names)) for span in spans]
         except Exception:                      # noqa: BLE001 - a primer is an improvement, never a reason a unit cannot be spoken
             return [None] * len(spans)
 
@@ -1299,7 +1950,7 @@ class OmniVoiceTTSBackend:
         try:
             start = int(group.get("start_ms") or 0)
             end = int(group.get("source_end_ms") or (start + int(group.get("source_span_ms") or 0)))
-            matches = self.bank_for(job_root).name_matches(str(group.get("speaker_id") or ""), start / 1000.0, end / 1000.0, _group_text(group))
+            matches = self.bank_for(job_root).name_matches(str(group.get("speaker_id") or ""), start / 1000.0, end / 1000.0, _group_text(group)) if self.priming else []          # no priming: no name is left to the speaker's audio, every one goes through the dictionary
         except Exception:                      # noqa: BLE001 - no bank or no timed words: the text stays as written
             matches = []
         covered = sorted({t for m in matches for t in m["tokens"]}, key=lambda t: (-len(t), t))          # names the speaker says in this window: the source audio is their pronunciation
@@ -1357,6 +2008,7 @@ class OmniVoiceTTSBackend:
         bank = self.bank_for(job_root)
         ranked = bank.ranked(str(group.get("speaker_id") or ""), int(group.get("start_ms") or 0),
                              int(group.get("source_end_ms") or (int(group.get("start_ms") or 0) + int(group.get("source_span_ms") or 0))))
+        clip_edges = (float(ranked[0]["start"]), float(ranked[0]["end"]))          # a draw the listener committed belongs to the clip as the Studio names it (the clip's own edges), not to where this render snaps them to the quiet: the lookup by the snapped edges missed by 0.06 s and no commit ever applied
         tone, delta = bank.room_tone()
         pause_ok = bank.natural_pause_s(str(group.get("speaker_id") or ""))          # the longest pause the speaker themself makes inside a sentence: shorter ones are not held against a take
         breath = bank.natural_pause_s(str(group.get("speaker_id") or ""), 75.0) or 0.0          # what the speaker leaves at least after a sentence: a full stop is a breath (prod-129 0:39: 'ethile.' and 'Umane' 0.06 s apart)
@@ -1394,7 +2046,7 @@ class OmniVoiceTTSBackend:
             times of each); a service that cannot is answered by speaking each lead alone as well and warping it onto the start of the generation (voice_takes.align_end)."""
             use_words = getattr(self, "service_aligns", None) is not False          # a unit of one sentence has no lead to cut, but its words are the Studio's word strip and the cut of its stray ends
 
-            refs = [bank.primed(reference, primer) for primer in primers]
+            refs = [bank.primed(reference, primer, self.match_primer_syllables) for primer in primers]
             take_no = take_count[0]
             take_count[0] += 1
             salt = f"{reference.start_s:.2f}-{reference.end_s:.2f}"
@@ -1406,7 +2058,7 @@ class OmniVoiceTTSBackend:
                 elif retakes is not None and index in retakes:
                     n = int(retakes[index])
                 else:
-                    n = dr.retake_for(marked, spans[index], reference.start_s, reference.end_s)
+                    n = dr.retake_for(marked, spans[index], *clip_edges)
                 return stable_seed(text, take_no, *parts, *((("retake", n),) if n else ()))
 
             def primed_pass(sent: list[str], pool: Any) -> dict[str, Any]:
@@ -1415,13 +2067,17 @@ class OmniVoiceTTSBackend:
                 slower one wins.  A primed span that comes out SHORTER (the names, said fast, made the voice read the reference as a faster speaker: 7.0 s against 8.6 s, "ngemisebenzi" -> "nomsebenzi") is spoken
                 once more pinned to the fluent length, which only stretches it.  One that comes out LONGER is left as it is: pinning it down squeezed the short syllable in front of a name ("ngu-Eric" heard as
                 "Eric": 0 of 5 clean pinned, 5 of 5 clean unpinned, prod-125 1:01)."""
-                reused = (salt, tuple(sent)) in first_pass          # the cluster is spoken once: the draws of a span with names differ in how its names are primed, not in the speech around them
+                host_key = (salt, tuple(sent), take_no if self.host_per_draw else None)          # the cluster is spoken once and its draws differ in how the names are primed - or, with host_per_draw, each draw has a first pass of its own
+                reused = host_key in first_pass
                 first_future = None if reused else pool.submit(synth, spans=sent, gaps_ms=[0] * (len(sent) - 1), reference=reference, speed=self.speed, lora=self.lora, generation=self.generation, align=True,
-                                                               seeds=[seed_for(i, text, "first", salt) for i, text in enumerate(sent)], keep=[p["names"] if p else () for p in primers])
+                                                               seeds=[seed_for(i, text, "first", salt) for i, text in enumerate(sent)], keep=None if (self.host_spaced or (self.splice_mix and self.splice_names)) else [p["names"] if p else () for p in primers])
                 futures: dict[Any, Any] = {}
 
                 def primed_kwargs(index: int, text: str, tag: str) -> dict[str, Any]:
-                    return dict(spans=[text], gaps_ms=[], reference=refs[index], speed=self.speed, lora=self.lora, generation=self.generation, align=True, seeds=[seed_for(index, text, tag, salt, primers[index]["names"])])
+                    kwargs = dict(spans=[text], gaps_ms=[], reference=refs[index], speed=self.speed, lora=self.lora, generation=self.generation, align=True, seeds=[seed_for(index, text, tag, salt, primers[index]["names"])])
+                    if self.pin_to_reference:          # the length is what the PLAIN reference gives this text (the model's own estimate from the clip's characters a second): the names in front of it say how the names sound, and nothing else
+                        kwargs["durations_s"] = [round(od.estimate_seconds([text], [], reference.text, reference.seconds, self.speed), 3)]
+                    return kwargs
 
                 def fetch(key: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
                     """The reply of a primed generation: the one already on its way (submitted with the first pass, so they are spoken side by side), or made now."""
@@ -1438,17 +2094,17 @@ class OmniVoiceTTSBackend:
                     if primer is None:
                         continue
                     sentences_in = [x for x in vt.SENTENCE_END.split(spans[index].strip()) if x.strip()]
-                    if self.splice_names and self.span_sentences > 1 and len(sentences_in) > 1 and sum(len(x.split()) for x in sentences_in) == len(spans[index].split()):
+                    if self.splice_names and self.span_sentences > 1 and len(sentences_in) >= 1 and sum(len(x.split()) for x in sentences_in) == len(spans[index].split()):
                         for j in reversed(range(len(sentences_in))):
                             if name_runs(sentences_in[j].split(), primer["names"]):
                                 text_in = sentence_plan(index, j, sentences_in)[2]
                                 futures[("s", index, text_in)] = pool.submit(synth, **primed_kwargs(index, text_in, "primed-sentence"))
                     else:
                         futures[("b", index)] = pool.submit(synth, **primed_kwargs(index, sent[index], "primed"))
-                first = first_pass[(salt, tuple(sent))] if reused else first_future.result()
+                first = first_pass[host_key] if reused else first_future.result()
                 if not isinstance(first.get("words"), list):
                     return first                                                       # the service does not align: the caller asks the old way, with one reference
-                first_pass[(salt, tuple(sent))] = first
+                first_pass[host_key] = first
                 audio_all, rate_seen = _decode_answer(first)
                 parts = vt.split_spans(first, audio_all, rate_seen)
                 words_by_span = [first["words"][i] if i < len(first["words"]) else None for i in range(len(sent))]
@@ -1459,7 +2115,7 @@ class OmniVoiceTTSBackend:
                     sentences_in = [x for x in vt.SENTENCE_END.split(spans[index].strip()) if x.strip()]
                     n_lead = len(leads[index].split()) if leads[index] else 0
                     now_times = words_by_span[index]
-                    if self.splice_names and self.span_sentences > 1 and len(sentences_in) > 1 and isinstance(now_times, list) and len(now_times) == len(sent[index].split()) and sum(len(x.split()) for x in sentences_in) == len(spans[index].split()):
+                    if self.splice_names and self.span_sentences > 1 and len(sentences_in) >= 1 and isinstance(now_times, list) and len(now_times) == len(sent[index].split()) and sum(len(x.split()) for x in sentences_in) == len(spans[index].split()):
                         ranges, at = [], n_lead
                         for x in sentences_in:
                             ranges.append((at, at + len(x.split()) - 1, x))
@@ -1482,12 +2138,19 @@ class OmniVoiceTTSBackend:
                             raw_notes.append({"span": index, "take": take_no, "text": text_in, "audio": primed_audio, "rate": rate_seen, "names": name_lengths(text_in.split(), reply["words"][0], primer["names"]), "source": [{"text": t, "s": round(x, 3)} for t, _, x in primer["snippets"]]})
                             swapped = 0
                             words_s = text_s.split()
-                            for run_first, run_last in reversed(swap_regions(words_s, primer["names"])):          # the names are taken from the primed sentence (with a word or so between two of them); the cluster keeps everything else
-                                out = swap_word_run(audio_now, rate_seen, times_now, first_w + run_first, first_w + run_last, primed_audio, reply["words"][0], n_before + run_first, n_before + run_last, cut_at)
+                            regions = swap_regions(words_s, primer["names"], with_word_before=not (self.splice_inside_prefix or self.splice_mix))          # the names are taken from the primed sentence (with a word or so between two of them); the cluster keeps everything else
+                            if self.splice_phrases:                                    # each stretch widened to real pauses, so the joins fall where nothing is said; stretches that now touch are one
+                                regions = merge_regions([pause_bounded(a, b, len(words_s), times_now, first_w, reply["words"][0], n_before) for a, b in regions])
+                            mix_notes: list[dict[str, Any]] = []
+                            for run_first, run_last in reversed(regions):
+                                out = mix_word_run(audio_now, rate_seen, times_now, first_w + run_first, first_w + run_last, primed_audio, reply["words"][0], n_before + run_first, n_before + run_last, run_first == 0, sync=self.splice_sync, notes=mix_notes) if self.splice_mix else None
+                                if out is None:                                    # no mix (switched off, or a word beside the name has no time): the name is cut in at its words' edges, or inside its prefix
+                                    out = swap_word_run(audio_now, rate_seen, times_now, first_w + run_first, first_w + run_last, primed_audio, reply["words"][0], n_before + run_first, n_before + run_last, cut_at, refine=self.splice_refine or self.splice_mix,
+                                                        inside=prefix_share(words_s, run_first) if (self.splice_inside_prefix or self.splice_mix) else None)
                                 if out is not None:
                                     (audio_now, times_now), swapped = out, swapped + 1
                             redone += swapped
-                            pin_notes.append({"span": index, "sentence": text_s[:40], "lead": bool(before), "follow": bool(after), "names_swapped": swapped})
+                            pin_notes.append({"span": index, "sentence": text_s[:40], "lead": bool(before), "follow": bool(after), "names_swapped": swapped, "mix": mix_notes})
                         if redone:
                             parts[index], words_by_span[index] = audio_now, times_now
                             continue
@@ -1646,6 +2309,7 @@ class OmniVoiceTTSBackend:
             for index, scored in enumerate(scores):                          # how long the voice said the names of each span in this take (the primed sentences the names come from)
                 scored["names"] = [n for note in raw_notes if note["span"] == index and note["take"] == take_no for n in note.get("names") or []]
                 scored["name_s"] = round(sum(float(n["s"]) for n in scored["names"]), 3)
+                scored["clarity"] = round(sum(float(n["clarity"]) for n in scored["names"]) / len(scored["names"]), 3) if scored["names"] and all(n.get("clarity") is not None for n in scored["names"]) else None
             notes.append(info)
             return cores, scores, rate, float(answer.get("gpu_s") or 0.0)
 
@@ -1671,7 +2335,7 @@ class OmniVoiceTTSBackend:
             return audio, rate, starts, picks, chosen, cores
 
         reference = bank.as_reference(ranked[0])
-        pinned = [dr.take_for(marked, text, reference.start_s, reference.end_s) for text in spans]
+        pinned = [dr.take_for(marked, text, *clip_edges) for text in spans]
         takes = []
         wanted_takes = 1 + max([p for p in pinned if p is not None] or [0])          # a run makes one (and the later take the listener committed, if any)
         if all_takes:                                                    # the Studio: three draws where a span carries names (they differ in how the names are primed), one where it does not

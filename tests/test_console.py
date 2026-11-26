@@ -861,6 +861,29 @@ def test_a_run_can_ask_for_its_own_decoding_settings_and_its_studio_is_a_differe
     (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"span_sentences": "fill", "splice": False}), encoding="utf-8")
     assert drawn._run_voice(JOB, "prod-1-pt1") == {"span_sentences": 99, "splice_names": False}                                                  # a run can ask for no splicing
     assert drawn._omni_with({"span_sentences": 99, "splice_names": False}).splice_names is False and drawn._omni_with({"span_sentences": 99}).splice_names is True
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"primer_syllables": 1.5}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"primer_syllables": 1.5} and drawn._omni_with({"primer_syllables": 1.5}).match_primer_syllables == 1.5
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"pin_to_reference": True}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"pin_to_reference": True} and drawn._omni_with({"pin_to_reference": True}).pin_to_reference is True and drawn._omni_with({"span_sentences": 99}).pin_to_reference is False
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"priming": False}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"priming": False} and drawn._omni_with({"priming": False}).priming is False and drawn._omni_with({"span_sentences": 99}).priming is True
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"host_per_draw": True, "splice_refine": True, "splice_phrases": True}), encoding="utf-8")
+    voiced = drawn._run_voice(JOB, "prod-1-pt1")
+    assert voiced == {"host_per_draw": True, "splice_refine": True, "splice_phrases": True}
+    made = drawn._omni_with(voiced)
+    assert made.host_per_draw is True and made.splice_refine is True and made.splice_phrases is True
+    plain = drawn._omni_with({"span_sentences": 99})
+    assert plain.host_per_draw is False and plain.splice_refine is False and plain.splice_phrases is False
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"splice_sync": False}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"splice_sync": False} and drawn._omni_with({"splice_sync": False}).splice_sync is False and plain.splice_sync is True
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"splice_mix": False}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"splice_mix": False} and drawn._omni_with({"splice_mix": False}).splice_mix is False and plain.splice_mix is True
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"splice_inside_prefix": True}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"splice_inside_prefix": True} and drawn._omni_with({"splice_inside_prefix": True}).splice_inside_prefix is True and plain.splice_inside_prefix is False
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"primer_usual_pace": False}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"primer_usual_pace": False} and drawn._omni_with({"primer_usual_pace": False}).primer_usual_pace is False and plain.primer_usual_pace is True
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"host_spaced": True}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"host_spaced": True} and drawn._omni_with({"host_spaced": True}).host_spaced is True and plain.host_spaced is False
 
 
 def test_no_function_of_the_console_page_is_defined_twice():

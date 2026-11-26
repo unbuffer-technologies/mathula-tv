@@ -580,6 +580,22 @@ class Console:
             voice["span_sentences"] = 99          # omnivoice_tts.FILL_SENTENCES: as many sentences as fit the time budget
         if data.get("follow_word") is False:
             voice["follow_word"] = False
+        match = data.get("primer_syllables")
+        if isinstance(match, (int, float)) and not isinstance(match, bool) and 1.0 < float(match) <= 3.0:
+            voice["primer_syllables"] = float(match)          # the names put in front of the reference are slowed toward its syllable speed, at most this many times longer
+        if data.get("splice_sync") is False:
+            voice["splice_sync"] = False          # the joins of a mix are not lined up first
+        if data.get("splice_mix") is False:
+            voice["splice_mix"] = False          # names are cut in at their words' edges, as before the mix
+        if data.get("primer_usual_pace") is False:
+            voice["primer_usual_pace"] = False          # the primer keeps the speaker's own saying of a name even when they drew it out (a splice takes only the name)
+        for flag in ("host_spaced", "host_per_draw", "splice_refine", "splice_phrases", "splice_inside_prefix"):
+            if data.get(flag) is True:
+                voice[flag] = True          # a better splice: cuts where the two generations look alike, name at its host's level; stretches widened to real pauses
+        if data.get("priming") is False:
+            voice["priming"] = False          # the reference clip only: names are read from their spelling (the pronunciation dictionary and the respelling rules)
+        if data.get("pin_to_reference") is True:
+            voice["pin_to_reference"] = True          # a primed sentence takes the length the plain reference clip gives it
         if data.get("splice") is False:
             voice["splice_names"] = False          # no name is cut from a primed sentence and put in: the whole span is spoken primed (every name of it in front of the reference) and used as it is
         return voice or None
@@ -603,6 +619,17 @@ class Console:
             copy.span_sentences = int(voice.get("span_sentences") or 1)
             copy.follow_word = voice.get("follow_word") is not False
             copy.splice_names = voice.get("splice_names") is not False
+            copy.match_primer_syllables = float(voice.get("primer_syllables") or 0.0)
+            copy.pin_to_reference = voice.get("pin_to_reference") is True
+            copy.priming = voice.get("priming") is not False
+            copy.primer_usual_pace = voice.get("primer_usual_pace") is not False
+            copy.splice_mix = voice.get("splice_mix") is not False
+            copy.splice_sync = voice.get("splice_sync") is not False
+            copy.host_spaced = voice.get("host_spaced") is True
+            copy.host_per_draw = voice.get("host_per_draw") is True
+            copy.splice_refine = voice.get("splice_refine") is True
+            copy.splice_phrases = voice.get("splice_phrases") is True
+            copy.splice_inside_prefix = voice.get("splice_inside_prefix") is True
             copies[key] = copy
         return copies[key]
 
@@ -739,7 +766,7 @@ class Console:
             pins = [draws.take_for(store, text, ref.start_s, ref.end_s) for text in spans]
             generation = self._run_voice(job, run)
             steps = json.dumps(getattr(getattr(self._omni(), "client", None), "default_generation", None), sort_keys=True)
-            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked-stretch-guard-by-word-prefixed-words-whole-word-glued-in-sentence-spaced-in-primed-trailing-follow" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
+            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked-stretch-guard-by-word-prefixed-words-whole-word-glued-in-sentence-spaced-in-primed-trailing-follow-connector-names-restored-everywhere-mixed-in-at-quiet-points-synced-clear-of-the-name-clarity-draws-commits-found-by-clip-edges" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
             prepared.append((name, corpus, group, spans, gaps, pins, store, ref, generation))
         missing = [p for p in prepared if not ((self.audio_dir / f"{p[0]}.wav").is_file() and (self.audio_dir / f"{p[0]}.json").is_file())]
         if missing and not make:                      # only reading: nothing is queued and no GPU is spent

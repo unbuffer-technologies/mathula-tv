@@ -46,11 +46,20 @@ def test_the_clip_comes_from_inside_the_units_own_window_so_a_merged_label_canno
     assert bank.choose("SPEAKER_00", 0, 5200)["start"] == 0.0
 
 
-def test_a_window_too_short_for_a_clip_borrows_the_closest_clip_of_the_same_speaker(tmp_path):
+def test_a_window_too_short_for_a_clip_gets_the_speakers_one_reference_like_every_other_turn(tmp_path):
     bank = _bank(tmp_path)
-    near = bank.choose("SPEAKER_00", 10500, 11800)                # nothing inside 10.5-11.8 s: the closest SPEAKER_00 clip is the second one (5-10 s)
-    assert near["speaker"] == "SPEAKER_00" and near["start"] == 5.0
+    near = bank.choose("SPEAKER_00", 10500, 11800)                # nothing inside 10.5-11.8 s: the speaker's reference, the same clip as in any other window of that speaker
+    assert near["speaker"] == "SPEAKER_00" and near == bank.choose("SPEAKER_00", 0, 5200) == bank.choose("SPEAKER_00", 5000, 10000)
     assert bank.choose("SPEAKER_01", 10500, 11800)["start"] == 12.0
+
+
+def test_every_turn_of_a_speaker_is_cloned_from_the_same_clip_not_the_best_one_inside_its_own_window(tmp_path):
+    bank = _bank(tmp_path)
+    first, second = bank.choose("SPEAKER_00", 0, 5200), bank.choose("SPEAKER_00", 5000, 10000)
+    assert first == second and first["speaker"] == "SPEAKER_00"                      # one voice and one pace for the speaker in every turn
+    ranked = bank.ranked("SPEAKER_00", 0, 5200)
+    mine = [c for c in ranked if c["speaker"] == "SPEAKER_00"]
+    assert ranked[:len(mine)] == mine and [bank._score(c) for c in mine] == sorted((bank._score(c) for c in mine), reverse=True)          # all of the speaker's clips by score, then the others
 
 
 def test_a_picked_reference_is_a_24k_mono_wav_of_the_clip_and_is_cached(tmp_path):

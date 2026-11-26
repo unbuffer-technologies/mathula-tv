@@ -321,10 +321,16 @@ def run_production(
             pass
     try:        # the clusters the agent measured with (OMNIVOICE_SPAN_SENTENCES) are the run's own voice setting: the studio and the finish read them from here
         per_span = (os.environ.get("OMNIVOICE_SPAN_SENTENCES") or "").strip().lower()
-        if per_span and ws.current_voice_provider() == "omnivoice":
+        splice_off = (os.environ.get("OMNIVOICE_SPLICE") or "").strip().lower() in {"0", "false", "no", "off"}          # no name is cut from a primed sentence and put in (omnivoice_tts splice_names)
+        if (per_span or splice_off) and ws.current_voice_provider() == "omnivoice":
             voice_file = store.repeat_dir(run_id, clip_id, 1).parent / "voice.json"
             voice_file.parent.mkdir(parents=True, exist_ok=True)
-            voice_file.write_text(json.dumps({"span_sentences": "fill" if per_span == "fill" else int(per_span)}), encoding="utf-8")
+            setting: dict[str, Any] = {}
+            if per_span:
+                setting["span_sentences"] = "fill" if per_span == "fill" else int(per_span)
+            if splice_off:
+                setting["splice"] = False
+            voice_file.write_text(json.dumps(setting), encoding="utf-8")
     except Exception as exc:        # noqa: BLE001 - never stops a run
         print(f"[voice] the run's voice settings were not saved: {type(exc).__name__}")
     summary = run_agent(
