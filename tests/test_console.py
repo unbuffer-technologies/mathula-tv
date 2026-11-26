@@ -874,6 +874,8 @@ def test_a_run_can_ask_for_its_own_decoding_settings_and_its_studio_is_a_differe
     assert made.host_per_draw is True and made.splice_refine is True and made.splice_phrases is True
     plain = drawn._omni_with({"span_sentences": 99})
     assert plain.host_per_draw is False and plain.splice_refine is False and plain.splice_phrases is False
+    (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"primer_align": False}), encoding="utf-8")
+    assert drawn._run_voice(JOB, "prod-1-pt1") == {"primer_align": False} and drawn._omni_with({"primer_align": False}).primer_align is False and plain.primer_align is True
     (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"splice_sync": False}), encoding="utf-8")
     assert drawn._run_voice(JOB, "prod-1-pt1") == {"splice_sync": False} and drawn._omni_with({"splice_sync": False}).splice_sync is False and plain.splice_sync is True
     (runs / "prod-1-pt1" / CLIP / "voice.json").write_text(json.dumps({"splice_mix": False}), encoding="utf-8")

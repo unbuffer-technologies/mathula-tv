@@ -45,6 +45,9 @@ PRIMER_MAX_S = 9.0           # the names, all repetitions together, never take m
 PRIMER_MAX_SNIPPET_S = 4.0   # a run of names longer than this was cut wrongly
 PRIMER_SLOW_FACTOR = 2.0      # a name the speaker draws out to more than this many times what it takes at their usual pace is not the one to put in front of the reference: it drags the pace of the whole primed sentence
 PRIMER_SLOW_MIN_S = 0.6       # (and is at least this long: "ANC" for 1.26 s in prod-s2 unit 2, 0.36-0.40 s everywhere else: the primed reference ran at 10.7 characters a second instead of 13.5 and the voice took 25% longer over two sentences)
+PRIMER_ALIGN_CONTEXT = 3      # words of the source either side of a name that are aligned with it, so the aligner has the sentence around it
+PRIMER_ALIGN_LEAD_S = 0.05   # what is kept in front of the aligned name, and
+PRIMER_ALIGN_TAIL_S = 0.10   # behind it (the aligner puts a word's edges a little inside the sound; the last letter's release carries on)
 PRIMER_GAP_S = 0.05          # the least silence between the copies (more reads to the model as a slower speaker: 0.25 s made the sentence 13% longer, 0.05 s 6%); ReferenceBank.primed sets the real gap from the clip's pace
 PRIMER_GAP_MAX_S = 0.6       # and the most
 CLIP_TARGET_S = 8.0          # a longer clip says more about the voice; 3-10 s is what the model asks for
@@ -121,6 +124,7 @@ class ReferenceBank:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.words = list(words)                       # the source's timed words: where its speakers paused (span_cuts)
         self.speaker_of_raw = {str(k): str(v) for k, v in speaker_of_raw.items()}
+        self.aligner: Any = None                          # (text, mono audio, rate) -> timed words with letters (source_align.shared_aligner): where a name the speaker says falls in their audio, from its spelling
         self.known_names: list[list[str]] = []          # the job's own names (its pronunciation research): "Canny" alone is the start of "Canny Maphanga"
         self._candidates = self._build(words, speaker_of_raw)
         self._pace = self._speaker_pace(self._candidates, words, speaker_of_raw)
@@ -390,7 +394,7 @@ class ReferenceBank:
                                   "source_text": " ".join(str(w["text"]) for _, w in best_at), "restored_text": " ".join(self._said(w) for _, w in best_at), "similarity": round(best, 2)})
         return sorted(found, key=lambda m: -len(m["tokens"]))
 
-    def primer_for(self, speaker_id: str, start_s: float, end_s: float, span_text: str, usual_pace: bool = True) -> dict[str, Any] | None:
+    def primer_for(self, speaker_id: str, start_s: float, end_s: float, span_text: str, usual_pace: bool = True, aligned: bool = True) -> dict[str, Any] | None:
         """The names this span says that the speaker also says in the source window, cut from the source in the speaker's own voice: {names, snippets: [(text, wav, seconds)], reps, seconds}, or None.
         The snippet's text is the dub's spelling of the name (what the audio really says), not the recogniser's.  The model copies how a name is said from its reference when the reference carries that
         word, and one copy is not enough (0 of 3 right), three are (2 of 3; 3 of 3 with them first)."""
@@ -405,6 +409,9 @@ class ReferenceBank:
             prev_end = float(self.words[a - 1]["end"]) if a > 0 else float(self.words[a]["start"]) - 0.3
             next_start = float(self.words[z + 1]["start"]) if z + 1 < len(self.words) else float(self.words[z]["end"]) + 0.3
             first, last = self._edges_of(a, z)
+            refined = self._aligned_edges(a, z, m["text"]) if aligned else None
+            if refined is not None:
+                first, last = refined
             expected = (len(m["text"]) + 1) / self.typical_chars_per_s(speaker_id)
             if usual_pace and last - first > max(PRIMER_SLOW_MIN_S, PRIMER_SLOW_FACTOR * expected):          # this time the speaker drew it out: take the speaker's usual saying of it from elsewhere in the job (not when only the name is used, as in a splice: the host keeps its pace and the drawn-out name is how the speaker said it)
                 other = self._usual_saying(speaker_id, m, expected)
@@ -434,6 +441,38 @@ class ReferenceBank:
         if last - first < 0.2:
             first, last = self.snap(*edges, inward=0.0)
         return first, last
+
+    def _aligned_edges(self, a: int, z: int, name_text: str) -> tuple[float, float] | None:
+        """The audio edges of the name in the source words ``a``..``z``, from where its spelling sounds (forced alignment of the sentence around it, the name written as the dub writes it), or None when there is
+        no aligner or it does not find the name plausibly (not 0.2-4 s, or farther than the recogniser's words by half a second).  The edges are the word's with a little kept either side, then moved to the
+        quiet between it and its neighbours as any clip's are."""
+        if self.aligner is None:
+            return None
+        try:
+            lo, hi = max(0, a - PRIMER_ALIGN_CONTEXT), min(len(self.words) - 1, z + PRIMER_ALIGN_CONTEXT)
+            t0, t1 = max(0.0, float(self.words[lo]["start"]) - 0.1), float(self.words[hi]["end"]) + 0.1
+            info = sf.info(str(self.audio_path))
+            audio, rate = sf.read(str(self.audio_path), start=int(t0 * info.samplerate), stop=int(t1 * info.samplerate), dtype="float32", always_2d=True)
+            before = [str(self.words[i]["text"]) for i in range(lo, a)]
+            after = [str(self.words[i]["text"]) for i in range(z + 1, hi + 1)]
+            name = name_text.split()
+            found = self.aligner(" ".join(before + name + after), audio.mean(axis=1), rate)
+        except Exception:        # noqa: BLE001 - the recogniser's edges are the fallback
+            return None
+        if not isinstance(found, list) or len(found) != len(before) + len(name) + len(after):
+            return None
+        mine = found[len(before): len(before) + len(name)]
+        if not name or any(w is None for w in mine):
+            return None
+        start, end = t0 + float(mine[0]["start"]), t0 + float(mine[-1]["end"])
+        if not (0.2 <= end - start <= PRIMER_MAX_SNIPPET_S) or abs(start - float(self.words[a]["start"])) > 0.5 or abs(end - float(self.words[z]["end"])) > 0.6:
+            return None
+        previous = found[len(before) - 1] if before else None
+        following = found[len(before) + len(name)] if after else None
+        prev_end = min(t0 + float(previous["end"]), start) if previous else start - 0.3
+        next_start = max(t0 + float(following["start"]), end) if following else end + 0.3
+        first, last = self.snap(start - PRIMER_ALIGN_LEAD_S, end + PRIMER_ALIGN_TAIL_S, prev_end, next_start, inward=0.0)
+        return (first, last) if last - first >= 0.2 else None
 
     def typical_chars_per_s(self, speaker_id: str) -> float:
         """How many characters a second this speaker's clean clips run at (their median), 13.5 when there are none."""
@@ -1436,6 +1475,7 @@ MIX_BOUND_REACH_S = 0.12       # a join is looked for this far back into the wor
 MIX_NAME_MARGIN_S = 0.02       # a cross-fade clears the name's own edge by this much, since the aligner's edge is not exact
 MIX_VALLEY_DB = -25.0           # a quiet point worth joining at is at least this far below the track's speech level (a pause, a stop's closure)
 MIX_JOIN_REACH_S = 0.40        # a join is looked for this far back from the name, or on from it, in each track
+MIX_LETTER_REJECT = 2.5         # where the aligner gave letter times, a pair of quiet points more letters apart than this is not the same moment of the words and is never joined (a pause with the closure inside the next word)
 MIX_SHALLOW_DB = -12.0          # when one track has no valley as deep as that, the search is made again with dips this far under speech (the voice ran the name into the next word)
 MIX_SHAPE_DB = 40.0            # a pair of quiet points is worth this much (dB of depth) for every 1.0 of similarity between the loudness shapes around them
 MIX_DIST_DB_PER_S = 40.0       # and costs this much per second of difference in how far from the name each is
@@ -1696,26 +1736,30 @@ def mix_word_run(part: np.ndarray, rate: int, times: Sequence[Mapping[str, Any] 
         letters_host, letters_primed = _letter_times(words_host), _letter_times(words_primed)
         if letters_host is not None and (letters_primed is None or len(letters_host) != len(letters_primed)):
             letters_host = letters_primed = None
-        host_valleys, primed_valleys = _valleys(part, rate, h_lo, h_hi, h_speech), _valleys(snippet, rate, s_lo, s_hi, s_speech)
-        if not host_valleys or not primed_valleys:
-            host_valleys, primed_valleys = _valleys(part, rate, h_lo, h_hi, h_speech, MIX_SHALLOW_DB), _valleys(snippet, rate, s_lo, s_hi, s_speech, MIX_SHALLOW_DB)
-        best: tuple[float, int, int, int] | None = None
-        for c_h, db_h in host_valleys:
-            ext_h = _silence_extent(part, rate, c_h, h_speech)
-            for c_s, db_s in primed_valleys:
-                ext_s = _silence_extent(snippet, rate, c_s, s_speech)
-                fade = max(int(MIX_MIN_FADE_S * rate), min(width, ext_h, ext_s) if min(ext_h, ext_s) >= int(0.05 * rate) else width)
-                margin = MIX_NAME_MARGIN_S * rate
-                clear_ok = (c_h + fade / 2 <= h_ref * rate - margin and c_s + fade / 2 <= s_ref * rate - margin) if side == "before" else (c_h - fade / 2 >= h_ref * rate + margin and c_s - fade / 2 >= s_ref * rate + margin)
-                if fade > min(ext_h, ext_s) and not clear_ok:                                    # a fade that fits inside both silences has nothing spoken under it; a closure's neighbours are speech, which must not be the name's
-                    continue
-                apart = abs(abs(c_h / rate - h_ref) - abs(c_s / rate - s_ref))
-                cost = (db_h + db_s) / 2.0 - MIX_SHAPE_DB * _shape_match(part, c_h, snippet, c_s, rate, h_speech, s_speech, side) + MIX_DIST_DB_PER_S * apart
-                if letters_host is not None and letters_primed is not None:
-                    cost += MIX_LETTER_DB * abs(_letter_position(letters_host, c_h / rate) - _letter_position(letters_primed, c_s / rate))
-                if best is None or cost < best[0]:
-                    best = (cost, c_h, c_s, fade)
-        return None if best is None else (best[1], best[2], best[3])
+        for depth in (None, MIX_SHALLOW_DB):                 # the deep quiet points first; where they give no pair that is the same moment in both tracks, the shallower dips
+            host_valleys, primed_valleys = _valleys(part, rate, h_lo, h_hi, h_speech, depth), _valleys(snippet, rate, s_lo, s_hi, s_speech, depth)
+            best: tuple[float, int, int, int] | None = None
+            for c_h, db_h in host_valleys:
+                ext_h = _silence_extent(part, rate, c_h, h_speech)
+                for c_s, db_s in primed_valleys:
+                    ext_s = _silence_extent(snippet, rate, c_s, s_speech)
+                    fade = max(int(MIX_MIN_FADE_S * rate), min(width, ext_h, ext_s) if min(ext_h, ext_s) >= int(0.05 * rate) else width)
+                    margin = MIX_NAME_MARGIN_S * rate
+                    clear_ok = (c_h + fade / 2 <= h_ref * rate - margin and c_s + fade / 2 <= s_ref * rate - margin) if side == "before" else (c_h - fade / 2 >= h_ref * rate + margin and c_s - fade / 2 >= s_ref * rate + margin)
+                    if fade > min(ext_h, ext_s) and not clear_ok:                                    # a fade that fits inside both silences has nothing spoken under it; a closure's neighbours are speech, which must not be the name's
+                        continue
+                    apart = abs(abs(c_h / rate - h_ref) - abs(c_s / rate - s_ref))
+                    cost = (db_h + db_s) / 2.0 - MIX_SHAPE_DB * _shape_match(part, c_h, snippet, c_s, rate, h_speech, s_speech, side) + MIX_DIST_DB_PER_S * apart
+                    if letters_host is not None and letters_primed is not None:
+                        letters_apart = abs(_letter_position(letters_host, c_h / rate) - _letter_position(letters_primed, c_s / rate))
+                        if letters_apart > MIX_LETTER_REJECT:
+                            continue
+                        cost += MIX_LETTER_DB * letters_apart
+                    if best is None or cost < best[0]:
+                        best = (cost, c_h, c_s, fade)
+            if best is not None:
+                return (best[1], best[2], best[3])
+        return None
 
     found_before, found_after = join_between("before"), join_between("after")
     if found_after is None and extend > 0 and last + 2 < len(times) and last + 2 < len(snippet_times) and s_last + 2 < len(snippet_times) and times[last + 2] and snippet_times[s_last + 2]:
@@ -1855,6 +1899,7 @@ class OmniVoiceTTSBackend:
         self.host_spaced = False            # the host of a splice is sent the same text a reference-only sentence is (an English word after a Zulu prefix spaced), so it is that sentence exactly
         self.host_per_draw = False          # each draw speaks the cluster's first pass again with its own seed (one speaker's sentence can range from 4% to 15% of it in breaks between seeds, and a host shared by the draws cannot be re-rolled)
         self.splice_refine = False          # a splice cuts where the two generations look alike, matches the name's level to its host and blends with equal power
+        self.primer_align = True            # the names the speaker says are cut from their audio at the edges the aligner finds from the name's spelling, not at the recogniser's word times
         self.splice_mix = True              # a name is mixed in from its primed sentence (cross-faded at the quietest points around it, mix_word_run) instead of cut in; it implies host_spaced and the speaker's own saying of a name in the primer
         self.splice_sync = True             # each join of a mix where there is speech is lined up first (sync_join): the primed track moved by the lag at which the two syllables' loudness shapes agree
         self.splice_inside_prefix = False   # a name with a Zulu prefix is taken alone and joined inside its prefix, at the moment the two generations look most alike (not with the word before it)
@@ -1899,6 +1944,7 @@ class OmniVoiceTTSBackend:
         backend.host_spaced = (env.get("OMNIVOICE_HOST_SPACED") or "").strip().lower() in {"1", "true", "yes", "on"}
         backend.host_per_draw = (env.get("OMNIVOICE_HOST_PER_DRAW") or "").strip().lower() in {"1", "true", "yes", "on"}
         backend.splice_refine = (env.get("OMNIVOICE_SPLICE_REFINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+        backend.primer_align = (env.get("OMNIVOICE_PRIMER_ALIGN") or "1").strip().lower() not in {"0", "false", "no", "off"}
         backend.splice_mix = (env.get("OMNIVOICE_SPLICE_MIX") or "1").strip().lower() not in {"0", "false", "no", "off"}
         backend.splice_sync = (env.get("OMNIVOICE_SPLICE_SYNC") or "1").strip().lower() not in {"0", "false", "no", "off"}
         backend.splice_inside_prefix = (env.get("OMNIVOICE_SPLICE_INSIDE_PREFIX") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -1924,6 +1970,10 @@ class OmniVoiceTTSBackend:
         key = str(job_root)
         if key not in self._banks:
             self._banks[key] = self._bank_factory(Path(job_root))
+            if self.primer_align:
+                from . import source_align
+
+                self._banks[key].aligner = source_align.shared_aligner()
         return self._banks[key]
 
     def span_primers(self, group: Mapping[str, Any], spans: Sequence[str], job_root: Path | str | None) -> list[dict[str, Any] | None]:
@@ -1934,7 +1984,7 @@ class OmniVoiceTTSBackend:
             bank = self.bank_for(job_root)
             start = int(group.get("start_ms") or 0)
             end = int(group.get("source_end_ms") or (start + int(group.get("source_span_ms") or 0)))
-            return [bank.primer_for(str(group.get("speaker_id") or ""), start / 1000.0, end / 1000.0, span, self.primer_usual_pace and not (self.splice_mix and self.splice_names)) for span in spans]
+            return [bank.primer_for(str(group.get("speaker_id") or ""), start / 1000.0, end / 1000.0, span, self.primer_usual_pace and not (self.splice_mix and self.splice_names), self.primer_align) for span in spans]
         except Exception:                      # noqa: BLE001 - a primer is an improvement, never a reason a unit cannot be spoken
             return [None] * len(spans)
 

@@ -1,3 +1,4 @@
+from pathlib import Path
 import re
 import base64
 import io
@@ -386,6 +387,42 @@ def test_a_draw_the_listener_committed_is_found_by_the_clip_as_the_studio_names_
     backend = ot.OmniVoiceTTSBackend(client, banks={str(tmp_path): bank})
     report = backend.speak(GROUP, spans, [], str(tmp_path))[3]
     assert report["picked"] == [1]                                                                     # draw 2 was committed: the render keeps it, whatever it would have chosen
+
+
+def _fake_aligner_for(bank, a, tail_extra_s=0.25):
+    """An aligner that finds each word where the recogniser has it, except that the last word of the name runs ``tail_extra_s`` longer (the recogniser's edge cut its end off)."""
+    lo = max(0, a - ot.PRIMER_ALIGN_CONTEXT)
+    t0 = max(0.0, float(bank.words[lo]["start"]) - 0.1)
+
+    def aligner(text, audio, rate):
+        out = []
+        for k, _ in enumerate(text.split()):
+            w = bank.words[lo + k]
+            out.append({"start": float(w["start"]) - t0, "end": float(w["end"]) - t0 + (tail_extra_s if k == a - lo + 1 else 0.0), "score": 0.9})
+        return out
+
+    return aligner
+
+
+def test_the_primer_is_cut_at_the_edges_the_aligner_finds_for_the_name_and_falls_back_to_the_recognisers_when_it_cannot(tmp_path):
+    bank = _bank_with_a_name(tmp_path)
+    a = next(i for i, w in enumerate(bank.words) if w["text"] == "Phineas")
+    plain = bank.primer_for("SPEAKER_00", 0.0, 40.0, "Siyabonga uPhineas Manyama ukhulumile.")
+    bank.aligner = _fake_aligner_for(bank, a)
+    aligned = bank.primer_for("SPEAKER_00", 0.0, 40.0, "Siyabonga uPhineas Manyama ukhulumile.")
+    gain = aligned["snippets"][0][2] - plain["snippets"][0][2]
+    assert abs(gain - (0.25 + ot.PRIMER_ALIGN_TAIL_S + ot.PRIMER_ALIGN_LEAD_S)) < 0.03                      # the name's lost last quarter second is back, with the little kept either side
+    assert bank.primer_for("SPEAKER_00", 0.0, 40.0, "Siyabonga uPhineas Manyama ukhulumile.", aligned=False)["snippets"][0][2] == plain["snippets"][0][2]      # the switch
+    for broken in (lambda text, audio, rate: 1 / 0, lambda text, audio, rate: [None] * len(text.split()), lambda text, audio, rate: [{"start": 0.0, "end": 9.0, "score": 1.0}] * len(text.split()), lambda text, audio, rate: []):
+        bank.aligner = broken
+        assert bank.primer_for("SPEAKER_00", 0.0, 40.0, "Siyabonga uPhineas Manyama ukhulumile.")["snippets"][0][2] == plain["snippets"][0][2]          # an error, no word, an implausible length or a wrong count: the recogniser's edges
+
+
+def test_the_source_aligner_is_the_services_own_module_and_the_two_copies_are_the_same_file():
+    root = Path(__file__).resolve().parents[1]
+    own = (root / "src" / "mathula_tv" / "word_align.py").read_text(encoding="utf-8").splitlines()
+    service = (root / "gcp" / "omnivoice_service" / "word_align.py").read_text(encoding="utf-8").splitlines()
+    assert own == service
 
 
 def test_the_primer_gives_way_to_the_budget_when_there_are_many_names(tmp_path):
@@ -1144,6 +1181,23 @@ def test_a_next_word_the_primed_voice_ran_the_name_into_is_taken_with_it_and_the
     after = notes[0]["joins"][-1]
     assert 1.9 <= after["host_s"] <= 2.2 and 1.5 <= after["primed_s"] <= 1.8                           # the join is in the pause after that word, in both tracks
     assert out[1][3]["start"] < 2.2                                                                      # the primed voice took no pause there, so what follows moves up
+
+
+def test_a_pause_is_never_joined_to_the_closure_inside_the_next_word_even_when_they_are_all_there_is():
+    rate = RATE
+
+    def entry(start, end, letters):
+        return {"start": start, "end": end, "letters": [[c, round(start + k * (end - start) / len(letters), 3), 0.9] for k, c in enumerate(letters)]}
+
+    host_words = [entry(0.1, 0.5, "baph"), entry(0.6, 1.0, "amadetails"), entry(1.2, 1.7, "ibalulekile"), entry(2.0, 2.5, "kusasa")]            # the host pauses before "ibalulekile"
+    snippet_words = [entry(0.1, 0.5, "baph"), entry(0.6, 1.0, "amadetails"), entry(1.0, 1.5, "ibalulekile"), entry(1.8, 2.3, "kusasa")]        # the primed voice runs the name into it
+    host, snippet = _spoken(rate, 2.8, [(0.1, 0.5), (0.6, 1.0), (1.2, 1.7), (2.0, 2.5)], 150), _spoken(rate, 2.6, [(0.1, 0.5), (0.6, 1.0), (1.0, 1.5), (1.8, 2.3)], 300)
+    snippet[int(1.30 * rate): int(1.34 * rate)] = 0.0                                                       # the only quiet point in the primed word: a closure inside "ibalulekile"
+    notes: list = []
+    out = ot.mix_word_run(host, rate, host_words, 1, 1, snippet, snippet_words, 1, 1, sync=False, notes=notes)
+    assert out is not None and notes[0]["words"] == [1, 2]                                                   # the host's pause is not joined to that closure: the next word is taken, and the join is made after it
+    after = notes[0]["joins"][-1]
+    assert after["host_s"] >= 1.7 and after["primed_s"] >= 1.5
 
 
 def test_there_is_no_mix_without_a_word_on_each_side_of_the_name():
