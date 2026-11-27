@@ -1606,6 +1606,28 @@ class Workbench:
         self.claims_shown.update(key for _, key, _ in shown)
         return [claim for _, _, claim in shown]
 
+    def _source_sentences(self) -> list[dict[str, Any]] | None:
+        """The source's sentence records exactly as the renderer will see them (dub_render.prepare_render_root): the job's pass1_sentences.json, else built from pass 1's segments.  Read once; None where
+        they cannot be had (no job on disk: a test, a clip with no corpus entry), and then nothing is checked against them."""
+        if hasattr(self, "_sentence_cache"):
+            return self._sentence_cache
+        records: list[dict[str, Any]] | None = None
+        try:
+            episode = self._episode()
+            entry = self.store.load_corpus()["clips"][episode["clip_id"]]
+            job_root = Path(self.store.root).parent / "jobs" / str(entry["job_id"])
+            path = job_root / "native_dub" / "pass1_sentences.json"
+            if path.is_file():
+                records = list(read_json(path).get("records") or [])
+            else:
+                from .native_dub import _build_pass1_sentence_records
+
+                records = _build_pass1_sentence_records(list(read_json(Path(episode["native"]) / "pass1_restored_transcript.json")["segments"]), job_root=job_root)
+        except Exception:  # noqa: BLE001 - the check is a safeguard: where the sentences cannot be had the render finds the problem as before
+            records = None
+        self._sentence_cache = records or None
+        return self._sentence_cache
+
     def submit_dub(
         self, items: list[dict[str, Any]], approach_notes: str = "", partial: bool = False,
         remove: list[str] | None = None, decisions: list[dict[str, Any]] | None = None,
@@ -1639,6 +1661,13 @@ class Workbench:
                                    "units are replaced only by the same item_id or listed in remove. To change how "
                                    "units are split, send the new units and put the old ids in remove.)"]
             return {"accepted": False, "errors": errors, "warnings": warnings}
+        if not self.scope:                                  # the whole clip: the units must be ones the renderer can take (it refused a run whose three units shared one 56 s sentence, after the voice had been paid for)
+            from .dub_render import unit_sentence_problem
+
+            sentences = self._source_sentences()
+            problem = unit_sentence_problem(items, sentences) if sentences else None
+            if problem:
+                return {"accepted": False, "errors": [problem], "warnings": warnings}
         directory = Path(episode["dir"])
         card = score_submission_dir(
             native, submission, tts=self.tts, measure_root=self._measure_dir(),

@@ -142,3 +142,45 @@ def test_a_partial_update_can_re_split_units_using_remove(tmp_path, monkeypatch)
     wb.submit_dub(FULL)
     result = wb.submit_dub([_u("b1", 4200, 6000, "s2"), _u("b2", 6200, 8200, "s3")], partial=True, remove=["b"])
     assert result["accepted"] and seen[1] == ["a", "b1", "b2", "c"] and result["merged"]["replaced"] == ["b"]
+
+
+# --- the source's sentences: the renderer cannot split one between units ---
+
+LONG_SENTENCE_SOURCE = [
+    {"segment_id": "s1__s00", "start_ms": 0, "end_ms": 3800, "parent_segment_ids": ["s1", "s2", "s3", "s4"]},
+    {"segment_id": "s1__s01", "start_ms": 4200, "end_ms": 16600, "parent_segment_ids": ["s1", "s2", "s3", "s4"]},          # one 12 s sentence over the rest of the clip
+]
+
+
+def test_units_that_split_one_source_sentence_are_refused_with_what_the_agent_needs_to_know(tmp_path, monkeypatch):
+    wb = _workbench(tmp_path)
+    wb._source_sentences = lambda: LONG_SENTENCE_SOURCE
+    scored = []
+    monkeypatch.setattr(dub_workbench, "score_submission_dir", _fake_score(scored))
+    result = wb.submit_dub([_u("a", 0, 4000, "s1"), _u("b", 4200, 8200, "s2", "s3"), _u("c", 12600, 16600, "s4")])
+    assert not result["accepted"] and not scored                                                      # refused before a single unit is measured
+    message = result["errors"][0]
+    assert "own no sentence" in message and "s1__s01 4.2-16.6 s" in message                          # the sentences, with their times
+    assert "unit b starts at 4.2 s" not in message and "unit c starts at 12.6 s, inside sentence s1__s01" in message          # where the units cut a sentence
+    assert "single unit" in message and "sentence boundary" in message
+
+
+def test_units_that_start_on_the_source_sentence_boundaries_are_taken(tmp_path, monkeypatch):
+    wb = _workbench(tmp_path)
+    wb._source_sentences = lambda: LONG_SENTENCE_SOURCE
+    scored = []
+    monkeypatch.setattr(dub_workbench, "score_submission_dir", _fake_score(scored))
+    result = wb.submit_dub([_u("a", 0, 4000, "s1"), _u("b", 4200, 16600, "s2", "s3", "s4")])
+    assert result.get("accepted") is not False and scored                                             # the second unit holds the long sentence whole
+    (tmp_path / "one").mkdir()
+    one = _workbench(tmp_path / "one")
+    one._source_sentences = lambda: LONG_SENTENCE_SOURCE
+    assert one.submit_dub([_u("a", 0, 16600, "s1", "s2", "s3", "s4")]).get("accepted") is not False  # and so does one unit for the whole clip
+
+
+def test_no_sentences_to_check_against_means_no_check(tmp_path, monkeypatch):
+    wb = _workbench(tmp_path)
+    wb._source_sentences = lambda: None                                                               # a job not on disk: the render finds any problem as before
+    scored = []
+    monkeypatch.setattr(dub_workbench, "score_submission_dir", _fake_score(scored))
+    assert wb.submit_dub([_u("a", 0, 4000, "s1"), _u("b", 4200, 8200, "s2", "s3"), _u("c", 12600, 16600, "s4")]).get("accepted") is not False

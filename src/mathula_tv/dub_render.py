@@ -70,6 +70,25 @@ def assign_sentences(
     return owned
 
 
+def unit_sentence_problem(units: Sequence[Mapping[str, Any]], sentences: Sequence[Mapping[str, Any]]) -> str | None:
+    """Why the renderer would refuse these units (assign_sentences), written for the agent that made them, or None when it would take them.  The renderer cannot split a source sentence between units: a
+    sentence belongs to the one unit whose window overlaps it most, and every unit must own at least one.  A source whose speaker runs on (one 56 s sentence in a 76 s clip) therefore cannot be cut into
+    three units wherever the agent likes: its units' starts must fall on sentence boundaries, or the units that share a long sentence must be one."""
+    try:
+        assign_sentences(units, sentences)
+        return None
+    except RenderAdapterError as exc:
+        reason = str(exc)
+    ordered = sorted(units, key=lambda u: (int(u["start_ms"]), int(u["end_ms"])))
+    rows = [f"{s['segment_id']} {int(s['start_ms']) / 1000:.1f}-{int(s['end_ms']) / 1000:.1f} s" for s in sentences]
+    listing = "; ".join(rows[:14]) + (f"; ... ({len(rows)} sentences in all)" if len(rows) > 14 else "")
+    inside = [f"unit {u['item_id']} starts at {int(u['start_ms']) / 1000:.1f} s, inside sentence {s['segment_id']} ({int(s['start_ms']) / 1000:.1f}-{int(s['end_ms']) / 1000:.1f} s)"
+              for u in ordered for s in sentences if int(s["start_ms"]) + 300 < int(u["start_ms"]) < int(s["end_ms"]) - 300]
+    return (f"{reason}. The renderer never splits a source sentence between units: each sentence goes to the unit whose window overlaps it most. Source sentences: {listing}. "
+            + (("Where your units cut a sentence: " + "; ".join(inside[:6]) + ". ") if inside else "")
+            + "Start and end each unit on a sentence boundary, or make the units that share one long sentence a single unit (a unit may run a minute or more).")
+
+
 def build_committed_translation(
     submission: Mapping[str, Any], sentences: Sequence[Mapping[str, Any]], *, pass1_sha256: str = "",
 ) -> dict[str, Any]:
