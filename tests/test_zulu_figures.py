@@ -47,6 +47,7 @@ def test_the_agent_has_the_figure_lookup_and_is_told_the_renderer_speaks_small_f
     spec = next(s for s in TOOL_SPECS if s["function"]["name"] == "figure_style")
     assert "prefix" in spec["function"]["description"] and "unit word" in spec["function"]["description"]
     assert "figure_style" in SYSTEM_PROMPT and "code-switched English after its prefix" in SYSTEM_PROMPT
+    assert "A COUNT of 1 to 9" in SYSTEM_PROMPT and "counting word that agrees" in SYSTEM_PROMPT          # the newspaper writes small counts as words and people say them so (Isolezwe, 478 h of speech); the year is spoken in English
 
 
 def test_a_figure_is_compared_only_with_figures_of_its_size(tmp_path):

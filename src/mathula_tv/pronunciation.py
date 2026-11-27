@@ -808,7 +808,7 @@ def prefixed_figures(texts: Iterable[str]) -> list[tuple[str, str, bool]]:
     for text in texts:
         times = [(m.start(), m.end()) for m in _time_of_day_matches(text)]          # a time of day is listed as a time (written_times), not as a decimal figure
         for match in [*_ZU_PREFIXED_TWO_DIGIT_CARDINAL.finditer(text), *_ZU_BARE_FIGURE.finditer(_PAUSE_MARKER.sub(" ", text))]:
-            if any(start <= match.start() < end for start, end in times):
+            if any(start <= match.start() < end for start, end in times) or native_count(match, text):          # a time; a count said as the isiZulu counting word
                 continue
             key = match.group("number") + ("." + match.group("decimals") if match.group("decimals") else "") + ("%" if match.group("percent") else "")
             found.setdefault(key, (match.group("number"), match.group("decimals") or "", bool(match.group("percent"))))
@@ -839,11 +839,47 @@ def _unit_just_said(before: str) -> bool:
     return len(between) <= 3 and not any(any(c.isdigit() for c in word) for word in between)
 
 
+# A COUNT of 2-9 (people, things, years, days): the newspaper writes it as the counting word that agrees with the noun, and people say it that way aloud (Isolezwe 2026-11-27: amabili 4,669, ezimbili 3,174,
+# ababili 2,339 against a few digits; 478 h of transcribed speech: two, three, six, seven, eight, nine are isiZulu far more often than English; the listener heard both on OmniVoice and chose the native
+# ones).  What marks a count is the prefix written before the digit, and the prefix carries the noun's class: the relative concord of the plural classes is aba- (2), e- (4), a- (6), ezi- (8 and 10), so
+# "abangu-5", "engu-6", "angu-4" and the bare concords "aba-3", "emi-2", "ezi-3" are counts.  Times and dates (ngo-, ka-, ku-), years, ordinals and 10 and over keep the English code-switch.
+_COUNT_CLASS = {"abangu": "2", "aba": "2", "engu": "4", "emi": "4", "angu": "6", "ezingu": "?", "ezi": "?"}
+_COUNTED_NOUN = re.compile(r"^(?:ne|na|nge|nga|nase|nese|kwe|kwa|ku|o|ngo|no|se)?[ie]?zi(?P<nasal>[nm])?[a-z]", re.IGNORECASE)
+
+
+def _plural_class_of_ezi(text_before: str) -> str | None:
+    """Which plural class the counted noun before an "ezi-" count is in: 10 (izin-, izim-: izinsuku, izinto, izingane) or 8 (izi- before anything else: izikhulu, izifundo), looking at the nearest three words."""
+    for word in reversed(re.findall(r"[A-Za-z']+", text_before)[-3:]):
+        found = _COUNTED_NOUN.match(word)
+        if found:
+            return "10" if found.group("nasal") else "8"
+    return None
+
+
+def native_count(match: re.Match[str], text: str = "", override: Mapping[str, str] | None = None) -> str | None:
+    """The isiZulu counting word (ababili, emihlanu, ezintathu, emiyisithupha) for a count of 2-9 written after its prefix ("abangu-2", "engu-5", "ezingu-3"), else None: the figure is spoken as English as before.
+    None for a time, a date, a year, 10 and over, a decimal, a percent, a prefix that is not a count, a noun whose class cannot be told, and a figure the listener spelled by ear (``override``)."""
+    number = match.group("number")
+    if match.group("decimals") or match.group("percent") or not re.fullmatch(r"[2-9]", number) or (override or {}).get(number):
+        return None
+    cls = _COUNT_CLASS.get(match.group("prefix").lower())
+    if cls == "?":
+        cls = _plural_class_of_ezi(text[:match.start()])
+    if cls is None:
+        return None
+    from .zulu_numerals import cardinal
+
+    return cardinal(int(number), cls)
+
+
 def _zulu_prefixed_two_digit_cardinal(match: re.Match[str], text: str = "", override: Mapping[str, str] | None = None) -> str:
     """A figure (1-99, with decimals and a percent sign) after an isiZulu prefix is code-switched to English number words, the prefix kept ("kuka-31%" ->
     "kuka-thethi-waan wamaphesenti"): the isiZulu numerals take too much room in the window (human decision, 2026-11-10), and the raw digits are read by the voice with
     English sounds of its own ("titty one").  A decimal figure the listener spelled by ear (``override``, keyed "75.8%") is said as spelled.  The unit word is not said twice
     after the isiZulu word for percent ("amaphesenti angu-31%")."""
+    native = native_count(match, text, override)
+    if native:
+        return native
     return f"{match.group('prefix')}-{_figure_words(match, text, override)}"
 
 

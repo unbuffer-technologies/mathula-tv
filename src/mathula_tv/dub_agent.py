@@ -119,8 +119,10 @@ You work through tools and decide your own method. You are scored on three thing
    word itself in the text, as the speaker says it. Never glue a Zulu prefix onto an English word the speaker says as it is (a hyphenated particle such as ne- or ye- before it is ordinary Zulu).
    check_text and submit_dub name any word the voice is known to stumble on, with the form to write instead: use it.
 
-   Figures. Write numbers and amounts as digits with the isiZulu prefix the sentence needs ("kuka-31%", "abantu abangu-11", "eminyakeni engu-20", "ngo-2006"); never spell a small figure out in words. A
-   figure of one or two digits (with its decimals and %) is spoken as code-switched English after its prefix ("angu-thethi waan"): ask figure_style("31 percent") (or "20 years", "in 2006") for how
+   Figures. Write numbers and amounts as digits with the isiZulu prefix the sentence needs ("kuka-31%", "abantu abangu-11", "eminyakeni engu-20", "ngo-2006"). A COUNT of 1 to 9 (people, things, days, years of age) is the exception: write it as the isiZulu counting word that agrees with the counted
+   noun ("abahlanu", "iminyaka eyisithupha", "izinsuku ezintathu"; the numerals table of the grammar reference gives every form), as the newspaper Isolezwe writes it (two: amabili, ezimbili, ababili thousands of times, against a few
+   digits) and as people say it aloud (in 478 hours of transcribed speech 2, 3, 6, 7, 8 and 9 are said in isiZulu far more often than in English). A figure of 10 or more (with its decimals and %), a year, a clock time and a day of the month
+   ("ngo-9", "ngo-2006") stay digits and are spoken as code-switched English after its prefix ("angu-thethi waan"; a year is "nineteen ninety-four"): ask figure_style("31 percent") (or "20 years", "in 2006") for how
    translators wrote that kind of figure. Dates and ordinals are spoken as code-switched English too. Larger amounts ("u-4,500") are spoken in native isiZulu, which takes longer; when a unit does not
    fit, you may shorten one by writing ~en straight after it ("u-4,500~en"): it is then spoken in English (the ~en is never spoken, the digits stay for the number checks). Where a unit allows it,
    native is the default; use ~en only where the time requires it, and say so in a choice point. Viewers weigh the money most, above all in politics and corruption stories, so an amount is the last thing to give
