@@ -45,6 +45,35 @@ def english_stem(prefix: str, stem: str) -> bool:
     return prefix in CLASS_PREFIXES and stem.isalpha() and stem.islower() and len(stem) >= 4 and not looks_isizulu(stem)
 
 
+# The English number words the dub writes after a Zulu prefix ("ngo-nineteen-ninety-four", "engu-sixty-seven", "engu-seeks"): plain, and as respelled for the voice (pronunciation._ZU_CODE_SWITCH_NUMBER_RESPELLINGS) -> the plain word
+NUMBER_RESPELLED = {"wan": "one", "waan": "one", "tuu": "two", "fayiv": "five", "faif": "five", "seeks": "six", "eyt": "eight", "nayn": "nine", "thurteen": "thirteen", "eyteen": "eighteen", "naynteen": "nineteen", "thethi": "thirty"}
+_NUMBER_PLAIN = frozenset("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand oh".split())
+NUMBER_WORDS = _NUMBER_PLAIN | frozenset(NUMBER_RESPELLED)
+_TENS = frozenset("twenty thirty forty fifty sixty seventy eighty ninety thethi".split())
+_ONES = frozenset("one two three four five six seven eight nine wan waan tuu fayiv faif seeks eyt nayn".split())
+_FIGURE_TOKEN = re.compile(r"(?P<lead>[^\w]*)(?P<core>[A-Za-z]+(?:-[A-Za-z]+)+)(?P<tail>[^\w-]*)")
+
+
+def figure_split(core: str) -> tuple[str, list[str]] | None:
+    """(the Zulu prefix, the English number words) of a word like "ngo-nineteen-ninety-four" or "engu-seeks", else None: a short lower-case prefix that is not itself a number word, then only number words."""
+    parts = core.split("-")
+    for at in range(1, len(parts)):
+        if parts[at - 1].isalpha() and 2 <= len(parts[at - 1]) <= 7 and parts[at - 1].lower() not in NUMBER_WORDS and all(p.lower() in NUMBER_WORDS for p in parts[at:]):
+            return "-".join(parts[:at]), parts[at:]
+    return None
+
+
+def spoken_figure(words: Iterable[str]) -> str:
+    """A figure's words as the voice is given them: apart, with a tens word and the ones after it joined ("nineteen ninety-four", "sixty-seven", "twenty twenty-four")."""
+    out: list[str] = []
+    for word in words:
+        if out and out[-1].split("-")[-1].lower() in _TENS and "-" not in out[-1] and word.lower() in _ONES:
+            out[-1] = f"{out[-1]}-{word}"
+        else:
+            out.append(word)
+    return " ".join(out)
+
+
 def title_words() -> frozenset[str]:
     """Every title, abbreviated or written out, lower case: none of them is part of a name (omnivoice_tts.ReferenceBank.dub_name_runs)."""
     words = set(_ZU_HONORIFIC_EXPANSIONS) | set(TITLES_BY_CAPITAL) | set(TITLES_WITH_STOP)
@@ -98,6 +127,14 @@ def separate_stems(text: str, keep: Iterable[str] = ()) -> tuple[str, list[int]]
     groups: list[int] = []
     changed = False
     for token in str(text or "").split():
+        f = _FIGURE_TOKEN.fullmatch(token)
+        figure = figure_split(f.group("core")) if f else None
+        if figure and len(figure[1]) >= 2 and not ({w.lower() for w in figure[1]} | {NUMBER_RESPELLED.get(w.lower(), w.lower()) for w in figure[1]}) & kept:          # a year or a figure after its prefix ("ngo-nineteen-ninety-four"): the prefix apart and the number as the voice says it, or the glued form is read as one Zulu word (q5 "bad", the half-glued "chopped at 19"; with a space the same sentence was right 4 of 4)
+            number = spoken_figure(figure[1])
+            out.extend((f.group("lead") + figure[0], number + f.group("tail")))
+            groups.append(1 + len(number.split()))
+            changed = True
+            continue
         m = _GLUED_TOKEN.fullmatch(token)
         if m and english_stem(m.group("prefix"), m.group("stem")) and m.group("stem").lower() not in kept:
             out.extend((m.group("lead") + m.group("prefix"), m.group("stem") + m.group("tail")))

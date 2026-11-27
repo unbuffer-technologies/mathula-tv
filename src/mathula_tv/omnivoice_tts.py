@@ -38,8 +38,62 @@ NAME_SIMILARITY = 0.8        # how alike (spelt as the voice would say them) a n
 NAME_SIMILARITY_ONE_WORD = 0.85
 NAME_SIMILARITY_LONG = 0.65          # a long name (NAME_LONG_LETTERS letters or more) said alone: an unrelated word is almost never this alike to it, and the recogniser's guesses at a long place name are far from it ("Likuhuli" and "Iguruleni" for Ekurhuleni: 0.67, 0.74)
 NAME_LONG_LETTERS = 8
+SOURCE_CLARITY_MIN = 0.10            # a name the aligner hears in the speaker's own saying at less than this (mean confidence of its letters) is not primed from it: the speaker mumbled it ("nineteen ninety four" 0.04, the five of "engu-five" 0.04-0.07, the clear ones 0.2-0.8), and a primer is copied as it is; the dictionary's respelling says it instead
 NAME_SKELETON_MIN = 0.6              # a name that passes only by the lowered bars must also share this much of its consonants with the word heard
 NAME_CONNECTORS = frozenset({"and", "&", "of", "the", "in", "at"})          # a word the speaker says between two names that the dub joins with a Zulu prefix ("Tswane and Johannesburg": "e-Tshwane nase-Johannesburg"): it is in the clip and in its transcript
+NUMBER_SIMILARITY = 0.95     # a number the speaker says must be said as the dub spells it: "four" and the word "for" are 0.86 alike, "seven" and "even" 0.89, and are not the same word
+NUMBER_RESPELLED = abbreviations.NUMBER_RESPELLED          # how the dub spells an English number word for the voice -> the word the speaker says
+NUMBER_WORDS = abbreviations.NUMBER_WORDS
+
+
+def number_phrase(core: str) -> list[str] | None:
+    """The English number a word of the dub says after a Zulu prefix, as the words the speaker says it in ("ngo-nineteen-ninety-four" -> nineteen, ninety, four; "engu-sixty-seven"; "engu-seeks" -> six), else None.
+    A year or a figure is one run, and its saying is as much the speaker's own as a name is: the whole of it is what the model must copy, not its last word."""
+    split = abbreviations.figure_split(core)
+    return [NUMBER_RESPELLED.get(p.lower(), p.lower()) for p in split[1]] if split else None
+
+
+def numeral_words(text: str) -> str:
+    """A numeral the recogniser wrote ("1994", "67") as the English words a speaker says it with ("nineteen ninety four", "sixty seven"); anything else as it is."""
+    plain = re.sub(r"^\W+|\W+$", "", str(text))
+    if not re.fullmatch(r"\d{1,4}", plain):
+        return str(text)
+    from .pronunciation import _english_cardinal_word
+
+    value = int(plain)
+    if 1900 <= value <= 2099 and not 2000 <= value <= 2009:
+        head, tail = divmod(value, 100)
+        said = [_english_cardinal_word(head), "hundred" if tail == 0 else ("oh " + _english_cardinal_word(tail) if tail < 10 else _english_cardinal_word(tail))]
+    elif value < 1000:
+        said = [_english_cardinal_word(value)]
+    else:
+        return str(text)
+    return " ".join(said).replace("-", " ").replace(" and ", " ")
+
+
+def _primer_words(snippets: Sequence[tuple[Any, ...]]) -> set[str]:
+    """The lower-case words of the names a primer's snippets say (a connector between two names is not one)."""
+    return {re.sub(r"^\W+|\W+$", "", w).lower() for text, *_ in snippets for w in str(text).split()} - NAME_CONNECTORS
+
+
+def primer_names(primer: Mapping[str, Any]) -> list[str]:
+    """Every name the speaker says in a sentence, however many a single primer could carry: the names that are cut out of a primed sentence and put in."""
+    return list(primer.get("pool_names") or primer["names"])
+
+
+def narrow_primer(primer: Mapping[str, Any], words: set[str]) -> dict[str, Any] | None:
+    """The primer of only the names whose words are all among ``words`` (the words of one stretch of the sentence, taken apart at hyphens), or None when none is.  A name is primed on its own: the model
+    keeps one name's saying clear when it is the only one it is asked to copy, and it has room for three whole copies of it whatever else the sentence says."""
+    chosen = [s for s in (primer.get("pool") or primer["snippets"]) if _primer_words([s]) and _primer_words([s]) <= words]
+    if not chosen:
+        return None
+    reps = PRIMER_REPS
+    total = sum(s[2] for s in chosen) + PRIMER_GAP_S * len(chosen)
+    while reps > 1 and total * reps > PRIMER_MAX_S:
+        reps -= 1
+    return {"names": sorted(_primer_words(chosen)), "snippets": chosen, "reps": reps, "seconds": total * reps}
+
+
 PRIMER_REPS = 3              # a name the source says is put in front of the reference this many times (heard on "Phineas": once 0 of 3 right, three times 2 of 3, and 3 of 3 with the names first)
 PRIMER_MAX_S = 9.0           # the names, all repetitions together, never take more of the reference than this (the model asks for 3-10 s in all; the clip it is put in front of is about 8.5 s)
 PRIMER_MAX_SNIPPET_S = 4.0   # a run of names longer than this was cut wrongly
@@ -124,6 +178,8 @@ class ReferenceBank:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.words = list(words)                       # the source's timed words: where its speakers paused (span_cuts)
         self.speaker_of_raw = {str(k): str(v) for k, v in speaker_of_raw.items()}
+        self._clarity: dict[Any, float | None] = {}
+        self.min_clarity = SOURCE_CLARITY_MIN              # 0 keeps every name the speaker says
         self.aligner: Any = None                          # (text, mono audio, rate) -> timed words with letters (source_align.shared_aligner): where a name the speaker says falls in their audio, from its spelling
         self.known_names: list[list[str]] = []          # the job's own names (its pronunciation research): "Canny" alone is the start of "Canny Maphanga"
         self._candidates = self._build(words, speaker_of_raw)
@@ -314,6 +370,13 @@ class ReferenceBank:
             stem = core.split("-")[-1]
             spaced = abbreviations.english_stem(previous.lower(), core)          # "ama details": the same word after the space the voice text is written with
             previous = core
+            figure = number_phrase(core)
+            if figure:                                                           # a year or a figure the Zulu prefix is glued to: all of its words are one run, as the speaker says them
+                if current:
+                    runs.append(current)
+                runs.append(figure)
+                current = []
+                continue
             if spaced or ("-" in core and stem.isalpha() and stem.islower() and len(stem) >= 4):          # an English word kept in English after a Zulu class prefix ("ama-details", "ezingu-forty"): when the speaker says it, its audio is the pronunciation, as a name's is (prod-x1: the voice dropped the t of "details" in every draw)
                 if current:
                     runs.append(current)
@@ -364,13 +427,14 @@ class ReferenceBank:
                     if len(key) < 3:
                         continue
                     best, best_at, best_inside, best_counted = 0.0, None, None, ""
-                    for n in ((length, length + 1) if length > 1 else (1, 2)):          # as many words as the name has: a word of the text that the audio does not say, or the other way round, would teach the model the wrong thing; the exceptions are a connector between two names ("Tswane and Johannesburg") and a one-word name the recogniser wrote as two ("Action SA")
+                    figure = all(t.lower() in NUMBER_WORDS for t in tokens)      # a year or a figure: the recogniser may have written it as one numeral word ("1994"), or as the words
+                    for n in (sorted({1, length}) if figure else ((length, length + 1) if length > 1 else (1, 2))):        # as many words as the name has: a word of the text that the audio does not say, or the other way round, would teach the model the wrong thing; the exceptions are a connector between two names ("Tswane and Johannesburg") and a one-word name the recogniser wrote as two ("Action SA")
                         for j in range(0, len(words) - n + 1):
                             window = words[j: j + n]
                             if any(window[k + 1][0] != window[k][0] + 1 for k in range(n - 1)):
                                 continue
                             inside = None
-                            counted = [self._said(w) for _, w in window]
+                            counted = [numeral_words(self._said(w)) if figure else self._said(w) for _, w in window]
                             if n > length and length > 1:
                                 inside = next((q for q in range(1, n - 1) if re.sub(r"\W", "", counted[q]).lower() in NAME_CONNECTORS), None)
                                 if inside is None:
@@ -381,6 +445,8 @@ class ReferenceBank:
                             if similarity > best + (0.04 if (n > length and length == 1) else 0.0):          # the two-word reading must be clearly better than the one word
                                 best, best_at, best_inside, best_counted = similarity, window, inside, joiner.join(counted)
                     needed = NAME_SIMILARITY if length > 1 else (NAME_SIMILARITY_LONG if len(key) >= NAME_LONG_LETTERS else NAME_SIMILARITY_ONE_WORD)
+                    if figure:
+                        needed = max(needed, NUMBER_SIMILARITY)
                     if best_at is None or best < needed or (length == 1 and len(key) < 4 and not tokens[0].isupper()):
                         continue
                     if length == 1 and best < NAME_SIMILARITY_ONE_WORD and SequenceMatcher(None, self._skeleton(key), self._skeleton(self._sound_key(best_counted))).ratio() < NAME_SKELETON_MIN:
@@ -392,7 +458,14 @@ class ReferenceBank:
                         spoken.insert(best_inside, re.sub(r"^\W+|\W+$", "", self._said(best_at[best_inside][1])))
                     found.append({"tokens": tokens, "text": " ".join(spoken), "first": best_at[0][0], "last": best_at[-1][0],
                                   "source_text": " ".join(str(w["text"]) for _, w in best_at), "restored_text": " ".join(self._said(w) for _, w in best_at), "similarity": round(best, 2)})
-        return sorted(found, key=lambda m: -len(m["tokens"]))
+        return sorted((m for m in found if self._audible(m)), key=lambda m: -len(m["tokens"]))
+
+    def _audible(self, match: Mapping[str, Any]) -> bool:
+        """Whether the speaker's saying of a name can be heard well enough to be copied (source_clarity); with no aligner, or when it cannot tell, it is kept."""
+        if self.min_clarity <= 0:
+            return True
+        clarity = self.source_clarity(int(match["first"]), int(match["last"]), str(match["text"]))
+        return clarity is None or clarity >= self.min_clarity
 
     def primer_for(self, speaker_id: str, start_s: float, end_s: float, span_text: str, usual_pace: bool = True, aligned: bool = True) -> dict[str, Any] | None:
         """The names this span says that the speaker also says in the source window, cut from the source in the speaker's own voice: {names, snippets: [(text, wav, seconds)], reps, seconds}, or None.
@@ -423,14 +496,33 @@ class ReferenceBank:
         if not snippets:
             return None
         snippets.sort(key=lambda x: -len(x[0].split()))                                # the longest names first
+        pool = list(snippets)                                                           # every name found: each is primed alone when it is cut from its own primed sentence (narrow_primer)
         reps = PRIMER_REPS
         total = lambda: sum(x[2] for x in snippets) + PRIMER_GAP_S * len(snippets)
         while len(snippets) > 1 and total() * reps > PRIMER_MAX_S:                       # three copies are what works, so names are dropped before copies are
             snippets.pop()
         while reps > 1 and total() * reps > PRIMER_MAX_S:
             reps -= 1
-        said = {re.sub(r"^\W+|\W+$", "", w).lower() for text, _, _ in snippets for w in text.split()} - NAME_CONNECTORS
-        return {"names": sorted(said), "snippets": snippets, "reps": reps, "seconds": total() * reps}
+        return {"names": sorted(_primer_words(snippets)), "snippets": snippets, "reps": reps, "seconds": total() * reps, "pool": pool, "pool_names": sorted(_primer_words(pool))}
+
+    def source_clarity(self, a: int, z: int, name_text: str) -> float | None:
+        """How well the aligner hears the name in the speaker's own saying of it (the source words ``a``..``z``, cut as the primer is cut): the mean confidence over its letters, 0-1, a swallowed letter near 0.
+        None when there is no aligner or it cannot tell.  A saying it cannot hear is not one to copy: the model copies the mumble ("nineteen ninety four" said as "nin'teen nin'ty four": 0.04)."""
+        if self.aligner is None:
+            return None
+        key = (a, z, name_text)
+        if key not in self._clarity:
+            value = None
+            try:
+                first, last = self._aligned_edges(a, z, name_text) or self._edges_of(a, z)
+                audio, rate = sf.read(io.BytesIO(self._clip(first, last)), dtype="float32", always_2d=True)
+                found = self.aligner(name_text, audio.mean(axis=1), rate)
+                sure = [float(item[2]) for w in (found or []) if w for item in (w.get("letters") or []) if len(item) > 2]
+                value = sum(sure) / len(sure) if sure else None
+            except Exception:        # noqa: BLE001 - not knowing is not a reason to drop a name
+                value = None
+            self._clarity[key] = value
+        return self._clarity[key]
 
     def _edges_of(self, a: int, z: int) -> tuple[float, float]:
         """The audio edges of the words ``a``..``z`` of the source (a primer is the whole word: the snap trims the quiet, and when it cut into the word the edges move outward only)."""
@@ -1160,7 +1252,8 @@ SWAP_KEEP_S = 0.05           # a sentence swapped into a cluster keeps this much
 
 def _plain_word(word: str) -> str:
     """A word as a name is matched: no punctuation around it, lower case, and only what follows an 'i-' / 'u-' / 'ngo-' prefix."""
-    return re.sub(r"^\W+|\W+$", "", str(word)).lower().split("-")[-1]
+    last = re.sub(r"^\W+|\W+$", "", str(word)).lower().split("-")[-1]
+    return NUMBER_RESPELLED.get(last, last)          # "engu-seeks" is the number six the speaker says
 
 
 def name_runs(words: Sequence[str], names: Sequence[str] | set[str]) -> list[tuple[int, int]]:
@@ -1899,7 +1992,9 @@ class OmniVoiceTTSBackend:
         self.host_spaced = False            # the host of a splice is sent the same text a reference-only sentence is (an English word after a Zulu prefix spaced), so it is that sentence exactly
         self.host_per_draw = False          # each draw speaks the cluster's first pass again with its own seed (one speaker's sentence can range from 4% to 15% of it in breaks between seeds, and a host shared by the draws cannot be re-rolled)
         self.splice_refine = False          # a splice cuts where the two generations look alike, matches the name's level to its host and blends with equal power
+        self.source_clarity_min = SOURCE_CLARITY_MIN          # a name the aligner cannot hear in the speaker's saying is left to the dictionary's respelling (ReferenceBank._audible); 0 primes every name the speaker says
         self.primer_align = True            # the names the speaker says are cut from their audio at the edges the aligner finds from the name's spelling, not at the recogniser's word times
+        self.name_alone = True              # every name of a sentence is primed alone (a primed sentence for each name: narrow_primer); False: one primer carries all the names of the span
         self.splice_mix = True              # a name is mixed in from its primed sentence (cross-faded at the quietest points around it, mix_word_run) instead of cut in; it implies host_spaced and the speaker's own saying of a name in the primer
         self.splice_sync = True             # each join of a mix where there is speech is lined up first (sync_join): the primed track moved by the lag at which the two syllables' loudness shapes agree
         self.splice_inside_prefix = False   # a name with a Zulu prefix is taken alone and joined inside its prefix, at the moment the two generations look most alike (not with the word before it)
@@ -1970,6 +2065,7 @@ class OmniVoiceTTSBackend:
         key = str(job_root)
         if key not in self._banks:
             self._banks[key] = self._bank_factory(Path(job_root))
+            self._banks[key].min_clarity = self.source_clarity_min
             if self.primer_align:
                 from . import source_align
 
@@ -2123,8 +2219,8 @@ class OmniVoiceTTSBackend:
                                                                seeds=[seed_for(i, text, "first", salt) for i, text in enumerate(sent)], keep=None if (self.host_spaced or (self.splice_mix and self.splice_names)) else [p["names"] if p else () for p in primers])
                 futures: dict[Any, Any] = {}
 
-                def primed_kwargs(index: int, text: str, tag: str) -> dict[str, Any]:
-                    kwargs = dict(spans=[text], gaps_ms=[], reference=refs[index], speed=self.speed, lora=self.lora, generation=self.generation, align=True, seeds=[seed_for(index, text, tag, salt, primers[index]["names"])])
+                def primed_kwargs(index: int, text: str, tag: str, primer: Mapping[str, Any] | None = None, ref: Reference | None = None) -> dict[str, Any]:
+                    kwargs = dict(spans=[text], gaps_ms=[], reference=ref or refs[index], speed=self.speed, lora=self.lora, generation=self.generation, align=True, seeds=[seed_for(index, text, tag, salt, (primer or primers[index])["names"])])
                     if self.pin_to_reference:          # the length is what the PLAIN reference gives this text (the model's own estimate from the clip's characters a second): the names in front of it say how the names sound, and nothing else
                         kwargs["durations_s"] = [round(od.estimate_seconds([text], [], reference.text, reference.seconds, self.speed), 3)]
                     return kwargs
@@ -2133,6 +2229,22 @@ class OmniVoiceTTSBackend:
                     """The reply of a primed generation: the one already on its way (submitted with the first pass, so they are spoken side by side), or made now."""
                     future = futures.get(key)
                     return future.result() if future is not None else synth(**kwargs)
+
+                region_cache: dict[Any, list[Any]] = {}
+
+                def region_plan(index: int, text_s: str) -> list[tuple[tuple[int, int], Mapping[str, Any], Reference]]:
+                    """The stretches of one sentence that are cut from a primed sentence, each with the primer of ONLY the names in it and the reference that carries it: every name is primed on its own, and the
+                    sentence is spoken once for each (a primer of several names gave each of them fewer and worse copies, and the names it had no room for none).  A stretch no name's words fill is primed with all."""
+                    key = (index, text_s)
+                    if key not in region_cache:
+                        primer, words_s, plan = primers[index], text_s.split(), []
+                        for region in swap_regions(words_s, primer_names(primer), with_word_before=not (self.splice_inside_prefix or self.splice_mix)):
+                            parts = {p for w in words_s[region[0]: region[1] + 1] for p in re.split(r"[-\s]+", re.sub(r"^\W+|\W+$", "", w).lower()) if p}
+                            parts |= {NUMBER_RESPELLED[p] for p in parts if p in NUMBER_RESPELLED}
+                            sub = None if (self.splice_phrases or not self.name_alone) else narrow_primer(primer, parts)
+                            plan.append((region, sub or primer, refs[index] if sub is None else bank.primed(reference, sub, self.match_primer_syllables)))
+                        region_cache[key] = plan
+                    return region_cache[key]
 
                 def sentence_plan(index: int, j: int, sentences_in: list[str]) -> tuple[str | None, str | None, str, int]:
                     """For the j-th sentence of a cluster: what is spoken before it, the word after it, the text of the generation and how many words of it come first (the way the pipeline speaks any sentence)."""
@@ -2146,9 +2258,11 @@ class OmniVoiceTTSBackend:
                     sentences_in = [x for x in vt.SENTENCE_END.split(spans[index].strip()) if x.strip()]
                     if self.splice_names and self.span_sentences > 1 and len(sentences_in) >= 1 and sum(len(x.split()) for x in sentences_in) == len(spans[index].split()):
                         for j in reversed(range(len(sentences_in))):
-                            if name_runs(sentences_in[j].split(), primer["names"]):
+                            if name_runs(sentences_in[j].split(), primer_names(primer)):
                                 text_in = sentence_plan(index, j, sentences_in)[2]
-                                futures[("s", index, text_in)] = pool.submit(synth, **primed_kwargs(index, text_in, "primed-sentence"))
+                                for _region, sub, sub_ref in region_plan(index, sentences_in[j]):          # every name is primed alone: one generation of the sentence for each
+                                    if ("s", index, text_in, tuple(sub["names"])) not in futures:
+                                        futures[("s", index, text_in, tuple(sub["names"]))] = pool.submit(synth, **primed_kwargs(index, text_in, "primed-sentence", sub, sub_ref))
                     else:
                         futures[("b", index)] = pool.submit(synth, **primed_kwargs(index, sent[index], "primed"))
                 first = first_pass[host_key] if reused else first_future.result()
@@ -2173,26 +2287,28 @@ class OmniVoiceTTSBackend:
                         audio_now, times_now, redone = parts[index], list(now_times), 0
                         for j in reversed(range(len(ranges))):                     # a cluster is spoken whole; each sentence that carries a name is spoken again, primed, and only its name is put in place of the cluster's own
                             first_w, last_w, text_s = ranges[j]
-                            if not name_runs(text_s.split(), primer["names"]) or not times_now[first_w] or not times_now[last_w]:
+                            if not name_runs(text_s.split(), primer_names(primer)) or not times_now[first_w] or not times_now[last_w]:
                                 continue
                             before, after, text_in, n_before = sentence_plan(index, j, sentences_in)          # spoken the way the pipeline speaks any sentence: the one before it in front, the first word of the next after it (both cut away)
-                            reply = fetch(("s", index, text_in), primed_kwargs(index, text_in, "primed-sentence"))
-                            gpu += float(reply.get("gpu_s") or 0.0)
-                            if not isinstance(reply.get("words"), list) or not reply["words"] or len(reply["words"][0]) != len(text_in.split()):
-                                continue
-                            sentence_all, sentence_rate = _decode_answer(reply)
-                            if sentence_rate != rate_seen:
-                                continue
                             cut_at = lambda audio, t0, t1: vt.find_cut(audio, rate_seen, (t0 + t1) / 2.0, before_s=abs(t1 - t0) / 2.0 + 0.03, after_s=abs(t1 - t0) / 2.0 + 0.03)[0]      # noqa: E731
-                            primed_audio = vt.split_spans(reply, sentence_all, sentence_rate)[0]
-                            raw_notes.append({"span": index, "take": take_no, "text": text_in, "audio": primed_audio, "rate": rate_seen, "names": name_lengths(text_in.split(), reply["words"][0], primer["names"]), "source": [{"text": t, "s": round(x, 3)} for t, _, x in primer["snippets"]]})
                             swapped = 0
                             words_s = text_s.split()
-                            regions = swap_regions(words_s, primer["names"], with_word_before=not (self.splice_inside_prefix or self.splice_mix))          # the names are taken from the primed sentence (with a word or so between two of them); the cluster keeps everything else
-                            if self.splice_phrases:                                    # each stretch widened to real pauses, so the joins fall where nothing is said; stretches that now touch are one
-                                regions = merge_regions([pause_bounded(a, b, len(words_s), times_now, first_w, reply["words"][0], n_before) for a, b in regions])
                             mix_notes: list[dict[str, Any]] = []
-                            for run_first, run_last in reversed(regions):
+                            heard: set[Any] = set()
+                            for (run_first, run_last), sub, sub_ref in reversed(region_plan(index, text_s)):          # each name is taken from the sentence primed with that name alone; the cluster keeps everything else
+                                sub_key = ("s", index, text_in, tuple(sub["names"]))
+                                reply = fetch(sub_key, primed_kwargs(index, text_in, "primed-sentence", sub, sub_ref))
+                                if sub_key not in heard:
+                                    gpu += float(reply.get("gpu_s") or 0.0)
+                                if not isinstance(reply.get("words"), list) or not reply["words"] or len(reply["words"][0]) != len(text_in.split()):
+                                    continue
+                                sentence_all, sentence_rate = _decode_answer(reply)
+                                if sentence_rate != rate_seen:
+                                    continue
+                                primed_audio = vt.split_spans(reply, sentence_all, sentence_rate)[0]
+                                if sub_key not in heard:
+                                    heard.add(sub_key)
+                                    raw_notes.append({"span": index, "take": take_no, "text": text_in, "audio": primed_audio, "rate": rate_seen, "names": name_lengths(text_in.split(), reply["words"][0], sub["names"]), "source": [{"text": t, "s": round(x, 3)} for t, _, x in sub["snippets"]]})
                                 out = mix_word_run(audio_now, rate_seen, times_now, first_w + run_first, first_w + run_last, primed_audio, reply["words"][0], n_before + run_first, n_before + run_last, run_first == 0, sync=self.splice_sync, notes=mix_notes) if self.splice_mix else None
                                 if out is None:                                    # no mix (switched off, or a word beside the name has no time): the name is cut in at its words' edges, or inside its prefix
                                     out = swap_word_run(audio_now, rate_seen, times_now, first_w + run_first, first_w + run_last, primed_audio, reply["words"][0], n_before + run_first, n_before + run_last, cut_at, refine=self.splice_refine or self.splice_mix,

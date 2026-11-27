@@ -114,3 +114,14 @@ def test_a_prefixed_english_word_is_a_name_run_with_the_hyphen_or_the_space():
     assert ReferenceBank.dub_name_runs("kunamaqembu ama details amaningi.") == [["details"]]
     assert ReferenceBank.dub_name_runs("sikhuluma ngama details.") == [["details"]]
     assert ReferenceBank.dub_name_runs("amaqembu amaningi ukuthi") == []
+
+
+def test_a_figure_after_its_prefix_is_sent_to_the_voice_with_the_prefix_apart():
+    # heard on OmniVoice (prod-y1 unit 2): "ngo-nineteen-ninety-four" was read as one Zulu word, "ngo-nineteen ninety-four" was chopped at 19; "ngo nineteen ninety-four" was right after 1 to 4 Zulu words
+    assert ab.separate_stems("kwaze kwaba ngo-nineteen-ninety-four. Futhi") == ("kwaze kwaba ngo nineteen ninety-four. Futhi", [1, 1, 3, 1])
+    assert ab.separate_stems("iminyaka engu-sixty-seven yami, kuka-nayn,") == ("iminyaka engu sixty-seven yami, kuka-nayn,", [1, 2, 1, 1])          # a figure of one word keeps the form chosen for it
+    assert ab.separate_stems("ngo-twenty-twenty-four")[0] == "ngo twenty twenty-four"
+    assert ab.separate_stems("kwaba ngo-nineteen-ninety-four", keep=["four"]) == ("kwaba ngo-nineteen-ninety-four", [1, 1])          # a figure cut from the speaker's own saying stays as the primer has it
+    assert ab.separate_stems("ngo nineteen ninety-four")[0] == "ngo nineteen ninety-four"
+    words = [{"start": 0.0, "end": 0.3}, {"start": 0.3, "end": 0.5}, {"start": 0.5, "end": 0.8}, {"start": 0.8, "end": 1.2}]
+    assert ab.fold_words(words, [1, 3]) == [words[0], {"start": 0.3, "end": 1.2}]

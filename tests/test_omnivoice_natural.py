@@ -482,6 +482,59 @@ def test_a_name_said_again_later_is_cut_once_and_names_are_dropped_before_copies
     assert tight["reps"] == 3 and len(tight["snippets"]) < len(texts)                              # the copies stay at three, a name went
 
 
+def test_a_year_or_figure_after_a_zulu_prefix_is_one_run_said_as_the_speaker_says_it(tmp_path):
+    assert ot.ReferenceBank.dub_name_runs("kwaze kwaba ngo-nineteen-ninety-four.") == [["nineteen", "ninety", "four"]]          # all of it, not its last word
+    assert ot.ReferenceBank.dub_name_runs("eminyakeni engu-sixty-seven yami") == [["sixty", "seven"]]
+    assert ot.ReferenceBank.dub_name_runs("iqembu elineminyaka engu-seeks,") == [["six"]]                                      # the dub's respelling is the plain number
+    assert ot.name_runs("kwaba ngo-nineteen-ninety-four yami engu-seeks".split(), ["four", "six"]) == [(1, 1), (3, 3)]
+    assert ot.numeral_words("1994,") == "nineteen ninety four" and ot.numeral_words("67") == "sixty seven" and ot.numeral_words("2024") == "twenty twenty four" and ot.numeral_words("1905") == "nineteen oh five" and ot.numeral_words("Moya") == "Moya"
+    bank = _bank(tmp_path)
+    for w in bank.words:                                                                          # the recogniser wrote the year as one numeral; elsewhere the speaker says "for" and "even"
+        if 10.0 <= float(w["start"]) < 20.0 and w["text"] == "w5":
+            w["text"] = "1994"
+        if 10.0 <= float(w["start"]) < 20.0 and w["text"] == "w9":
+            w["text"] = "for"
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    found = bank.name_matches("SPEAKER_00", 0.0, 40.0, "Saphila kwaze kwaba ngo-nineteen-ninety-four, bonke")
+    assert [m["text"] for m in found] == ["nineteen ninety four"] and found[0]["source_text"] == "1994"
+    assert bank.name_matches("SPEAKER_00", 0.0, 40.0, "kwaba ngo-four") == []                      # the word "for" is not the number four
+
+
+def test_a_name_the_aligner_cannot_hear_in_the_speakers_saying_is_left_to_the_dictionary(tmp_path):
+    bank = _bank_with_a_name(tmp_path)
+    a = next(i for i, w in enumerate(bank.words) if w["text"] == "Phineas")
+    base = _fake_aligner_for(bank, a)
+
+    def aligner_with(confidence):
+        def aligner(text, audio, rate):
+            return [{**w, "letters": [[ch, w["start"] + 0.05 * k, confidence] for k, ch in enumerate("abc")]} for w in base(text, audio, rate)]
+        return aligner
+
+    text = "Siyabonga uPhineas Manyama ukhulumile."
+    assert bank.name_matches("SPEAKER_00", 0.0, 40.0, text) and bank.source_clarity(a, a + 1, "Phineas Manyama") is None          # no aligner: nothing is dropped
+    bank.aligner = aligner_with(0.02)                                                                          # mumbled: the aligner finds almost none of its letters
+    assert bank.name_matches("SPEAKER_00", 0.0, 40.0, text) == [] and bank.primer_for("SPEAKER_00", 0.0, 40.0, text) is None
+    bank._clarity.clear()
+    bank.aligner = aligner_with(0.6)
+    assert [m["text"] for m in bank.name_matches("SPEAKER_00", 0.0, 40.0, text)] == ["Phineas Manyama"]
+    bank._clarity.clear()
+    bank.aligner, bank.min_clarity = aligner_with(0.02), 0.0                                                   # the floor off: every name the speaker says is primed
+    assert bank.name_matches("SPEAKER_00", 0.0, 40.0, text)
+
+
+def test_every_name_of_a_sentence_is_primed_alone_with_room_for_all_its_copies():
+    snippets = [("Nasiphi Moya", b"a", 0.9), ("ActionSA", b"b", 0.8), ("nineteen ninety four", b"c", 1.1), ("Afrika", b"d", 0.6)]
+    primer = {"names": ["actionsa", "moya", "nasiphi"], "snippets": snippets[:2], "reps": 2, "seconds": 5.0, "pool": snippets, "pool_names": sorted(ot._primer_words(snippets))}
+    assert ot.primer_names(primer) == sorted({"nasiphi", "moya", "actionsa", "nineteen", "ninety", "four", "afrika"})          # the names beyond what one primer could hold are names too
+    moya = ot.narrow_primer(primer, {"udr", "dr", "nasiphi", "moya"})
+    assert moya["names"] == ["moya", "nasiphi"] and [s[0] for s in moya["snippets"]] == ["Nasiphi Moya"] and moya["reps"] == 3          # three whole copies of one name, where the span's primer had room for two
+    year = ot.narrow_primer(primer, {"ngo", "nineteen", "ninety", "four"})
+    assert [s[0] for s in year["snippets"]] == ["nineteen ninety four"] and year["reps"] == 3
+    assert ot.narrow_primer(primer, {"moya"}) is None and ot.narrow_primer(primer, {"kwaba"}) is None          # half a name is not a name
+    both = ot.narrow_primer(primer, {"nasiphi", "moya", "actionsa"})                                          # names that touch share a stretch, and so a primer
+    assert [s[0] for s in both["snippets"]] == ["Nasiphi Moya", "ActionSA"]
+
+
 def test_a_name_is_found_by_how_it_sounds_when_the_recogniser_spelt_it_differently(tmp_path):
     bank = _bank(tmp_path)
     for w in bank.words:                                                                          # the source says "Kanima Panga"; the dub writes Canny Maphanga

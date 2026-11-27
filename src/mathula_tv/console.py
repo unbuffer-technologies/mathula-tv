@@ -587,6 +587,11 @@ class Console:
             voice["primer_align"] = False          # the primer is cut at the recogniser's word edges, as before the aligner
         if data.get("splice_sync") is False:
             voice["splice_sync"] = False          # the joins of a mix are not lined up first
+        floor = data.get("source_clarity_min")
+        if isinstance(floor, (int, float)) and not isinstance(floor, bool) and 0.0 <= float(floor) <= 1.0:
+            voice["source_clarity_min"] = float(floor)          # the clarity a name must have in the speaker's own saying to be primed from it (0 primes them all)
+        if data.get("name_alone") is False:
+            voice["name_alone"] = False          # one primer carries every name of a span, as before each name was primed alone
         if data.get("splice_mix") is False:
             voice["splice_mix"] = False          # names are cut in at their words' edges, as before the mix
         if data.get("primer_usual_pace") is False:
@@ -628,6 +633,9 @@ class Console:
             copy.splice_mix = voice.get("splice_mix") is not False
             copy.primer_align = voice.get("primer_align") is not False
             copy.splice_sync = voice.get("splice_sync") is not False
+            copy.name_alone = voice.get("name_alone") is not False
+            if isinstance(voice.get("source_clarity_min"), (int, float)):
+                copy.source_clarity_min = float(voice["source_clarity_min"])
             copy.host_spaced = voice.get("host_spaced") is True
             copy.host_per_draw = voice.get("host_per_draw") is True
             copy.splice_refine = voice.get("splice_refine") is True
@@ -769,7 +777,7 @@ class Console:
             pins = [draws.take_for(store, text, ref.start_s, ref.end_s) for text in spans]
             generation = self._run_voice(job, run)
             steps = json.dumps(getattr(getattr(self._omni(), "client", None), "default_generation", None), sort_keys=True)
-            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked-stretch-guard-by-word-prefixed-words-whole-word-glued-in-sentence-spaced-in-primed-trailing-follow-connector-names-restored-everywhere-mixed-in-at-quiet-points-synced-clear-of-the-name-clarity-draws-commits-found-by-clip-edges-letters-must-agree-primer-cut-by-aligner" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
+            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked-stretch-guard-by-word-prefixed-words-whole-word-glued-in-sentence-spaced-in-primed-trailing-follow-connector-names-restored-everywhere-mixed-in-at-quiet-points-synced-clear-of-the-name-clarity-draws-commits-found-by-clip-edges-letters-must-agree-primer-cut-by-aligner-each-name-primed-alone-figures-primed-unheard-sayings-respelled" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
             prepared.append((name, corpus, group, spans, gaps, pins, store, ref, generation))
         missing = [p for p in prepared if not ((self.audio_dir / f"{p[0]}.wav").is_file() and (self.audio_dir / f"{p[0]}.json").is_file())]
         if missing and not make:                      # only reading: nothing is queued and no GPU is spent
