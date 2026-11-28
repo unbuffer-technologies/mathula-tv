@@ -278,6 +278,34 @@ def _reference_file(wav_b64: str) -> str:
     return path
 
 
+@api.post("/v1/estimate")
+def estimate_rest(body: dict) -> dict:
+    """OmniVoice's own numbers for a reference clip, asked the way ``generate`` asks them: {ref_wav_b64, ref_text, lora?, texts?, speed?}.
+
+    The clip goes through ``create_voice_clone_prompt`` (silences removed, end punctuation added, the audio tokenised), so the token count is the one the length formula really divides by.
+    Returns {ref_tokens, ref_seconds, ref_text_used, ref_weight, tokens_per_weight, frame_rate}: how many tokens of audio one unit of text weight takes at this clip's pace.  With ``texts``
+    it also returns {targets_tokens, targets_s}: the length the model itself would fix for each text with this clip as its reference (``_estimate_target_tokens``, ``speed`` applied)."""
+    if not body.get("ref_wav_b64"):
+        raise HTTPException(status_code=400, detail="send ref_wav_b64 and ref_text")
+    model = MODELS["tuned" if body.get("lora", True) else "base"]
+    reference = _reference_file(body["ref_wav_b64"])
+    with GPU_LOCK:
+        prompt = model.create_voice_clone_prompt(ref_audio=reference, ref_text=(body.get("ref_text") or None))
+    tokens = int(prompt.ref_audio_tokens.shape[-1])
+    frame_rate = float(model.audio_tokenizer.config.frame_rate)
+    weight = float(model.duration_estimator.calculate_total_weight(prompt.ref_text))
+    if weight <= 0 or tokens <= 0:
+        raise HTTPException(status_code=422, detail="the clip has no text weight or no audio after silence removal")
+    answer: dict = {"ref_tokens": tokens, "ref_seconds": round(tokens / frame_rate, 4), "ref_text_used": prompt.ref_text, "ref_weight": weight, "tokens_per_weight": tokens / weight, "frame_rate": frame_rate, "instance": INSTANCE_ID}
+    texts = [str(t) for t in (body.get("texts") or [])]
+    if texts:
+        speed = float(body.get("speed") or 1.0)
+        targets = [int(model._estimate_target_tokens(t, prompt.ref_text, tokens, speed=speed)) for t in texts]
+        answer["targets_tokens"] = targets
+        answer["targets_s"] = [round(t / frame_rate, 3) for t in targets]
+    return answer
+
+
 INSTANCE_ID = os.urandom(4).hex()                         # which copy of the service answered (Cloud Run may run several)
 
 

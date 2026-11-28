@@ -47,6 +47,24 @@ def studio_track(console: Any, job_id: str, run_id: str, *, progress: Callable[[
         time.sleep(poll_seconds)
 
 
+def seam_audit(store: Any, track: Path, run_id: str, clip_id: str, folder: Path, *, progress: Callable[[str], None] = print) -> list[dict[str, Any]]:
+    """The places of the dub's audio worth listening to (cut_audit): printed, and kept as ``cut_audit.json`` beside the master.  Never a reason a finish fails."""
+    try:
+        from .cut_audit import audit_track, report
+
+        items = json.loads((store.repeat_dir(run_id, clip_id, 1) / "submission.json").read_text(encoding="utf-8"))["items"]
+        flags = audit_track(track, items)
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        (Path(folder) / "cut_audit.json").write_text(json.dumps(flags, ensure_ascii=False, indent=2), encoding="utf-8")
+        progress(f"[finish] seam audit: {len(flags)} place(s) to listen to" + (":" if flags else ""))
+        for line in report(flags):
+            progress("[finish]   " + line)
+        return flags
+    except Exception as exc:          # noqa: BLE001 - an audit is a help, not a gate
+        progress(f"[finish] seam audit skipped ({type(exc).__name__}: {exc})")
+        return []
+
+
 def finish(settings: Any, *, job_id: str, run_id: str, clip_id: str | None = None, opening_cut: bool = False, new_hook: bool = False,
            progress: Callable[[str], None] = print, console: Any = None, provider: Any = None) -> dict[str, Any]:
     from . import native_dub as nd
@@ -67,6 +85,7 @@ def finish(settings: Any, *, job_id: str, run_id: str, clip_id: str | None = Non
 
         console = Console(work_dir)
     track = studio_track(console, job_id, run_id, progress=progress)
+    seams = seam_audit(store, track, run_id, clip_id, Path(paths.video).parent, progress=progress)
     source = nd.resolve_job_source_video(job, work_dir / "jobs" / job_id)
     master = mux_master(source, track, Path(paths.video))
     progress(f"[finish] dubbed master: {master.name} ({master.stat().st_size / 1e6:.1f} MB)")
@@ -87,7 +106,7 @@ def finish(settings: Any, *, job_id: str, run_id: str, clip_id: str | None = Non
                                                     apply_opening_cut=opening_cut, progress=progress)
     handoff = publish_handoff(work_dir, job_id=job_id, run_id=run_id, clip_id=clip_id)
     selection = json.loads(paths.publication_selection.read_text(encoding="utf-8")).get("selection") or {}
-    result = {"run": run_id, "job": job_id, "opening_cut": bool(opening_cut), "hook": selection.get("hook_text"), "hook_spelling_fixes": selection.get("hook_spelling_fixes") or [],
+    result = {"run": run_id, "job": job_id, "seam_flags": seams, "opening_cut": bool(opening_cut), "hook": selection.get("hook_text"), "hook_spelling_fixes": selection.get("hook_spelling_fixes") or [],
               "master": str(master), "publication_video": str(publication["output"]["path"]), "handoff": handoff}
     progress(f"[finish] done: {handoff.get('final_video')}")
     return result

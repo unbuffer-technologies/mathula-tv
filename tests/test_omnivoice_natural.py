@@ -43,13 +43,27 @@ def _bank(tmp_path):
     return ot.ReferenceBank(words, {"AZURE_1": "SPEAKER_00"}, path, cache_dir=tmp_path / "cache")
 
 
-def test_a_reference_is_chosen_for_fluency_and_the_speakers_usual_pace_not_for_the_slowest_clip(tmp_path):
+def test_a_reference_is_chosen_for_fluency_and_the_speakers_usual_pace_not_for_the_slowest_clip_when_that_is_not_too_quick(tmp_path):
     bank = _bank(tmp_path)
+    bank.REFERENCE_PACE_CEILING = 1000.0                                                      # nobody is quicker than this: the old order stands
     slow = min(bank._candidates, key=lambda c: c["wps"])
     assert slow["start"] < 1.0 and slow["gaps"] >= 1
     order = bank.ranked("SPEAKER_00", 0, 40000)
     assert order[-1]["start"] == slow["start"]                                                # last, not first
     assert order[0]["gaps"] == 0 and abs(order[0]["wps"] / bank._pace["SPEAKER_00"] - 1.0) < 0.2
+
+
+def test_a_speaker_whose_best_liked_clip_is_quicker_than_the_ceiling_is_cloned_from_their_slowest_clip(tmp_path):
+    bank = _bank(tmp_path)
+    rate = lambda c: sum(ch.isalpha() for ch in c["text"]) / max(c["end"] - c["start"], 0.1)
+    liked = min([c for c in bank._candidates if c["speaker"] == "SPEAKER_00"], key=lambda c: (-bank._score(c), c["start"]))
+    bank.REFERENCE_PACE_CEILING = round(rate(liked), 1) - 0.1                                  # the liked clip is just above the ceiling
+    slowest = min([c for c in bank._candidates if c["speaker"] == "SPEAKER_00"], key=lambda c: round(rate(c), 1))
+    order = bank.ranked("SPEAKER_00", 0, 40000)
+    assert order[0]["start"] == slowest["start"] and len(order) == len(bank._candidates)       # the slowest first, nothing dropped
+    bank2 = _bank(tmp_path)
+    bank2.REFERENCE_PACE_CEILING = round(rate(liked), 1)                                       # at the ceiling is not above it
+    assert bank2.ranked("SPEAKER_00", 0, 40000)[0]["start"] == liked["start"]
 
 
 def _tone(freq, seconds, seed=0):
@@ -99,9 +113,11 @@ class ScriptedClient:
 
     def __init__(self, make, aligns=True, lead_texts=()):
         self.make, self.calls, self.aligns, self.requests, self.refs, self.lead_texts, self.pins = make, [], aligns, [], [], list(lead_texts), []
+        self.speeds: list[float] = []
 
     def synthesize(self, *, spans, gaps_ms, reference, durations_s=None, speed=1.0, lora=True, align=False, seeds=None, **_ignored):
         self.calls.append(reference.start_s)
+        self.speeds.append(speed)
         self.requests.append({"spans": list(spans), "align": align})
         self.refs.append(reference)
         self.pins.append(durations_s)
@@ -143,8 +159,8 @@ def test_the_voice_speaks_at_the_reference_pace_with_nothing_pinned_stretched_or
     assert ot.DEFAULT_SPEED == 1.0
     client = ScriptedClient(lambda call, ref: [_span_audio()])
     audio, rate, answer, report, reference = _backend(tmp_path, client).speak(GROUP, ["Sawubona baba."], [], "job")
-    assert len(client.calls) == 1 and reference.start_s >= 1.0 and report["takes"] == 1          # a clean first take is the only one needed
-    assert abs(len(audio) / rate - 3.2) < 0.1                                                     # what the model produced, pads included (the unit end now keeps the word's decay up to its own cut)
+    assert len(client.calls) == 1 and reference.start_s >= 1.0 and report["takes"] == 1         # a clean first take is the only one needed
+    assert abs(len(audio) / rate - 3.2) < 0.2                                                     # what the model produced, pads included (the unit end keeps the word's decay up to its own cut, found from the signal and not the aligner's edge: the fake aligner's edges are 0.1 s off its audio)
 
 
 def test_each_span_is_the_best_of_the_takes_not_the_best_whole_take(tmp_path):
@@ -292,7 +308,7 @@ def test_the_first_word_of_the_next_span_is_spoken_after_a_span_and_cut_off_so_i
     client = ScriptedClient(lambda call, ref: [_span_audio(), _span_audio()])
     audio, rate, answer, report, reference = _backend(tmp_path, client).speak(GROUP, ["Okokuqala kuhle. Siyabonga baba.", "Kunjalo nje."], [150], "job")
     tail = report["tails"][0]
-    assert tail["tail_by"] == "words" and tail["tail_word_end_s"] < tail["tail_next_start_s"] and tail["tail_cut_s"] <= tail["tail_word_end_s"] + 0.12 + 1e-6
+    assert tail["tail_by"] in ("words", "signal") and tail["cut_check"] == "ok" and tail["tail_word_end_s"] < tail["tail_next_start_s"] and tail["tail_cut_s"] <= tail["tail_word_end_s"] + 0.12 + 1e-6
     assert tail["tail_cut_s"] >= tail["tail_word_end_s"] + 0.03 - 1e-6                      # the word keeps its own decay
     assert answer["span_ms"][0] / 1000.0 < 3.4                                              # the 0.65 s the service spoke for the next span's first word is not in the audio
     last = client.requests[0]["spans"]
@@ -1578,3 +1594,200 @@ def test_a_drawn_out_name_is_kept_in_the_primer_when_asked_for_the_speakers_own_
     usual = bank.primer_for("SPEAKER_00", 20.0, 30.0, "yi-ANC iyaphikelela")
     own = bank.primer_for("SPEAKER_00", 20.0, 30.0, "yi-ANC iyaphikelela", usual_pace=False)
     assert usual["snippets"][0][2] < 0.8 and own["snippets"][0][2] > 1.0                           # the usual saying from the other stretch, or the 1.3 s the speaker took in this window
+
+
+def test_a_word_of_a_name_the_source_does_not_say_is_left_out_of_the_match_and_the_name_is_primed_without_it(tmp_path):
+    bank = _bank(tmp_path)
+    for w in bank.words:                                                                          # "...the EFF's Mpile Maudwe is now the deputy mayor": the dub says "Omphile Maotwe we-EFF"; the source's "is" is the verb
+        if 10.0 <= float(w["start"]) < 20.0 and w["text"] in ("w5", "w6", "w7"):
+            heard = {"w5": "Mpile", "w6": "Maudwe", "w7": "is"}[w["text"]]
+            w["text"], w["restored"] = heard, {"Mpile": "Omphile", "Maudwe": "Maotwe", "is": None}[heard]
+    bank._candidates = bank._build(bank.words, {"AZURE_1": "SPEAKER_00"})
+    found = bank.name_matches("SPEAKER_00", 0.0, 40.0, "kanti u-Omphile Maotwe we-EFF useyiphini lemeya")
+    assert [m["text"] for m in found] == ["Omphile Maotwe"]                                      # not "Omphile Maotwe EFF": nothing in the source says EFF there
+    primer = bank.primer_for("SPEAKER_00", 0.0, 40.0, "kanti u-Omphile Maotwe we-EFF useyiphini lemeya")
+    assert [t for t, _, _ in primer["snippets"]] == ["Omphile Maotwe"] and "eff" not in primer["names"]
+
+
+
+def test_a_word_the_listener_decided_is_not_copied_from_the_speaker_is_not_a_name_to_prime(tmp_path):
+    bank = _bank_with_a_name(tmp_path)
+    assert any("Phineas" in m["tokens"] for m in bank.name_matches("SPEAKER_00", 0.0, 40.0, "Siyabonga uPhineas Manyama ukhulumile."))
+    bank.not_primed = frozenset({"phineas"})
+    found = bank.name_matches("SPEAKER_00", 0.0, 40.0, "Siyabonga uPhineas Manyama ukhulumile.")
+    assert all("Phineas" not in m["tokens"] for m in found)
+
+
+
+def test_a_speakers_reference_is_their_slowest_clip_nothing_is_left_out_and_the_listeners_choice_comes_first(tmp_path):
+    bank = _bank(tmp_path)
+    bank.aligner = lambda text, audio, rate: []
+    bank.REFERENCE_PACE_CEILING = 0.0                                                                    # every clip is above the ceiling: the slowest is wanted
+    cands = [c for c in bank._candidates if c["speaker"] == "SPEAKER_00"]
+    assert len(cands) >= 4
+    rate = lambda c: sum(ch.isalpha() for ch in c["text"]) / max(c["end"] - c["start"], 0.1)
+    for c in cands:
+        bank._quality_cache[f"{float(c['start']):.2f}-{float(c['end']):.2f}"] = {"fidelity": 0.5}
+    order = sorted(cands, key=lambda c: bank._rank_key("SPEAKER_00", c))
+    assert len(order) == len(cands)                                                                      # every clip is in the list
+    assert [round(rate(c), 1) for c in order] == sorted(round(rate(c), 1) for c in cands)                 # slowest first
+    bank.reference_overrides = {"SPEAKER_00": float(cands[3]["start"])}
+    assert min(cands, key=lambda c: bank._rank_key("SPEAKER_00", c))["start"] == cands[3]["start"]        # the ear outranks the measure
+
+
+def test_the_slowest_clip_leads_only_where_the_aligner_hears_its_transcript_and_clips_of_one_pace_go_to_the_better_heard(tmp_path):
+    bank = _bank(tmp_path)
+    bank.aligner = lambda text, audio, rate: []
+    bank.REFERENCE_PACE_CEILING = 0.0
+    cands = [c for c in bank._candidates if c["speaker"] == "SPEAKER_00"]
+    rate = lambda c: sum(ch.isalpha() for ch in c["text"]) / max(c["end"] - c["start"], 0.1)
+    put = lambda c, fidelity: bank._quality_cache.__setitem__(f"{float(c['start']):.2f}-{float(c['end']):.2f}", {"fidelity": fidelity})
+    by_pace = sorted(cands, key=rate)
+    slowest, next_slowest, fastest = by_pace[0], by_pace[1], by_pace[-1]
+    for c in cands:
+        put(c, 0.80)
+    put(slowest, 0.30)                                                                                 # its transcript is not what is said: its pace is not believed
+    put(fastest, 0.99)
+    order = sorted(cands, key=lambda c: bank._rank_key("SPEAKER_00", c))
+    assert order[0]["start"] == next_slowest["start"] and order[-1]["start"] == slowest["start"]       # the slowest believed clip leads; the unbelieved one is last, not dropped
+    assert len(order) == len(cands)
+    put(slowest, 0.80)
+    assert min(cands, key=lambda c: bank._rank_key("SPEAKER_00", c))["start"] == slowest["start"]     # heard as well as the rest, the slowest leads
+    twin = dict(fastest, start=fastest["start"] + 1000.0, end=fastest["end"] + 1000.0)                  # a clip of the very same pace, heard worse
+    put(twin, 0.20)
+    assert min([twin, fastest], key=lambda c: bank._rank_key("SPEAKER_00", c))["start"] == fastest["start"]
+
+
+def test_with_a_reference_per_unit_the_clip_inside_the_units_own_window_comes_first_and_otherwise_the_nearest_pace(tmp_path):
+    bank = _bank(tmp_path)
+    cands = sorted([c for c in bank._candidates if c["speaker"] == "SPEAKER_00"], key=lambda c: c["start"])
+    assert len(cands) >= 3
+    inside, other = cands[1], cands[-1]
+    bank.reference_per_unit = True
+    first = bank.ranked("SPEAKER_00", int(inside["start"] * 1000), int(inside["end"] * 1000))
+    assert first[0]["start"] == inside["start"]                                                       # the unit holds a clip of the speaker's own: that one
+    far = bank.ranked("SPEAKER_00", 0, 1000)                                                           # a window with no clip of its own (the first second): pace and nearness decide, and every clip stays in the list
+    assert {c["start"] for c in far} >= {c["start"] for c in cands}
+    pace = bank._unit_pace("SPEAKER_00", inside["start"], inside["end"])
+    assert pace is None or pace > 0
+
+
+
+def test_the_pace_pinned_to_a_unit_is_its_matching_clips_pace_over_the_one_references_and_the_voice_is_asked_for_it(tmp_path):
+    bank = _bank(tmp_path)
+    cands = sorted([c for c in bank._candidates if c["speaker"] == "SPEAKER_00"], key=lambda c: c["start"])
+    ratio, match, base = bank.pace_ratio("SPEAKER_00", int(cands[1]["start"] * 1000), int(cands[1]["end"] * 1000))
+    rate = lambda c: sum(ch.isalpha() for ch in c["text"]) / (c["end"] - c["start"])
+    assert match["start"] == cands[1]["start"] and base["start"] == bank.ranked("SPEAKER_00", 0, 40000, per_unit=False)[0]["start"]
+    expected = rate(match) / rate(base)
+    assert ratio == 1.0 if abs(expected - 1.0) < ot.PACE_DEADBAND else ratio == round(min(ot.PACE_MAX, max(ot.PACE_MIN, expected)), 2)
+    client = ScriptedClient(lambda call, ref: [_span_audio()])
+    backend = ot.OmniVoiceTTSBackend(client, banks={"job": bank})
+    backend.pace_from_match = True
+    bank.pace_ratio = lambda speaker, start, end: (1.15, cands[1], cands[0])                          # a unit whose matching clip is 15% faster than the reference
+    report = backend.speak(GROUP, ["Sawubona baba."], [], "job")[3]
+    assert report["rate"]["applied"] and report["rate"]["ratio"] == 1.15 and set(client.speeds) == {1.15}          # every request of the unit carries it
+    plain = ScriptedClient(lambda call, ref: [_span_audio()])
+    ot.OmniVoiceTTSBackend(plain, banks={"job": bank}).speak(GROUP, ["Sawubona baba."], [], "job")
+    assert set(plain.speeds) == {1.0}                                                                   # off unless asked for
+
+
+
+def test_a_pinned_pace_is_exactly_the_matching_clips_even_when_it_makes_the_unit_overrun_its_window(tmp_path):
+    bank = _bank(tmp_path)
+    backend = ot.OmniVoiceTTSBackend(ScriptedClient(lambda call, ref: [_span_audio()]), banks={"job": bank})
+    cand = bank._candidates[0]
+    group = {"speaker_id": "SPEAKER_00", "start_ms": 0, "source_end_ms": 1000, "source_span_ms": 1000}                  # a one second window: any text overruns it
+    bank.pace_ratio = lambda speaker, start, end: (0.85, cand, cand)
+    ratio, info = backend.pinned_ratio(bank, group)
+    assert ratio == 0.85 and info["applied"] and info["ratio"] == 0.85                               # not bent to fit: fitting the text to the pace is the agent's work
+    bank.pace_ratio = lambda speaker, start, end: (1.15, cand, cand)
+    assert backend.pinned_ratio(bank, group)[0] == 1.15
+
+
+def test_the_pinned_pace_ratio_is_in_omnivoices_own_measure_weight_over_seconds_not_letters(tmp_path):
+    from mathula_tv import omnivoice_duration as od
+
+    bank = _bank(tmp_path)
+    cands = sorted([c for c in bank._candidates if c["speaker"] == "SPEAKER_00"], key=lambda c: c["start"])
+    base, match = cands[0], cands[-1]
+    bank.ranked = lambda speaker, start, end, per_unit=None: [base] if per_unit is False else [match]
+    ratio, got_match, got_base = bank.pace_ratio("SPEAKER_00", 0, 1000)
+    want = (od.weight(match["text"]) / (match["end"] - match["start"])) / (od.weight(base["text"]) / (base["end"] - base["start"]))
+    assert got_match is match and got_base is base
+    assert ratio == (1.0 if abs(want - 1.0) < ot.PACE_DEADBAND else round(min(ot.PACE_MAX, max(ot.PACE_MIN, want)), 2))
+    punctuated = {**match, "text": match["text"] + " , . ; ; ,"}                                        # punctuation weighs 0.5 a mark in OmniVoice's count: letters alone would not see it
+    assert ot.ReferenceBank._weight_a_second(punctuated) > ot.ReferenceBank._weight_a_second(match)
+
+
+def test_the_client_asks_the_service_for_a_clips_pace_once(monkeypatch):
+    import mathula_tv.dub_agent as agent
+
+    calls = []
+    monkeypatch.setattr(agent, "post_with_retry", lambda url, headers, body, **kw: calls.append((url, body)) or {"tokens_per_weight": 1.7, "ref_tokens": 170})
+    client = ot.OmniVoiceClient("https://voice.example")
+    monkeypatch.setattr(client, "_id_token", lambda: "token")
+    first = client.estimate(b"wav", "hello there")
+    second = client.estimate(b"wav", "hello there")
+    assert first is second and len(calls) == 1 and calls[0][0] == "https://voice.example/v1/estimate"
+    assert calls[0][1]["ref_text"] == "hello there" and "texts" not in calls[0][1]
+
+
+def test_the_pin_does_not_depend_on_the_service_being_asked(tmp_path):
+    bank = _bank(tmp_path)
+    assert not hasattr(bank, "pace_source") and not hasattr(bank, "omni_pace")                              # the pin is our copy of the formula, checked against the service by a script
+
+
+
+def test_a_stray_word_of_the_next_segment_at_the_edge_of_a_window_does_not_cost_the_segment_its_corrections(tmp_path):
+    rate = 16000
+    path = tmp_path / "mix.wav"
+    sf.write(str(path), np.zeros((rate * 60, 2), dtype=np.float32), rate, subtype="PCM_16")
+    words = [{"text": "residents", "start": 1.0, "end": 1.5, "raw_speaker": "AZURE_1"}, {"text": "of", "start": 1.5, "end": 1.7, "raw_speaker": "AZURE_1"},
+             {"text": "Tawane", "start": 1.7, "end": 2.3, "raw_speaker": "AZURE_1"}, {"text": "to", "start": 2.3, "end": 2.5, "raw_speaker": "AZURE_1"},
+             {"text": "govern", "start": 2.5, "end": 3.0, "raw_speaker": "AZURE_1"},
+             {"text": "it", "start": 3.02, "end": 3.2, "raw_speaker": "AZURE_1"}]                     # the next segment's first word, 0.02 s after this one ends
+    bank = ot.ReferenceBank(words, {"AZURE_1": "SPEAKER_00"}, path, cache_dir=tmp_path / "cache")
+    segment = {"start_ms": 1000, "end_ms": 3000, "changed": True, "source_text": "residents of Tawane to govern", "restored_text": "residents of Tshwane to govern"}
+    assert bank.restore([segment]) == 1
+    assert [bank._said(w) for w in bank.words][:5] == ["residents", "of", "Tshwane", "to", "govern"] and bank._said(bank.words[5]) == "it"
+    elsewhere = {**segment, "source_text": "residents of Tawane to govern now", "restored_text": "residents of Tshwane to govern now"}
+    assert bank.restore([elsewhere]) == 0                                                              # words that do not line up are still left as heard: no guessing
+
+
+
+def test_a_name_the_speaker_mumbles_in_the_unit_is_taken_from_where_the_same_speaker_says_it_clearly(tmp_path):
+    rate = 16000
+    path = tmp_path / "mix.wav"
+    sf.write(str(path), np.zeros((rate * 90, 2), dtype=np.float32), rate, subtype="PCM_16")
+    def say(start, name):
+        return [{"text": "of", "start": start, "end": start + 0.2, "raw_speaker": "AZURE_1"}, {"text": name, "start": start + 0.2, "end": start + 0.8, "raw_speaker": "AZURE_1"},
+                {"text": "is", "start": start + 0.8, "end": start + 1.0, "raw_speaker": "AZURE_1"}]
+    words = say(1.0, "Tshwane") + _sentence(10.0, 26, 0.32) + say(40.0, "Tshwane") + _sentence(50.0, 26, 0.31)
+    bank = ot.ReferenceBank(words, {"AZURE_1": "SPEAKER_00"}, path, cache_dir=tmp_path / "cache")
+    bank.min_clarity = 0.1
+    mumbled, clear = next(i for i, w in enumerate(bank.words) if w["text"] == "Tshwane"), max(i for i, w in enumerate(bank.words) if w["text"] == "Tshwane")
+    bank.source_clarity = lambda a, z, name: 0.05 if a == mumbled else 0.3
+    found = bank.name_matches("SPEAKER_00", 0.0, 3.0, "izakhamuzi zaseTshwane ukuba")
+    assert found and found[0]["borrowed"] and found[0]["first"] == clear                          # the window's own saying (0.05) is not heard; the clear one at 40 s is the speaker's
+    bank.source_clarity = lambda a, z, name: 0.05
+    assert not bank.name_matches("SPEAKER_00", 0.0, 3.0, "izakhamuzi zaseTshwane ukuba")            # nowhere clear: nothing to copy, the dictionary reads it
+    bank.source_clarity = lambda a, z, name: 0.3
+    assert not [m for m in bank.name_matches("SPEAKER_00", 0.0, 3.0, "izakhamuzi zaseTshwane ukuba") if m.get("borrowed")]          # a saying that can be heard is used as it is
+
+
+def test_a_word_that_only_sounds_like_the_name_is_never_borrowed_for_it(tmp_path):
+    rate = 16000
+    path = tmp_path / "mix.wav"
+    sf.write(str(path), np.zeros((rate * 90, 2), dtype=np.float32), rate, subtype="PCM_16")
+    def say(start, name):
+        return [{"text": "of", "start": start, "end": start + 0.2, "raw_speaker": "AZURE_1"}, {"text": name, "start": start + 0.2, "end": start + 0.8, "raw_speaker": "AZURE_1"},
+                {"text": "is", "start": start + 0.8, "end": start + 1.0, "raw_speaker": "AZURE_1"}]
+    words = say(1.0, "Tshwane") + _sentence(10.0, 26, 0.32) + say(40.0, "Tswani") + _sentence(50.0, 26, 0.31)        # "Tswani" is 0.9 alike to Tshwane by sound, said once, and nothing says it is the name
+    bank = ot.ReferenceBank(words, {"AZURE_1": "SPEAKER_00"}, path, cache_dir=tmp_path / "cache")
+    bank.min_clarity = 0.1
+    mumbled = next(i for i, w in enumerate(bank.words) if w["text"] == "Tshwane")
+    bank.source_clarity = lambda a, z, name: 0.05 if a == mumbled else 0.3
+    assert not bank.name_matches("SPEAKER_00", 0.0, 3.0, "izakhamuzi zaseTshwane ukuba")                          # not borrowed from a look-alike
+    bank.words[next(i for i, w in enumerate(bank.words) if w["text"] == "Tswani")]["restored"] = "Tshwane"          # the job's own correction says it is the name
+    assert bank.name_matches("SPEAKER_00", 0.0, 3.0, "izakhamuzi zaseTshwane ukuba")[0]["borrowed"]

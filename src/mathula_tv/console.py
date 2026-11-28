@@ -559,7 +559,7 @@ class Console:
         return {"url": f"/audio/{name}", "text": text, "voice": voice}
 
     # -- draws: which draw of a sentence the listener approves --------------------------------------------------------------------------------
-    DRAWS_PER_DAY = 80                  # new draws a day: each is a real synthesis of up to three sentences on the GPU
+    DRAWS_PER_DAY = int(os.environ.get("MATHULA_DRAWS_PER_DAY") or 80)          # new draws a day (a run raises it for itself with MATHULA_DRAWS_PER_DAY; the default is the owner's guard): each is a real synthesis of up to three sentences on the GPU
 
     def _run_voice(self, job: str, run: str) -> dict[str, Any] | None:
         """The voice settings a run asks for (``experience/runs/<run>/<clip>/voice.json``): {"generation": {"position_temperature": 1.0}} for the model's decoding settings and/or
@@ -590,6 +590,10 @@ class Console:
         floor = data.get("source_clarity_min")
         if isinstance(floor, (int, float)) and not isinstance(floor, bool) and 0.0 <= float(floor) <= 1.0:
             voice["source_clarity_min"] = float(floor)          # the clarity a name must have in the speaker's own saying to be primed from it (0 primes them all)
+        if data.get("pace_from_match") is True:
+            voice["pace_from_match"] = True          # one reference per speaker; each unit's pace is pinned to what its matching clip says
+        if data.get("reference_per_unit") is True:
+            voice["reference_per_unit"] = True          # each unit is cloned from the clip that matches its own delivery
         if data.get("name_alone") is False:
             voice["name_alone"] = False          # one primer carries every name of a span, as before each name was primed alone
         if data.get("splice_mix") is False:
@@ -634,6 +638,8 @@ class Console:
             copy.primer_align = voice.get("primer_align") is not False
             copy.splice_sync = voice.get("splice_sync") is not False
             copy.name_alone = voice.get("name_alone") is not False
+            copy.reference_per_unit = voice.get("reference_per_unit") is True
+            copy.pace_from_match = voice.get("pace_from_match") is True
             if isinstance(voice.get("source_clarity_min"), (int, float)):
                 copy.source_clarity_min = float(voice["source_clarity_min"])
             copy.host_spaced = voice.get("host_spaced") is True
@@ -777,7 +783,7 @@ class Console:
             pins = [draws.take_for(store, text, ref.start_s, ref.end_s) for text in spans]
             generation = self._run_voice(job, run)
             steps = json.dumps(getattr(getattr(self._omni(), "client", None), "default_generation", None), sort_keys=True)
-            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked-stretch-guard-by-word-prefixed-words-whole-word-glued-in-sentence-spaced-in-primed-trailing-follow-connector-names-restored-everywhere-mixed-in-at-quiet-points-synced-clear-of-the-name-clarity-draws-commits-found-by-clip-edges-letters-must-agree-primer-cut-by-aligner-each-name-primed-alone-figures-primed-unheard-sayings-respelled" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
+            name = hashlib.sha256((f"studio2|tone{room_tone.VERSION}|steps{steps}|{job}|{index}|{spans}|{retakes}|{pins}|{ref.start_s:.2f}-{ref.end_s:.2f}" + (f"|voice={json.dumps(generation, sort_keys=True)}" if generation else "") + ("|names-from-primed-sentence-longest-name-picked-stretch-guard-by-word-prefixed-words-whole-word-glued-in-sentence-spaced-in-primed-trailing-follow-connector-names-restored-everywhere-mixed-in-at-quiet-points-synced-clear-of-the-name-clarity-draws-commits-found-by-clip-edges-letters-must-agree-primer-cut-by-aligner-each-name-primed-alone-figures-primed-unheard-sayings-respelled-leaked-onset-trimmed-tail-cut-from-the-signal-room-tone-between-units-stray-sounds-removed-reference-by-fidelity-per-unit-option-pace-from-match-reference-old-score-slowest-above-12" if generation and generation.get("span_sentences") else "")).encode("utf-8")).hexdigest()[:32]          # a cluster's names are taken from the primed sentence and put in (omnivoice_tts speak)
             prepared.append((name, corpus, group, spans, gaps, pins, store, ref, generation))
         missing = [p for p in prepared if not ((self.audio_dir / f"{p[0]}.wav").is_file() and (self.audio_dir / f"{p[0]}.json").is_file())]
         if missing and not make:                      # only reading: nothing is queued and no GPU is spent
@@ -828,8 +834,36 @@ class Console:
             track = np.zeros(max(at + len(a) for at, a in pieces), dtype=np.float32)
             for at, a in pieces:
                 track[at:at + len(a)] += a
+            try:                                                           # between the units the dub is exact zero: the job's own room tone goes under all of it
+                tone, delta = self._omni_with(prepared[0][8]).bank_for(prepared[0][1]).room_tone()
+                track, _filled = room_tone.bed(track, rate, tone, delta)
+            except Exception:                                              # noqa: BLE001 - a bed is an improvement, never a reason the dub cannot be made
+                pass
             sf.write(str(target), (track / (float(np.abs(track).max()) or 1.0) * 0.9).astype(np.float32), rate, subtype="PCM_16")
         return {"ready": True, "url": f"/audio/{key}.wav", "seconds": round(sf.info(str(target)).duration, 2), "units": units, "sentences": sentences}
+
+    def _remove_strays(self, generation: dict[str, Any] | None, corpus: Path, spans: list[str], audio: Any, rate: int) -> tuple[Any, list[dict[str, float]]]:
+        """The unit with the sounds the voice added between two of its words taken out (voice_takes.find_stray_sounds): the text is laid on the finished audio by the forced aligner, and a sound of 0.08-0.6 s
+        that is 0.2 s from every word and has quiet either side is replaced by the room's quiet.  [{at_s, length_s}] of what was taken out, kept with the unit.  Off with ``"stray_repair": false`` in a run's
+        voice.json; never a reason a unit cannot be made (no aligner, a text it cannot lay on the audio: the unit is kept as it is)."""
+        if isinstance(generation, dict) and generation.get("stray_repair") is False:
+            return audio, []
+        try:
+            from . import voice_takes as vt
+
+            aligner = self._omni_with(generation).bank_for(corpus).aligner
+            text = " ".join(spans)
+            if aligner is None:
+                return audio, []
+            found = aligner(text, audio, rate)
+            if not isinstance(found, list) or len(found) != len(text.split()):
+                return audio, []
+            ranges = vt.find_stray_sounds(audio, rate, [(float(w["start"]), float(w["end"])) for w in found if w])
+            if not ranges:
+                return audio, []
+            return vt.quiet_over(audio, rate, ranges), [{"at_s": round(a / rate, 2), "length_s": round((b - a) / rate, 2)} for a, b in ranges]
+        except Exception:                                                  # noqa: BLE001 - a repair is an improvement, never a reason the unit cannot be made
+            return audio, []
 
     def _studio_make(self, name: str, wav: Path, meta: Path, corpus: Path, group: dict[str, Any], spans: list[str], gaps: list[int], generation: dict[str, Any] | None = None) -> None:
         try:
@@ -837,6 +871,8 @@ class Console:
             raw_out: list[dict[str, Any]] = []
             audio, rate, _answer, report, _ref = self._omni_with(generation).speak(group, spans, gaps, corpus, takes_out=takes_out, all_takes=True, raw_out=raw_out)
             import soundfile as sf
+
+            audio, strays = self._remove_strays(generation, corpus, spans, audio, rate)
 
             files: dict[str, list[str]] = {}
             for k, takes in enumerate(takes_out):                          # the three draws of every sentence, kept so that they can be played at once
@@ -851,7 +887,7 @@ class Console:
                 sf.write(str(self.audio_dir / fname), note["audio"], int(note["rate"]))
                 primed.setdefault(str(note["span"]), {}).setdefault(str(note["take"]), []).append({"file": fname, "text": str(note["text"]), "names": note.get("names") or [], "source": note.get("source") or [], "stretched": bool(note.get("stretched"))})
             sf.write(str(wav), audio, rate)
-            meta.write_text(json.dumps({"seconds": round(len(audio) / rate, 2), "words": report.get("words") or [], "takes": files, "picked": report.get("picked"), "primed": primed}), encoding="utf-8")
+            meta.write_text(json.dumps({"seconds": round(len(audio) / rate, 2), "words": report.get("words") or [], "takes": files, "picked": report.get("picked"), "primed": primed, "strays_removed": strays}), encoding="utf-8")
         except Exception as exc:                                          # noqa: BLE001 - the page is told, the server goes on
             sys.stderr.write(f"console studio error: {type(exc).__name__}: {exc}\n")
             with self._lock:

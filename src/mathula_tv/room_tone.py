@@ -102,3 +102,22 @@ def fill(length_samples: int, tone: np.ndarray, delta_db: float, speech_db: floa
 
 def describe(tone: np.ndarray, delta_db: float) -> dict[str, Any]:
     return {"tone_rms_db": round(20.0 * float(np.log10(np.sqrt((tone ** 2).mean()) + 1e-9)), 1), "below_speech_db": round(delta_db, 1)}
+
+
+def bed(track: np.ndarray, rate: int, tone: np.ndarray, delta_db: float, *, min_s: float = 0.01) -> tuple[np.ndarray, float]:
+    """(the dub with the room tone laid into every stretch of exact digital silence, seconds filled).  Between two units, and in front of the first and behind the last, the dub is zero: the picture's
+    sound drops to nothing for a second or two and comes back (prod-y1 3:14: 1.6 s of -120 dB after a unit, heard as the sound dying).  The joins inside a unit are already filled (voice_takes.assemble);
+    this fills the rest, at the same level under the dub's own speech, so the room never goes away.  The source's room tone, never made-up noise."""
+    track = np.asarray(track, dtype=np.float32)
+    live = np.abs(track) > 1e-6
+    if not live.any() or len(tone) == 0:
+        return track, 0.0
+    speech_db = 20.0 * float(np.log10(np.sqrt((track[live] ** 2).mean()) + 1e-9))
+    zero = np.abs(track) < 1e-7
+    edges = np.diff(np.concatenate(([0], zero.astype(np.int8), [0])))
+    out, filled = track.copy(), 0
+    for a, b in zip(np.nonzero(edges == 1)[0], np.nonzero(edges == -1)[0]):
+        if b - a >= int(min_s * rate):
+            out[a:b] += fill(int(b - a), tone, delta_db, speech_db)
+            filled += int(b - a)
+    return out, filled / rate

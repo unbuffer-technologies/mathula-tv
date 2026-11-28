@@ -33,6 +33,9 @@ class StubWorkbench:
         self.budget = budget
         self.measured = 0
 
+    def check_texts(self, units):
+        return {"results": [{"item_id": u.get("item_id"), "ok": True, "problems": []} for u in units]}
+
     def list_foreign_words(self):
         return {"words": []}
 
@@ -1155,7 +1158,7 @@ def test_every_key_the_workbench_puts_in_a_submit_result_has_a_route_to_the_agen
     assert not keys - set(SUBMIT_KEY_ROUTES), f"computed by the workbench but never shown to the agent: {sorted(keys - set(SUBMIT_KEY_ROUTES))}"
     full = {"accepted": True, "warnings": ["w"], "headline": {"group_count": 3, "gate_failures": 0}, "gates": {"a": {"failed": False, "n": 1}}, "merged": {"sent": 1}, "regressions_accepted": [1],
             "note": "n", "meaning": {"loss": [{"u": 1}], "claims": [{"u": 2}]}, "timing_lock": {"fitting_segments": 1}, "turn_padding": [{"turn_id": "t", "residual_ms": 500, "units": ["u1"]}],
-            "flagged_units": [{"item_id": "u1", "gates": [], "flags": ["x"]}], "listening_load": [{"item_id": "u1"}], "spoken_form_gaps": [{"item_id": "u1"}],
+            "flagged_units": [{"item_id": "u1", "gates": [], "flags": ["x"]}], "listening_load": [{"item_id": "u1"}], "text_checks": [{"item_id": "u1", "ok": True, "problems": [{"flag": "english_leakage"}]}], "spoken_form_gaps": [{"item_id": "u1"}],
             "voice_limit_words": [{"item_id": "u1"}], "figures_as_spoken": [{"item_id": "u1"}], "decisions_so_far": [{"english": "a"}], "settled_units": ["u2"], "units_overview": ["u1 1ch 0"],
             "naturalness": [{"item_id": "u1"}], "speaker_rates_chars_per_s": {"A": 12.0}, "sentence_timing": [{"unit": "u1", "behind_the_mouth": [{"sentence": 2}]}]}
     assert set(full) == set(SUBMIT_KEY_ROUTES)
@@ -1173,7 +1176,7 @@ def test_the_free_budget_policy_takes_the_cost_framing_out_and_leaves_the_lean_p
     lean, free = flat(build_system_prompt(None)), flat(build_system_prompt(None, budget="free"))
     for phrase in ("Measurements are budgeted.", "each extra turn costs more than the last", "much cheaper than rewriting", "you have budget left"):
         assert phrase in lean and phrase not in free, phrase
-    assert "QUALITY FIRST" in free and "QUALITY FIRST" not in lean and "not the finish line" in free
+    assert "QUALITY FIRST" in free and "QUALITY FIRST" not in lean
     assert agent_budget(None) == "free" and agent_budget("LEAN") == "lean" and agent_budget("nonsense") == "free"
     assert BUDGET_LIMITS["free"]["max_turns"] > BUDGET_LIMITS["lean"]["max_turns"] and BUDGET_LIMITS["free"]["dead_air_slack_pct"] == 0.0
     assert BUDGET_LIMITS["lean"]["max_turns"] == 80 and BUDGET_LIMITS["lean"]["tts_budget"] == 600          # lean keeps today's limits
@@ -1183,8 +1186,8 @@ def test_a_quality_first_run_is_not_stopped_when_the_bar_is_met_and_is_told_once
     from mathula_tv.dub_agent import free_bar_message
 
     message = free_bar_message(1.4, ["u5: 9 Zulu sentences for 4 English"], first=True)
-    assert "minimum, not the finish line" in message and "u5: 9 Zulu sentences" in message and "no tool call" in message
-    assert "minimum, not the finish line" not in free_bar_message(1.4, ["u9: x"], first=False) and "New open points" in free_bar_message(1.4, ["u9: x"], first=False)
+    assert "meets the bar" in message and "u5: 9 Zulu sentences" in message and "no tool call" in message and "ONE round" in message          # the soft points get one round, then the end of the work
+    assert "ONE round" in free_bar_message(1.4, ["u9: x"], first=False) and "New open points" in free_bar_message(1.4, ["u9: x"], first=False)
 
 
 def test_a_quality_first_run_keeps_going_after_the_bar_is_met_hears_it_once_and_ends_only_when_the_agent_says_it_is_done(tmp_path):
@@ -1196,8 +1199,8 @@ def test_a_quality_first_run_keeps_going_after_the_bar_is_met_hears_it_once_and_
     client = ScriptedClient(script)
     summary = run_agent(client, ScoringWorkbench(tmp_path, scores), clip_id="c1", run_id="r", tts_budget=50, max_turns=80, free_finish=True)
     assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 14 and summary["free_finish"] is True
-    told = [m["content"] for m in client.seen[-1] if m["role"] == "user" and "not the finish line" in str(m.get("content"))]
-    assert len(told) == 1 and "meets the minimum bar" in told[0] and "1.9%" in told[0]                  # told once, not at every submission
+    told = [m["content"] for m in client.seen[-1] if m["role"] == "user" and "meets the bar" in str(m.get("content"))]
+    assert len(told) == 1 and "1.9%" in told[0]                  # told once, not at every submission
     assert not [m for m in client.seen[-1] if m["role"] == "user" and "Finish now" in str(m.get("content"))]
 
 
@@ -1237,7 +1240,7 @@ def test_a_paused_run_is_saved_whole_and_resumes_from_the_next_turn_without_redo
     assert summary["resumed_from_turn"] == 3 and summary["turns"] == 5 and summary["stop_reason"] == "agent_finished"
     assert len(after.seen[0]) == len(state["messages"])                                          # the first call after the resume sends exactly the saved conversation: no turn is redone
     assert summary["tokens"]["in"] > paused["tokens"]["in"] and summary["tool_calls"]["submit_dub"] == 3 and second_bench.last_submit == _score(1.7)
-    told = [m for m in after.seen[-1] if m["role"] == "user" and "not the finish line" in str(m.get("content"))]
+    told = [m for m in after.seen[-1] if m["role"] == "user" and "meets the bar" in str(m.get("content"))]
     assert len(told) == 1                                                                        # still told once in the whole conversation
     assert not (folder / "PAUSE").exists()
 
@@ -1290,12 +1293,12 @@ def test_a_quality_first_agent_that_stops_with_open_points_is_sent_back_to_them_
               _reply(calls=[_call("s3", "submit_dub", {"items": []})]), _reply(content="now done")]      # acted, nothing open: finishes
     client = ScriptedClient(script)
     summary = run_agent(client, ScoringWorkbench(tmp_path, scores), clip_id="c1", run_id="r", tts_budget=50, free_finish=True, max_turns=40)
-    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 7
+    assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 5                  # one round (it was three: prod-y1 spent 21 turns after the bar on soft points)
     sent = [m["content"] for m in client.seen[-1] if m["role"] == "user" and "You stopped, but your last submission still has" in str(m.get("content"))]
-    assert len(sent) == 2 and "Round 1 of 3" in sent[0] and "Round 2 of 3" in sent[1] and "u5:" in sent[0] and chr(10) + "- u5:" in sent[0]
+    assert len(sent) == 1 and "Round 1 of 1" in sent[0] and "u5:" in sent[0] and chr(10) + "- u5:" in sent[0]
     trace = [json.loads(line) for line in (Path(tmp_path) / "r" / "c1" / "r1" / "trace.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert [r["round"] for r in trace if r.get("kind") == "quality_pushback"] == [1, 2]
-    assert [r["agent_said"] for r in trace if r.get("kind") == "quality_pushback"] == ["done", "done again"]          # what the agent said when it stopped is kept
+    assert [r["round"] for r in trace if r.get("kind") == "quality_pushback"] == [1]
+    assert [r["agent_said"] for r in trace if r.get("kind") == "quality_pushback"] == ["done"]          # what the agent said when it stopped is kept
 
 
 def test_an_agent_that_answers_the_push_back_without_changing_anything_is_not_asked_again_and_the_rounds_are_bounded(tmp_path):
@@ -1306,7 +1309,7 @@ def test_an_agent_that_answers_the_push_back_without_changing_anything_is_not_as
     assert summary["stop_reason"] == "agent_finished" and summary["turns"] == 4                  # one round: it declined, and that is its answer
     from mathula_tv.dub_agent import MAX_QUALITY_ROUNDS
 
-    assert MAX_QUALITY_ROUNDS == 3
+    assert MAX_QUALITY_ROUNDS == 1
     lean = ScriptedClient([_reply(calls=[_call("o", "open_clip", {"clip_id": "c1"})]), _reply(calls=[_call("s1", "submit_dub", {"items": []})]), _reply(content="done")])
     done = run_agent(lean, ScoringWorkbench(tmp_path / "lean", [_points_result(_score(1.9), ["u5"])]), clip_id="c1", run_id="r", tts_budget=50, max_turns=40)
     assert done["stop_reason"] in ("agent_finished", "bar_met") and not [m for m in lean.seen[-1] if "You stopped, but your last submission" in str(m.get("content"))]          # lean runs are unchanged
@@ -1480,3 +1483,54 @@ def test_the_reviewer_reports_phrases_per_unit_and_keeps_its_answer_until_the_te
     assert judge.grammar(units) == first and Client.calls == calls                                    # nothing is asked again for an unchanged text
     changed = judge.grammar([{**units[0], "zulu": "u-Ayanda Nyathi, nentatheli"}, units[1]])
     assert Client.calls == calls + 1 and "unit-01" in changed                                          # a changed text is asked again, the unchanged one is not
+
+
+def test_check_texts_checks_many_units_in_one_call_and_every_submit_carries_the_checks_for_all_its_units():
+    import pytest
+
+    from mathula_tv.dub_workbench import Workbench
+
+    wb = Workbench.__new__(Workbench)
+    seen = []
+
+    def fake_check(zulu, source):
+        seen.append((zulu, source))
+        problems = []
+        if "gate" in zulu:
+            problems.append({"gate": "fabricated_entity", "evidence": ["x"]})
+        if "soft" in zulu:
+            problems.append({"flag": "english_leakage"})
+        if "long" in zulu:
+            problems.append({"flag": "long_run_without_breath"})
+        return {"ok": not any("gate" in p for p in problems), "problems": problems, "gates_checked": []}
+
+    wb.check_text = fake_check
+    many = wb.check_texts([{"item_id": "a", "zulu_text": "fine", "source_text": "A"}, {"item_id": "b", "zulu_text": "a gate", "source_text": "B"}])
+    assert [r["item_id"] for r in many["results"]] == ["a", "b"] and many["results"][1]["ok"] is False and len(seen) == 2
+    with pytest.raises(ValueError):
+        wb.check_texts([])
+    with pytest.raises(ValueError):
+        wb.check_texts([{"zulu_text": "x", "source_text": "y"}] * 41)
+    items = [{"item_id": "a", "zulu_text": "fine", "source_segment_ids": ["s1"]}, {"item_id": "b", "zulu_text": "a gate", "source_segment_ids": ["s1", "s2"]},
+             {"item_id": "c", "zulu_text": "a long run", "source_segment_ids": ["s2"]}, {"item_id": "d", "zulu_text": "soft", "source_segment_ids": []}]
+    segments = [{"segment_id": "s1", "source_text": "one", "restored_text": "One."}, {"segment_id": "s2", "source_text": "two"}]
+    seen.clear()
+    checks = wb._text_checks(items, segments)
+    assert [c["item_id"] for c in checks] == ["b", "d"] and checks[0]["ok"] is False and checks[1]["ok"] is True          # a unit with nothing to say, and one whose only flag listening_load already reports, are left out
+    assert seen[1][1] == "One. two"                                                                                      # each unit is checked against the English of its own segments, as restored
+
+
+def test_the_draft_note_tells_the_agent_to_send_every_unit_in_one_call_and_check_texts_is_a_tool():
+    from mathula_tv.dub_agent import DRAFT_PHASE_NOTE, TOOL_SPECS
+
+    assert "ALL the units of the draft in ONE call" in DRAFT_PHASE_NOTE
+    spec = next(s for s in TOOL_SPECS if s["function"]["name"] == "check_texts")
+    assert "ONE call" in spec["function"]["description"] and spec["function"]["parameters"]["required"] == ["units"]
+
+
+
+def test_a_repair_run_can_be_scoped_to_named_units_and_the_note_says_to_leave_every_other_unit():
+    from mathula_tv.dub_agent import FOCUS_NOTE
+
+    note = FOCUS_NOTE.format(units="u-05, u-13")
+    assert "u-05, u-13" in note and "ONLY" in note and "Do NOT change any other unit" in note and "its own pace" in note

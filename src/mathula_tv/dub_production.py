@@ -247,7 +247,7 @@ def ensure_frozen(store: Any, job_root: Path, clip_id: str) -> dict[str, Any]:
 def run_production(
     settings: Any, client: Any, *, job_id: str, clip_id: str | None = None, run_id: str | None = None,
     playbook_version: str | None = None, render: bool = True, reflect_after: bool = True, judge_meaning: bool = True,
-    max_turns: int | None = None, max_total_tokens: int | None = None, tts_budget: int | None = None, repair_from: str | None = None,
+    max_turns: int | None = None, max_total_tokens: int | None = None, tts_budget: int | None = None, repair_from: str | None = None, focus_units: list[str] | None = None,
     hook: bool = False, audio_only: bool = False, mode: str | None = None, compact: bool = True, budget: str | None = None, resume: bool = False,
     fresh: bool = False, opening_cut: bool = False,
 ) -> dict[str, Any]:
@@ -322,7 +322,8 @@ def run_production(
     try:        # the clusters the agent measured with (OMNIVOICE_SPAN_SENTENCES) are the run's own voice setting: the studio and the finish read them from here
         per_span = (os.environ.get("OMNIVOICE_SPAN_SENTENCES") or "").strip().lower()
         splice_off = (os.environ.get("OMNIVOICE_SPLICE") or "").strip().lower() in {"0", "false", "no", "off"}          # no name is cut from a primed sentence and put in (omnivoice_tts splice_names)
-        if (per_span or splice_off) and ws.current_voice_provider() == "omnivoice":
+        pace_match = (os.environ.get("OMNIVOICE_PACE_FROM_MATCH") or "").strip().lower() in {"1", "true", "yes", "on"}          # each unit's pace pinned from its matching clip (omnivoice_tts pace_from_match)
+        if (per_span or splice_off or pace_match) and ws.current_voice_provider() == "omnivoice":
             voice_file = store.repeat_dir(run_id, clip_id, 1).parent / "voice.json"
             voice_file.parent.mkdir(parents=True, exist_ok=True)
             setting: dict[str, Any] = {}
@@ -330,6 +331,8 @@ def run_production(
                 setting["span_sentences"] = "fill" if per_span == "fill" else int(per_span)
             if splice_off:
                 setting["splice"] = False
+            if pace_match:
+                setting["pace_from_match"] = True
             voice_file.write_text(json.dumps(setting), encoding="utf-8")
     except Exception as exc:        # noqa: BLE001 - never stops a run
         print(f"[voice] the run's voice settings were not saved: {type(exc).__name__}")
@@ -338,7 +341,7 @@ def run_production(
         max_total_tokens=max_total_tokens, tts_budget=tts_budget, system_prompt=build_system_prompt(playbook, mode=mode, budget=budget, web=bool(getattr(client, "web_budget", 0))),
         playbook_version=playbook["version"], seed_items=seed_items, mode=mode, free_finish=(budget == "free"), resume=resume,
         dead_air_slack_pct=limits["dead_air_slack_pct"], compact_after_tokens=limits["compact_after_tokens"] if compact else 0,
-        focus_growth_tokens=limits.get("focus_growth_tokens", 0) if compact else 0)
+        focus_growth_tokens=limits.get("focus_growth_tokens", 0) if compact else 0, focus_units=focus_units)
     try:        # the agent has stopped measuring: the copies of the voice held for it are given back now (they cost for as long as they are held; the process exit gives them back too)
         from .omnivoice_tts import release_voice
 
@@ -423,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-only", action="store_true",
                         help="make the glossary, pronunciation research, prosody modes and voices, then stop")
     parser.add_argument("--repair-from", default=None, help="run id whose accepted submission to repair instead of dubbing again")
+    parser.add_argument("--focus-units", default=None, help="with --repair-from: item ids (u-05,u-13) the run is about; the agent is told to change those units and no other")
     parser.add_argument("--fresh", action="store_true", help="do not start from the job's best earlier submission: draft the whole clip from nothing (the default for a job never dubbed before)")
     parser.add_argument("--hook", action="store_true",
                         help="render the hook edit and footer overlay and write the job-ID-named handoff files for posting")
@@ -470,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
     report = run_production(
         settings, client, job_id=args.job, clip_id=args.clip, run_id=args.run_id, playbook_version=args.playbook,
         render=not args.no_render, reflect_after=not args.no_reflect, judge_meaning=not args.no_judge,
-        max_total_tokens=args.max_tokens, repair_from=args.repair_from, hook=args.hook, audio_only=args.audio_only,
+        max_total_tokens=args.max_tokens, repair_from=args.repair_from, focus_units=[u.strip() for u in args.focus_units.split(",") if u.strip()] if args.focus_units else None, hook=args.hook, audio_only=args.audio_only,
         mode=args.mode, compact=not args.no_compact, budget=args.budget, resume=args.resume, fresh=args.fresh, opening_cut=args.opening_cut)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     return 0 if report["met_bar"] else 2

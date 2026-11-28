@@ -1522,6 +1522,36 @@ class Workbench:
             problems.append({"flag": "word_the_voice_stumbles_on", "evidence": limits, "note": "a listener heard this word stutter; a different word is better than a respelling"})
         return {"ok": not any("gate" in p for p in problems), "problems": problems, "gates_checked": list(GATE_NAMES)}
 
+    CHECK_TEXTS_MAX = 40
+
+    def check_texts(self, units: list[dict[str, Any]]) -> dict[str, Any]:
+        """check_text over many units in one call (up to CHECK_TEXTS_MAX): [{item_id?, zulu_text, source_text}] -> {results: [{item_id, ok, problems}]}.  One call instead of one turn per unit (prod-y1 made 38
+        single check_text calls, each a turn that re-sent the whole conversation)."""
+        if not 1 <= len(units) <= self.CHECK_TEXTS_MAX:
+            raise ValueError(f"send between 1 and {self.CHECK_TEXTS_MAX} units (you sent {len(units)})")
+        results = []
+        for unit in units:
+            found = self.check_text(str(unit.get("zulu_text") or ""), str(unit.get("source_text") or ""))
+            results.append({"item_id": unit.get("item_id"), "ok": found["ok"], "problems": found["problems"]})
+        return {"results": results, "gates_checked": list(GATE_NAMES)}
+
+    TEXT_CHECK_ALREADY_SHOWN = ("figures_run_together", "long_run_without_breath")          # reported apart on every submit (listening_load)
+
+    def _text_checks(self, items: list[dict[str, Any]], segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """check_text for every unit of a submission, on every submit, so the agent does not ask for it one unit at a time: only the units that have something to say, and not what listening_load already says."""
+        current = {str(s["segment_id"]): str(s.get("restored_text") or s.get("source_text") or "") for s in segments}
+        found = []
+        for item in items:
+            try:
+                source = " ".join(current.get(str(i), "") for i in item.get("source_segment_ids") or [])
+                result = self.check_text(str(item.get("zulu_text") or ""), source)
+            except Exception:        # noqa: BLE001 - a check that cannot run is not a reason a submission fails
+                continue
+            problems = [p for p in result["problems"] if p.get("flag") not in self.TEXT_CHECK_ALREADY_SHOWN]
+            if problems:
+                found.append({"item_id": item.get("item_id"), "ok": not any("gate" in p for p in problems), "problems": problems})
+        return found
+
     def recall_lessons(self, limit: int = 25) -> dict[str, Any]:
         lessons: list[dict[str, Any]] = []
         for clip_id in self.store.clip_ids():
@@ -1723,6 +1753,7 @@ class Workbench:
             ],
             "flagged_units": self._with_texts([self._flagged_entry(g) for g in card["groups"] if g["flags"] or any(v["failed"] for v in g["gates"].values())], items),
             "listening_load": self._listening_load(items),
+            "text_checks": self._text_checks(items, segments),
             "spoken_form_gaps": self._spoken_form_gaps(items),
             "sentence_timing": self._sentence_timing(items, card),
             "voice_limit_words": self._voice_limit_words(items),

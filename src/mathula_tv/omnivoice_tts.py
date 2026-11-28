@@ -18,6 +18,7 @@ from difflib import SequenceMatcher
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -39,6 +40,7 @@ NAME_SIMILARITY_ONE_WORD = 0.85
 NAME_SIMILARITY_LONG = 0.65          # a long name (NAME_LONG_LETTERS letters or more) said alone: an unrelated word is almost never this alike to it, and the recogniser's guesses at a long place name are far from it ("Likuhuli" and "Iguruleni" for Ekurhuleni: 0.67, 0.74)
 NAME_LONG_LETTERS = 8
 SOURCE_CLARITY_MIN = 0.10            # a name the aligner hears in the speaker's own saying at less than this (mean confidence of its letters) is not primed from it: the speaker mumbled it ("nineteen ninety four" 0.04, the five of "engu-five" 0.04-0.07, the clear ones 0.2-0.8), and a primer is copied as it is; the dictionary's respelling says it instead
+NAME_TOKEN_MIN = 0.4                 # in a name of several words, each word must be heard in the word of the source it is laid against: "Omphile Maotwe EFF" matched "Mpile Maudwe is" at 0.83 as a whole and its last word, EFF, matched "is" at 0.00 (prod-y1 0:10: the primer was the name and the English word "is", labelled EFF)
 NAME_SKELETON_MIN = 0.6              # a name that passes only by the lowered bars must also share this much of its consonants with the word heard
 NAME_CONNECTORS = frozenset({"and", "&", "of", "the", "in", "at"})          # a word the speaker says between two names that the dub joins with a Zulu prefix ("Tswane and Johannesburg": "e-Tshwane nase-Johannesburg"): it is in the clip and in its transcript
 NUMBER_SIMILARITY = 0.95     # a number the speaker says must be said as the dub spells it: "four" and the word "for" are 0.86 alike, "seven" and "even" 0.89, and are not the same word
@@ -94,6 +96,9 @@ def narrow_primer(primer: Mapping[str, Any], words: set[str]) -> dict[str, Any] 
     return {"names": sorted(_primer_words(chosen)), "snippets": chosen, "reps": reps, "seconds": total * reps}
 
 
+PACE_MIN = 0.85              # the pace pinned to a unit, relative to the speaker's one reference, stays within these (a unit is never asked to be much faster or slower than the voice takes naturally)
+PACE_MAX = 1.20
+PACE_DEADBAND = 0.04         # and is left alone inside this much of the reference's own pace
 PRIMER_REPS = 3              # a name the source says is put in front of the reference this many times (heard on "Phineas": once 0 of 3 right, three times 2 of 3, and 3 of 3 with the names first)
 PRIMER_MAX_S = 9.0           # the names, all repetitions together, never take more of the reference than this (the model asks for 3-10 s in all; the clip it is put in front of is about 8.5 s)
 PRIMER_MAX_SNIPPET_S = 4.0   # a run of names longer than this was cut wrongly
@@ -179,6 +184,10 @@ class ReferenceBank:
         self.words = list(words)                       # the source's timed words: where its speakers paused (span_cuts)
         self.speaker_of_raw = {str(k): str(v) for k, v in speaker_of_raw.items()}
         self._clarity: dict[Any, float | None] = {}
+        self.reference_per_unit = False                         # True: each unit's reference is the clip that matches the unit's own delivery (ranked, _unit_key), not one clip for the speaker
+        self.reference_overrides: dict[str, float] = {}      # the listener's choice of a speaker's reference clip, by the clip's start second (reference_overrides.json): the ear outranks every measure
+        self._quality_cache: dict[str, dict[str, Any] | None] = {}
+        self.not_primed: frozenset[str] = frozenset()        # words the listener decided by ear are better said from the dictionary's spelling than copied from the speaker (primer_exclusions.json)
         self.min_clarity = SOURCE_CLARITY_MIN              # 0 keeps every name the speaker says
         self.aligner: Any = None                          # (text, mono audio, rate) -> timed words with letters (source_align.shared_aligner): where a name the speaker says falls in their audio, from its spelling
         self.known_names: list[list[str]] = []          # the job's own names (its pronunciation research): "Canny" alone is the start of "Canny Maphanga"
@@ -253,6 +262,20 @@ class ReferenceBank:
             pass
         return bank
 
+    @staticmethod
+    def _trim_to_segment(inside: list[Any], heard: list[str], tokens: Any) -> list[Any]:
+        """The raw words of a segment's window with the strays at its two ends taken off: the window is a little wider than the segment (a word that starts 0.05 s after it ends is the next segment's first),
+        and one such word made the whole segment fail to line up and lose every correction it carried (prod-y7: "Tawane", "Tsuani" and "Twani" were restored to Tshwane in pass 1 and never reached the words,
+        so units 2, 5 and 10 were not primed).  Only words before the first heard token and after the last are taken off, and only when what is left is the segment's words one for one."""
+        words = [tokens(str(w["text"])) for w in inside]
+        flat = [t[0] if len(t) == 1 else "" for t in words]
+        if not heard or len(flat) <= len(heard):
+            return inside
+        for lead in range(0, len(flat) - len(heard) + 1):
+            if flat[lead: lead + len(heard)] == heard:
+                return inside[lead: lead + len(heard)]
+        return inside
+
     def restore(self, segments: Sequence[Mapping[str, Any]]) -> int:
         """Put the job's own corrected spelling on the recogniser's words, so the name search compares the dub's name with what the job already knows the speaker said ("kenny mapanga" was restored to
         "Canny Maphanga" in pass 1) and not with a raw guess.  Each restored segment is lined up word for word with the raw words inside its window; only a word the restoration replaced by exactly
@@ -267,6 +290,7 @@ class ReferenceBank:
             start, end = float(segment.get("start_ms") or 0) / 1000.0 - 0.05, float(segment.get("end_ms") or 0) / 1000.0 + 0.05
             inside = sorted((w for w in self.words if start <= float(w.get("start") or 0.0) < end), key=lambda w: float(w["start"]))
             heard, written = tokens(segment.get("source_text")), str(segment.get("restored_text") or "").split()
+            inside = self._trim_to_segment(inside, heard, tokens)
             if not inside or len(heard) != len(inside) or [t for t in tokens(" ".join(str(w["text"]) for w in inside))] != heard:
                 continue                                             # the words do not line up one for one: no guessing
             clean = [re.sub(r"^[^\w]+|[^\w]+$", "", raw) for raw in written]
@@ -413,7 +437,19 @@ class ReferenceBank:
         if not words:
             return []
         found: list[dict[str, Any]] = []
-        for run in self.dub_name_runs(text):
+        runs = []
+        for run in self.dub_name_runs(text):                 # a word the listener decided is not copied from the speaker splits the run: the others are still names
+            part: list[str] = []
+            for token in run:
+                if token.casefold() in self.not_primed:
+                    if part:
+                        runs.append(part)
+                    part = []
+                else:
+                    part.append(token)
+            if part:
+                runs.append(part)
+        for run in runs:
             if len(run) == 1:                              # "Canny," on its own: the job knows her whole name, and the speaker said it whole
                 whole = next((full for full in self.known_names if run[0].lower() in [t.lower() for t in full]), None)
                 run = list(whole) if whole else run
@@ -451,14 +487,70 @@ class ReferenceBank:
                         continue
                     if length == 1 and best < NAME_SIMILARITY_ONE_WORD and SequenceMatcher(None, self._skeleton(key), self._skeleton(self._sound_key(best_counted))).ratio() < NAME_SKELETON_MIN:
                         continue                                                       # "national" is 0.75 like ActionSA by its letters but shares half of its consonants; the recogniser's real guesses ("Likuhuli", "Iguruleni" for Ekurhuleni) share two thirds
-                    for k in range(at, at + length):
+                    kept_from = 0
+                    if length > 1 and best_inside is None and not figure and len(best_at) == length:          # every word of the name is heard in its own word of the source, or it is not part of what the speaker said
+                        support = [SequenceMatcher(None, self._sound_key(t), self._sound_key(self._said(w))).ratio() for t, (_, w) in zip(tokens, best_at)]
+                        lo_t, hi_t = 0, length
+                        while hi_t - lo_t > 1 and support[hi_t - 1] < NAME_TOKEN_MIN:
+                            hi_t -= 1
+                        while hi_t - lo_t > 1 and support[lo_t] < NAME_TOKEN_MIN:
+                            lo_t += 1
+                        if any(x < NAME_TOKEN_MIN for x in support[lo_t:hi_t]):                     # a word in the middle is not heard: not this name
+                            continue
+                        if (lo_t, hi_t) != (0, length):                                             # the end words the source does not say are left out of this match (they may be matched on their own)
+                            tokens, best_at, kept_from = tokens[lo_t:hi_t], best_at[lo_t:hi_t], lo_t
+                            key = self._sound_key(" ".join(tokens))
+                            best = SequenceMatcher(None, key, self._sound_key(" ".join(self._said(w) for _, w in best_at))).ratio()
+                            if len(tokens) > 1 and best < NAME_SIMILARITY:
+                                continue
+                            if len(tokens) == 1 and best < (NAME_SIMILARITY_LONG if len(key) >= NAME_LONG_LETTERS else NAME_SIMILARITY_ONE_WORD):
+                                continue
+                    for k in range(at + kept_from, at + kept_from + len(tokens)):
                         used[k] = True
                     spoken = list(tokens)
                     if best_inside is not None:                                       # the connector is in the clip, so it is in the transcript the model reads, between the names it joins
                         spoken.insert(best_inside, re.sub(r"^\W+|\W+$", "", self._said(best_at[best_inside][1])))
                     found.append({"tokens": tokens, "text": " ".join(spoken), "first": best_at[0][0], "last": best_at[-1][0],
                                   "source_text": " ".join(str(w["text"]) for _, w in best_at), "restored_text": " ".join(self._said(w) for _, w in best_at), "similarity": round(best, 2)})
-        return sorted((m for m in found if self._audible(m)), key=lambda m: -len(m["tokens"]))
+        kept: list[dict[str, Any]] = []
+        for m in found:
+            if self._audible(m):
+                kept.append(m)
+                continue
+            other = self._borrowed(speaker_id, m)              # the speaker's saying here cannot be heard: the same name, said clearly by the same speaker elsewhere in the job, is their pronunciation of it
+            if other is not None:
+                first, last = other
+                kept.append({**m, "first": first, "last": last, "borrowed": True, "source_text": " ".join(str(w["text"]) for w in self.words[first: last + 1]),
+                             "restored_text": " ".join(self._said(w) for w in self.words[first: last + 1])})
+        return sorted(kept, key=lambda m: -len(m["tokens"]))
+
+    def _borrowed(self, speaker_id: str, match: Mapping[str, Any]) -> tuple[int, int] | None:
+        """Where else in the job this speaker says the same name so that it can be heard: the word indexes (first, last) of the saying the aligner hears best, as alike by sound to the name as ``name_matches`` asks
+        (the same number of words), and at least as clear as ``min_clarity``; None when there is none.  Used when the saying in the unit's own window is a mumble (prod-y7 unit 7: Tshwane at 0.08, said clearly
+        at 0.27 and 0.32 elsewhere)."""
+        if self.min_clarity <= 0:
+            return None
+        key = self._sound_key(" ".join(match["tokens"]))
+        n = int(match["last"]) - int(match["first"]) + 1
+        needed = NAME_SIMILARITY if len(match["tokens"]) > 1 else (NAME_SIMILARITY_LONG if len(key) >= NAME_LONG_LETTERS else NAME_SIMILARITY_ONE_WORD)
+        words = [(i, w) for i, w in enumerate(self.words) if not w.get("overlap") and self.speaker_of_raw.get(str(w.get("raw_speaker")), str(w.get("raw_speaker"))) == speaker_id]
+        best: tuple[float, tuple[int, int]] | None = None
+        for j in range(0, len(words) - n + 1):
+            window = words[j: j + n]
+            if window[0][0] == match["first"] or any(window[k + 1][0] != window[k][0] + 1 for k in range(n - 1)):
+                continue
+            said = [self._said(w) for _, w in window if re.sub(r"\W", "", self._said(w)).lower() not in NAME_CONNECTORS]
+            if SequenceMatcher(None, key, self._sound_key(" ".join(said))).ratio() < needed:
+                continue
+            names = {re.sub(r"\W", "", str(x)).lower() for x in match["tokens"]}
+            if not all(w.get("restored") or re.sub(r"\W", "", str(w["text"])).lower() in names for _, w in window):
+                continue                                           # a word that only sounds like the name is not the name ("reaction" for ActionSA): only a saying the job's own correction made this name, or that is spelt it, is borrowed
+            clarity = self.source_clarity(window[0][0], window[-1][0], str(match["text"]))
+            if clarity is None or clarity < self.min_clarity:
+                continue
+            if best is None or clarity > best[0]:
+                best = (clarity, (window[0][0], window[-1][0]))
+        return best[1] if best else None
 
     def _audible(self, match: Mapping[str, Any]) -> bool:
         """Whether the speaker's saying of a name can be heard well enough to be copied (source_clarity); with no aligner, or when it cannot tell, it is kept."""
@@ -626,7 +718,7 @@ class ReferenceBank:
         audio = np.concatenate([part for piece in pieces for part in (piece, gap)] + [head])
         return Reference(wav=wav_bytes(audio, rate), text=" ".join(texts + [base.text]), seconds=len(audio) / rate, start_s=base.start_s, end_s=base.end_s, speaker=base.speaker)
 
-    def ranked(self, speaker_id: str, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
+    def ranked(self, speaker_id: str, start_ms: int, end_ms: int, per_unit: bool | None = None) -> list[dict[str, Any]]:
         """The clips to clone for a unit, best first.  The person talking in the unit's window is who is cloned (a merged label cannot give the wrong voice: the speaker of the best clip inside the window, else the
         unit's own label), and the clip is that person's BEST clip anywhere in the job, so they have one voice and one pace in every turn.  The unit's own window used to decide the clip, and every turn had its
         own reference and its own pace: the second speaker's 3.7 s turn held only a 3.6 s clip at 3.57 words/s (their usual is 2.75) and came out at 21 characters a second against 14 in their other turns (prod-s1).
@@ -636,10 +728,140 @@ class ReferenceBank:
             raise LookupError("the job has no clean 3-9 s clip of any speaker to clone")
         inside = sorted((c for c in self._candidates if c["start"] >= start - 0.05 and c["end"] <= end + 0.05), key=self._score, reverse=True)
         talking = inside[0]["speaker"] if inside else speaker_id
-        mine = sorted((c for c in self._candidates if c["speaker"] == talking), key=lambda c: (-self._score(c), c["start"]))
+        if self.reference_per_unit if per_unit is None else per_unit:
+            here = self._unit_pace(talking, start, end)
+            mine = sorted((c for c in self._candidates if c["speaker"] == talking), key=lambda c: self._unit_key(talking, c, start, end, here))
+        else:
+            mine = sorted((c for c in self._candidates if c["speaker"] == talking), key=lambda c: self._rank_key(talking, c))
         middle = (start + end) / 2.0
         others = sorted((c for c in self._candidates if c["speaker"] != talking), key=lambda c: (abs((c["start"] + c["end"]) / 2.0 - middle) + (0.0 if c["speaker"] == speaker_id else 25.0), -self._score(c)))
         return mine + others
+
+    def _quality(self, c: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The measures of a candidate clip (reference_quality.measure: pauses, steadiness, noise, clipping, and the forced aligner's fidelity: how well it hears the clip's own transcript), kept on disk
+        beside the clips; None when there is no aligner to measure fidelity with."""
+        if self.aligner is None:
+            return None
+        key = f"{float(c['start']):.2f}-{float(c['end']):.2f}"
+        if key in self._quality_cache:
+            return self._quality_cache[key]
+        store = self.cache_dir / "reference_quality.json" if self.cache_dir else None
+        if not self._quality_cache and store is not None and store.is_file():
+            try:
+                self._quality_cache.update(json.loads(store.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                pass
+            if key in self._quality_cache:
+                return self._quality_cache[key]
+        try:
+            from . import reference_quality as rq
+
+            audio, rate = sf.read(io.BytesIO(self._clip(float(c["start"]), float(c["end"]))), dtype="float32", always_2d=True)
+            audio = audio.mean(axis=1)
+            words = [{"text": w["text"], "start": float(w["start"]) - float(c["start"]), "end": float(w["end"]) - float(c["start"])} for w in self.words
+                     if float(c["start"]) - 0.01 <= float(w["start"]) and float(w["end"]) <= float(c["end"]) + 0.01 and self.speaker_of_raw.get(str(w.get("raw_speaker")), str(w.get("raw_speaker"))) == c["speaker"]]
+            aligned = self.aligner(str(c["text"]), audio, rate)
+            value: dict[str, Any] | None = rq.measure(audio, rate, words, aligned if isinstance(aligned, list) else [])
+        except Exception:        # noqa: BLE001 - not measuring is not a reason to have no reference
+            value = None
+        self._quality_cache[key] = value
+        if store is not None and value is not None:
+            try:
+                store.parent.mkdir(parents=True, exist_ok=True)
+                store.write_text(json.dumps(self._quality_cache), encoding="utf-8")
+            except OSError:
+                pass
+        return value
+
+    def pace_ratio(self, speaker_id: str, start_ms: int, end_ms: int) -> tuple[float, dict[str, Any], dict[str, Any]]:
+        """(the pace to pin to this unit, the clip that matches the unit's own delivery, the speaker's one reference clip).  The voice is cloned from the one reference, so it is the same voice in every
+        unit; the unit's pace is what its matching clip says it is: the pace of the matching clip over the pace of the reference, both in OmniVoice's own measure (_weight_a_second: text weight over seconds, the formula its length estimator uses;
+        scripts/validate_omnivoice_formula.py checks our copy of it against the live service: within 0.4% on 48 clips).  1.0 when the matching clip is the reference or inside
+        PACE_DEADBAND; within PACE_MIN..PACE_MAX; rounded to 0.01."""
+        base = self.ranked(speaker_id, start_ms, end_ms, per_unit=False)[0]
+        match = self.ranked(speaker_id, start_ms, end_ms, per_unit=True)[0]
+        if abs(float(match["start"]) - float(base["start"])) < 0.01:
+            return 1.0, match, base                                                                      # the unit's own clip is the reference: nothing to ask
+        ratio = self._weight_a_second(match) / max(self._weight_a_second(base), 0.01)
+        if abs(ratio - 1.0) < PACE_DEADBAND:
+            return 1.0, match, base
+        return round(min(PACE_MAX, max(PACE_MIN, ratio)), 2), match, base
+
+    def _unit_pace(self, speaker_id: str, start_s: float, end_s: float) -> float | None:
+        """How fast the speaker talks in this window of the source, in letters a second of fluent speech (words closer than 0.25 s make a run; runs under 0.6 s are left out), None under 3 s of it."""
+        words = [w for w in self.words if not w.get("overlap") and float(w.get("start") or 0.0) >= start_s - 0.05 and float(w.get("end") or 0.0) <= end_s + 0.05
+                 and self.speaker_of_raw.get(str(w.get("raw_speaker")), str(w.get("raw_speaker"))) == speaker_id]
+        runs: list[list[Mapping[str, Any]]] = []
+        for w in words:
+            if runs and float(w["start"]) - float(runs[-1][-1]["end"]) <= 0.25:
+                runs[-1].append(w)
+            else:
+                runs.append([w])
+        letters, seconds = 0, 0.0
+        for run in runs:
+            length = float(run[-1]["end"]) - float(run[0]["start"])
+            if length >= 0.6:
+                letters += sum(sum(ch.isalpha() for ch in str(self._said(w))) for w in run)
+                seconds += length
+        return letters / seconds if seconds >= 3.0 else None
+
+    def _unit_key(self, speaker_id: str, c: Mapping[str, Any], start_s: float, end_s: float, unit_rate: float | None) -> tuple[Any, ...]:
+        """How a speaker's clips are put in order for ONE unit (smallest first): a clip from inside the unit's own window comes first (the speaker's voice, pace and effort at that moment: the voice copies
+        its reference, so a unit that is rushed or raised is dubbed from a clip that is); among those the one whose pace is nearest the unit's (in steps of about 10%), then the one the aligner hears best.  When the unit holds no clip, the clips whose pace is nearest the speaker's
+        pace in the unit (in steps of about 10%), the nearest in time among them, then the best heard."""
+        inside = float(c["start"]) >= start_s - 0.05 and float(c["end"]) <= end_s + 0.05
+        q = self._quality(c)
+        fidelity = float(q["fidelity"]) if q is not None and q.get("fidelity") is not None else 0.0
+        middle = abs((float(c["start"]) + float(c["end"])) / 2.0 - (start_s + end_s) / 2.0)
+        lps = sum(ch.isalpha() for ch in str(c["text"])) / max(float(c["end"]) - float(c["start"]), 0.1)
+        step = int(abs(math.log(max(lps, 0.1) / unit_rate)) / 0.1) if unit_rate else 0
+        if inside:
+            return (0, step, -fidelity, middle)
+        return (1, step, middle, -fidelity)
+
+    @staticmethod
+    def _weight_a_second(c: Mapping[str, Any]) -> float:
+        """OmniVoice's own measure of a clip's pace: the weight of its text (omnivoice_duration.weight: its rule estimator's count, letters 1.0, spaces 0.2, punctuation 0.5, digits 3.5) over its seconds.  The
+        model sets a unit's length as the unit text's weight times the reference's seconds per weight, so a ratio of these between two clips is the ratio of lengths it would give the same text."""
+        return od.weight(str(c["text"])) / max(float(c["end"]) - float(c["start"]), 0.1)
+
+    def _letters_a_second(self, c: Mapping[str, Any]) -> float:
+        """The pace of a clip in letters a second, the measure the voice's length formula takes from its reference."""
+        return sum(ch.isalpha() for ch in str(c["text"])) / max(float(c["end"]) - float(c["start"]), 0.1)
+
+    REFERENCE_PACE_CEILING = 12.0          # letters a second: above this the recogniser's pick is not cloned, the speaker's slowest believed clip is
+    REFERENCE_TRUST = 0.75                 # a clip's pace is believed when the aligner hears its transcript at least this share as well as the speaker's best clip
+
+    def _fidelity(self, c: Mapping[str, Any]) -> float:
+        q = self._quality(c)
+        return float(q["fidelity"]) if q is not None and q.get("fidelity") is not None else 0.0
+
+    def _slowest_wanted(self, speaker_id: str) -> tuple[bool, float]:
+        """(whether this speaker's reference is their slowest believed clip, the share of the best fidelity a clip needs to be believed).  It is when the clip the old score likes best (_score: clearly
+        transcribed, fluent, at the speaker's usual pace, a good length) runs above REFERENCE_PACE_CEILING letters a second: the voice copies its reference's pace one for one, and a quick one made the anchor
+        rush (the 3 s clip at 14.2 letters a second read 217 letters in 15 s: 14.0 a second against 13.0 for the 99th percentile of isiZulu speakers)."""
+        memo = self.__dict__.setdefault("_slowest_memo", {})
+        if speaker_id not in memo:
+            mine = [x for x in self._candidates if x["speaker"] == speaker_id]
+            liked = min(mine, key=lambda x: (-self._score(x), x["start"])) if mine else None
+            best = max([self._fidelity(x) for x in mine] or [0.0])
+            memo[speaker_id] = (liked is not None and round(self._letters_a_second(liked), 1) > self.REFERENCE_PACE_CEILING, best)
+        return memo[speaker_id]
+
+    def _rank_key(self, speaker_id: str, c: Mapping[str, Any]) -> tuple[Any, ...]:
+        """How a speaker's clips are put in order (smallest first), every clip in the one list: the clip the listener chose; then the old score's order (_score, best first), except for a speaker whose best-liked
+        clip is quicker than REFERENCE_PACE_CEILING: for them the SLOWEST clip first, by letters a second.  A slow reference costs nothing: each unit's own pace is pinned from its matching clip (pace_ratio), which
+        only goes up from there, up to PACE_MAX.  A clip's pace is its transcript's letters over its seconds, so it is only believed where the transcript is what is said: a clip the aligner hears under
+        REFERENCE_TRUST of the speaker's best comes after the believed ones (the second speaker's slowest 'clip', 5.1 letters a second, was a mis-heard line at fidelity 0.55).  Nothing is dropped."""
+        chosen = self.reference_overrides.get(speaker_id)
+        if chosen is not None and abs(float(c["start"]) - chosen) < 0.06:
+            return (-2, 0.0, 0.0, 0.0, c["start"])
+        slowest, best = self._slowest_wanted(speaker_id)
+        if not slowest:
+            return (0, 0.0, 0.0, -self._score(c), c["start"])
+        fidelity = self._fidelity(c)
+        believed = 0 if fidelity >= self.REFERENCE_TRUST * best else 1
+        return (believed, round(self._letters_a_second(c), 1), -fidelity, -self._score(c), c["start"])
 
     PAUSE_CLIPS = 40                      # the longest clips of the speaker, looked at for their pauses
     PAUSE_MIN_RUNS = 8                    # fewer pauses than this say nothing about the speaker
@@ -1094,6 +1316,22 @@ class OmniVoiceClient:
         reply = oc.assemble([parts[i] for i in range(count)], int(rate or 24000), gaps, [words[i] for i in range(count)] if words_ok else None, gpu_s)
         reply["copies"] = len(shares)
         return reply
+
+    def estimate(self, wav: bytes, ref_text: str, texts: Sequence[str] | None = None, *, speed: float = 1.0, lora: bool = True) -> dict[str, Any]:
+        """OmniVoice's own pace data for a reference clip (the service's ``/v1/estimate``): the clip's token count after the model has stripped its silences, and the weight of its text, so
+        ``tokens_per_weight`` is the number the model's length formula scales every text by; with ``texts``, the length the model itself would fix for each.  Not in the pin path (our copy of the
+        formula matches it to 0.4%): it is the check of that copy, scripts/validate_omnivoice_formula.py."""
+        from .dub_agent import post_with_retry
+
+        key = (hashlib.sha1(wav).hexdigest(), ref_text, bool(lora), float(speed), tuple(texts or ()))
+        memo = self.__dict__.setdefault("_estimates", {})
+        if key not in memo:
+            body: dict[str, Any] = {"ref_wav_b64": base64.b64encode(wav).decode("ascii"), "ref_text": ref_text, "lora": lora, "speed": speed}
+            if texts:
+                body["texts"] = list(texts)
+            headers = {"Authorization": f"Bearer {self._id_token()}", "Content-Type": "application/json"}
+            memo[key] = post_with_retry(f"{self.url}/v1/estimate", headers, body, timeout=self.timeout, retries=self.retries, sleep=self.sleep)
+        return memo[key]
 
     def _remote(self, *, spans: Sequence[str], gaps_ms: Sequence[int], reference: Reference | None, durations_s: Sequence[float | None] | None = None,
                 speed: float = 1.0, lora: bool = True, align: bool = False, languages: Sequence[str | None] | None = None,
@@ -1994,6 +2232,8 @@ class OmniVoiceTTSBackend:
         self.splice_refine = False          # a splice cuts where the two generations look alike, matches the name's level to its host and blends with equal power
         self.source_clarity_min = SOURCE_CLARITY_MIN          # a name the aligner cannot hear in the speaker's saying is left to the dictionary's respelling (ReferenceBank._audible); 0 primes every name the speaker says
         self.primer_align = True            # the names the speaker says are cut from their audio at the edges the aligner finds from the name's spelling, not at the recogniser's word times
+        self.pace_from_match = False        # each unit is cloned from the speaker's one reference, and its pace is pinned to what its matching clip says (ReferenceBank.pace_ratio)
+        self.reference_per_unit = False     # each unit is cloned from the clip that matches its own delivery, not one clip for the speaker (ReferenceBank._unit_key); the listener's per-speaker choice is not used
         self.name_alone = True              # every name of a sentence is primed alone (a primed sentence for each name: narrow_primer); False: one primer carries all the names of the span
         self.splice_mix = True              # a name is mixed in from its primed sentence (cross-faded at the quietest points around it, mix_word_run) instead of cut in; it implies host_spaced and the speaker's own saying of a name in the primer
         self.splice_sync = True             # each join of a mix where there is speech is lined up first (sync_join): the primed track moved by the lag at which the two syllables' loudness shapes agree
@@ -2041,6 +2281,8 @@ class OmniVoiceTTSBackend:
         backend.splice_refine = (env.get("OMNIVOICE_SPLICE_REFINE") or "").strip().lower() in {"1", "true", "yes", "on"}
         backend.primer_align = (env.get("OMNIVOICE_PRIMER_ALIGN") or "1").strip().lower() not in {"0", "false", "no", "off"}
         backend.splice_mix = (env.get("OMNIVOICE_SPLICE_MIX") or "1").strip().lower() not in {"0", "false", "no", "off"}
+        backend.reference_per_unit = (env.get("OMNIVOICE_REFERENCE_PER_UNIT") or "0").strip().lower() in {"1", "true", "yes", "on"}
+        backend.pace_from_match = (env.get("OMNIVOICE_PACE_FROM_MATCH") or "0").strip().lower() in {"1", "true", "yes", "on"}
         backend.splice_sync = (env.get("OMNIVOICE_SPLICE_SYNC") or "1").strip().lower() not in {"0", "false", "no", "off"}
         backend.splice_inside_prefix = (env.get("OMNIVOICE_SPLICE_INSIDE_PREFIX") or "").strip().lower() in {"1", "true", "yes", "on"}
         backend.splice_phrases = (env.get("OMNIVOICE_SPLICE_PHRASES") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -2066,10 +2308,21 @@ class OmniVoiceTTSBackend:
         if key not in self._banks:
             self._banks[key] = self._bank_factory(Path(job_root))
             self._banks[key].min_clarity = self.source_clarity_min
+            try:                                           # the listener's choice of a speaker's reference clip: work/reference_overrides.json {"<corpus id>": {"SPEAKER_02": 260.0}} (the clip's start second)
+                chosen = json.loads((Path(job_root).parents[2] / "reference_overrides.json").read_text(encoding="utf-8")).get(Path(job_root).name) or {}
+                self._banks[key].reference_overrides = {str(k): float(v) for k, v in chosen.items()}
+            except (OSError, ValueError, IndexError, TypeError):
+                pass
+            try:                                           # the listener's ear: words said from the dictionary, not copied from the speaker (work/primer_exclusions.json: {"words": {"eff": {"reason": ...}}})
+                path = Path(job_root).parents[2] / "primer_exclusions.json"
+                self._banks[key].not_primed = frozenset(str(w).casefold() for w in (json.loads(path.read_text(encoding="utf-8")).get("words") or {}))
+            except (OSError, ValueError, IndexError):
+                pass
             if self.primer_align:
                 from . import source_align
 
                 self._banks[key].aligner = source_align.shared_aligner()
+        self._banks[key].reference_per_unit = self.reference_per_unit          # the bank is shared by the copies of this backend: each call says how it wants the reference chosen
         return self._banks[key]
 
     def span_primers(self, group: Mapping[str, Any], spans: Sequence[str], job_root: Path | str | None) -> list[dict[str, Any] | None]:
@@ -2142,6 +2395,14 @@ class OmniVoiceTTSBackend:
         except Exception:                      # noqa: BLE001 - where to cut is an improvement, never a reason a unit cannot be spoken
             return None
 
+    def pinned_ratio(self, bank: "ReferenceBank", group: Mapping[str, Any]) -> tuple[float, dict[str, Any]]:
+        """The pace to pin to a unit (ReferenceBank.pace_ratio) and what it was made of.  Exactly what the unit's matching clip says: a unit that this pace makes overrun its window is for the agent to fit by
+        writing for the pace (its length estimate uses the same ratio), not for the pace to be bent to hide it."""
+        start = int(group.get("start_ms") or 0)
+        end = int(group.get("source_end_ms") or (start + int(group.get("source_span_ms") or 0)))
+        ratio, match, base = bank.pace_ratio(str(group.get("speaker_id") or ""), start, end)
+        return ratio, {"applied": ratio != 1.0, "ratio": ratio, "matching_clip": [round(match["start"], 1), round(match["end"], 1)], "reference_clip": [round(base["start"], 1), round(base["end"], 1)]}
+
     def speak(self, group: Mapping[str, Any], spans: Sequence[str], gaps: Sequence[int], job_root: Path | str | None, retakes: Mapping[int, int] | None = None, takes_out: list[Any] | None = None,
               all_takes: bool = False, raw_out: list[dict[str, Any]] | None = None) -> tuple[np.ndarray, int, dict[str, Any], dict[str, Any], Reference]:
         """The unit spoken as the voice would naturally say it, cloned from the best clip of that speaker: (audio, rate, an answer-shaped description, a report, the reference used).
@@ -2154,6 +2415,13 @@ class OmniVoiceTTSBackend:
         bank = self.bank_for(job_root)
         ranked = bank.ranked(str(group.get("speaker_id") or ""), int(group.get("start_ms") or 0),
                              int(group.get("source_end_ms") or (int(group.get("start_ms") or 0) + int(group.get("source_span_ms") or 0))))
+        unit_speed, rate_info = self.speed, {"applied": False}
+        if self.pace_from_match:                                         # the pace of the unit's matching clip against the pace of the one reference, pinned to this unit
+            try:
+                ratio, rate_info = self.pinned_ratio(bank, group)
+                unit_speed = round(self.speed * ratio, 3)
+            except Exception:                                            # noqa: BLE001 - a pace to follow is an improvement, never a reason a unit cannot be spoken
+                unit_speed, rate_info = self.speed, {"applied": False}
         clip_edges = (float(ranked[0]["start"]), float(ranked[0]["end"]))          # a draw the listener committed belongs to the clip as the Studio names it (the clip's own edges), not to where this render snaps them to the quiet: the lookup by the snapped edges missed by 0.06 s and no commit ever applied
         tone, delta = bank.room_tone()
         pause_ok = bank.natural_pause_s(str(group.get("speaker_id") or ""))          # the longest pause the speaker themself makes inside a sentence: shorter ones are not held against a take
@@ -2215,14 +2483,14 @@ class OmniVoiceTTSBackend:
                 "Eric": 0 of 5 clean pinned, 5 of 5 clean unpinned, prod-125 1:01)."""
                 host_key = (salt, tuple(sent), take_no if self.host_per_draw else None)          # the cluster is spoken once and its draws differ in how the names are primed - or, with host_per_draw, each draw has a first pass of its own
                 reused = host_key in first_pass
-                first_future = None if reused else pool.submit(synth, spans=sent, gaps_ms=[0] * (len(sent) - 1), reference=reference, speed=self.speed, lora=self.lora, generation=self.generation, align=True,
+                first_future = None if reused else pool.submit(synth, spans=sent, gaps_ms=[0] * (len(sent) - 1), reference=reference, speed=unit_speed, lora=self.lora, generation=self.generation, align=True,
                                                                seeds=[seed_for(i, text, "first", salt) for i, text in enumerate(sent)], keep=None if (self.host_spaced or (self.splice_mix and self.splice_names)) else [p["names"] if p else () for p in primers])
                 futures: dict[Any, Any] = {}
 
                 def primed_kwargs(index: int, text: str, tag: str, primer: Mapping[str, Any] | None = None, ref: Reference | None = None) -> dict[str, Any]:
-                    kwargs = dict(spans=[text], gaps_ms=[], reference=ref or refs[index], speed=self.speed, lora=self.lora, generation=self.generation, align=True, seeds=[seed_for(index, text, tag, salt, (primer or primers[index])["names"])])
+                    kwargs = dict(spans=[text], gaps_ms=[], reference=ref or refs[index], speed=unit_speed, lora=self.lora, generation=self.generation, align=True, seeds=[seed_for(index, text, tag, salt, (primer or primers[index])["names"])])
                     if self.pin_to_reference:          # the length is what the PLAIN reference gives this text (the model's own estimate from the clip's characters a second): the names in front of it say how the names sound, and nothing else
-                        kwargs["durations_s"] = [round(od.estimate_seconds([text], [], reference.text, reference.seconds, self.speed), 3)]
+                        kwargs["durations_s"] = [round(od.estimate_seconds([text], [], reference.text, reference.seconds, unit_speed), 3)]
                     return kwargs
 
                 def fetch(key: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -2329,7 +2597,7 @@ class OmniVoiceTTSBackend:
                     pinned = primed_s < natural
                     if pinned:                                                         # the names made it faster than the speaker is: stretch it to the speaker's length
                         gpu += float(reply.get("gpu_s") or 0.0)
-                        again = pool.submit(synth, spans=[sent[index]], gaps_ms=[], reference=refs[index], speed=self.speed, lora=self.lora, generation=self.generation, align=True, durations_s=[round(natural, 3)],
+                        again = pool.submit(synth, spans=[sent[index]], gaps_ms=[], reference=refs[index], speed=unit_speed, lora=self.lora, generation=self.generation, align=True, durations_s=[round(natural, 3)],
                                             seeds=[seed_for(index, sent[index], "stretched", salt, primer["names"])]).result()          # through the same pool: never more requests in the air than copies
                         if isinstance(again.get("words"), list) and again["words"]:
                             again_audio, again_rate = _decode_answer(again)
@@ -2363,7 +2631,7 @@ class OmniVoiceTTSBackend:
                 sent = [" ".join(part for part in (lead, span, follow if with_words else None) if part) for lead, span, follow in zip(leads, spans, follows)] + heard
                 if with_words and any(ref is not reference for ref in refs):
                     return ask_per_reference(sent), 0
-                reply = synth(spans=sent, gaps_ms=[max(0, g) for g in gaps] + [0] * len(heard), reference=reference, speed=self.speed, lora=self.lora, generation=self.generation, **({"align": True} if with_words else {}),
+                reply = synth(spans=sent, gaps_ms=[max(0, g) for g in gaps] + [0] * len(heard), reference=reference, speed=unit_speed, lora=self.lora, generation=self.generation, **({"align": True} if with_words else {}),
                                                seeds=[seed_for(i, text, "first", salt) for i, text in enumerate(sent)])
                 return reply, len(heard)
 
@@ -2394,7 +2662,11 @@ class OmniVoiceTTSBackend:
                     n_before = len(leads[index].split()) if leads[index] else 0
                     last_word = next((w for w in reversed(times[n_before:-1]) if w), None) if len(times) == len(sent_words[index]) else None
                     if last_word and times[-1]:
-                        gap_s = max(0.0, float(times[-1]["start"]) - float(last_word["end"]))
+                        gap_s = max(0.0, float(times[-1]["start"]) - float(last_word["end"]))          # by the aligner's word edges, which count a pause as part of the word before it ...
+                        own, own_lead, _ = vt.trim_zero_pads(segments[index]) if index < len(segments) else (None, 0, 0)
+                        found = vt.locate_tail(own, rate, float(last_word["start"]) - own_lead / rate, float(times[-1]["start"]) - own_lead / rate) if own is not None else None
+                        if found:
+                            gap_s = found["pause_s"]                                                   # ... and by the signal where there is a pause to measure: the pause the voice really left
                 natural.append(gap_s)
             target = [max(vt.join_target_s(gaps[i], natural[i]), breath if spans[i].rstrip().endswith((".", "?", "!")) else 0.0) for i in range(len(spans) - 1)]
             for index, segment in enumerate(segments[:len(spans)]):
@@ -2409,15 +2681,28 @@ class OmniVoiceTTSBackend:
                     after = word_times[-1] if len(word_times) == len(sent_words[index]) else None
                     before = next((w for w in reversed(word_times[n_lead:-1]) if w), None)
                     if after and before:                                           # the span's last word is cut off at the quiet after it; the word the model said after it goes
-                        end_word, start_next = float(before["end"]) - shift, float(after["start"]) - shift
+                        end_word, start_next = float(before["end"]) - shift, float(after["start"]) - shift          # the aligner's edges: where to look, not where the sound is
+                        by, real = "words", vt.locate_tail(core, rate, float(before["start"]) - shift, start_next)
+                        if real:                                                       # the sound's own end and the next word's own onset, from the signal
+                            by, end_word, start_next = "signal", real["speech_end_s"], real["next_onset_s"]
                         low, high = min(end_word, start_next) - 0.03, max(end_word, start_next) + 0.03
                         tail_s, tail_found = vt.find_cut(core, rate, (low + high) / 2, before_s=(high - low) / 2, after_s=(high - low) / 2)
                         last_span = index == len(spans) - 1
                         keep_tail = FINAL_TAIL_KEEP_S if last_span else vt.edge_keep_s(target[index], share=0.6, most_s=vt.TAIL_KEEP_S, least_s=vt.TAIL_MIN_KEEP_S)          # a short join keeps little of the quiet; the end of the unit keeps the word's whole decay
+                        if real:
+                            tail_s, tail_found = min(end_word + keep_tail, start_next - 0.03), True          # inside the pause, clear of the next word
                         tail_s = min(max(tail_s, end_word + vt.TAIL_MIN_KEEP_S), end_word + keep_tail)
                         core = vt.fade_out(core[:int(tail_s * rate)], rate, FINAL_FADE_S if last_span else 0.012)
-                        tail_pad, kept_tail = 0, round(tail_s - end_word, 3)         # the join is measured from the word, not from the generation's end: see build()
-                        entry.update(tail_by="words", tail_word_end_s=round(end_word, 2), tail_next_start_s=round(start_next, 2), tail_cut_s=round(tail_s, 2), tail_found=tail_found, kept_tail_s=kept_tail)
+                        last_start = float(before["start"]) - shift
+                        trimmed, leaked = vt.strip_leaked_onset(core, rate, not_before_s=last_start + 0.15)          # the cut let the first sound of the word that follows through (the aligner's edges are not exact)
+                        if leaked:
+                            core, tail_s = vt.fade_out(trimmed, rate, 0.012), len(trimmed) / rate
+                            entry.update(leaked_onset_s=round(leaked / rate, 3))
+                        problem = vt.verify_cut_end(core, rate)                       # the cut looks at what it left: a sound still going at its end, or a sliver of the next word
+                        if problem:
+                            extra += 1.0                                               # a draw whose cut is not clean is worth less than one whose is (the others share this cut, but a re-cut with a longer window is one more try)
+                        tail_pad, kept_tail = 0, round(max(tail_s - end_word, 0.0), 3)         # the join is measured from the word, not from the generation's end: see build()
+                        entry.update(cut_check=problem or "ok", tail_by=by, tail_word_end_s=round(end_word, 2), tail_next_start_s=round(start_next, 2), tail_cut_s=round(tail_s, 2), tail_found=tail_found, kept_tail_s=kept_tail)
                 if use_words and not leads[index]:                                         # a span that begins cold: sound before its first word is not in the text
                     own = [w for w in answer["words"][index][:len(spans[index].split())] if w]
                     if own:
@@ -2458,7 +2743,7 @@ class OmniVoiceTTSBackend:
                         entry.update(lead_chars=len(leads[index]), by="warp", lead_s=round(end_s - start_s, 2), aligned_s=aligned, cut_s=round(cut_s, 2), found=found)
                     core, lead_pad = vt.fade_in(core[int(cut_s * rate):], rate), 0
                     head_cut_s = cut_s
-                    extra = 0.0 if found else 1.5                                   # the end of the repeated sentence was not clear: this take is worth less
+                    extra += 0.0 if found else 1.5                                  # the end of the repeated sentence was not clear: this take is worth less
                 if len(entry) > 1:
                     info.append(entry)
                 core, head_cut, tail_cut = vt.strip_stray_ends(core, rate)          # the model's end-of-generation click (and the zeros before it) is not speech: drop it, keep the timeline
@@ -2520,7 +2805,7 @@ class OmniVoiceTTSBackend:
             raw_out[:] = raw_notes
         if takes_out is not None:
             takes_out[:] = [[takes[t][0][i][0] for t in (range(len(takes)) if primers[i] is not None or pinned[i] is not None or self.nameless_draws > 1 else range(1))] for i in range(len(spans))]          # every take of every span, as kept (the studio plays them as the draws)
-        report: dict[str, Any] = {"takes": len(takes), "picked": picks, "spans": kept, "reference_s": [round(reference.start_s, 1), round(reference.end_s, 1)],
+        report: dict[str, Any] = {"rate": rate_info, "takes": len(takes), "picked": picks, "spans": kept, "reference_s": [round(reference.start_s, 1), round(reference.end_s, 1)],
                                   "room_tone": {"below_speech_db": round(delta, 1)},
                                   "overlap": [next((n for n in notes[picks[i]] if n["span"] == i), None) for i in range(1, len(spans))] if notes else []}
         report["tails"] = [next((n for n in notes[picks[i]] if n["span"] == i and "tail_by" in n), None) for i in range(len(spans) - 1)] if notes else []          # where each span's last word was cut off from the next span's first word
@@ -2557,7 +2842,13 @@ class OmniVoiceTTSBackend:
         """The free estimate of this group's natural length (see omnivoice_duration), from its reference clip's pace: no synthesis, no GPU."""
         spans, gaps = self.plan(group, voice_info, job_root)
         reference = self.reference_for(group, job_root)
-        return od.estimate_seconds(spans, gaps, reference.text, reference.seconds, self.speed)          # a span with names runs about 6% longer than this (the names slow the voice); the measurement has the real length
+        speed = self.speed
+        if self.pace_from_match:                                         # the pace the voice will be asked for in this unit
+            try:
+                speed = round(self.speed * self.pinned_ratio(self.bank_for(job_root), group)[0], 3)
+            except Exception:                                            # noqa: BLE001
+                speed = self.speed
+        return od.estimate_seconds(spans, gaps, reference.text, reference.seconds, speed)          # a span with names runs about 6% longer than this (the names slow the voice); the measurement has the real length
 
     def synthesize_group(self, *, group: Mapping[str, Any], voice_info: Mapping[str, Any], output_path: Path, preferred_ms: int, maximum_ms: int,
                          force: bool, job_root: Path | str | None = None) -> Any:

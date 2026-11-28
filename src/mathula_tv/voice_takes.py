@@ -101,6 +101,142 @@ def strip_stray_ends(core: np.ndarray, rate: int, *, max_s: float = STRAY_MAX_S)
     return core, 0, 0
 
 
+TAIL_QUIET_DB = 25.0          # quiet is this far under the span's speech level (its 95th percentile): the voice's pauses sit 25-45 dB under it
+TAIL_MIN_PAUSE_S = 0.08       # a pause between the last word and the one after it is at least this long to be a place to cut
+TAIL_WINDOW_BEFORE_S = 0.10   # looked for from this long after the aligner's start of the last word ...
+TAIL_WINDOW_AFTER_S = 0.40    # ... to this long after its start of the next: the aligner's word edges are out by up to half a second at a pause (prod-y1 0:56: 0.5 s)
+
+
+def locate_tail(core: np.ndarray, rate: int, last_word_start_s: float, next_word_start_s: float) -> dict[str, float] | None:
+    """Where the last word's sound really ends and the next word's really begins, from the signal: {speech_end_s, next_onset_s, pause_s}, or None when there is no pause between them to cut in.
+    The aligner's word edges say roughly where to look and no more: it counts the pause after a word as part of that word (prod-y1 0:56: the year 'ended' where the next word began, 0.5 s late, so
+    the cut kept 90 ms of the next word, and the pause the voice left was recorded as 0).  The pause is the longest quiet (TAIL_QUIET_DB under the speech, at least TAIL_MIN_PAUSE_S) that starts
+    between the last word and a little after the next one and has sound after it; the cut is made in it.  None means continuous speech into the next word: the caller falls back to the aligner's edges."""
+    frame = int(0.01 * rate)
+    count = len(core) // frame
+    if count < 30:
+        return None
+    db = 20.0 * np.log10(np.sqrt((core[: count * frame].reshape(count, frame) ** 2).mean(axis=1)) + 1e-9)
+    quiet = db < np.percentile(db, 95) - TAIL_QUIET_DB
+    lo, hi = max(0, int((last_word_start_s + TAIL_WINDOW_BEFORE_S) * 100)), min(count, int((next_word_start_s + TAIL_WINDOW_AFTER_S) * 100))
+    found, i = [], 0
+    while i < count:
+        if quiet[i]:
+            j = i
+            while j < count and quiet[j]:
+                j += 1
+            if lo <= i < hi and j < count and (j - i) * 0.01 >= TAIL_MIN_PAUSE_S and i > 0:          # sound before it, in the window, with sound after it
+                found.append((i, j))
+            i = j
+        else:
+            i += 1
+    if not found:
+        return None
+    a, b = max(found, key=lambda run: ((run[1] - run[0]), -abs(run[1] * 0.01 - next_word_start_s)))
+    return {"speech_end_s": a * 0.01, "next_onset_s": b * 0.01, "pause_s": (b - a) * 0.01}
+
+
+def verify_cut_end(core: np.ndarray, rate: int) -> str | None:
+    """What is wrong with the end of a cut span, or None: ``cut_in_sound`` (it ends while the voice is still loud: the cut is inside a word) or ``leaked_onset`` (a short burst after a real quiet:
+    the first sound of the word that should have been cut away).  The seam audit (cut_audit) finds the same thing in the finished dub; this finds it where the cut is made, so it can be corrected there."""
+    frame = int(0.01 * rate)
+    count = len(core) // frame
+    if count < 30:
+        return None
+    db = 20.0 * np.log10(np.sqrt((core[: count * frame].reshape(count, frame) ** 2).mean(axis=1)) + 1e-9)
+    if strip_leaked_onset(core, rate)[1]:
+        return "leaked_onset"
+    return "cut_in_sound" if db[-3:].max() > np.percentile(db, 95) - 12.0 else None
+
+
+STRAY_SOUND_MARGIN_S = 0.20   # a sound this far from every word of the text (the aligner's word edges are out by up to half a second at a pause, but not by this much at the front of a word) ...
+STRAY_SOUND_MIN_S = 0.08      # ... that lasts this long (shorter is a click, found elsewhere) ...
+STRAY_SOUND_MAX_S = 0.60      # ... and no longer (a longer sound is a word the aligner lost, not an extra one)
+STRAY_ISOLATION_S = 0.06      # ... with this much quiet either side, is a sound the voice made that no word of the text accounts for (prod-y1 3:05.8: 300 ms at speech level, 0.7 s after "phansi")
+
+
+def find_stray_sounds(audio: np.ndarray, rate: int, word_spans_s: Sequence[tuple[float, float]], *, margin_s: float = STRAY_SOUND_MARGIN_S) -> list[tuple[int, int]]:
+    """(first sample, one past the last) of every sound in ``audio`` that no word accounts for: ``word_spans_s`` are the (start, end) seconds the forced aligner gives the words of the text the voice was
+    asked to say.  The voice sometimes adds a sound of its own between two sentences (a breath, an 'uh', half a syllable); it sits in the gap between two words, apart from both, and it is what the ear
+    hears as a hitch.  Never a sound inside or beside a word."""
+    frame = int(0.01 * rate)
+    count = len(audio) // frame
+    if count < 30 or not word_spans_s:
+        return []
+    db = 20.0 * np.log10(np.sqrt((audio[: count * frame].reshape(count, frame) ** 2).mean(axis=1)) + 1e-9)
+    sound = db > np.percentile(db, 95) - LEAK_QUIET_DB
+    found, i = [], 0
+    while i < count:
+        if sound[i]:
+            j = i
+            while j < count and sound[j]:
+                j += 1
+            start_s, end_s = i * 0.01, j * 0.01
+            quiet_before = 0
+            while i - 1 - quiet_before >= 0 and not sound[i - 1 - quiet_before]:
+                quiet_before += 1
+            quiet_after = 0
+            while j + quiet_after < count and not sound[j + quiet_after]:
+                quiet_after += 1
+            apart = all(end_s < ws - margin_s or start_s > we + margin_s for ws, we in word_spans_s)
+            if STRAY_SOUND_MIN_S <= end_s - start_s <= STRAY_SOUND_MAX_S and apart and quiet_before * 0.01 >= STRAY_ISOLATION_S and quiet_after * 0.01 >= STRAY_ISOLATION_S and (quiet_before < count and quiet_after < count):
+                found.append((i * frame, j * frame))
+            i = j
+        else:
+            i += 1
+    return found
+
+
+def quiet_over(audio: np.ndarray, rate: int, spans: Sequence[tuple[int, int]]) -> np.ndarray:
+    """``audio`` with each span (a stray sound) replaced by the quiet around it, faded in and out over 10 ms: noise at the level of the quiet either side, so the pause stays a pause with the room in it."""
+    out = np.array(audio, dtype=np.float32, copy=True)
+    rng = np.random.default_rng(len(audio))
+    fade = int(0.01 * rate)
+    for a, b in spans:
+        reach = int(0.4 * rate)
+        around = np.concatenate([out[max(0, a - reach): a], out[b: b + reach]])
+        floor = float(np.sqrt(np.mean(np.sort(around ** 2)[: max(1, len(around) // 2)]))) if len(around) else 0.0
+        lo, hi = max(0, a - fade), min(len(out), b + fade)
+        fill = rng.normal(0.0, floor, hi - lo).astype(np.float32)
+        weight = np.ones(hi - lo, dtype=np.float32)
+        ramp = np.linspace(0.0, 1.0, min(fade, (hi - lo) // 2), dtype=np.float32)
+        weight[: len(ramp)], weight[len(weight) - len(ramp):] = ramp, ramp[::-1]
+        out[lo:hi] = out[lo:hi] * (1.0 - weight) + fill * weight
+    return out
+
+
+LEAK_MAX_S = 0.30             # what is left of the next word at the end of a cut span is shorter than this ...
+LEAK_MIN_QUIET_S = 0.12       # ... and comes after at least this much quiet (a word is never only a fragment of itself after a real pause: the span's own words end before the quiet)
+LEAK_QUIET_DB = 25.0          # quiet is this far under the span's loud (95th percentile) level; the voice's pauses are 25-45 dB under it (prod-y1 0:56: -50 to -70 dB against -22)
+
+
+def strip_leaked_onset(core: np.ndarray, rate: int, *, not_before_s: float = 0.0, max_s: float = LEAK_MAX_S, min_quiet_s: float = LEAK_MIN_QUIET_S, quiet_db: float = LEAK_QUIET_DB) -> tuple[np.ndarray, int]:
+    """(the span without the onset of the next word that its cut let through, samples removed from the tail).  The cut at the end of a span is made at the aligner's word edges, which are not exact
+    (prod-y1 0:56, "ngo nineteen ninety-four." and then the follow word "Nge-": the edges said the year ended where the next word began, 0.5 s later than it did), so when the span's last
+    sound is a short burst after a real quiet, it is the first sound of the word that should have been cut away: the cut moves into the middle of the quiet.  ``not_before_s`` is the earliest it may fall (the
+    last word's own start and a little more): a last word that follows a pause is never taken for a leak.  The silence taken off is added to the span's pad by the caller, so the timeline does not move."""
+    frame = int(0.01 * rate)
+    count = len(core) // frame
+    if count < 20:
+        return core, 0
+    db = 20.0 * np.log10(np.sqrt((core[: count * frame].reshape(count, frame) ** 2).mean(axis=1)) + 1e-9)
+    loud = db > np.percentile(db, 95) - quiet_db
+    i = count
+    while i > 0 and loud[i - 1]:
+        i -= 1
+    if i == count or (count - i) * 0.01 > max_s:                    # the span ends in quiet (the usual case), or in something longer than a fragment
+        return core, 0
+    j = i
+    while j > 0 and not loud[j - 1]:
+        j -= 1
+    if j == 0 or (i - j) * 0.01 < min_quiet_s:
+        return core, 0
+    cut = (j + (i - j) // 2) * frame
+    if cut < int(not_before_s * rate):
+        return core, 0
+    return core[:cut], len(core) - cut
+
+
 def score_span(core: np.ndarray, rate: int, pause_ok_s: float | None = None) -> dict[str, Any]:
     ratio = onset_ratio(core, rate)
     quiet = quiet_seconds(core, rate, pause_ok_s)

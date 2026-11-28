@@ -291,15 +291,39 @@ def free_prompt(base: str) -> str:
 
 def free_bar_message(residual: Any, points: list[str], *, first: bool) -> str:
     """Quality-first runs are not stopped when the bar is met: the agent is told it is met, shown the open points, and left to decide when it is done."""
-    head = ("Your last submission meets the minimum bar by the harness's own score: no hard-gate failures, no collisions, nothing overruns, no meaning lost"
-            + (f", residual dead air {residual}%" if residual is not None else "") + ". That is the minimum, not the finish line. " if first else "New open points on your latest submission. ")
+    head = ("Your last submission meets the bar by the harness's own score: no hard-gate failures, no collisions, nothing overruns, no meaning lost"
+            + (f", residual dead air {residual}%" if residual is not None else "") + ". " if first else "New open points on your latest submission. ")
     body = (("The listener's view of the same submission has open points (soft evidence, not gates):\n- " + "\n- ".join(points) + "\nAct on the ones that are right; leave one alone if acting on it would cost a name, "
              "a number or the meaning. ") if points else "")
-    tail = "Keep improving whatever could sound more like a person talking; when you judge that no unit would be better, reply with one short sentence and no tool call."
+    tail = ("This is the end of the work unless something is plainly wrong (a name, a number, a date, the meaning). If an open point above is right, act on ALL the right ones in ONE round: change every unit "
+            "together and send one submit_dub with partial=true. Then reply with one short sentence and no tool call; further passes over soft points are not wanted.")
     return head + body + tail
 
 
-MAX_QUALITY_ROUNDS = 3          # how many times a quality-first run is sent back to its open points when it stops (bounded: a loop needs a ceiling)
+FOCUS_NOTE = ("THE SCOPE OF THIS RUN IS THESE UNITS ONLY: {units}. The listener asked for them to be re-fitted: the voice speaks each unit at its own pace (the length estimates you get from "
+              "estimate_fit and check_texts already include it) and these units do not fill their windows the way their text was written for. The target for each is its window to within about half a second, "
+              "never over: a unit that stops early leaves a silence the listener hears, however small the total dead air is. Keep the meaning, the names and every number. Do NOT change any other unit, "
+              "even if it is flagged: leave it exactly as it is. ")
+
+
+def focus_budget_note(workbench: Any, seed_items: list[dict[str, Any]], focus_units: list[str]) -> str:
+    """What each unit in scope needs, in letters, and the speaker's own padding words from the English: the work the agent would otherwise do in turns (estimate, reword, estimate again) done once, free.
+    Nothing here picks the agent's words; a failure to build it leaves the task message as it was."""
+    try:
+        from .speaker_fillers import budget_note, budget_rows, fillers_by_speaker
+
+        rows = budget_rows(seed_items, focus_units, lambda text, speaker, start, end: workbench._text_ms(text, speaker, start, end)[0])
+        from .attestation import resources_dir
+        from .config import load_settings
+        from .speaker_fillers import conversational_fillers
+
+        return budget_note(rows, fillers_by_speaker(getattr(workbench, "segments", None) or []), conversational_fillers(resources_dir(Path(load_settings().work_dir)).parent))          # the corpora sit beside the attestation folder, not in it
+    except Exception as error:  # noqa: BLE001 - a budget is an improvement, never a reason a repair cannot start; but never silent: a note that did not arrive looks like an agent that ignored it
+        print(f"[budget] the fit budget and filler note could not be built: {type(error).__name__}: {str(error)[:200]}", flush=True)
+        return ""
+
+
+MAX_QUALITY_ROUNDS = 1          # how many times a quality-first run is sent back to its open points when it stops (bounded: a loop needs a ceiling; prod-y1 spent 21 turns after the bar on soft points, with three rounds)
 QUALITY_POINTS_SHOWN = 12
 
 
@@ -457,6 +481,10 @@ TOOL_SPECS = [
     _tool("check_text", "Free deterministic checks on one unit (no TTS): required literals, restated references, "
           "invented names, doubling, English leakage, English weekday names.",
           {"zulu_text": {"type": "string"}, "source_text": {"type": "string"}}, ["zulu_text", "source_text"]),
+    _tool("check_texts", "check_text for up to 40 units in ONE call: [{item_id, zulu_text, source_text}]. Use this, not check_text one unit at a time: every call is a turn. "
+          "Every submit_dub also returns the same checks for all its units (text_checks).",
+          {"units": {"type": "array", "items": {"type": "object", "properties": {"item_id": {"type": "string"}, "zulu_text": {"type": "string"}, "source_text": {"type": "string"}},
+                                                  "required": ["zulu_text", "source_text"]}}}, ["units"]),
     _tool("submit_dub", "Submit the dub as ordered, non-overlapping units covering every English segment. "
           "Returns the official score and flagged units. You may resubmit. With partial=true, send ONLY the units you "
           "changed: each replaces the current unit with the same item_id, ids listed in remove are deleted, and every "
@@ -698,7 +726,8 @@ def drop_empty_replies(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 MEASURE_TOOLS = frozenset({"measure_tts", "measure_tts_batch"})          # the per-unit real syntheses; submit_dub synthesizes and scores EVERY unit, so a first submission gives all of them at once
 DRAFT_PHASE_NOTE = ("Work breadth first. Until you have submitted a complete dub, measure_tts and measure_tts_batch are not available (a call is refused and costs nothing): submit_dub synthesizes and scores every unit, so your first "
                     "submission gives you real timing, gates and collisions for the whole clip at once, and flags the units that need work. Draft EVERY unit now, sized with fits_about_chars "
-                    "(estimate_fit and timeline_fit are free, and check_text if you are unsure of one unit), then call submit_dub. After that, spend your effort where the score says it matters. "
+                    "(estimate_fit and timeline_fit are free: send ALL the units of the draft in ONE call to each, up to 40 and 60, because every call is a turn; submit_dub also returns check_text for every unit), then call submit_dub. "
+                    "After that, spend your effort where the score says it matters. "
                     f"The first submission is due by about {int(DRAFT_FRACTION * 100)}% of the token budget: after that only submit_dub is available until it is in.")
 REFINE_PHASE_NOTE = ("Your first complete submission is in, so measure_tts and measure_tts_batch are available now. Work from its score: the flagged units and the dead air they leave, in the order "
                      "that matters (gates, collisions, then the dead air), and send only the units you change with submit_dub partial=true. Every flagged unit and every measurement now says how far it is from its window and what that is in characters at its own pace (to_fit): change the words by about that much in one go, measure two or three renderings together, and when to_fit says within_noise the unit is done, because a further edit moves it within the noise.")
@@ -941,7 +970,7 @@ SUBMIT_KEY_ROUTES: dict[str, tuple[str, ...]] = {
     # in tests/test_dub_agent.py reads the workbench source and fails when a new key is added without a route here (slim_submit is an allow-list).
     "accepted": ("accepted",), "warnings": ("warnings",), "headline": ("headline",), "gates": ("gates",), "merged": ("merged",),
     "regressions_accepted": ("regressions_accepted",), "note": ("note",), "meaning": ("meaning_loss", "claims_to_check"), "timing_lock": ("timing_lock",),
-    "turn_padding": ("turns_ending_early",), "flagged_units": ("flagged_units",), "listening_load": ("listening_load",), "spoken_form_gaps": ("spoken_form_gaps",),
+    "turn_padding": ("turns_ending_early",), "flagged_units": ("flagged_units",), "listening_load": ("listening_load",), "text_checks": ("text_checks",), "spoken_form_gaps": ("spoken_form_gaps",),
     "sentence_timing": ("sentence_timing",), "voice_limit_words": ("voice_limit_words",), "figures_as_spoken": ("figures_as_spoken",), "decisions_so_far": ("decisions_so_far",),
     "settled_units": ("settled_units",), "units_overview": ("units_overview",), "naturalness": ("naturalness",), "speaker_rates_chars_per_s": ("speaker_rates_chars_per_s",),
 }
@@ -974,6 +1003,10 @@ def slim_submit(result: dict[str, Any]) -> dict[str, Any]:
         slim["spoken_form_gaps"] = result["spoken_form_gaps"]
         slim["spoken_form_gaps_note"] = ("Soft evidence, not a gate: these units still hold digits, an abbreviation or capitals that no rule converted, so the voice will read them by itself, "
                                          "often wrongly. Call say_it on the unit to see the whole spoken form; write the item another way, or leave it if it is right as it stands (a time, a fraction).")
+    if result.get("text_checks"):
+        slim["text_checks"] = result["text_checks"]
+        slim["text_checks_note"] = ("check_text run for you on every unit (what check_texts would return): a problem with a gate is a hard failure to fix; a flag is soft evidence to weigh. "
+                                    "You do not need to call check_text again for these units.")
     if result.get("listening_load"):
         slim["listening_load"] = result["listening_load"]
         slim["listening_load_note"] = ("Soft evidence, not a gate: a figure run into the next with no breath, or a stretch of about eight seconds with no breath, is hard for a listener to follow. "
@@ -1035,6 +1068,7 @@ def build_dispatch(
         "measure_tts": workbench.measure_tts,
         "measure_tts_batch": workbench.measure_tts_batch,
         "check_text": workbench.check_text,
+        **({"check_texts": workbench.check_texts} if hasattr(workbench, "check_texts") else {}),
         **({"estimate_fit": workbench.estimate_fit} if hasattr(workbench, "estimate_fit") else {}),
         **({"timeline_fit": workbench.timeline_fit} if hasattr(workbench, "timeline_fit") else {}),
         **({"grammar_review": workbench.grammar_review} if hasattr(workbench, "grammar_review") else {}),
@@ -1297,7 +1331,7 @@ def _run_agent(
     task_message: str | None = None, trace_dir: Path | None = None,
     compact_after_tokens: int = COMPACT_AFTER_TOKENS, focus_growth_tokens: int = 0, playbook_version: str | None = None,
     seed_items: list[dict[str, Any]] | None = None, wrapup_turns: int = WRAPUP_TURNS, dead_air_slack_pct: float = DEAD_AIR_SLACK_PCT, mode: str = "live", free_finish: bool = False, resume: bool = False,
-    breadth_first: bool | None = None, stable_tools: bool | None = None, draft_deadline: bool | None = None,
+    breadth_first: bool | None = None, stable_tools: bool | None = None, draft_deadline: bool | None = None, focus_units: list[str] | None = None,
 ) -> dict[str, Any]:
     """``draft_deadline`` (default on; MATHULA_AGENT_DRAFT_DEADLINE=0 turns it off): a complete first submission is due by a share of the token ceiling (see budget_governor), after which only submitting is available and the harness submits the agent's own drafts if it still has not.  ``stable_tools`` (default on; MATHULA_AGENT_STABLE_TOOLS=0 turns it off): the tool declarations are the same on every turn and a phase (draft, final) restricts which may be called, because a
     changed declaration set discards the provider's cache of everything after it.  ``breadth_first`` (default on; MATHULA_AGENT_BREADTH_FIRST=0 turns it off): until a complete submission exists the per-unit measurement tools are not available, so the work is
@@ -1328,8 +1362,11 @@ def _run_agent(
                 + ("misses the bar. " + pushback_message(seeded, seed_unmet, tts_left=tts_now) if seed_unmet else "meets the bar. ")
                 + _source_correction_note(workbench, seed_items)
                 + prefix_corpus_note(workbench, seed_items)
+                + (FOCUS_NOTE.format(units=", ".join(focus_units)) if focus_units else "")
+                + (focus_budget_note(workbench, list(seed_items), focus_units) if focus_units else "")
                 + "Change only the units that need it, send just those with submit_dub partial=true, leave every other unit "
                   "exactly as it is, and stop once the bar is met.")
+    trace.log("task_message", text=str(task_message or "")[:8000])          # what the agent was told, so a run can be read afterwards (a note that did not arrive looks like an agent that ignored it)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task_message or f"Dub clip {clip_id!r}. Start by opening it."},
@@ -1606,7 +1643,7 @@ def _run_agent(
             seen_submit = latest
             if not unmet_targets(latest, max_dead_air_pct=good_enough_pct):
                 new_points = [x for x in open_listener_points(latest) if x not in points_sent]
-                if not told_bar or new_points:
+                if not told_bar:                                                    # told once: the soft points are not a reason to talk to the agent again after every submit
                     residual = (latest.get("headline") or {}).get("residual_dead_air_pct")
                     text = free_bar_message(residual, new_points, first=not told_bar)
                     points_sent.update(new_points)
